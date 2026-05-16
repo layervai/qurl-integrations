@@ -211,7 +211,8 @@ function createGatewayWsShim({
       // user-registered handlers (the event-publisher, the
       // gateway-activity ticker).
       manager.on(WebSocketShardEvents.Dispatch, ({ data, shardId }) => {
-        if (data?.t === 'READY') {
+        const eventType = data?.t;
+        if (eventType === 'READY') {
           // application.id is the OAuth2 application snowflake —
           // identical to client.application.id in the legacy path.
           // RegisterCommands needs this to address the global-
@@ -226,6 +227,24 @@ function createGatewayWsShim({
             shardId,
             appIdPrefix: appId ? appId.slice(0, 6) : null,
           });
+        } else if (eventType === 'RESUMED') {
+          // RESUMED is Discord's ACK that a `RESUME` op succeeded —
+          // the production happy path for Pillar 2 (cross-process
+          // resume from a persisted DDB row). Without flipping
+          // isReady on this path, /health would stay 503, ECS would
+          // replace the task after --start-period elapses, and the
+          // resume win would be defeated.
+          //
+          // No appId update on resume — the application id doesn't
+          // change between processes for the same bot identity, so
+          // the value hydrated from the previous READY (or null if
+          // we never observed one in this process) is fine. Reset
+          // the IDENTIFY budget so a subsequent disconnect-then-
+          // reconnect path gets a fresh allowance the same way
+          // READY would.
+          isReady = true;
+          identifyAttempts = 0;
+          logger.info('gateway-ws-shim: RESUMED received', { shardId });
         }
         // Fan-out. Each handler runs synchronously; any thrown error
         // is caught and logged so one bad handler doesn't break the
@@ -257,6 +276,14 @@ function createGatewayWsShim({
       // (same hazard the legacy client.login() timeout closed).
       // .unref() prevents the dangling timer from pinning the
       // event loop after a successful connect.
+      //
+      // On timeout, the losing side of Promise.race leaves
+      // manager.connect()'s in-flight WS attempt pending. We don't
+      // call manager.destroy() here (see SIGTERM contract in
+      // module header); manager lifecycle is owned by stop().
+      // The caller's gracefulShutdown(1) → process.exit() unwinds
+      // the dangling promise as the process tears down — acceptable
+      // because the boot is failing anyway.
       let timeoutHandle;
       try {
         await Promise.race([

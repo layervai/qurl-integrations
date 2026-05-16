@@ -281,7 +281,7 @@ describe('READY detection', () => {
     expect(shim.getAppId()).toBeNull();
   });
 
-  it('non-READY dispatches do not flip isReady', async () => {
+  it('non-READY / non-RESUMED dispatches do not flip isReady', async () => {
     const { shim, managerInstances } = makeShim();
     await shim.start();
     const mgr = managerInstances[0];
@@ -292,6 +292,57 @@ describe('READY detection', () => {
     });
 
     expect(shim.isReady()).toBe(false);
+  });
+
+  it('flips isReady true on RESUMED — the cross-process resume happy path', async () => {
+    // Discord delivers RESUMED (not READY) on a successful resume,
+    // which is the entire Pillar 2 win. Without this branch, the
+    // shim's isReady() stays false through a successful resume, the
+    // health server stays 503, and ECS would replace the task —
+    // defeating the optimization.
+    const { shim, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+
+    expect(shim.isReady()).toBe(false);
+
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} },
+      shardId: 0,
+    });
+
+    expect(shim.isReady()).toBe(true);
+    // appId stays whatever it was before RESUMED — the prior
+    // process's READY populated it via DDB hydration (or it's
+    // null if this process never observed a READY directly,
+    // which is correct: a pure-resume process never re-registers
+    // commands).
+    expect(shim.getAppId()).toBeNull();
+  });
+
+  it('RESUMED resets the IDENTIFY budget so a later disconnect-reconnect cycle gets a fresh allowance', async () => {
+    // Symmetric with the READY-reset path: every successful session
+    // (whether first-time READY or warm-start RESUMED) restores
+    // the IDENTIFY counter. Otherwise a process that boots via
+    // RESUME and later sees its session age out (>60s outage)
+    // would have count=1 stuck since the prior process's READY
+    // and would trip the cap on the very next reconnect.
+    const { shim, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const { retrieveSessionInfo } = mgr._constructorArgs;
+
+    // Synthesize a non-zero counter as if a prior reconnect
+    // attempt had landed.
+    retrieveSessionInfo('0:1'); // mirror is null → count=1
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} },
+      shardId: 0,
+    });
+
+    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
   });
 });
 

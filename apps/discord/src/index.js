@@ -355,8 +355,10 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
   // STORE_TYPE=ddb requirement comes from unsupportedRoleResumeCombo
   // (above), and ddb-store.js throws on either env-var missing when
   // it loads via `require('./store')` at the top of this file —
-  // before this branch runs.
-  const ddbTablePrefix = process.env.DDB_TABLE_PREFIX;
+  // before this branch runs. Use config.DDB_TABLE_PREFIX (already
+  // trimmed) so the table-name computation matches every other
+  // DDB call site.
+  const ddbTablePrefix = config.DDB_TABLE_PREFIX;
   const awsRegion = process.env.AWS_REGION;
   const rawDdbClient = new DynamoDBClient({
     region: awsRegion,

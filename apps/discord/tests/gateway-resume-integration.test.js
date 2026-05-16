@@ -133,7 +133,10 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
 
     // READY arrives — updateSessionInfo fires with the new session.
-    await updateSessionInfo('0:1', {
+    // The callback returns synchronously (writes are fire-and-forget);
+    // aws-sdk-client-mock counts the .send() call at invocation time,
+    // not on settle, so the Put-count assertion is reliable here.
+    updateSessionInfo('0:1', {
       sessionId: 'sess-fresh',
       resumeURL: 'wss://resume.discord.gg/?v=10&encoding=json',
       sequence: 1,
@@ -153,7 +156,7 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     // 5. INTERACTION_CREATE: updateSessionInfo fires with bumped
     //    sequence; publisher receives the dispatch.
     now += 100;
-    await updateSessionInfo('0:1', {
+    updateSessionInfo('0:1', {
       sessionId: 'sess-fresh',
       resumeURL: 'wss://resume.discord.gg/?v=10&encoding=json',
       sequence: 2,
@@ -169,11 +172,11 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     // 6. More dispatches inside the throttle window — mirror updates,
     //    DDB writes deferred.
     now += 100;
-    await updateSessionInfo('0:1', {
+    updateSessionInfo('0:1', {
       sessionId: 'sess-fresh', resumeURL: 'wss://r/', sequence: 3,
     });
     now += 100;
-    await updateSessionInfo('0:1', {
+    updateSessionInfo('0:1', {
       sessionId: 'sess-fresh', resumeURL: 'wss://r/', sequence: 42,
     });
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1); // still just the initial.
@@ -245,7 +248,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     });
 
     await shim.start();
-    const { retrieveSessionInfo } = instances[0]._args;
+    const mgr = instances[0];
+    const { retrieveSessionInfo } = mgr._args;
 
     // Critical: retrieveSessionInfo returns the persisted row.
     // @discordjs/ws sees a non-null SessionInfo and chooses RESUME.
@@ -257,6 +261,18 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       sequence: 42,
     });
     expect(shim._getIdentifyAttemptsForTest()).toBe(0);
+    // Pre-RESUMED: isReady stays false (the WS is open but the
+    // session-replay handshake hasn't completed).
+    expect(shim.isReady()).toBe(false);
+
+    // Discord ACKs the successful resume — health flips green.
+    // Without this assertion, the cr-r3-caught "isReady never
+    // flips on RESUMED" bug could regress unnoticed.
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { op: 0, t: 'RESUMED', s: 43, d: {} },
+      shardId: 0,
+    });
+    expect(shim.isReady()).toBe(true);
 
     await shim.stop();
   });
@@ -299,7 +315,7 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     expect(retrieveSessionInfo('0:1')).not.toBeNull();
 
     // 2. Discord rejects RESUME — library calls updateSessionInfo(null).
-    await updateSessionInfo('0:1', null);
+    updateSessionInfo('0:1', null);
 
     // 3. Library calls retrieveSessionInfo again — MUST return null
     //    to break the loop. If this returned the stored session

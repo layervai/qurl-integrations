@@ -410,6 +410,14 @@ module.exports = {
   // src/store/index.js's selection precedence.
   STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'sqlite',
 
+  // DDB table-name prefix shared by every per-table consumer
+  // (ddb-store.js + gateway-session-store.js construction in
+  // index.js). Trimmed here so a whitespace-padded env value
+  // doesn't compute a different table name at one call site than
+  // the others — ddb-store.js's `.trim()` was the original
+  // normalization point.
+  DDB_TABLE_PREFIX: (process.env.DDB_TABLE_PREFIX ?? '').trim(),
+
   // SQS Standard queue the gateway publishes to and the worker
   // consumes from (provisioned by qurl-integrations-infra PR B).
   // Required when ENABLE_EVENT_SHIPPER=true; validated at boot in
