@@ -483,6 +483,20 @@ describe('generateNonce', () => {
 });
 
 describe('wrapEnvelope / unwrapEnvelope', () => {
+  it('wire envelope key order is exactly [body, signature]', () => {
+    // Pin the on-the-wire key order. V8 preserves insertion order
+    // per the JSON spec, so the order depends entirely on how
+    // wrapEnvelope spells the literal. A refactor that reorders
+    // the keys would change the byte representation across versions
+    // and break consumers that parse strictly. Pin the contract.
+    const wire = wrapEnvelope({
+      bodyBytes: Buffer.from('{"a":1}', 'utf8'),
+      signature: 'sig',
+    });
+    const parsed = JSON.parse(wire.toString('utf8'));
+    expect(Object.keys(parsed)).toEqual(['body', 'signature']);
+  });
+
   it('round-trips bodyBytes + signature byte-exact', () => {
     const bodyBytes = Buffer.from('{"a":1,"b":"hello"}', 'utf8');
     const signature = 'a'.repeat(64);

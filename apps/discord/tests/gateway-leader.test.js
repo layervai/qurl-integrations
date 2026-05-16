@@ -391,6 +391,52 @@ describe('pushHandoff', () => {
   });
 });
 
+describe('serialization — SIGTERM-during-tick (pushHandoff while a tick is in-flight)', () => {
+  it('pushHandoff queues behind an in-flight tick and runs after the tick settles', async () => {
+    // Real production race: SIGTERM fires mid-tick. The tick is
+    // awaiting renewLock (DDB RTT ~10-30ms); pushHandoff must
+    // queue behind it on `inFlight`, not race the same lock
+    // mutator. The serialization chain pins this — but until now
+    // only the inbound-handoff-vs-tick and parallel-handoff cases
+    // had explicit tests.
+    const callOrder = [];
+    let resolveRenew;
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    mocks.lock.renewLock = jest.fn(() => new Promise((resolve) => {
+      callOrder.push('renew-start');
+      resolveRenew = resolve;
+    }));
+    mocks.lock.transferLock = jest.fn(async () => {
+      callOrder.push('transfer');
+      return { transferred: true, version: 3 };
+    });
+    const { leader } = makeLeader({ mocks });
+    // Pre-hold the lock so the tick path enters renewLock branch.
+    await leader._stepForTest(); // heldLock=true via acquire
+
+    // Now start a SECOND tick (will go into renew); it'll block.
+    const tick2 = leader._stepForTest();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(callOrder).toEqual(['renew-start']);
+
+    // SIGTERM fires: pushHandoff. Queues behind tick2.
+    const push = leader.pushHandoff();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(callOrder).toEqual(['renew-start']); // still blocked
+
+    // Resolve the renew; tick2 settles, then push runs.
+    resolveRenew({ renewed: true, version: 2 });
+    await tick2;
+    await push;
+    expect(callOrder).toEqual(['renew-start', 'transfer']);
+  });
+});
+
 describe('serialization — no two mutators interleave', () => {
   it('a tick during an in-flight pushHandoff waits for the push to settle', async () => {
     let resolvePush;

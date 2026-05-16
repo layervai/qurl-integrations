@@ -119,6 +119,12 @@ function createGatewayLeader({
   // its own failure, this is a backstop for the chain-keeping path).
   let inFlight = Promise.resolve();
   function runSerialized(work) {
+    // `.then(work, work)` — both fulfillment AND rejection handlers
+    // call work(). INTENTIONAL: a prior op rejecting must NOT skip
+    // the next op (that would break the serialization chain when
+    // one op fails). Same `work` reference in both arms; called
+    // exactly once per `runSerialized` call regardless of the
+    // prior outcome.
     const next = inFlight.then(() => work(), () => work());
     inFlight = next.then(() => {}, (err) => {
       logger.debug('gateway-leader: serialized op rejected (chain continues)', {
@@ -328,7 +334,14 @@ function createGatewayLeader({
 
       if (!transferResult.transferred) {
         // CAS failed — version moved (peer cold-acquired) or we
-        // weren't actually holding. Either way, nothing to push.
+        // weren't actually holding. Either way the DDB row is no
+        // longer ours, so flip the local flag to match. Without
+        // this, the implicit "caller MUST exit after pushHandoff"
+        // invariant would be load-bearing for a hypothetical caller
+        // that loops back into the tick (where heldLock=true would
+        // attempt renewLock on a row owned by the peer). Making the
+        // flag explicitly match DDB state removes the dependency.
+        heldLock = false;
         logger.warn('gateway-leader: transferLock CAS failed; skipping push');
         return { pushed: false, reason: 'transfer_failed' };
       }
