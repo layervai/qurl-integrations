@@ -702,6 +702,18 @@ function createGatewayLeader({
     return knownPeerInstanceIds.has(instanceId);
   }
 
+  // True once `start()` has spun up the tick loop and false again
+  // after `stop()` (or after pushHandoff sets `closed=true` and the
+  // loop drains). Consumed by index.js's /health probe on the
+  // standby path: a standby with no WS by design needs SOME liveness
+  // signal to keep ECS from replacing it, and "tick loop running"
+  // is the simplest correct one — if the loop dies, lock renew /
+  // heartbeat write / peer-cache refresh all stop, and the standby
+  // has lost the ability to take over on the next handoff.
+  function hasStartedTickLoop() {
+    return loopPromise !== null;
+  }
+
   return {
     start,
     stop,
@@ -711,6 +723,7 @@ function createGatewayLeader({
     isHoldingLock,
     isConnecting,
     isKnownPeer,
+    hasStartedTickLoop,
     // Inspection seams for tests.
     _stepForTest: () => runSerialized('tick', step),
     _getKnownPeersForTest: () => new Set(knownPeerInstanceIds),

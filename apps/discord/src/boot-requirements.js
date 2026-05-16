@@ -182,6 +182,65 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
   return null;
 }
 
+// Parallel to unsupportedRoleResumeCombo for ENABLE_GATEWAY_HOT_STANDBY.
+// Two unsupported shapes:
+//
+//   1. hotStandby=true with role!=gateway — the leader coordinator
+//      drives the gateway-ws-shim's manager handle; only the gateway
+//      tier constructs the shim, so http/combined have nothing to
+//      hand off. Rejecting at boot avoids a deploy where the hot-
+//      standby flag is set in a uniform env block but the role isn't
+//      gateway — which would silently no-op the leader path and
+//      mask the misconfig as "the lock never gets acquired."
+//   2. hotStandby=true with resume=false — pushHandoff hands the
+//      incoming task a snapshot of session_id + sequence so it can
+//      RESUME without dropping events. Without the cross-process
+//      RESUME path, "handoff" degenerates to "both replicas
+//      IDENTIFY against the same token" — Discord rejects the
+//      second IDENTIFY and the second replica flaps the session.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Same string-or-null shape as unsupportedRoleResumeCombo.
+function unsupportedRoleHotStandbyCombo(role, hotStandbyEnabled, resumeEnabled) {
+  if (!hotStandbyEnabled) return null;
+  if (role !== 'gateway') {
+    return (
+      `ENABLE_GATEWAY_HOT_STANDBY=true requires PROCESS_ROLE=gateway (got '${role}'). ` +
+      'The hot-standby control plane (leader election + push handoff) drives the ' +
+      'gateway-ws-shim manager, which only the gateway tier constructs. http and ' +
+      'combined roles have no manager to hand off. Set PROCESS_ROLE=gateway on the ' +
+      'gateway task def, or leave ENABLE_GATEWAY_HOT_STANDBY unset on http/combined.'
+    );
+  }
+  if (!resumeEnabled) {
+    return (
+      'ENABLE_GATEWAY_HOT_STANDBY=true requires ENABLE_GATEWAY_RESUME=true. ' +
+      'Push handoff transfers session_id + sequence from the outgoing task to the ' +
+      'incoming task; without cross-process RESUME the incoming task would IDENTIFY ' +
+      'against the same bot token and Discord would flap the session. Enable RESUME ' +
+      'first, or leave ENABLE_GATEWAY_HOT_STANDBY unset.'
+    );
+  }
+  return null;
+}
+
+// Required env vars when ENABLE_GATEWAY_HOT_STANDBY=true on a gateway
+// replica. Returns the array of missing keys (parallel shape to
+// missingMapCommandKeys / missingEventShipperKeys). Each value is
+// load-bearing: INSTANCE_ID keys the lock row + peer-heartbeat row;
+// INSTANCE_IP is the address peers reach this replica on; the HMAC
+// secret authenticates every control-channel envelope. A boot with
+// any of these unset would either crash at first use or — worse —
+// run with a zero-knowledge HMAC that fails every verify silently.
+function missingHotStandbyKeys(cfg) {
+  if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
+  const missing = [];
+  if (!cfg.INSTANCE_ID) missing.push('INSTANCE_ID');
+  if (!cfg.INSTANCE_IP) missing.push('INSTANCE_IP');
+  if (!cfg.GATEWAY_HANDOFF_HMAC) missing.push('GATEWAY_HANDOFF_HMAC');
+  return missing;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -280,6 +339,8 @@ module.exports = {
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
+  unsupportedRoleHotStandbyCombo,
+  missingHotStandbyKeys,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

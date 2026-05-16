@@ -19,6 +19,8 @@ const {
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
+  unsupportedRoleHotStandbyCombo,
+  missingHotStandbyKeys,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
@@ -397,5 +399,105 @@ describe('resolveProcessRole', () => {
     // 'GATEWAY' should fail loud, not silently coerce.
     expect(() => resolveProcessRole('GATEWAY')).toThrow(/GATEWAY/);
     expect(() => resolveProcessRole('Combined')).toThrow(/Combined/);
+  });
+});
+
+describe('unsupportedRoleHotStandbyCombo', () => {
+  it('returns null when hot-standby=false regardless of other inputs', () => {
+    for (const role of ['combined', 'gateway', 'http']) {
+      for (const resume of [true, false]) {
+        expect(unsupportedRoleHotStandbyCombo(role, false, resume)).toBeNull();
+      }
+    }
+  });
+
+  it('rejects hot-standby=true on combined role with operator-facing remediation', () => {
+    const msg = unsupportedRoleHotStandbyCombo('combined', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/ENABLE_GATEWAY_HOT_STANDBY=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    // Names the actual role so an operator pasting the log line into
+    // a ticket sees their misconfiguration immediately.
+    expect(msg).toMatch(/'combined'/);
+  });
+
+  it('rejects hot-standby=true on http role', () => {
+    const msg = unsupportedRoleHotStandbyCombo('http', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/'http'/);
+    expect(msg).toMatch(/no manager to hand off/);
+  });
+
+  it('rejects hot-standby=true with resume=false (would session-flap)', () => {
+    // The push-handoff path adopts the outgoing leader's
+    // session_id+sequence on the standby — without RESUME, the
+    // standby would IDENTIFY against the same token and Discord
+    // would flap the session identity.
+    const msg = unsupportedRoleHotStandbyCombo('gateway', true, false);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/requires ENABLE_GATEWAY_RESUME=true/);
+    expect(msg).toMatch(/flap the session/);
+  });
+
+  it('returns null on the supported combo (gateway + resume + hot-standby)', () => {
+    expect(unsupportedRoleHotStandbyCombo('gateway', true, true)).toBeNull();
+  });
+
+  it('sequences role check before resume check (operator sees the dominant fix first)', () => {
+    // combined+hot-standby+resume-off is doubly broken. The role
+    // check fires first because PROCESS_ROLE is the higher-order
+    // misconfig — fixing the role + leaving resume off would leave
+    // the second rejection still firing; fixing resume + leaving
+    // combined would re-fire the role rejection. Sequencing the
+    // role check first means the first redeploy lands the higher-
+    // order fix.
+    const msg = unsupportedRoleHotStandbyCombo('combined', true, false);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).not.toMatch(/ENABLE_GATEWAY_RESUME=true/);
+  });
+});
+
+describe('missingHotStandbyKeys', () => {
+  function cfg(overrides = {}) {
+    return {
+      ENABLE_GATEWAY_HOT_STANDBY: true,
+      INSTANCE_ID: 'task-abc-123',
+      INSTANCE_IP: '10.0.1.42',
+      GATEWAY_HANDOFF_HMAC: '{"current":"' + 'a'.repeat(64) + '"}',
+      ...overrides,
+    };
+  }
+
+  it('returns empty when the flag is off (no requirements)', () => {
+    expect(missingHotStandbyKeys({
+      ENABLE_GATEWAY_HOT_STANDBY: false,
+      // Everything else unset — must still be empty.
+    })).toEqual([]);
+  });
+
+  it('returns empty when every required key is present', () => {
+    expect(missingHotStandbyKeys(cfg())).toEqual([]);
+  });
+
+  it('surfaces missing INSTANCE_ID', () => {
+    expect(missingHotStandbyKeys(cfg({ INSTANCE_ID: undefined }))).toEqual(['INSTANCE_ID']);
+  });
+
+  it('surfaces missing INSTANCE_IP', () => {
+    expect(missingHotStandbyKeys(cfg({ INSTANCE_IP: null }))).toEqual(['INSTANCE_IP']);
+  });
+
+  it('surfaces missing GATEWAY_HANDOFF_HMAC', () => {
+    expect(missingHotStandbyKeys(cfg({ GATEWAY_HANDOFF_HMAC: '' })))
+      .toEqual(['GATEWAY_HANDOFF_HMAC']);
+  });
+
+  it('returns every missing key (not just the first) for one-shot remediation', () => {
+    const missing = missingHotStandbyKeys(cfg({
+      INSTANCE_ID: undefined,
+      INSTANCE_IP: undefined,
+      GATEWAY_HANDOFF_HMAC: undefined,
+    }));
+    expect(missing.sort()).toEqual(['GATEWAY_HANDOFF_HMAC', 'INSTANCE_ID', 'INSTANCE_IP']);
   });
 });

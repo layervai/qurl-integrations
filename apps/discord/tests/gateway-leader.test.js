@@ -1126,3 +1126,37 @@ describe('start / stop lifecycle', () => {
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('hasStartedTickLoop — /health probe seam', () => {
+  it('returns false before start()', () => {
+    const sleep = jest.fn(() => new Promise(() => {}));
+    const { leader } = makeLeader({ sleep });
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+
+  it('returns true after start()', async () => {
+    const sleep = jest.fn(() => new Promise(() => {}));
+    const { leader } = makeLeader({ sleep });
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(leader.hasStartedTickLoop()).toBe(true);
+  });
+
+  it('returns false again after stop() drains the loop', async () => {
+    // The /health probe on the standby path relies on this predicate
+    // as its liveness signal. If `stop()` leaves it stuck at `true`,
+    // a standby whose tick loop crashed would still report healthy —
+    // exactly the failure mode the predicate exists to surface.
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { leader } = makeLeader({ sleep });
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(leader.hasStartedTickLoop()).toBe(true);
+
+    const stopPromise = leader.stop();
+    sleepResolvers[0]();
+    await stopPromise;
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+});
