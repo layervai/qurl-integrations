@@ -292,7 +292,8 @@ function invalidHotStandbyValues(cfg) {
   if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {
     problems.push(
       `INSTANCE_IP must be a valid IPv4 address (got '${cfg.INSTANCE_IP}'). ` +
-      'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today.'
+      'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today. ' +
+      'If you set INSTANCE_IP as an env override, unset it to fall back to the derivation from os.networkInterfaces().'
     );
   }
   return problems;
