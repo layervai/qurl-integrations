@@ -410,4 +410,57 @@ describe('runPushHandoffShutdown', () => {
       pushReason: 'push_threw',
     });
   });
+
+  it('drains eventPublisher concurrently with pushHandoff (publisher.stop called before pushHandoff resolves)', async () => {
+    // The active received Discord dispatches that may be in-flight to
+    // SQS. The standby cannot replay these — they arrived on OUR
+    // WebSocket. The contract is concurrent (not sequential) so
+    // publisher's DRAIN_DEADLINE_MS doesn't extend the pushHandoff
+    // critical path. Prove the ordering with a pending pushHandoff:
+    // publisher.stop must already have been invoked by the time the
+    // test releases pushHandoff.
+    const handoffResolvers = {};
+    const handoffPromise = new Promise((resolve) => { handoffResolvers.resolve = resolve; });
+    const eventPublisher = { stop: jest.fn().mockResolvedValue(undefined) };
+    const deps = makeDeps({
+      eventPublisher,
+      gatewayLeader: { pushHandoff: jest.fn().mockReturnValue(handoffPromise) },
+    });
+
+    const shutdownPromise = runPushHandoffShutdown({ code: 0, ...deps });
+    // Yield the microtask queue once so the helper's body runs up to
+    // the `await gatewayLeader.pushHandoff()` await point. The
+    // publisher drain is kicked off synchronously before that await,
+    // so the stop spy must already have fired.
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(eventPublisher.stop).toHaveBeenCalledTimes(1);
+    expect(deps.exit).not.toHaveBeenCalled(); // pushHandoff still pending
+
+    handoffResolvers.resolve({ transferred: true, pushAcked: true });
+    await shutdownPromise;
+    expect(deps.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('eventPublisher omitted is fine (legacy / flag-off / test setups)', async () => {
+    const deps = makeDeps();
+    // Default makeDeps doesn't include eventPublisher — verify the
+    // helper doesn't blow up trying to call .stop() on null.
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('eventPublisher.stop() failure is absorbed via tryStop (not propagated)', async () => {
+    // The SIGTERM handler invokes pushHandoffShutdown asynchronously
+    // (awaited); an unhandled-rejection bubble from the publisher
+    // drain would be a runtime hazard. tryStop catches both sync
+    // throws (async-function semantics) and async rejects.
+    const eventPublisher = { stop: jest.fn().mockRejectedValue(new Error('sqs unreachable')) };
+    const deps = makeDeps({ eventPublisher });
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      'event-publisher stop failed',
+      expect.objectContaining({ error: 'sqs unreachable' }),
+    );
+    expect(deps.exit).toHaveBeenCalledWith(0);
+  });
 });

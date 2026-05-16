@@ -702,14 +702,20 @@ function createGatewayLeader({
     return knownPeerInstanceIds.has(instanceId);
   }
 
-  // True once `start()` has spun up the tick loop and false again
-  // after `stop()` (or after pushHandoff sets `closed=true` and the
-  // loop drains). Consumed by index.js's /health probe on the
-  // standby path: a standby with no WS by design needs SOME liveness
-  // signal to keep ECS from replacing it, and "tick loop running"
-  // is the simplest correct one — if the loop dies, lock renew /
-  // heartbeat write / peer-cache refresh all stop, and the standby
-  // has lost the ability to take over on the next handoff.
+  // True when the tick loop has been started AND has not yet
+  // exited (loopPromise nulls itself via `.finally` when the loop
+  // returns — start-fail, stop(), or post-pushHandoff drain all
+  // clear it). Consumed by index.js's /health probe on the standby
+  // path so a standby that has no WS by design isn't reported as
+  // unhealthy.
+  //
+  // Limitation worth knowing: this is loop-exists, NOT loop-is-
+  // progressing. A tick wedged inside a hanging DDB call (lock
+  // renew, heartbeat write, peer-cache refresh) would still report
+  // healthy here. Acceptable for now — the 2 s renew + 60 s lock
+  // TTL means a hung loop loses the lock to a peer's cold-acquire
+  // within ~1 min anyway. Follow-up to add a `lastTickAt`
+  // freshness check tracked in the post-13b.3 polish list.
   function hasStartedTickLoop() {
     return loopPromise !== null;
   }

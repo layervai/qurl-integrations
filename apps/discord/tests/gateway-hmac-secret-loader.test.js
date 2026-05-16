@@ -21,10 +21,16 @@ describe('loadGatewayHmacSecret', () => {
       });
     });
 
-    it('accepts uppercase hex (case-insensitive)', () => {
+    it('accepts uppercase hex and normalizes to lowercase on the way out', () => {
+      // Lowercase normalization eliminates the case-as-identity
+      // hazard during rotation: the same logical key re-serialized
+      // with different case would otherwise key createHmac on
+      // different UTF-8 bytes and silently break dual-accept across
+      // the rolling deploy.
       const upper = 'A'.repeat(64);
-      const result = loadGatewayHmacSecret(JSON.stringify({ current: upper }));
-      expect(result.current).toBe(upper);
+      const result = loadGatewayHmacSecret(JSON.stringify({ current: upper, previous: 'B'.repeat(64) }));
+      expect(result.current).toBe('a'.repeat(64));
+      expect(result.previous).toBe('b'.repeat(64));
     });
 
     it('treats `previous: null` the same as missing — single-key mode', () => {

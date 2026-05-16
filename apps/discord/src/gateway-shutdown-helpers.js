@@ -77,25 +77,45 @@ async function tryClose(name, server, logger) {
 }
 
 // Push-handoff SIGTERM body. Distinct from gracefulShutdown because
-// the active replica's job is to transfer ownership ASAP — not drain
-// SQS / close DB / flush its own session row — the standby is already
-// doing all of that. Skipping `gatewayShim.stop()` here is load-
-// bearing: shim.stop()'s flushFinal=true would clobber the (newer)
-// session row that the standby has already advanced past our snapshot.
+// the active replica's job is to transfer ownership ASAP — not run
+// the full drain (close DB, flush its own session row, etc.) — the
+// standby is already doing the steady-state work. Three load-bearing
+// skips:
 //
-// The caller manages the `isShuttingDown` re-entry gate; this function
-// is purely "what runs inside the gate". Deps are injected so the
-// timeout / exit-code / handoff-result contracts are unit-testable
-// without process.exit side effects.
+//   * gatewayShim.stop() — flushFinal=true would clobber the (newer)
+//     session row the standby has advanced past our snapshot.
+//   * controlChannelServer close + leader/watchdog stop — leader's
+//     `closed=true` sentinel (set by pushHandoff itself) short-
+//     circuits any late inbound-handoff envelopes the still-listening
+//     server delivers in the ~ms window before process.exit fires.
+//     Calling tryClose/tryStop symmetrically would add latency to
+//     the active SIGTERM critical path with no correctness gain.
+//
+// One NON-skip: `eventPublisher.stop()` runs in parallel with
+// pushHandoff. The publisher's in-flight SQS sends are the outgoing
+// process's responsibility — those frames arrived on OUR WebSocket,
+// the standby cannot replay them. Draining in parallel (not before)
+// means the publisher's DRAIN_DEADLINE_MS doesn't extend the
+// pushHandoff critical path.
+//
+// The caller manages the `isShuttingDown` re-entry gate; this
+// function is purely "what runs inside the gate". Deps are injected
+// so the timeout / exit-code / handoff-result / drain contracts are
+// unit-testable without process.exit side effects.
 async function runPushHandoffShutdown({
   code = 0,
   gatewayLeader,
+  // Optional. When provided, `.stop()` runs in parallel with
+  // pushHandoff so in-flight SQS sends drain inside the 12 s ceiling
+  // instead of being truncated at process.exit. Production wires
+  // src/event-publisher.js; tests can omit or pass a spy.
+  eventPublisher = null,
   logger,
   ceilingMs = 12_000,
-  // Forced exit code when the outer ceiling fires. Hard-coded to 1
-  // (not the incoming `code`) so ECS / dashboards can distinguish
-  // "clean transfer, exit 0" from "timeout, standby cold-acquired,
-  // exit 1" even when the SIGTERM that triggered us was code 0.
+  // Forced exit code when the outer ceiling fires. Defaults to 1
+  // so ECS / dashboards can distinguish "clean transfer, exit 0"
+  // from "timeout, standby cold-acquired, exit 1" even when the
+  // SIGTERM that triggered us was code 0. Configurable for tests.
   forcedExitCode = 1,
   // Injected for tests; production uses node:timers + process.
   exit = (c) => process.exit(c),
@@ -109,6 +129,12 @@ async function runPushHandoffShutdown({
   if (hardExit && typeof hardExit.unref === 'function') {
     hardExit.unref();
   }
+  // Kick the publisher drain in parallel — tryStop is null-safe,
+  // catches both sync throws and async rejects, and harmonizes log
+  // shape with the rest of the shutdown surface. Capturing the
+  // promise (instead of awaiting here) lets pushHandoff run
+  // concurrently; we await both before exit below.
+  const drainPromise = tryStop('event-publisher', eventPublisher, logger);
   try {
     const result = await gatewayLeader.pushHandoff();
     logger.info('pushHandoff complete', {
@@ -122,6 +148,11 @@ async function runPushHandoffShutdown({
       error: err.message,
     });
   }
+  // Wait for the in-parallel publisher drain to finish before
+  // exit, so any SQS send that was almost-flushed gets its last
+  // round-trip. Best-effort; the outer ceiling absorbs the worst
+  // case.
+  await drainPromise;
   exit(code);
 }
 

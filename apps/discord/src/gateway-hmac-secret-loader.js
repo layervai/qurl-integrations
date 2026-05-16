@@ -78,10 +78,17 @@ function loadGatewayHmacSecret(raw) {
     if (typeof previous !== 'string' || !HEX64.test(previous)) {
       fail('GATEWAY_HANDOFF_HMAC.previous, if present, must be a 64-char hex string');
     }
-    normalizedPrevious = previous;
+    normalizedPrevious = previous.toLowerCase();
   }
 
-  return { current, previous: normalizedPrevious };
+  // Normalize case on the way out. crypto.createHmac keys on UTF-8
+  // bytes, so a rotation that re-serializes the same logical key
+  // with different case ('A1B2…' → 'a1b2…') would silently break
+  // dual-accept across the rolling deploy: the active and standby
+  // would compute different HMACs for the same payload. Eliminating
+  // the case-as-identity hazard at the loader is cheaper than relying
+  // on operator discipline.
+  return { current: current.toLowerCase(), previous: normalizedPrevious };
 }
 
 module.exports = {

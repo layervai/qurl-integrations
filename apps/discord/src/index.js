@@ -767,12 +767,17 @@ async function gracefulShutdown(code = 0) {
 
 // Hot-standby push-handoff SIGTERM path. The body lives in
 // `runPushHandoffShutdown` (gateway-shutdown-helpers.js) so the
-// timeout / exit-code / handoff-result contracts are unit-testable;
-// this wrapper owns the `isShuttingDown` re-entry gate.
+// timeout / exit-code / handoff-result / publisher-drain contracts
+// are unit-testable; this wrapper owns the `isShuttingDown` gate.
+//
+// eventPublisher is passed in so its DRAIN_DEADLINE_MS bounded
+// `.stop()` runs in parallel with pushHandoff — the outgoing
+// process's in-flight SQS sends carry dispatches the standby
+// can't replay (they arrived on OUR WebSocket).
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  await runPushHandoffShutdown({ code, gatewayLeader, logger });
+  await runPushHandoffShutdown({ code, gatewayLeader, eventPublisher, logger });
 }
 
 // Handle shutdown signals. Branches between the pushHandoff path
@@ -896,8 +901,15 @@ async function startHotStandby() {
       resolve();
       return;
     }
-    controlChannelServer.once('listening', resolve);
-    controlChannelServer.once('error', reject);
+    // Remove the OTHER listener on first event — leaving an idle
+    // `error → reject` listener after resolve would .reject() on
+    // every runtime listener-error and surface a noisy
+    // unhandled-rejection (the onListenError handler already routes
+    // those to gracefulShutdown(1); we don't need a duplicate path).
+    const onListening = () => { controlChannelServer.off('error', onError); resolve(); };
+    const onError = (err) => { controlChannelServer.off('listening', onListening); reject(err); };
+    controlChannelServer.once('listening', onListening);
+    controlChannelServer.once('error', onError);
   });
 
   // SIGTERM-during-boot race guard. If a signal landed while we were

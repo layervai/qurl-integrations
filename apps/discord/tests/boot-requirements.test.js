@@ -493,11 +493,15 @@ describe('missingHotStandbyKeys', () => {
   });
 
   it('returns every missing key (not just the first) for one-shot remediation', () => {
+    // Order is the function's natural push order (INSTANCE_ID,
+    // INSTANCE_IP, GATEWAY_HANDOFF_HMAC); pinning it documents that
+    // contract so a refactor that reorders the pushes flags the
+    // operator-facing log-message ordering as a change.
     const missing = missingHotStandbyKeys(cfg({
       INSTANCE_ID: undefined,
       INSTANCE_IP: undefined,
       GATEWAY_HANDOFF_HMAC: undefined,
     }));
-    expect(missing.sort()).toEqual(['GATEWAY_HANDOFF_HMAC', 'INSTANCE_ID', 'INSTANCE_IP']);
+    expect(missing).toEqual(['INSTANCE_ID', 'INSTANCE_IP', 'GATEWAY_HANDOFF_HMAC']);
   });
 });

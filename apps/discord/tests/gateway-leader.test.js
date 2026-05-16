@@ -1143,10 +1143,11 @@ describe('hasStartedTickLoop — /health probe seam', () => {
   });
 
   it('returns false again after stop() drains the loop', async () => {
-    // The /health probe on the standby path relies on this predicate
-    // as its liveness signal. If `stop()` leaves it stuck at `true`,
-    // a standby whose tick loop crashed would still report healthy —
-    // exactly the failure mode the predicate exists to surface.
+    // The /health probe on the standby path relies on this predicate.
+    // The crashed-loop case (loop body throws) and the stop() case
+    // both null `loopPromise` via the .finally — so both report
+    // unhealthy via this predicate. (A *hung* tick — DDB call that
+    // never resolves — does NOT flip this; see the helper comment.)
     const sleepResolvers = [];
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
     const { leader } = makeLeader({ sleep });
