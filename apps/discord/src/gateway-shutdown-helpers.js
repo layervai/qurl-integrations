@@ -28,6 +28,9 @@ function selectGatewayReadinessProbe({
   client,
 }) {
   if (enableHotStandby) {
+    // gatewayShim is guaranteed non-null on this branch — the
+    // boot-requirements gate rejects hot-standby without RESUME
+    // (which requires the shim's construction). No null-check needed.
     return () => {
       const gatewayLeader = getGatewayLeader();
       if (!gatewayLeader) return false;
@@ -53,12 +56,79 @@ async function tryStop(name, handle, logger) {
   try {
     await handle.stop();
   } catch (err) {
-    logger.warn(`${name} stop failed`, { error: err.message });
+    // Include the stack so a stuck SIGTERM drain log has both the
+    // symptom and the call site.
+    logger.warn(`${name} stop failed`, { error: err.message, stack: err.stack });
   }
+}
+
+// Symmetric to tryStop, but for net.Server-shaped handles (callback-
+// based close instead of Promise-based stop). Null-safe, awaits the
+// close callback, surfaces any close error at warn. Resolves cleanly
+// in every case so teardown doesn't stall.
+async function tryClose(name, server, logger) {
+  if (!server) return;
+  await new Promise(resolve => {
+    server.close(err => {
+      if (err) logger.warn(`${name} close reported error`, { error: err.message });
+      resolve();
+    });
+  });
+}
+
+// Push-handoff SIGTERM body. Distinct from gracefulShutdown because
+// the active replica's job is to transfer ownership ASAP — not drain
+// SQS / close DB / flush its own session row — the standby is already
+// doing all of that. Skipping `gatewayShim.stop()` here is load-
+// bearing: shim.stop()'s flushFinal=true would clobber the (newer)
+// session row that the standby has already advanced past our snapshot.
+//
+// The caller manages the `isShuttingDown` re-entry gate; this function
+// is purely "what runs inside the gate". Deps are injected so the
+// timeout / exit-code / handoff-result contracts are unit-testable
+// without process.exit side effects.
+async function runPushHandoffShutdown({
+  code = 0,
+  gatewayLeader,
+  logger,
+  ceilingMs = 12_000,
+  // Forced exit code when the outer ceiling fires. Hard-coded to 1
+  // (not the incoming `code`) so ECS / dashboards can distinguish
+  // "clean transfer, exit 0" from "timeout, standby cold-acquired,
+  // exit 1" even when the SIGTERM that triggered us was code 0.
+  forcedExitCode = 1,
+  // Injected for tests; production uses node:timers + process.
+  exit = (c) => process.exit(c),
+  scheduleHardExit = setTimeout,
+}) {
+  logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
+  const hardExit = scheduleHardExit(() => {
+    logger.error('PushHandoff shutdown timed out, forcing exit');
+    exit(forcedExitCode);
+  }, ceilingMs);
+  if (hardExit && typeof hardExit.unref === 'function') {
+    hardExit.unref();
+  }
+  try {
+    const result = await gatewayLeader.pushHandoff();
+    logger.info('pushHandoff complete', {
+      transferred: result?.transferred,
+      pushAcked: result?.pushAcked,
+      reason: result?.reason,
+      pushReason: result?.pushReason,
+    });
+  } catch (err) {
+    logger.error('pushHandoff threw — exiting anyway so the standby can cold-acquire', {
+      error: err.message,
+    });
+  }
+  exit(code);
 }
 
 module.exports = {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
   tryStop,
+  tryClose,
+  runPushHandoffShutdown,
 };

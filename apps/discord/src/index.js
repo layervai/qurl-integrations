@@ -16,6 +16,8 @@ const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
   tryStop,
+  tryClose,
+  runPushHandoffShutdown,
 } = require('./gateway-shutdown-helpers');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
@@ -353,6 +355,21 @@ if (hotStandbyMissing.length > 0) {
   process.exit(1);
 }
 
+// Parse + validate the HMAC secret AT BOOT, not inside startHotStandby.
+// All hot-standby misconfigs (env-var presence AND secret-format validity)
+// surface upfront before any I/O — same posture as missingHotStandbyKeys.
+// Stashed in a module-level so startHotStandby can read the parsed value
+// without re-parsing (and without drifting if the parse logic changes).
+let gatewayHmacSecrets = null;
+if (config.ENABLE_GATEWAY_HOT_STANDBY) {
+  try {
+    gatewayHmacSecrets = loadGatewayHmacSecret(config.GATEWAY_HANDOFF_HMAC);
+  } catch (err) {
+    logger.error(err.message);
+    process.exit(1);
+  }
+}
+
 // Symmetric with the eventShipper check above — fail fast on
 // inconsistent flag-vs-secret state. The error message is the
 // operator-facing source of truth for the remediation steps.
@@ -659,14 +676,7 @@ async function gracefulShutdown(code = 0) {
     // process.exit() called immediately after would truncate OAuth callbacks
     // mid-flight and leave users with a consumed pending_link but no GitHub
     // link created.
-    if (httpServer) {
-      await new Promise(resolve => {
-        httpServer.close(err => {
-          if (err) logger.warn('HTTP server close reported error', { error: err.message });
-          resolve();
-        });
-      });
-    }
+    await tryClose('HTTP server', httpServer, logger);
     stopServerIntervals();
     // SQS consumer drain. Stops new ReceiveMessage calls, then
     // awaits the current poll iteration's in-flight `processMessage`
@@ -704,22 +714,19 @@ async function gracefulShutdown(code = 0) {
     // Pillar 3 standby-path teardown. Active replicas take the
     // pushHandoffShutdown branch instead; this code only runs when
     // hot-standby is off, OR hot-standby is on but THIS replica is
-    // the standby (no lock to push). Closing the leader first stops
-    // new heartbeat / renew writes; the control-channel server close
-    // is best-effort (the peer would also be exiting in a typical
-    // ECS rolling deploy). Neither is on the SIGTERM critical path
-    // for Discord-session continuity because the active peer (if
-    // any) owns the WS.
+    // the standby (no lock to push).
+    //
+    // Order matters: close the control-channel server FIRST so no
+    // late inbound handoff envelope can land on a half-stopped
+    // leader (handleInboundHandoff against a leader whose tick loop
+    // has already exited is technically a no-op, but the explicit
+    // ordering makes the no-inbound-during-teardown invariant load-
+    // bearing rather than incidental). Watchdog stops next so its
+    // tick can't fire a manager.connect() during teardown. Leader
+    // last so any in-flight tick observes running=false and exits.
+    await tryClose('control-channel server', controlChannelServer, logger);
     await tryStop('connection-watchdog', connectionWatchdog, logger);
     await tryStop('gateway-leader', gatewayLeader, logger);
-    if (controlChannelServer) {
-      await new Promise(resolve => {
-        controlChannelServer.close(err => {
-          if (err) logger.warn('control-channel server close reported error', { error: err.message });
-          resolve();
-        });
-      });
-    }
 
     // Discord client shutdown only meaningful when we're the gateway
     // role. HTTP-only replicas never called login(), so there's no
@@ -758,58 +765,14 @@ async function gracefulShutdown(code = 0) {
   process.exit(code);
 }
 
-// Hot-standby push-handoff shutdown path. Distinct from gracefulShutdown
-// because the active replica's job is to transfer ownership ASAP, not
-// drain SQS / close DB / flush its own session row — the standby is
-// already doing all of that.
-//
-// Skipping eventConsumer/publisher drain + db.close is intentional: this
-// process never owned the inbound interaction surface (it published
-// frames to SQS; the worker tier consumed them). Any in-flight publish
-// is bounded by SQS's at-least-once guarantee. The bot's at-least-once
-// semantics carry through.
-//
-// gatewayShim.stop() is also skipped on this path — load-bearing.
-// shim.stop()'s flushFinal=true writes our (now-stale) session row
-// to DDB; after pushHandoff the standby is the live WS and its
-// updates have already advanced the row past our snapshot. A late
-// flush here would clobber the newer state and the standby's next
-// dispatch would land with a wrong sequence (Discord buffer
-// invalidated). The TCP socket drops when process.exit() fires
-// below, which is exactly what the SIGTERM contract wants —
-// Discord treats it as a network disconnect, not a clean close.
-//
-// 12 s outer setTimeout = 9 s pushHandoff ceiling + ~3 s headroom for
-// the post-handoff log + process.exit unwind. Well under the 30 s ECS
-// SIGTERM deadline.
+// Hot-standby push-handoff SIGTERM path. The body lives in
+// `runPushHandoffShutdown` (gateway-shutdown-helpers.js) so the
+// timeout / exit-code / handoff-result contracts are unit-testable;
+// this wrapper owns the `isShuttingDown` re-entry gate.
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
-  const hardExit = setTimeout(() => {
-    // Force exit(1) on timeout — even when the SIGTERM that triggered
-    // us was code 0. A timed-out pushHandoff is a deploy-time failure
-    // (peer unreachable, hung connect, HMAC mismatch); dashboards and
-    // ECS observability need to distinguish "clean transfer" from
-    // "timeout, standby cold-acquired" via the exit code.
-    logger.error('PushHandoff shutdown timed out, forcing exit');
-    process.exit(1);
-  }, 12_000);
-  hardExit.unref();
-  try {
-    const result = await gatewayLeader.pushHandoff();
-    logger.info('pushHandoff complete', {
-      transferred: result?.transferred,
-      pushAcked: result?.pushAcked,
-      reason: result?.reason,
-      pushReason: result?.pushReason,
-    });
-  } catch (err) {
-    logger.error('pushHandoff threw — exiting anyway so the standby can cold-acquire', {
-      error: err.message,
-    });
-  }
-  process.exit(code);
+  await runPushHandoffShutdown({ code, gatewayLeader, logger });
 }
 
 // Handle shutdown signals. Branches between the pushHandoff path
@@ -881,8 +844,9 @@ async function startHotStandby() {
     logger,
   });
 
-  const secrets = loadGatewayHmacSecret(config.GATEWAY_HANDOFF_HMAC);
-  const hmac = createGatewayHmac({ secrets, logger });
+  // Secrets were parsed + validated at module load (see boot chain
+  // adjacent to missingHotStandbyKeys). Read the stash here.
+  const hmac = createGatewayHmac({ secrets: gatewayHmacSecrets, logger });
 
   const controlClient = createControlClient({ hmac, logger });
 

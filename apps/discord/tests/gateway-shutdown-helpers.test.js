@@ -2,6 +2,8 @@ const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
   tryStop,
+  tryClose,
+  runPushHandoffShutdown,
 } = require('../src/gateway-shutdown-helpers');
 
 function makeFakeLeader({ holdingLock = false, ticking = false } = {}) {
@@ -221,21 +223,191 @@ describe('tryStop', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('logs at warn and swallows the error if stop() rejects', async () => {
+  it('logs at warn (with error + stack) and swallows the error if stop() rejects', async () => {
     // Teardown is already on the failure path; one component's
     // stop() error shouldn't stall the rest of the drain (which
     // is why we wrap each in tryStop rather than chaining bare
-    // awaits).
+    // awaits). Stack is included for triage on a stuck drain
+    // where the message alone doesn't tell the operator which
+    // call site threw.
     const logger = makeFakeLogger();
-    const handle = { stop: jest.fn().mockRejectedValue(new Error('ddb down')) };
+    const err = new Error('ddb down');
+    const handle = { stop: jest.fn().mockRejectedValue(err) };
     await expect(tryStop('leader', handle, logger)).resolves.toBeUndefined();
-    expect(logger.warn).toHaveBeenCalledWith('leader stop failed', { error: 'ddb down' });
+    expect(logger.warn).toHaveBeenCalledWith('leader stop failed', {
+      error: 'ddb down',
+      stack: err.stack,
+    });
   });
 
   it('embeds the component name in the warn message for triage', async () => {
     const logger = makeFakeLogger();
     const handle = { stop: jest.fn().mockRejectedValue(new Error('boom')) };
     await tryStop('connection-watchdog', handle, logger);
-    expect(logger.warn).toHaveBeenCalledWith('connection-watchdog stop failed', { error: 'boom' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog stop failed',
+      expect.objectContaining({ error: 'boom' }),
+    );
+  });
+});
+
+describe('tryClose', () => {
+  it('is a no-op for null server handle', async () => {
+    const logger = makeFakeLogger();
+    await tryClose('HTTP server', null, logger);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('awaits the server.close() callback', async () => {
+    const logger = makeFakeLogger();
+    const server = { close: jest.fn((cb) => cb()) };
+    await tryClose('HTTP server', server, logger);
+    expect(server.close).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('logs at warn and resolves cleanly when close yields an error', async () => {
+    const logger = makeFakeLogger();
+    const err = new Error('listener already detached');
+    const server = { close: jest.fn((cb) => cb(err)) };
+    await expect(tryClose('control-channel server', server, logger)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'control-channel server close reported error',
+      { error: 'listener already detached' },
+    );
+  });
+
+  it('embeds the component name in the warn message', async () => {
+    const logger = makeFakeLogger();
+    const server = { close: jest.fn((cb) => cb(new Error('boom'))) };
+    await tryClose('HTTP server', server, logger);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'HTTP server close reported error',
+      expect.objectContaining({ error: 'boom' }),
+    );
+  });
+});
+
+describe('runPushHandoffShutdown', () => {
+  // Captures every scheduleHardExit call so a test can fire the
+  // pending timer callback to simulate the ceiling elapsing.
+  function makeTimerSpy() {
+    const timers = [];
+    const fn = jest.fn((cb, ms) => {
+      const timer = { cb, ms, unref: jest.fn() };
+      timers.push(timer);
+      return timer;
+    });
+    fn.timers = timers;
+    return fn;
+  }
+
+  function makeDeps(overrides = {}) {
+    return {
+      logger: makeFakeLogger(),
+      gatewayLeader: { pushHandoff: jest.fn().mockResolvedValue({ transferred: true, pushAcked: true }) },
+      exit: jest.fn(),
+      scheduleHardExit: makeTimerSpy(),
+      ...overrides,
+    };
+  }
+
+  it('on a successful pushHandoff, exits with the incoming code', async () => {
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(0);
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      'pushHandoff complete',
+      expect.objectContaining({ transferred: true, pushAcked: true }),
+    );
+  });
+
+  it('on a thrown pushHandoff, still exits with the incoming code (standby cold-acquires)', async () => {
+    const deps = makeDeps({
+      gatewayLeader: { pushHandoff: jest.fn().mockRejectedValue(new Error('peer unreachable')) },
+    });
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.exit).toHaveBeenCalledWith(0);
+    expect(deps.logger.error).toHaveBeenCalledWith(
+      'pushHandoff threw — exiting anyway so the standby can cold-acquire',
+      expect.objectContaining({ error: 'peer unreachable' }),
+    );
+  });
+
+  it('schedules a hard-exit timer with the configured ceiling', async () => {
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ code: 0, ceilingMs: 9999, ...deps });
+    expect(deps.scheduleHardExit).toHaveBeenCalledWith(expect.any(Function), 9999);
+  });
+
+  it('default ceiling is 12_000 ms (9s pushHandoff + 3s headroom)', async () => {
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.scheduleHardExit).toHaveBeenCalledWith(expect.any(Function), 12_000);
+  });
+
+  it('unrefs the hard-exit timer so it does not pin the event loop', async () => {
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.scheduleHardExit.timers[0].unref).toHaveBeenCalledTimes(1);
+  });
+
+  it('hard-exit firing uses forcedExitCode=1 even when the incoming SIGTERM was code 0', async () => {
+    // Load-bearing contract — dashboards/ECS need to distinguish
+    // "clean transfer, exit 0" from "timeout, standby cold-acquired,
+    // exit 1" so a stuck handoff doesn't masquerade as a clean
+    // shutdown in the deploy metrics.
+    const handoffResolvers = {};
+    const handoffPromise = new Promise((resolve) => { handoffResolvers.resolve = resolve; });
+    const deps = makeDeps({
+      gatewayLeader: { pushHandoff: jest.fn().mockReturnValue(handoffPromise) },
+    });
+
+    const shutdown = runPushHandoffShutdown({ code: 0, ...deps });
+    // Yield once so scheduleHardExit has been called.
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(deps.scheduleHardExit.timers).toHaveLength(1);
+
+    // Fire the timer callback synchronously — represents the 12s
+    // ceiling elapsing in real time.
+    deps.scheduleHardExit.timers[0].cb();
+    expect(deps.exit).toHaveBeenCalledWith(1);
+    expect(deps.logger.error).toHaveBeenCalledWith('PushHandoff shutdown timed out, forcing exit');
+
+    // Release the never-resolving handoff so the orphan shutdown
+    // promise settles, then await it so Jest doesn't warn about
+    // an open async-context.
+    handoffResolvers.resolve({ transferred: true, pushAcked: true });
+    await shutdown;
+  });
+
+  it('forcedExitCode is configurable', async () => {
+    const handoffResolvers = {};
+    const handoffPromise = new Promise((resolve) => { handoffResolvers.resolve = resolve; });
+    const deps = makeDeps({
+      gatewayLeader: { pushHandoff: jest.fn().mockReturnValue(handoffPromise) },
+    });
+    const shutdown = runPushHandoffShutdown({ code: 0, forcedExitCode: 42, ...deps });
+    await new Promise((resolve) => { setImmediate(resolve); });
+    deps.scheduleHardExit.timers[0].cb();
+    expect(deps.exit).toHaveBeenCalledWith(42);
+    handoffResolvers.resolve({});
+    await shutdown;
+  });
+
+  it('forwards every pushHandoff result field into the log line for observability', async () => {
+    const deps = makeDeps({
+      gatewayLeader: { pushHandoff: jest.fn().mockResolvedValue({
+        transferred: false, pushAcked: false, reason: 'no_peer', pushReason: 'push_threw',
+      }) },
+    });
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.logger.info).toHaveBeenCalledWith('pushHandoff complete', {
+      transferred: false,
+      pushAcked: false,
+      reason: 'no_peer',
+      pushReason: 'push_threw',
+    });
   });
 });
