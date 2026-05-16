@@ -59,17 +59,20 @@
 // ── pushHandoff (SIGTERM path) ──
 // Stops the tick loop, then:
 //   1. Find a fresh peer in this shard (listFreshPeers, head of list).
-//   2. If no peer → release lock (best-effort) + return {pushed: false,
-//      reason: 'no_peer'}. Cold-fallback floor applies on the other
-//      side.
+//   2. If no peer → release lock (best-effort) + return
+//      {transferred: false, reason: 'no_peer'}. Cold-fallback floor
+//      applies on the other side.
 //   3. transferLock(peer.instance_id, peer.lock_holder) — atomic
 //      DDB ownership move. On CCF (active lost the lock to a cold-
-//      fallback acquire by the peer) → return {pushed: false, reason:
-//      'transfer_failed'}.
+//      fallback acquire by the peer) → return {transferred: false,
+//      reason: 'transfer_failed'}.
 //   4. controlClient.pushHandoff(...) with expectedVersion = the
 //      post-transfer version returned by transferLock.
-//   5. Return the result. Caller (index.js SIGTERM handler) exits
-//      either way.
+//   5. Return {transferred: true, pushAcked: bool, pushReason?}. The
+//      `transferred` field reflects DDB ownership (the standby owns
+//      the lock); `pushAcked` reflects whether the standby's HTTP
+//      ACK arrived. The watchdog covers the !pushAcked case. Caller
+//      (index.js SIGTERM handler) exits either way.
 
 const DEFAULT_TICK_INTERVAL_MS = 2_000;
 // Internal ceiling for an inbound-handoff `manager.connect()` await.
@@ -389,11 +392,15 @@ function createGatewayLeader({
       // `manager.connect()` is inside the try so a synchronous throw
       // (defensive — @discordjs/ws's WebSocketManager.connect contract
       // is async, but a future shim regression or wiring bug could
-      // surface a sync throw) still clears `connecting=false`. If
-      // `connectPromise` is unassigned at catch-time, the lifecycle
-      // attachment never ran, so the catch arm is the only thing that
-      // can clear the flag.
+      // surface a sync throw or a non-thenable return) still clears
+      // `connecting=false`. We track lifecycle attachment success
+      // explicitly (rather than just `!!connectPromise`) because
+      // `.then` itself can throw if `connect()` returned a non-
+      // thenable — in that case `connectPromise` is set but the
+      // settlement handlers never registered, so the catch is the
+      // only clear.
       let connectPromise;
+      let lifecycleAttached = false;
       let connectTimer;
       try {
         connectPromise = manager.connect();
@@ -401,6 +408,7 @@ function createGatewayLeader({
           () => { connecting = false; },
           () => { connecting = false; },
         );
+        lifecycleAttached = true;
         await Promise.race([
           connectPromise,
           new Promise((_, reject) => {
@@ -411,12 +419,12 @@ function createGatewayLeader({
           }),
         ]);
       } catch (err) {
-        // Sync-throw path: no connectPromise means the lifecycle
-        // attachment never ran, so this catch is the only clear. The
-        // async-rejection path is owned by the .then() handlers, so
-        // we DON'T touch `connecting` there (would race the next
-        // tick's connect; see comment in finally).
-        if (!connectPromise) connecting = false;
+        // Sync-throw path (and non-thenable-return path): if the
+        // lifecycle handlers never attached, this catch is the only
+        // clear. The async-rejection path is owned by the .then()
+        // handlers, so we DON'T touch `connecting` there (would
+        // race the next tick's connect; see comment in finally).
+        if (!lifecycleAttached) connecting = false;
         logger.error('gateway-leader: inbound-handoff connect threw (watchdog will retry)', {
           error: err.message, activeInstanceId,
         });
@@ -450,7 +458,7 @@ function createGatewayLeader({
     const result = await runSerialized(async () => {
       if (!heldLock) {
         logger.info('gateway-leader: pushHandoff called without holding lock (no-op)');
-        return { pushed: false, reason: 'not_holding_lock' };
+        return { transferred: false, reason: 'not_holding_lock' };
       }
 
       let peers;
@@ -461,14 +469,14 @@ function createGatewayLeader({
           error: err.message,
         });
         await releaseLockBestEffort('peer_lookup_failed');
-        return { pushed: false, reason: 'peer_lookup_failed' };
+        return { transferred: false, reason: 'peer_lookup_failed' };
       }
 
       const peer = peers[0]; // freshest-first per listFreshPeers contract
       if (!peer) {
         logger.warn('gateway-leader: no fresh peer for handoff — falling through to cold-fallback');
         await releaseLockBestEffort('no_peer');
-        return { pushed: false, reason: 'no_peer' };
+        return { transferred: false, reason: 'no_peer' };
       }
 
       // Defensive: if a heartbeat row exists without lock_holder
@@ -493,7 +501,7 @@ function createGatewayLeader({
       } catch (err) {
         logger.error('gateway-leader: transferLock threw', { error: err.message });
         await releaseLockBestEffort('transfer_threw');
-        return { pushed: false, reason: 'transfer_threw' };
+        return { transferred: false, reason: 'transfer_threw' };
       }
 
       if (!transferResult.transferred) {
@@ -502,7 +510,7 @@ function createGatewayLeader({
         // longer ours, so flip the local flag to match.
         heldLock = false;
         logger.warn('gateway-leader: transferLock CAS failed; skipping push');
-        return { pushed: false, reason: 'transfer_failed' };
+        return { transferred: false, reason: 'transfer_failed' };
       }
 
       heldLock = false;
@@ -530,7 +538,7 @@ function createGatewayLeader({
         logger.error('gateway-leader: controlClient.pushHandoff threw (watchdog will catch)', {
           peerInstanceId: peer.instance_id, error: err && err.message,
         });
-        return { pushed: true, ackReason: 'push_threw' };
+        return { transferred: true, pushAcked: false, pushReason: 'push_threw' };
       }
       // Either ACK branch is fine. The active is exiting anyway; the
       // standby has the lock either way (transferLock already moved
@@ -541,12 +549,12 @@ function createGatewayLeader({
         logger.info('gateway-leader: pushHandoff ACKed', {
           peerInstanceId: peer.instance_id,
         });
-      } else {
-        logger.warn('gateway-leader: pushHandoff did not ACK (watchdog will catch)', {
-          peerInstanceId: peer.instance_id, reason: pushResult.reason,
-        });
+        return { transferred: true, pushAcked: true };
       }
-      return { pushed: true, ackReason: pushResult.ok ? 'ack' : pushResult.reason };
+      logger.warn('gateway-leader: pushHandoff did not ACK (watchdog will catch)', {
+        peerInstanceId: peer.instance_id, reason: pushResult.reason,
+      });
+      return { transferred: true, pushAcked: false, pushReason: pushResult.reason };
     });
 
     // Best-effort heartbeat-row cleanup. Deliberately OUTSIDE the

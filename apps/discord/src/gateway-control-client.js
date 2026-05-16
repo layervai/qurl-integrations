@@ -33,6 +33,7 @@
 // ── Return contract ──
 // Returns a result object — never throws. Distinguishes:
 //   { ok: true,  status: 200 }                        — peer ACKed; we're done
+//   { ok: false, reason: 'invalid_arg', arg }         — argument validation rejected (also caught at the heartbeat-side validator; this is defense-in-depth)
 //   { ok: false, reason: 'timeout' }                  — peer didn't reply in time
 //   { ok: false, reason: 'http_error', error }        — connection error
 //   { ok: false, reason: 'rejected', status, body }   — peer returned non-2xx
@@ -47,11 +48,20 @@ const net = require('node:net');
 const { wrapEnvelope } = require('./gateway-hmac');
 
 const DEFAULT_TIMEOUT_MS = 200;
+// Symmetric to the server's bodyByteCap (gateway-control-channel.js
+// DEFAULT_BODY_BYTE_CAP = 8 KB). A correctly-behaving peer will reply
+// with a small ACK or a JSON error envelope — kilobytes at most.
+// A misrouted POST hitting an HTML error page (or a hostile in-VPC
+// actor) could otherwise return multi-MB and OOM the active during
+// the SIGTERM critical path. Buffer cap is the bytes we'll keep; on
+// exceeded the request is destroyed and we settle with `http_error`.
+const DEFAULT_RESPONSE_BYTE_CAP = 8 * 1024;
 
 function createControlClient({
   hmac,
   logger,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  responseByteCap = DEFAULT_RESPONSE_BYTE_CAP,
   // Injected for tests. Production uses node:http.
   httpRequest = http.request,
 } = {}) {
@@ -67,27 +77,29 @@ function createControlClient({
     selfInstanceId,
     expectedVersion,
   }) {
-    // Validate as a parseable IPv4/IPv6 literal — same shape as
-    // gateway-peer-heartbeat's write-time check. Defense-in-depth:
-    // if a heartbeat row is ever corrupted or mis-written to carry
-    // a hostname (or the literal "undefined" from env-stringification),
-    // we don't want to do DNS resolution + POST to wherever it
-    // resolves. The heartbeat-side validator and this validator
-    // are deliberately the same so each side fails loud on a bad row.
-    if (typeof peerIp !== 'string' || net.isIP(peerIp) === 0) {
-      throw new Error('pushHandoff: peerIp (IPv4 or IPv6 literal) required');
-    }
-    if (!Number.isInteger(peerPort) || peerPort <= 0 || peerPort > 65535) {
-      throw new Error('pushHandoff: peerPort (integer 1-65535) required');
-    }
-    if (typeof peerInstanceId !== 'string' || peerInstanceId.length === 0) {
-      throw new Error('pushHandoff: peerInstanceId (non-empty string) required');
-    }
-    if (typeof selfInstanceId !== 'string' || selfInstanceId.length === 0) {
-      throw new Error('pushHandoff: selfInstanceId (non-empty string) required');
-    }
-    if (!Number.isInteger(expectedVersion) || expectedVersion <= 0) {
-      throw new Error('pushHandoff: expectedVersion (positive integer) required');
+    // Validators return a result object rather than throw so the
+    // "never throws" contract documented in the module header holds
+    // unconditionally. Defense-in-depth: if a heartbeat row is ever
+    // corrupted or mis-written to carry a hostname (or the literal
+    // "undefined" from env-stringification), we don't want to do DNS
+    // resolution + POST to wherever it resolves. The heartbeat-side
+    // validator (gateway-peer-heartbeat.js) DOES throw (it's a write-
+    // time config check, not a hot-path runtime check) — this side
+    // mirrors the same shape but at runtime returns a result so the
+    // SIGTERM caller stays exception-free.
+    const invalidArg = (
+      (typeof peerIp !== 'string' || net.isIP(peerIp) === 0) ? 'peerIp'
+      : (!Number.isInteger(peerPort) || peerPort <= 0 || peerPort > 65535) ? 'peerPort'
+      : (typeof peerInstanceId !== 'string' || peerInstanceId.length === 0) ? 'peerInstanceId'
+      : (typeof selfInstanceId !== 'string' || selfInstanceId.length === 0) ? 'selfInstanceId'
+      : (!Number.isInteger(expectedVersion) || expectedVersion <= 0) ? 'expectedVersion'
+      : null
+    );
+    if (invalidArg) {
+      logger.warn('control-client: invalid pushHandoff arg', {
+        arg: invalidArg, peerInstanceId: typeof peerInstanceId === 'string' ? peerInstanceId : null,
+      });
+      return { ok: false, reason: 'invalid_arg', arg: invalidArg };
     }
 
     const payload = {
@@ -129,8 +141,32 @@ function createControlClient({
           timeout: timeoutMs,
         }, (res) => {
           const chunks = [];
-          res.on('data', (chunk) => chunks.push(chunk));
+          let bytesRead = 0;
+          let bodyCapExceeded = false;
+          res.on('data', (chunk) => {
+            if (bodyCapExceeded) return;
+            bytesRead += chunk.length;
+            if (bytesRead > responseByteCap) {
+              // A misrouted POST hitting an HTML error page or a
+              // hostile in-VPC actor could otherwise return multi-MB
+              // and OOM the active during SIGTERM. Destroy the
+              // response so we settle now instead of buffering
+              // forever; the destroy emits an error which the 'error'
+              // handler below maps to http_error. Mark a flag so
+              // subsequent 'data' chunks (already in the pipeline)
+              // are dropped without growing the buffer.
+              bodyCapExceeded = true;
+              logger.warn('control-client: response body exceeded cap', {
+                peerInstanceId, cap: responseByteCap,
+              });
+              settle({ ok: false, reason: 'http_error', error: 'response_body_too_large' });
+              res.destroy();
+              return;
+            }
+            chunks.push(chunk);
+          });
           res.on('end', () => {
+            if (bodyCapExceeded) return;
             const body = Buffer.concat(chunks).toString('utf8');
             if (res.statusCode >= 200 && res.statusCode < 300) {
               logger.info('control-client: handoff ACKed', {
@@ -141,9 +177,8 @@ function createControlClient({
               // Cap the logged body so an unexpectedly large peer
               // response (e.g., a stray HTML error page from a
               // misrouted request) doesn't flood the log line. The
-              // returned `body` field stays uncapped — callers don't
-              // act on it today, but a future debugger reading the
-              // full string from the result object is still ok.
+              // returned `body` field is already cap-bounded by the
+              // streaming guard above.
               logger.warn('control-client: handoff rejected by peer', {
                 peerInstanceId, status: res.statusCode, body: body.slice(0, 512),
               });

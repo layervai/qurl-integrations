@@ -17,9 +17,11 @@
 //        - no fresh peer → releaseLock + reason:'no_peer'.
 //        - transferLock CAS fail → reason:'transfer_failed', no release
 //          (peer cold-acquired; the CCF IS the release).
-//        - transferLock success + push success → pushed:true.
-//        - transferLock success + push timeout → pushed:true, ackReason:
-//          'timeout' (active still exits; standby's watchdog recovers).
+//        - transferLock success + push success → transferred:true,
+//          pushAcked:true.
+//        - transferLock success + push timeout → transferred:true,
+//          pushAcked:false, pushReason:'timeout' (active still exits;
+//          standby's watchdog recovers).
 //   5. Serialization: tick + inbound-handoff + push-handoff funnel
 //      through the same in-flight chain. No two lock mutators ever
 //      run concurrently.
@@ -334,6 +336,23 @@ describe('handleInboundHandoff', () => {
     expect(leader.isConnecting()).toBe(false);
     expect(leader.isHoldingLock()).toBe(true);
   });
+
+  it('non-thenable manager.connect return clears connecting flag (defensive)', async () => {
+    // Even stronger defensive: if connect() returns a non-thenable
+    // (i.e., the .then attachment itself throws synchronously after
+    // connectPromise is already assigned), the lifecycle handlers
+    // never register. The catch must still clear `connecting=false`.
+    const mocks = makeMocks();
+    mocks.manager.connect = jest.fn(() => 'not-a-promise');
+    const { leader } = makeLeader({ mocks });
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-A', expectedVersion: 7,
+    })).rejects.toThrow();
+
+    expect(leader.isConnecting()).toBe(false);
+    expect(leader.isHoldingLock()).toBe(true);
+  });
 });
 
 describe('pushHandoff', () => {
@@ -345,7 +364,7 @@ describe('pushHandoff', () => {
   it('returns not_holding_lock when called without the lock', async () => {
     const { leader } = makeLeader();
     const result = await leader.pushHandoff();
-    expect(result).toEqual({ pushed: false, reason: 'not_holding_lock' });
+    expect(result).toEqual({ transferred: false, reason: 'not_holding_lock' });
   });
 
   it('returns no_peer + best-effort release when no fresh peer exists', async () => {
@@ -354,7 +373,7 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     const result = await leader.pushHandoff();
-    expect(result).toEqual({ pushed: false, reason: 'no_peer' });
+    expect(result).toEqual({ transferred: false, reason: 'no_peer' });
     expect(lock.releaseLock).toHaveBeenCalledTimes(1);
   });
 
@@ -370,12 +389,12 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     const result = await leader.pushHandoff();
-    expect(result).toEqual({ pushed: false, reason: 'transfer_failed' });
+    expect(result).toEqual({ transferred: false, reason: 'transfer_failed' });
     expect(controlClient.pushHandoff).not.toHaveBeenCalled();
     expect(lock.releaseLock).not.toHaveBeenCalled();
   });
 
-  it('returns pushed:true, ackReason:ack on successful transfer + ACKed push', async () => {
+  it('returns transferred:true, pushAcked:true on successful transfer + ACKed push', async () => {
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -386,7 +405,7 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     const result = await leader.pushHandoff();
-    expect(result).toEqual({ pushed: true, ackReason: 'ack' });
+    expect(result).toEqual({ transferred: true, pushAcked: true });
     expect(lock.transferLock).toHaveBeenCalledWith('inst-B', 'task-B/inst-B');
     expect(controlClient.pushHandoff).toHaveBeenCalledWith({
       peerIp: '10.0.0.2', peerPort: 9876, peerInstanceId: 'inst-B',
@@ -395,7 +414,7 @@ describe('pushHandoff', () => {
     expect(leader.isHoldingLock()).toBe(false);
   });
 
-  it('returns pushed:true, ackReason:timeout when transferred but peer did not ACK', async () => {
+  it('returns transferred:true, pushAcked:false, pushReason:timeout when transferred but peer did not ACK', async () => {
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -407,10 +426,10 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     const result = await leader.pushHandoff();
-    expect(result).toEqual({ pushed: true, ackReason: 'timeout' });
+    expect(result).toEqual({ transferred: true, pushAcked: false, pushReason: 'timeout' });
   });
 
-  it('returns pushed:true, ackReason:push_threw when controlClient.pushHandoff throws', async () => {
+  it('returns transferred:true, pushAcked:false, pushReason:push_threw when controlClient.pushHandoff throws', async () => {
     // The control-client's documented contract is "never throws", but
     // its synchronous argument validators DO throw if a row makes it
     // past listFreshPeers' filters in a future regression. transferLock
@@ -430,7 +449,7 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     const result = await leader.pushHandoff();
-    expect(result).toEqual({ pushed: true, ackReason: 'push_threw' });
+    expect(result).toEqual({ transferred: true, pushAcked: false, pushReason: 'push_threw' });
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/controlClient\.pushHandoff threw/),
       expect.objectContaining({ peerInstanceId: 'inst-B' }),
@@ -794,7 +813,7 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     await leader._stepForTest();
     const result = await leader.pushHandoff();
     // Push still succeeds; cleanup is best-effort.
-    expect(result).toEqual({ pushed: true, ackReason: 'ack' });
+    expect(result).toEqual({ transferred: true, pushAcked: true });
   });
 });
 
@@ -814,10 +833,10 @@ describe('pushHandoff — re-entry safety', () => {
     await leader._stepForTest(); // heldLock=true via acquire
 
     const first = await leader.pushHandoff();
-    expect(first).toEqual({ pushed: true, ackReason: 'ack' });
+    expect(first).toEqual({ transferred: true, pushAcked: true });
 
     const second = await leader.pushHandoff();
-    expect(second).toEqual({ pushed: false, reason: 'not_holding_lock' });
+    expect(second).toEqual({ transferred: false, reason: 'not_holding_lock' });
 
     // Critical: transferLock was called once, not twice.
     expect(lock.transferLock).toHaveBeenCalledTimes(1);
@@ -839,11 +858,11 @@ describe('pushHandoff — re-entry safety', () => {
     ]);
     expect(lock.transferLock).toHaveBeenCalledTimes(1);
     // First call transfers, second sees not_holding_lock.
-    const transferred = [a, b].filter((r) => r.pushed === true);
-    const noOps = [a, b].filter((r) => r.pushed === false);
+    const transferred = [a, b].filter((r) => r.transferred === true);
+    const noOps = [a, b].filter((r) => r.transferred === false);
     expect(transferred).toHaveLength(1);
     expect(noOps).toHaveLength(1);
-    expect(noOps[0]).toEqual({ pushed: false, reason: 'not_holding_lock' });
+    expect(noOps[0]).toEqual({ transferred: false, reason: 'not_holding_lock' });
   });
 });
 

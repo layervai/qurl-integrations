@@ -55,6 +55,10 @@ function makeFakeHttpRequest({ behavior }) {
         respond(status, body) {
           const res = new EventEmitter();
           res.statusCode = status;
+          res.destroyed = false;
+          // Real http.IncomingMessage exposes .destroy() — the client
+          // calls it on body-cap-exceeded to stop the stream.
+          res.destroy = () => { res.destroyed = true; };
           responseHandler(res);
           setImmediate(() => {
             res.emit('data', Buffer.from(body ?? '', 'utf8'));
@@ -112,12 +116,24 @@ describe('createControlClient — factory validation', () => {
 });
 
 describe('pushHandoff — argument validation', () => {
-  it('rejects missing required args', async () => {
+  it('returns ok:false reason:invalid_arg on missing required args (never throws)', async () => {
+    // The "never throws" contract documented in the module header is
+    // load-bearing for the SIGTERM caller. Validators must surface as
+    // result objects, not rejected promises.
     const hmac = makeHmac();
     const client = createControlClient({ hmac, logger: makeLogger() });
-    await expect(client.pushHandoff({})).rejects.toThrow(/required/);
-    await expect(client.pushHandoff({ ...validArgs, peerIp: '' })).rejects.toThrow(/required/);
-    await expect(client.pushHandoff({ ...validArgs, expectedVersion: 0 })).rejects.toThrow(/required/);
+    await expect(client.pushHandoff({}))
+      .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'peerIp' });
+    await expect(client.pushHandoff({ ...validArgs, peerIp: '' }))
+      .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'peerIp' });
+    await expect(client.pushHandoff({ ...validArgs, peerPort: 0 }))
+      .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'peerPort' });
+    await expect(client.pushHandoff({ ...validArgs, peerInstanceId: '' }))
+      .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'peerInstanceId' });
+    await expect(client.pushHandoff({ ...validArgs, selfInstanceId: '' }))
+      .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'selfInstanceId' });
+    await expect(client.pushHandoff({ ...validArgs, expectedVersion: 0 }))
+      .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'expectedVersion' });
   });
 
   it('rejects peerIp that is not an IPv4/IPv6 literal (defense-in-depth vs corrupted heartbeat row)', async () => {
@@ -126,13 +142,14 @@ describe('pushHandoff — argument validation', () => {
     // env-stringification. The client mirrors that check so a
     // corrupted row (or pre-13b.2 callers that bypassed the write-
     // time validator) doesn't get a free DNS resolution + POST to
-    // an arbitrary host.
+    // an arbitrary host. Returned as result object (see "never
+    // throws" contract in the module header).
     const hmac = makeHmac();
     const client = createControlClient({ hmac, logger: makeLogger() });
     for (const bad of ['discord.com', 'localhost', 'undefined', 'not-an-ip', '10.0.0', '10.0.0.0.0']) {
       // eslint-disable-next-line no-await-in-loop
       await expect(client.pushHandoff({ ...validArgs, peerIp: bad }))
-        .rejects.toThrow(/IPv4 or IPv6 literal/);
+        .resolves.toMatchObject({ ok: false, reason: 'invalid_arg', arg: 'peerIp' });
     }
     // IPv4 + IPv6 literals pass validation. Use a fake httpRequest
     // so the assertion runs without actually opening a socket.
@@ -262,6 +279,42 @@ describe('pushHandoff — result mapping', () => {
     const client = createControlClient({ hmac, logger: makeLogger(), httpRequest: fakeRequest });
     const result = await client.pushHandoff(validArgs);
     expect(result).toEqual({ ok: false, reason: 'http_error', error: 'ECONNREFUSED' });
+  });
+
+  it('caps response body and returns reason:http_error on cap exceeded', async () => {
+    // Defense vs OOM during SIGTERM: a misrouted POST hitting an
+    // HTML error page (or hostile in-VPC actor) could otherwise
+    // return multi-MB. The client must settle as http_error before
+    // buffering grows unbounded.
+    const hmac = makeHmac();
+    const { fakeRequest } = makeFakeHttpRequest({
+      behavior: (ctx) => {
+        // Simulate a streaming response of chunks that together
+        // exceed the configured cap. We send via the 'respond'
+        // helper which fires data + end, but we want to drive
+        // multiple data chunks. Reach inside to do it manually.
+        const res = new (require('events').EventEmitter)();
+        res.statusCode = 200;
+        ctx.options; // no-op — keep ctx referenced
+        // The responseHandler lives in the closure of httpRequest;
+        // simplest path is to use the 'respond' helper with a giant
+        // body so the single data emit > cap.
+        ctx.respond(200, 'X'.repeat(100));
+      },
+    });
+    const logger = makeLogger();
+    // Set a tiny cap so a 100-byte response trips it.
+    const client = createControlClient({
+      hmac, logger, httpRequest: fakeRequest, responseByteCap: 50,
+    });
+    const result = await client.pushHandoff(validArgs);
+    expect(result).toEqual({
+      ok: false, reason: 'http_error', error: 'response_body_too_large',
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'control-client: response body exceeded cap',
+      expect.objectContaining({ peerInstanceId: 'inst-B', cap: 50 }),
+    );
   });
 
   it('returns reason:http_error when the response is aborted mid-stream', async () => {

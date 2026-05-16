@@ -52,16 +52,25 @@
 // freshness edge and may bounce; the design doc names this as a
 // chrony-failure incident, not an application-level recovery target.
 //
-// ── Nonce LRU ──
+// ── Nonce cache (FIFO-by-insertion) ──
 // Each verified body carries a `nonce` (16 random bytes hex). The
-// verifier maintains a bounded in-memory LRU (default 1024 entries)
+// verifier maintains a bounded in-memory FIFO (default 1024 entries)
 // of seen nonces. Replays within the freshness window are rejected.
-// At 5s freshness and 1024 entries, the LRU absorbs up to ~200
+// At 5s freshness and 1024 entries, the cache absorbs up to ~200
 // handoffs/sec before still-fresh nonces start evicting (which would
 // allow replay within the 5s window). Real-world handoff rate is
 // one-per-deploy, so the size is ~3 orders of magnitude over-
 // provisioned; revisit the size if either freshness or handoff rate
 // changes.
+//
+// FIFO (not LRU): we evict by insertion order, not by access order.
+// True LRU would re-rank on each `has()` hit, but the verify path
+// returns `replay` before `rememberNonce` runs on a duplicate, so
+// the cache never sees an `has()` hit followed by use. Eviction by
+// insertion order == eviction by first-seen, which is what we want
+// for a replay window: an old nonce is more likely to be past
+// freshness than a recently-inserted one. Same behavior either way
+// for this call shape; the name reflects the simpler invariant.
 //
 // The check-then-set MUST be one synchronous microtask. There must
 // be no `await` between Map.has and Map.set, otherwise a concurrent
@@ -111,10 +120,12 @@ function createGatewayHmac({
   }
   if (!logger) throw new Error('createGatewayHmac: logger is required');
 
-  // Map insertion order is preserved per spec — so a Map IS a
-  // size-bounded LRU if we re-insert on access and evict the oldest
-  // (first iterator key) when at capacity. Cheaper than a full
-  // LRU class for our 1k-entry use case.
+  // Map insertion order is preserved per spec — so a Map gives us
+  // a size-bounded FIFO by evicting the oldest (first iterator key)
+  // when at capacity. We do NOT re-insert on access (which would
+  // make this a true LRU) — see the FIFO discussion in the module
+  // header for why insertion-order eviction is correct for the
+  // replay-window invariant.
   const seenNonces = new Map();
 
   function rememberNonce(nonce) {
