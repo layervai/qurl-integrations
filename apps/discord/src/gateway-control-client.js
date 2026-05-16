@@ -23,9 +23,12 @@
 // `{active_instance_id, peer_instance_id, expected_version, ts, nonce}`
 // signed with HMAC. `ts` and `nonce` are added by this module
 // (callers don't need to think about them); `expected_version` is
-// the active's currentVersion at the moment of handoff — pre-
-// transfer, the peer uses it via `adoptLockFromHandoff(expected+1)`
-// to bootstrap its own version cursor.
+// the POST-transfer version returned by the active's
+// `transferLock` call (DDB version after the CAS-bump). The
+// standby seeds its own `gateway-lock` cursor with this value
+// directly via `adoptLockFromHandoff(expected_version)` — no
+// arithmetic on the receive side. Sender contract: pass the
+// `version` field of a `{transferred: true}` transferLock result.
 //
 // ── Return contract ──
 // Returns a result object — never throws. Distinguishes:

@@ -60,6 +60,14 @@
 // not actually a broader bind than 127.0.0.1 in the network-namespace
 // sense. The task security group is the perimeter. Tests pass
 // `127.0.0.1` to avoid binding a routable address during the suite.
+//
+// IPv4-only assumption: this default works on today's Fargate
+// (IPv4 ENI). If the bot ever runs on an IPv6-only ENI, callers
+// MUST pass `bindAddr: '::'` (dual-stack) explicitly — `0.0.0.0`
+// won't bind to v6. The peer-heartbeat module's `net.isIP` write
+// validator and the control-client's read validator both accept
+// IPv6 literals, so the wire is v6-ready; only this bind default
+// is v4-only. Revisit when ECS rolls out v6-only task networking.
 
 const http = require('node:http');
 
@@ -275,7 +283,13 @@ function readRequestBody(req, byteCap) {
 }
 
 function sendJson(res, status, body, extraHeaders = {}) {
-  if (res.headersSent || res.writableEnded) return;
+  // `res.destroyed` covers the client-abort path: the request was
+  // aborted mid-stream, the socket is gone, and a writeHead/end
+  // pair would emit 'error' on the response. Without this guard
+  // that 'error' would propagate to the server-level error handler
+  // (which is scoped to listen errors, not per-request) and
+  // surface a benign client abort as a listener fault.
+  if (res.headersSent || res.writableEnded || res.destroyed) return;
   const buf = Buffer.from(JSON.stringify(body), 'utf8');
   res.writeHead(status, {
     'Content-Type': 'application/json',

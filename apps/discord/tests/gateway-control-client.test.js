@@ -336,3 +336,77 @@ describe('end-to-end — client → server', () => {
     });
   });
 });
+
+describe('end-to-end — IPv6 loopback (::1)', () => {
+  // peer-heartbeat rows can carry IPv6 literals; pushHandoff's
+  // validator accepts ::1, and node:http handles bare-IPv6 hostname
+  // correctly. This test closes the loop end-to-end on v6 so a
+  // future deploy onto an IPv6-only ENI doesn't surface an
+  // untested wire path.
+  //
+  // Some CI environments disable IPv6 entirely. Probe ::1 bindability
+  // in beforeAll and skip the suite cleanly if unavailable.
+  let server;
+  let port;
+  let ipv6Available = false;
+  const onHandoff = jest.fn(async () => {});
+
+  beforeAll(async () => {
+    ipv6Available = await new Promise((resolve) => {
+      const probe = require('node:http').createServer();
+      probe.once('error', () => resolve(false));
+      probe.listen(0, '::1', () => {
+        probe.close(() => resolve(true));
+      });
+    });
+  });
+
+  beforeEach(() => {
+    if (!ipv6Available) return undefined;
+    return new Promise((resolve) => {
+      const hmac = makeHmac();
+      server = startControlChannelServer({
+        hmac,
+        selfInstanceId: 'inst-B',
+        isKnownPeer: (id) => id === 'inst-A',
+        onHandoff,
+        logger: makeLogger(),
+        port: 0,
+        bindAddr: '::1',
+        onListenError: () => {},
+      });
+      server.on('listening', () => {
+        port = server.address().port;
+        resolve();
+      });
+    });
+  });
+
+  afterEach(() => new Promise((resolve) => {
+    onHandoff.mockClear();
+    if (!server) { resolve(); return; }
+    server.close(() => resolve());
+    server = null;
+  }));
+
+  it('round-trips a handoff over ::1', async () => {
+    if (!ipv6Available) {
+      // eslint-disable-next-line no-console
+      console.warn('IPv6 loopback unavailable; skipping ::1 e2e test');
+      return;
+    }
+    const hmac = makeHmac();
+    const client = createControlClient({ hmac, logger: makeLogger() });
+    const result = await client.pushHandoff({
+      peerIp: '::1',
+      peerPort: port,
+      peerInstanceId: 'inst-B',
+      selfInstanceId: 'inst-A',
+      expectedVersion: 7,
+    });
+    expect(result).toEqual({ ok: true, status: 200 });
+    expect(onHandoff).toHaveBeenCalledWith({
+      activeInstanceId: 'inst-A', expectedVersion: 7,
+    });
+  });
+});
