@@ -815,6 +815,45 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     // Push still succeeds; cleanup is best-effort.
     expect(result).toEqual({ transferred: true, pushAcked: true });
   });
+
+  it('handleInboundHandoff after pushHandoff rejects with leader_closed', async () => {
+    // A race where the SIGTERM path ran AND an inbound handoff hits
+    // the control-channel server BEFORE the process exits. The leader
+    // is dead — must not re-adopt. Uniform terminal-state invariant
+    // alongside start() and releaseLockForImmediateExit.
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader, lock } = makeLeader({ mocks });
+    await leader._stepForTest();
+    await leader.pushHandoff();
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 99,
+    })).rejects.toThrow(/leader_closed/);
+    // adoptLockFromHandoff must NOT have run.
+    expect(lock.adoptLockFromHandoff).not.toHaveBeenCalled();
+  });
+
+  it('releaseLockForImmediateExit after pushHandoff is a no-op (closed)', async () => {
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader, lock } = makeLeader({ mocks });
+    await leader._stepForTest();
+    await leader.pushHandoff();
+    const releaseCallsBefore = lock.releaseLock.mock.calls.length;
+
+    await leader.releaseLockForImmediateExit();
+    // releaseLock NOT called again — the closed sentinel short-circuits.
+    expect(lock.releaseLock.mock.calls.length).toBe(releaseCallsBefore);
+  });
 });
 
 describe('pushHandoff — re-entry safety', () => {

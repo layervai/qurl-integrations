@@ -19,6 +19,19 @@
 // ~7 s cold-floor applies but is still better than a stuck active
 // preventing handoff.
 //
+// ── ACK-vs-timeout regime ──
+// The standby's `onHandoff` handler awaits `manager.connect()` to
+// Discord WS (typically 1-3 s) BEFORE returning 200. The active's
+// 200 ms timeout is much shorter, so the wire-level 200 ACK is
+// essentially never observed by the sender in the happy path.
+// `pushAcked: true` will be rare; `pushAcked: false, pushReason:
+// 'timeout'` is the common case. This is intentional — the wire
+// ACK is only useful for the synchronous-throw / 4xx error path
+// (bad HMAC, malformed body, wrong peer, etc.). For success, we
+// rely on the watchdog's lock-held + WS-disconnected check instead.
+// PR 13b.3 should log `pushAcked` as a metric so the "always times
+// out" regime stays observable vs. a genuinely-broken standby.
+//
 // ── Body shape ──
 // `{active_instance_id, peer_instance_id, expected_version, ts, nonce}`
 // signed with HMAC. `ts` and `nonce` are added by this module
@@ -48,13 +61,15 @@ const net = require('node:net');
 const { wrapEnvelope } = require('./gateway-hmac');
 
 const DEFAULT_TIMEOUT_MS = 200;
-// Symmetric to the server's bodyByteCap (gateway-control-channel.js
-// DEFAULT_BODY_BYTE_CAP = 8 KB). A correctly-behaving peer will reply
-// with a small ACK or a JSON error envelope — kilobytes at most.
-// A misrouted POST hitting an HTML error page (or a hostile in-VPC
-// actor) could otherwise return multi-MB and OOM the active during
-// the SIGTERM critical path. Buffer cap is the bytes we'll keep; on
-// exceeded the request is destroyed and we settle with `http_error`.
+// Expected legitimate responses from the control-channel server are
+// tiny — `{"status":"ok"}` on 2xx (≈ 15 bytes) or a small JSON error
+// envelope on 4xx/5xx (≈ 50 bytes). 8 KB matches the server's request
+// bodyByteCap and is ~150× the expected response size, so the cap
+// only ever fires on pathological inputs: a misrouted POST hitting
+// an HTML error page (e.g., a generic LB 502 with a multi-KB body)
+// or a hostile in-VPC actor returning multi-MB. Defense against OOM
+// of the active during the SIGTERM critical path. On exceeded, the
+// response is destroyed and we settle with reason:'http_error'.
 const DEFAULT_RESPONSE_BYTE_CAP = 8 * 1024;
 
 function createControlClient({

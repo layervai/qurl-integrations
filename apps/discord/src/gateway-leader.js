@@ -127,13 +127,6 @@ function createGatewayLeader({
   let loopPromise = null;
   let knownPeerInstanceIds = new Set();
 
-  // Mutator serialization. Every call site that touches the
-  // single-caller-only gateway-lock API funnels through this so
-  // tick / inbound-handoff / push-handoff never overlap. Rejections
-  // are caught when chained into `inFlight` so a prior failure
-  // doesn't break the chain — but we log on the catch so an op
-  // failure isn't observable-only-via-caller (the work itself logs
-  // its own failure, this is a backstop for the chain-keeping path).
   // Best-effort lock release for pushHandoff's bail-out paths. The
   // leader is exiting; we want to give up the lock so the next
   // replacement task can cold-acquire immediately instead of waiting
@@ -150,25 +143,30 @@ function createGatewayLeader({
     }
   }
 
+  // ── Mutator serialization ──
+  // Every call site that touches the single-caller-only gateway-lock
+  // API funnels through `runSerialized` so tick / inbound-handoff /
+  // push-handoff never overlap. The serialization chain absorbs
+  // failures so one op's rejection doesn't break the next op's
+  // turn — see the function-level comment for the load-bearing
+  // invariant.
   let inFlight = Promise.resolve();
   function runSerialized(work) {
-    // `.then(work, work)` — both fulfillment AND rejection handlers
-    // invoke `work()`. INTENTIONAL: a prior op rejecting must NOT
-    // skip the next op (that would break the serialization chain
-    // when one op fails). The fulfillment and rejection arms are
-    // distinct thenable handlers but both call the same `work`
-    // callee; `work()` runs exactly once per `runSerialized` call
-    // regardless of the prior outcome.
+    // The load-bearing invariant: `inFlight` is ALWAYS fulfilled
+    // (never rejected) because we assign it below to a `.then` whose
+    // rejection arm returns undefined — turning every prior failure
+    // into a fulfilled chain. That means the NEXT `runSerialized`
+    // call's `inFlight.then(() => work())` reliably runs `work()`
+    // regardless of whether the previous op rejected. This is what
+    // keeps the serialization chain alive across failures; the
+    // dual-arm `.then` we used to have on the consumer side was
+    // over-defending against a state that can't happen.
     //
-    // Subtle: this function returns `next` (which propagates work's
-    // rejection to the caller) but ASSIGNS `inFlight` to a different
-    // promise that swallows the rejection (via the second `.then`
-    // arm below). The caller awaiting the return value can `.catch`
-    // its op's failure; the NEXT `runSerialized` call chains off an
-    // always-fulfilled `inFlight` so a prior op's rejection doesn't
-    // poison the chain. Returned-promise behavior diverges from
-    // chain-keeping promise behavior on purpose.
-    const next = inFlight.then(() => work(), () => work());
+    // The returned `next` DOES propagate the work's rejection to the
+    // caller — so callers can `.catch` their own op's failure — but
+    // the side-effect `inFlight` assignment diverges and absorbs it.
+    // Returned-promise vs chain-keeping behavior differ on purpose.
+    const next = inFlight.then(() => work());
     inFlight = next.then(() => {}, (err) => {
       // Debug (not warn): every rethrowing op (tick / handleInboundHandoff
       // / pushHandoff) ALREADY logs at warn/error from its own
@@ -310,6 +308,17 @@ function createGatewayLeader({
   // safe: the active exits on any non-2xx, and the watchdog re-tries
   // the connect path if heldLock got set before the throw.
   async function handleInboundHandoff({ activeInstanceId, expectedVersion }) {
+    // Terminal-state guard: a post-pushHandoff leader is dead.
+    // A second inbound handoff arriving (e.g., racing the SIGTERM
+    // path) must NOT re-adopt — the process is exiting. Throw so
+    // the control-channel server returns 500 and the active gives
+    // up. Symmetric to start()'s same guard.
+    if (closed) {
+      logger.warn('gateway-leader: inbound handoff rejected — leader closed', {
+        activeInstanceId, expectedVersion,
+      });
+      throw new Error('leader_closed');
+    }
     return runSerialized(async () => {
       // Stray-handoff guard: if we already hold the lock AND the WS
       // is connected, a second inbound handoff is either a duplicate
@@ -395,7 +404,10 @@ function createGatewayLeader({
       // If a future @discordjs/ws version ever drops that contract,
       // either set a hard ceiling here that accepts the concurrent
       // risk, or wire a `manager.destroy()`-on-timeout escape in
-      // the shim layer.
+      // the shim layer. Tracking issue #415 covers a process-level
+      // health check (alert on `connecting=true` duration > 30s
+      // and exit(1) so ECS replaces the task) — preferred recovery
+      // over racing another timer.
       connecting = true;
       // `manager.connect()` is inside the try so a synchronous throw
       // (defensive — @discordjs/ws's WebSocketManager.connect contract
@@ -498,8 +510,7 @@ function createGatewayLeader({
       // TODO(post-13b.2-bake): drop this fallback once all peers
       // have been on >=13b.2 long enough that missing lock_holder
       // is impossible. Target removal: 2026-07-01 (~6 weeks after
-      // 13b.2 lands in prod). Tracked: file a follow-up issue
-      // when 13b.3 lands so the bake window is observable.
+      // 13b.2 lands in prod). Tracked: #416.
       const targetLockHolder = peer.lock_holder
         || `placeholder/${peer.instance_id}`;
 
@@ -592,7 +603,16 @@ function createGatewayLeader({
   // success); the function name surfaces that contract at the
   // call site instead of relying on a comment.
   async function releaseLockForImmediateExit() {
-    return runSerialized(async () => {
+    // Terminal-state guard: if pushHandoff already ran, we've already
+    // released (best-effort) and `heldLock=false`. A subsequent watchdog
+    // call here would no-op anyway, but short-circuiting makes the
+    // closed-state invariant uniform across the API surface (start()
+    // and handleInboundHandoff also guard on closed).
+    if (closed) {
+      logger.debug('gateway-leader: releaseLockForImmediateExit called on closed leader (no-op)');
+      return;
+    }
+    await runSerialized(async () => {
       heldLock = false;
       await lock.releaseLock();
     });
