@@ -62,6 +62,40 @@ async function tryStop(name, handle, logger) {
   }
 }
 
+// Waits for an http.Server-shaped handle to fire its `listening`
+// event, with three-way unwind: resolve on `listening`, reject on
+// `error`, reject on `close`. The `close` clause closes the
+// SIGTERM-during-listen-await hang: if gracefulShutdown calls
+// `server.close()` while we're still waiting for the listener to
+// come up, Node fires `close` (not `error` or `listening`) and the
+// Promise would otherwise hang until gracefulShutdown's force-exit
+// timer fires.
+//
+// Mutual listener removal — leaving idle `error → reject` /
+// `close → reject` listeners attached after a `listening` resolve
+// would surface unhandled rejections on every runtime listener-
+// error; the caller's `onListenError` hook routes those to
+// gracefulShutdown(1) and we don't need a duplicate path.
+function awaitServerListening(server) {
+  return new Promise((resolve, reject) => {
+    if (server.listening) {
+      resolve();
+      return;
+    }
+    const cleanup = () => {
+      server.off('listening', onListening);
+      server.off('error', onError);
+      server.off('close', onClose);
+    };
+    const onListening = () => { cleanup(); resolve(); };
+    const onError = (err) => { cleanup(); reject(err); };
+    const onClose = () => { cleanup(); reject(new Error('control-channel server closed before listening')); };
+    server.once('listening', onListening);
+    server.once('error', onError);
+    server.once('close', onClose);
+  });
+}
+
 // Symmetric to tryStop, but for net.Server-shaped handles (callback-
 // based close instead of Promise-based stop). Null-safe, awaits the
 // close callback, surfaces any close error at warn. Resolves cleanly
@@ -184,6 +218,7 @@ async function runPushHandoffShutdown({
 module.exports = {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
+  awaitServerListening,
   tryStop,
   tryClose,
   runPushHandoffShutdown,

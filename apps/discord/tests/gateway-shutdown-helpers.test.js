@@ -1,6 +1,8 @@
+const { EventEmitter } = require('events');
 const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
+  awaitServerListening,
   tryStop,
   tryClose,
   runPushHandoffShutdown,
@@ -205,6 +207,99 @@ describe('selectGatewayReadinessProbe', () => {
     // After inbound handoff transfers ownership away: now standby.
     currentLeader = makeFakeLeader({ holdingLock: false, ticking: true });
     expect(probe()).toBe(true); // standby is still healthy via tick loop
+  });
+});
+
+describe('awaitServerListening', () => {
+  // Fake http.Server: an EventEmitter with a mutable `listening`
+  // flag. Models the three relevant terminal events (`listening`,
+  // `error`, `close`) without binding an actual socket.
+  function makeFakeServer({ listening = false } = {}) {
+    const s = new EventEmitter();
+    s.listening = listening;
+    return s;
+  }
+
+  it('resolves immediately when server.listening is already true (fast path)', async () => {
+    const server = makeFakeServer({ listening: true });
+    await expect(awaitServerListening(server)).resolves.toBeUndefined();
+  });
+
+  it('resolves on the `listening` event when server starts not-yet-listening', async () => {
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('listening');
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it('rejects on the `error` event with the emitted error', async () => {
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('error', new Error('EADDRINUSE'));
+    await expect(promise).rejects.toThrow(/EADDRINUSE/);
+  });
+
+  it('rejects on the `close` event — closes the SIGTERM-during-listen-await hang', async () => {
+    // Load-bearing contract. If gracefulShutdown calls server.close()
+    // while we're still awaiting `listening`, Node fires `close` (not
+    // `error` or `listening`) — without this reject the promise would
+    // hang until gracefulShutdown's force-exit timer fires.
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('close');
+    await expect(promise).rejects.toThrow(/closed before listening/);
+  });
+
+  it('removes all three listeners on `listening` resolve (no late-event leakage)', async () => {
+    // Idle listeners would .reject() on every runtime listener-error
+    // and surface a noisy unhandled-rejection. The caller's
+    // onListenError hook already routes runtime errors to graceful-
+    // Shutdown(1); we don't need a duplicate path.
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('listening');
+    await promise;
+    expect(server.listenerCount('listening')).toBe(0);
+    expect(server.listenerCount('error')).toBe(0);
+    expect(server.listenerCount('close')).toBe(0);
+  });
+
+  it('removes all three listeners on `error` reject', async () => {
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('error', new Error('bind failed'));
+    await expect(promise).rejects.toThrow();
+    expect(server.listenerCount('listening')).toBe(0);
+    expect(server.listenerCount('error')).toBe(0);
+    expect(server.listenerCount('close')).toBe(0);
+  });
+
+  it('removes all three listeners on `close` reject', async () => {
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('close');
+    await expect(promise).rejects.toThrow();
+    expect(server.listenerCount('listening')).toBe(0);
+    expect(server.listenerCount('error')).toBe(0);
+    expect(server.listenerCount('close')).toBe(0);
+  });
+
+  it('a second `error` after `listening` does not surface an unhandled rejection', async () => {
+    // Defense against the idle-listener hazard: after resolve(), any
+    // subsequent `error` event from the server's runtime lifetime
+    // must NOT bubble through our Promise.
+    const server = makeFakeServer();
+    const promise = awaitServerListening(server);
+    server.emit('listening');
+    await promise;
+    // This must not throw and must not bubble — if our cleanup
+    // missed a listener, jest would surface the unhandled rejection
+    // at the next tick.
+    expect(() => server.emit('error', new Error('runtime listener-error'))).toThrow(/runtime listener-error/);
+    // (EventEmitter's default error-without-listener behavior is to
+    // re-throw synchronously — the throw above PROVES no idle
+    // `error → reject` listener remained, since a remaining listener
+    // would have swallowed it.)
   });
 });
 
@@ -490,6 +585,19 @@ describe('runPushHandoffShutdown', () => {
     // helper doesn't blow up trying to call .stop() on null.
     await runPushHandoffShutdown({ code: 0, ...deps });
     expect(deps.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('eventPublisher explicit null is fine (SIGTERM before publisher.start() ran)', async () => {
+    // Different from the "omitted" case in that the caller is
+    // explicitly passing the unset binding rather than relying on
+    // the parameter default. Models the SIGTERM-during-boot path
+    // where startHotStandby's publisher construction has not yet
+    // happened. tryStop is null-safe; the helper must not throw
+    // and must still complete the pushHandoff + clean exit.
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ code: 0, eventPublisher: null, ...deps });
+    expect(deps.exit).toHaveBeenCalledWith(0);
+    expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
   });
 
   it('eventPublisher.stop() failure is absorbed via tryStop (not propagated)', async () => {

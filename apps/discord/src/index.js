@@ -15,6 +15,7 @@ const { loadGatewayHmacSecret } = require('./gateway-hmac-secret-loader');
 const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
+  awaitServerListening,
   tryStop,
   tryClose,
   runPushHandoffShutdown,
@@ -413,6 +414,16 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // exist until `await gatewayShim.start({ connect: false })` resolves.
 // We hoist the locals here so gracefulShutdown + SIGTERM branching can
 // see them. Both stay null when hot-standby is off.
+//
+// Concurrency invariant: these three `let`s are written only inside
+// `startHotStandby` (one ECS-task-lifetime initialization path) and
+// read from `gracefulShutdown` + the SIGTERM handler. Node's single
+// event loop guarantees read/write atomicity here — no two tasks
+// can be mid-mutation while a signal handler reads. The tryClose /
+// tryStop calls in gracefulShutdown are `!= null`-guarded, so a
+// SIGTERM landing mid-startHotStandby (before the assignment) is
+// safe; the `isShuttingDown` re-check after the listen-await closes
+// the inverse race (assignment done, but `.start()` not yet called).
 let gatewayLeader = null;
 let controlChannelServer = null;
 let connectionWatchdog = null;
@@ -811,6 +822,17 @@ async function signalShutdown(code) {
 // falling through to gracefulShutdown — the contract is pinned by
 // the "returns false when leader is null" test in
 // gateway-shutdown-helpers.test.js.
+//
+// `signalShutdown(0)` always passes 0 here — the signal received is
+// "container scheduled for replacement", which is a clean transfer,
+// not a fault. The non-zero exit codes (the `forcedExitCode` knob in
+// runPushHandoffShutdown) signal in-process failures: pushHandoff
+// threw, or the 12 s ceiling fired. So in production today the
+// three-outcome contract collapses to two observable outcomes
+// (0 = clean transfer, 1 = anything else). The third knob exists
+// for the unit-test surface and for the next caller that wants to
+// distinguish "explicit fault exit" from "signal-driven exit" (e.g.
+// a future health-probe-driven self-restart path).
 process.on('SIGTERM', () => {
   logger.info('Received SIGTERM');
   signalShutdown(0).catch(err => {
@@ -917,21 +939,7 @@ async function startHotStandby() {
       gracefulShutdown(1);
     },
   });
-  await new Promise((resolve, reject) => {
-    if (controlChannelServer.listening) {
-      resolve();
-      return;
-    }
-    // Remove the OTHER listener on first event — leaving an idle
-    // `error → reject` listener after resolve would .reject() on
-    // every runtime listener-error and surface a noisy
-    // unhandled-rejection (the onListenError handler already routes
-    // those to gracefulShutdown(1); we don't need a duplicate path).
-    const onListening = () => { controlChannelServer.off('error', onError); resolve(); };
-    const onError = (err) => { controlChannelServer.off('listening', onListening); reject(err); };
-    controlChannelServer.once('listening', onListening);
-    controlChannelServer.once('error', onError);
-  });
+  await awaitServerListening(controlChannelServer);
 
   // SIGTERM-during-boot race guard. If a signal landed while we were
   // awaiting the `listening` event, gracefulShutdown has already
