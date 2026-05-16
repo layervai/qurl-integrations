@@ -126,11 +126,12 @@ function createGatewayLeader({
   let inFlight = Promise.resolve();
   function runSerialized(work) {
     // `.then(work, work)` — both fulfillment AND rejection handlers
-    // call work(). INTENTIONAL: a prior op rejecting must NOT skip
-    // the next op (that would break the serialization chain when
-    // one op fails). Same `work` reference in both arms; called
-    // exactly once per `runSerialized` call regardless of the
-    // prior outcome.
+    // invoke `work()`. INTENTIONAL: a prior op rejecting must NOT
+    // skip the next op (that would break the serialization chain
+    // when one op fails). The fulfillment and rejection arms are
+    // distinct thenable handlers but both call the same `work`
+    // callee; `work()` runs exactly once per `runSerialized` call
+    // regardless of the prior outcome.
     const next = inFlight.then(() => work(), () => work());
     inFlight = next.then(() => {}, (err) => {
       // Warn (not debug): every work() should already log its own
@@ -269,9 +270,10 @@ function createGatewayLeader({
       // Step 1: bootstrap version cursor. THROWS if expectedVersion
       // is malformed — protects against a future control-channel-server
       // bug that lets bad payloads through. Log at error level with
-      // routing context so an unexpected adopt failure is visible
-      // (the catch in runSerialized only logs at debug, which
-      // wouldn't show in default-prod log levels).
+      // routing context so an unexpected adopt failure carries the
+      // active_instance_id + expectedVersion in the same line as
+      // the error message — the runSerialized backstop is a generic
+      // warn without that routing context.
       try {
         lock.adoptLockFromHandoff(expectedVersion);
       } catch (err) {
