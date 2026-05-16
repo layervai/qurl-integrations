@@ -198,6 +198,32 @@ describe('handleRequest — body cap', () => {
     expect(ctx.onHandoff).not.toHaveBeenCalled();
   });
 
+  it('accepts a body exactly at bodyByteCap (boundary: cap = "max allowed", not "first rejected")', async () => {
+    // Off-by-one pin: the cap is the largest accepted size. A body
+    // of exactly `cap` bytes must NOT 413. (`> cap` rejects, `>=
+    // cap` would reject the boundary — wrong shape.)
+    const ctx = makeCtx({ bodyByteCap: 100 });
+    // Body must be a valid signed envelope to reach the 200 path,
+    // so we build a tiny payload and verify the envelope fits.
+    const now = 1_700_000_000_000;
+    const hmac = makeHmac({ clock: () => now });
+    ctx.hmac = hmac;
+    const payload = makeFreshPayload({ now });
+    const envelope = makeSignedEnvelope({ payload });
+    // Pin the precondition: the envelope must be longer than cap
+    // for the body-to-cap to mean anything; if not, this is a
+    // useful test of "small envelope passes," which is also fine.
+    const padded = Buffer.alloc(100, 0x20); // 100 bytes of spaces
+    padded.write(envelope.slice(0, Math.min(envelope.length, 100)), 0);
+    // Either case (passes verify or fails verify) reaches a status
+    // code that isn't 413. The contract under test is "at-cap is
+    // not body_too_large."
+    const req = makeReq({ body: padded });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).not.toBe(413);
+  });
+
   it('413s when cumulative chunks exceed bodyByteCap (streaming path)', async () => {
     // Real HTTP streams chunk delivery (~16 KB at a time). A bug in
     // the cumulative-counter that only checked the LAST chunk would

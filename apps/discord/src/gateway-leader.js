@@ -7,7 +7,7 @@
 // And exposes the four hooks the wiring layer (index.js, PR 13b.3)
 // plugs into the other Pillar 3 components:
 //   - `isHoldingLock()` → for gateway-connection-watchdog
-//   - `releaseLockForExit()` → for gateway-connection-watchdog's
+//   - `releaseLockForImmediateExit()` → for gateway-connection-watchdog's
 //      exhaustion path
 //   - `handleInboundHandoff(payload)` → for gateway-control-channel's
 //      onHandoff
@@ -72,6 +72,13 @@
 //      either way.
 
 const DEFAULT_TICK_INTERVAL_MS = 2_000;
+// Internal ceiling for an inbound-handoff `manager.connect()` await.
+// Discord WS cold-connects normally complete in 1-3s; 5s is generous
+// headroom while still bounding a hung resolve. On timeout we settle
+// the promise as a connect failure (heldLock stays true, watchdog
+// takes over next tick). Makes the leader self-sufficient rather
+// than relying on the WS shim's wiring to enforce a timeout.
+const DEFAULT_INBOUND_CONNECT_TIMEOUT_MS = 5_000;
 
 function createGatewayLeader({
   lock,
@@ -83,6 +90,7 @@ function createGatewayLeader({
   shardId,
   logger,
   tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
+  inboundConnectTimeoutMs = DEFAULT_INBOUND_CONNECT_TIMEOUT_MS,
   // Injected for tests. Production: setTimeout-based sleep.
   sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
 } = {}) {
@@ -301,22 +309,32 @@ function createGatewayLeader({
       // clears the flag — the watchdog can then validly take over
       // the retry on the next tick.
       //
-      // Note: `manager.connect()` is awaited inline with no timeout
-      // here. A hung connect (e.g., Discord WS endpoint resolution
-      // black-holed) would pin `connecting=true` indefinitely and
-      // the watchdog would no-op every tick. PR 13b.3 wiring MUST
-      // ensure the WS shim's connect() either has an internal
-      // timeout OR provide an external timeout wrapper at the
-      // call site.
+      // Internal timeout: a hung `manager.connect()` (e.g., Discord
+      // WS endpoint resolution black-holed) would otherwise pin
+      // `connecting=true` indefinitely and the watchdog would
+      // no-op every tick. Racing connect against a timer keeps
+      // the leader self-sufficient — on timeout we throw, the
+      // catch arm logs, the finally clears the flag, and the
+      // watchdog picks up the retry next tick.
       connecting = true;
+      let connectTimer;
       try {
-        await manager.connect();
+        await Promise.race([
+          manager.connect(),
+          new Promise((_, reject) => {
+            connectTimer = setTimeout(
+              () => reject(new Error(`inbound_connect_timeout_${inboundConnectTimeoutMs}ms`)),
+              inboundConnectTimeoutMs,
+            );
+          }),
+        ]);
       } catch (err) {
         logger.error('gateway-leader: inbound-handoff connect threw (watchdog will retry)', {
           error: err.message, activeInstanceId,
         });
         throw err;
       } finally {
+        clearTimeout(connectTimer);
         connecting = false;
       }
       logger.info('gateway-leader: adopted lock + connected via inbound handoff', {
@@ -374,7 +392,9 @@ function createGatewayLeader({
       // which is shaped like `task-arn:.../inst-X`.
       // TODO(post-13b.2-bake): drop this fallback once all peers
       // have been on >=13b.2 long enough that missing lock_holder
-      // is impossible.
+      // is impossible. Target removal: 2026-07-01 (~6 weeks after
+      // 13b.2 lands in prod). Tracked: file a follow-up issue
+      // when 13b.3 lands so the bake window is observable.
       const targetLockHolder = peer.lock_holder
         || `placeholder/${peer.instance_id}`;
 
@@ -438,14 +458,17 @@ function createGatewayLeader({
   // For the connection-watchdog's releaseLock hook. Serialized so
   // it can't race a tick's renewLock.
   //
-  // Order note: heldLock=false is cleared BEFORE awaiting the DDB
-  // release. If releaseLock throws, the local flag is already false
-  // but the DDB row may still belong to us until TTL lapse. This is
-  // OK only because the sole caller (watchdog exhaustion path)
-  // `exit(1)`s immediately afterward — the row fades naturally via
-  // TTL. A future non-exiting caller would need to flip the
-  // ordering (await release first, then clear the flag on success).
-  async function releaseLockForExit() {
+  // Name is deliberately `releaseLockForImmediateExit` (not just
+  // `releaseLock`): the implementation clears `heldLock=false`
+  // BEFORE awaiting the DDB release. If releaseLock throws, the
+  // local flag is already false but the DDB row may still belong
+  // to us until TTL lapse. This is OK ONLY because every documented
+  // caller `exit(1)`s immediately afterward — the row fades
+  // naturally via TTL. A future non-exiting caller would need to
+  // flip the ordering (await release first, then clear the flag on
+  // success); the function name surfaces that contract at the
+  // call site instead of relying on a comment.
+  async function releaseLockForImmediateExit() {
     return runSerialized(async () => {
       heldLock = false;
       await lock.releaseLock();
@@ -472,7 +495,7 @@ function createGatewayLeader({
     stop,
     pushHandoff,
     handleInboundHandoff,
-    releaseLockForExit,
+    releaseLockForImmediateExit,
     isHoldingLock,
     isConnecting,
     isKnownPeer,
@@ -486,4 +509,5 @@ function createGatewayLeader({
 module.exports = {
   createGatewayLeader,
   DEFAULT_TICK_INTERVAL_MS,
+  DEFAULT_INBOUND_CONNECT_TIMEOUT_MS,
 };

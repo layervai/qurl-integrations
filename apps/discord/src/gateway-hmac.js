@@ -184,7 +184,13 @@ function createGatewayHmac({
     } catch (_err) {
       return { ok: false, reason: VERIFY_REASONS.MALFORMED_BODY };
     }
-    if (payload == null || typeof payload !== 'object') {
+    // Reject arrays too — `typeof [] === 'object'`, but a handoff
+    // payload is always a plain object. The downstream
+    // findInvalidHandoffField check would catch an array anyway
+    // (array.active_instance_id is undefined), but rejecting at the
+    // HMAC module boundary keeps this layer's contract less
+    // dependent on receiver-side validation shape.
+    if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
       return { ok: false, reason: VERIFY_REASONS.MALFORMED_BODY };
     }
 

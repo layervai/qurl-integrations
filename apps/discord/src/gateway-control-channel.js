@@ -129,7 +129,14 @@ function startControlChannelServer({
     handleRequest(req, res, {
       hmac, selfInstanceId, isKnownPeer, onHandoff, logger, bodyByteCap,
     }).catch((err) => {
-      logger.error('control-channel: unhandled handler error', { error: err.message });
+      // Include req.method + req.url so an operator triaging a 500
+      // can correlate this log line with what the client was
+      // attempting. sendJson is guarded against already-ended
+      // responses, so the 500 write is safe even if the failure
+      // happened after headers were sent.
+      logger.error('control-channel: unhandled handler error', {
+        error: err.message, method: req.method, url: req.url,
+      });
       sendJson(res, 500, { error: 'internal_error' });
     });
   });

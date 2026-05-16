@@ -47,7 +47,8 @@ function makeFakeHttpRequest({ behavior }) {
     const req = new EventEmitter();
     const writtenChunks = [];
     req.write = (chunk) => { writtenChunks.push(chunk); };
-    req.end = () => {
+    req.end = (chunk) => {
+      if (chunk) writtenChunks.push(chunk);
       const ctx = {
         options,
         body: Buffer.concat(writtenChunks),

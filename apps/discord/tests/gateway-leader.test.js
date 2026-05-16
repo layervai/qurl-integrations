@@ -23,8 +23,8 @@
 //   5. Serialization: tick + inbound-handoff + push-handoff funnel
 //      through the same in-flight chain. No two lock mutators ever
 //      run concurrently.
-//   6. Hooks: isHoldingLock + isKnownPeer + releaseLockForExit
-//      reflect internal state; releaseLockForExit clears flag +
+//   6. Hooks: isHoldingLock + isKnownPeer + releaseLockForImmediateExit
+//      reflect internal state; releaseLockForImmediateExit clears flag +
 //      calls lock.releaseLock.
 
 const {
@@ -591,6 +591,38 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
     expect(leader.isConnecting()).toBe(false);
   });
 
+  it('inbound handoff connect times out internally and throws (watchdog takes over)', async () => {
+    // A hung Discord WS connect (never resolves) would pin
+    // connecting=true forever without the internal timeout. The
+    // leader races connect against a timer; on timeout it throws
+    // and the finally clears the flag so the watchdog can retry.
+    const mocks = makeMocks();
+    mocks.manager.connect = jest.fn(() => new Promise(() => {})); // never resolves
+    const leader = createGatewayLeader({
+      lock: mocks.lock,
+      peerHeartbeat: mocks.peerHeartbeat,
+      controlClient: mocks.controlClient,
+      manager: mocks.manager,
+      selfInstanceId: 'inst-A',
+      selfLockHolder: 'task-arn:.../inst-A',
+      shardId: '0:1',
+      logger: mocks.logger,
+      inboundConnectTimeoutMs: 50, // fast timeout for the test
+    });
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 5,
+    })).rejects.toThrow(/inbound_connect_timeout/);
+
+    // Critical: connecting must be cleared after the timeout so
+    // the watchdog can take over on the next tick.
+    expect(leader.isConnecting()).toBe(false);
+    // heldLock must still be true (adopt + flag-set happened before
+    // the connect await) so the watchdog observes lock-held + WS-
+    // not-connected and retries.
+    expect(leader.isHoldingLock()).toBe(true);
+  });
+
   it('isConnecting clears even when manager.connect() throws', async () => {
     const mocks = makeMocks();
     mocks.manager.connect = jest.fn(async () => { throw new Error('discord-down'); });
@@ -743,12 +775,12 @@ describe('hooks for watchdog + control-channel', () => {
     expect(leader.isKnownPeer('inst-Z')).toBe(false);
   });
 
-  it('releaseLockForExit clears flag + calls lock.releaseLock', async () => {
+  it('releaseLockForImmediateExit clears flag + calls lock.releaseLock', async () => {
     const { leader, lock } = makeLeader();
     await leader._stepForTest();
     expect(leader.isHoldingLock()).toBe(true);
 
-    await leader.releaseLockForExit();
+    await leader.releaseLockForImmediateExit();
     expect(leader.isHoldingLock()).toBe(false);
     expect(lock.releaseLock).toHaveBeenCalledTimes(1);
   });

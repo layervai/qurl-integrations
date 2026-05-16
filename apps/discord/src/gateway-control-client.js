@@ -193,8 +193,7 @@ function createControlClient({
           settle({ ok: false, reason: 'http_error', error: err.message });
         });
 
-        req.write(wire);
-        req.end();
+        req.end(wire);
       } catch (err) {
         logger.warn('control-client: synchronous http.request failure', {
           peerInstanceId, error: err.message,
