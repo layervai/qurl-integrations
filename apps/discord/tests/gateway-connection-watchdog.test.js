@@ -45,6 +45,7 @@ function makeFakeManager({ initialConnected = false } = {}) {
 function makeWatchdog({
   manager,
   isHoldingLock = () => true,
+  isConnecting = () => false,
   releaseLock = jest.fn(async () => {}),
   pollIntervalMs,
   maxAttempts,
@@ -56,7 +57,7 @@ function makeWatchdog({
   };
   const watchdog = createConnectionWatchdog({
     manager: manager ?? makeFakeManager(),
-    isHoldingLock, releaseLock, logger,
+    isHoldingLock, isConnecting, releaseLock, logger,
     pollIntervalMs, maxAttempts, sleep, exit,
   });
   return { watchdog, logger, releaseLock, sleep, exit };
@@ -145,6 +146,46 @@ describe('step() — no-op paths', () => {
     manager._setConnected(true);
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+});
+
+describe('step() — isConnecting backoff (race with leader inbound-handoff)', () => {
+  it('does NOT call manager.connect() when leader reports isConnecting=true', async () => {
+    // Inbound-handoff path: leader is awaiting `manager.connect()`.
+    // Watchdog tick observes !isConnected() and would normally
+    // fire its own connect — that would race against the same
+    // WebSocketManager. The isConnecting hook gates this off.
+    const manager = makeFakeManager();
+    const isConnecting = jest.fn(() => true);
+    const { watchdog } = makeWatchdog({ manager, isConnecting });
+
+    await watchdog._stepForTest();
+
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(isConnecting).toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('resets attempts when leader transitions to isConnecting=true mid-ladder', async () => {
+    // Failure ladder is at attempt 3; leader then takes over the
+    // connect (inbound-handoff). The watchdog must reset attempts
+    // so the leader's eventual outcome doesn't carry a stale
+    // ladder into the next watchdog-driven retry.
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    let leaderConnecting = false;
+    const { watchdog } = makeWatchdog({
+      manager, isConnecting: () => leaderConnecting, maxAttempts: 10,
+    });
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(3);
+
+    leaderConnecting = true;
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+    expect(manager.connect).toHaveBeenCalledTimes(3); // not 4
   });
 });
 

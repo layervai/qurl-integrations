@@ -140,7 +140,13 @@ async function handleRequest(req, res, ctx) {
   } catch (err) {
     if (err.code === 'BODY_TOO_LARGE') {
       ctx.logger.warn('control-channel: body exceeded cap', { cap: ctx.bodyByteCap });
-      sendJson(res, 413, { error: 'body_too_large' });
+      // `Connection: close` because we never read the rest of the
+      // (paused) request body. Without forcing close, a keep-alive
+      // client could attempt another request on the same socket
+      // and the leftover unread bytes would confuse the HTTP
+      // parser. Forcing close after this response makes the
+      // unread body harmless.
+      sendJson(res, 413, { error: 'body_too_large' }, { Connection: 'close' });
       return;
     }
     ctx.logger.warn('control-channel: body read failed', { error: err.message });
@@ -262,12 +268,13 @@ function readRequestBody(req, byteCap) {
   });
 }
 
-function sendJson(res, status, body) {
+function sendJson(res, status, body, extraHeaders = {}) {
   if (res.headersSent || res.writableEnded) return;
   const buf = Buffer.from(JSON.stringify(body), 'utf8');
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': buf.length,
+    ...extraHeaders,
   });
   res.end(buf);
 }

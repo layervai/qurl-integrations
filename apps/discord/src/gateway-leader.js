@@ -98,6 +98,14 @@ function createGatewayLeader({
   if (!logger) throw new Error('createGatewayLeader: logger is required');
 
   let heldLock = false;
+  // Set true around `handleInboundHandoff`'s in-flight
+  // `manager.connect()`. The watchdog observes this via
+  // `isConnecting()` and skips its own `manager.connect()` call —
+  // a Discord WS cold-connect routinely takes 1-3 s, longer than
+  // the watchdog's 1 s tick, so without this flag the two would
+  // race and call `connect()` concurrently. @discordjs/ws's
+  // WebSocketManager is NOT safe under concurrent connect().
+  let connecting = false;
   let running = false;
   let loopPromise = null;
   let knownPeerInstanceIds = new Set();
@@ -222,6 +230,17 @@ function createGatewayLeader({
       // Step 3: bring up the WS. The active is waiting for the ACK
       // (200 ms) before exiting; this connect resolving is what
       // makes the 200 "I'm live" semantic true.
+      //
+      // `connecting` is flipped true around the await so the
+      // watchdog's parallel 1 s tick observes it via isConnecting()
+      // and skips its own connect call. Without this guard a
+      // Discord WS cold-connect (1-3 s) would race the watchdog
+      // and produce two concurrent connect() invocations against
+      // @discordjs/ws's WebSocketManager, which is NOT safe under
+      // concurrency. Reset in `finally` so a connect throw still
+      // clears the flag — the watchdog can then validly take over
+      // the retry on the next tick.
+      connecting = true;
       try {
         await manager.connect();
       } catch (err) {
@@ -229,6 +248,8 @@ function createGatewayLeader({
           error: err.message, activeInstanceId,
         });
         throw err;
+      } finally {
+        connecting = false;
       }
       logger.info('gateway-leader: adopted lock + connected via inbound handoff', {
         activeInstanceId, expectedVersion,
@@ -341,6 +362,13 @@ function createGatewayLeader({
     return heldLock;
   }
 
+  // For the connection-watchdog: when the leader is itself mid-
+  // `manager.connect()` (inbound-handoff path), the watchdog must
+  // back off rather than fire its own concurrent connect.
+  function isConnecting() {
+    return connecting;
+  }
+
   function isKnownPeer(instanceId) {
     return knownPeerInstanceIds.has(instanceId);
   }
@@ -352,6 +380,7 @@ function createGatewayLeader({
     handleInboundHandoff,
     releaseLockForExit,
     isHoldingLock,
+    isConnecting,
     isKnownPeer,
     // Inspection seams for tests.
     _stepForTest: () => runSerialized(step),

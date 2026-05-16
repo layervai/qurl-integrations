@@ -471,6 +471,90 @@ describe('serialization — no two mutators interleave', () => {
   });
 });
 
+describe('isConnecting — race protection between inbound-handoff and watchdog', () => {
+  it('is true ONLY while handleInboundHandoff awaits manager.connect()', async () => {
+    let resolveConnect;
+    const mocks = makeMocks();
+    mocks.manager.connect = jest.fn(() => new Promise((resolve) => {
+      resolveConnect = resolve;
+    }));
+    const { leader } = makeLeader({ mocks });
+    expect(leader.isConnecting()).toBe(false);
+
+    const handoffPromise = leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 5,
+    });
+    // Give the serialized fn a microtask to start.
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(leader.isConnecting()).toBe(true);
+
+    resolveConnect();
+    await handoffPromise;
+    expect(leader.isConnecting()).toBe(false);
+  });
+
+  it('isConnecting clears even when manager.connect() throws', async () => {
+    const mocks = makeMocks();
+    mocks.manager.connect = jest.fn(async () => { throw new Error('discord-down'); });
+    const { leader } = makeLeader({ mocks });
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 5,
+    })).rejects.toThrow(/discord-down/);
+    // finally{} block must clear the flag so the watchdog can take
+    // over the retry on its next tick.
+    expect(leader.isConnecting()).toBe(false);
+  });
+});
+
+describe('pushHandoff — re-entry safety', () => {
+  it('a second pushHandoff call after the first transferred returns not_holding_lock', async () => {
+    // SIGTERM fires twice (rare but possible: ECS retry + signal
+    // bounce). Second call must observe heldLock=false (cleared by
+    // the first push's transfer) and no-op cleanly rather than
+    // attempt to re-transfer.
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader, lock } = makeLeader({ mocks });
+    await leader._stepForTest(); // heldLock=true via acquire
+
+    const first = await leader.pushHandoff();
+    expect(first).toEqual({ pushed: true, ackReason: 'ack' });
+
+    const second = await leader.pushHandoff();
+    expect(second).toEqual({ pushed: false, reason: 'not_holding_lock' });
+
+    // Critical: transferLock was called once, not twice.
+    expect(lock.transferLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('two parallel pushHandoff calls serialize — only one transfers', async () => {
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader, lock } = makeLeader({ mocks });
+    await leader._stepForTest(); // heldLock=true
+
+    const [a, b] = await Promise.all([
+      leader.pushHandoff(),
+      leader.pushHandoff(),
+    ]);
+    expect(lock.transferLock).toHaveBeenCalledTimes(1);
+    // First call transfers, second sees not_holding_lock.
+    const transferred = [a, b].filter((r) => r.pushed === true);
+    const noOps = [a, b].filter((r) => r.pushed === false);
+    expect(transferred).toHaveLength(1);
+    expect(noOps).toHaveLength(1);
+    expect(noOps[0]).toEqual({ pushed: false, reason: 'not_holding_lock' });
+  });
+});
+
 describe('hooks for watchdog + control-channel', () => {
   it('isHoldingLock reflects internal state', async () => {
     const { leader } = makeLeader();

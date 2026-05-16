@@ -106,7 +106,7 @@ function createControlClient({
       }
 
       const req = httpRequest({
-        host: peerIp,
+        hostname: peerIp,
         port: peerPort,
         path: '/control/yours',
         method: 'POST',

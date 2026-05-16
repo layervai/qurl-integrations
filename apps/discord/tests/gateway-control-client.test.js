@@ -154,7 +154,7 @@ describe('pushHandoff — request shape', () => {
     expect(result).toEqual({ ok: true, status: 200 });
     expect(calls).toHaveLength(1);
     expect(calls[0].options).toMatchObject({
-      host: '10.0.1.5',
+      hostname: '10.0.1.5',
       port: 9876,
       path: '/control/yours',
       method: 'POST',

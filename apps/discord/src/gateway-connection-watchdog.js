@@ -57,6 +57,16 @@ const BACKOFF_CAP_MS = 5_000;
 function createConnectionWatchdog({
   manager,
   isHoldingLock,
+  // Optional. Returns true when the leader is itself mid-
+  // `manager.connect()` (inbound-handoff path); the watchdog backs
+  // off rather than race a second concurrent connect. Default
+  // `() => false` keeps tests + non-leader callers simple, but
+  // production wiring (PR 13b.3) MUST pass the leader's
+  // `isConnecting()` — without it, an inbound-handoff connect
+  // taking >1 s would race the next watchdog tick and produce
+  // overlapping connect() calls against the non-concurrency-safe
+  // WebSocketManager.
+  isConnecting = () => false,
   releaseLock,
   logger,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
@@ -71,6 +81,9 @@ function createConnectionWatchdog({
   }
   if (typeof isHoldingLock !== 'function') {
     throw new Error('createConnectionWatchdog: isHoldingLock function is required');
+  }
+  if (typeof isConnecting !== 'function') {
+    throw new Error('createConnectionWatchdog: isConnecting must be a function');
   }
   if (typeof releaseLock !== 'function') {
     throw new Error('createConnectionWatchdog: releaseLock function is required');
@@ -91,6 +104,16 @@ function createConnectionWatchdog({
       return;
     }
     if (manager.isConnected()) {
+      attempts = 0;
+      return;
+    }
+    // Leader is mid-connect (inbound-handoff path). Stand down —
+    // don't race a second concurrent connect against the same
+    // WebSocketManager. Reset attempts so the leader's eventual
+    // success doesn't leave a stale failure ladder behind, and
+    // its eventual failure starts the ladder cleanly from 1 on
+    // the next tick when isConnecting() returns false again.
+    if (isConnecting()) {
       attempts = 0;
       return;
     }
