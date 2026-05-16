@@ -22,8 +22,11 @@ function deriveInstanceIp() {
   for (const addr of ifaces.eth0 || []) {
     if (addr.family === 'IPv4' && !addr.internal) return addr.address;
   }
-  for (const name of Object.keys(ifaces)) {
-    if (name === 'eth0') continue;
+  // Fallback for local/dev (macOS `en0`, stripped containers without
+  // `eth0`, etc.). Iteration order is whatever `os.networkInterfaces()`
+  // returns — best-effort only; under Fargate awsvpc the eth0 path
+  // above always wins, so this branch never runs in prod.
+  for (const name of Object.keys(ifaces).filter(n => n !== 'eth0')) {
     for (const addr of ifaces[name] || []) {
       if (addr.family === 'IPv4' && !addr.internal) return addr.address;
     }

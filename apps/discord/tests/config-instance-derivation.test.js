@@ -131,14 +131,37 @@ describe('INSTANCE_IP derivation', () => {
     );
   });
 
-  it('skips internal IPv4 addresses', () => {
+  it('passes a bad env override through to invalidHotStandbyValues (contract end-to-end)', () => {
+    // Env override wins over derivation, so a malformed value
+    // (10.0.0.999 — non-IPv4) lands in config.INSTANCE_IP unmodified.
+    // The boot-time validator must then catch it. Locks the contract
+    // that override-path values still flow through the shape gate.
+    const { invalidHotStandbyValues } = require('../src/boot-requirements');
+    withFreshConfig(
+      { env: { INSTANCE_IP: '10.0.0.999' } },
+      (config) => {
+        expect(config.INSTANCE_IP).toBe('10.0.0.999');
+        const problems = invalidHotStandbyValues({
+          ...config,
+          ENABLE_GATEWAY_HOT_STANDBY: true,
+        });
+        expect(problems.some((p) => p.includes('INSTANCE_IP must be a valid IPv4'))).toBe(true);
+      },
+    );
+  });
+
+  it('skips internal IPv4 addresses on eth0 (loopback aliased)', () => {
+    // Eth0 has both an internal address (127.0.0.1 — a misconfigured
+    // alias) AND the real non-internal IP. Without the `!addr.internal`
+    // guard this would return 127.0.0.1 because it appears first.
     withFreshConfig(
       {
         env: {},
         networkInterfaces: {
-          lo: [{ family: 'IPv4', address: '127.0.0.1', internal: true }],
-          docker0: [{ family: 'IPv4', address: '172.17.0.1', internal: true }],
-          eth0: [{ family: 'IPv4', address: '10.0.0.1', internal: false }],
+          eth0: [
+            { family: 'IPv4', address: '127.0.0.1', internal: true },
+            { family: 'IPv4', address: '10.0.0.1', internal: false },
+          ],
         },
       },
       (config) => {
