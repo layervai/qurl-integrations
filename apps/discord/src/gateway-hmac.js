@@ -125,6 +125,22 @@ function createGatewayHmac({
     throw new Error('createGatewayHmac: secrets.previous must be a non-empty string or null');
   }
   if (!logger) throw new Error('createGatewayHmac: logger is required');
+  // freshnessWindowMs <= 0 would reject every body as `stale` (the
+  // freshness check is `now - ts < window`); fractional values
+  // would coerce weirdly. Fail loud at boot.
+  if (!Number.isInteger(freshnessWindowMs) || freshnessWindowMs <= 0) {
+    throw new Error('createGatewayHmac: freshnessWindowMs must be a positive integer');
+  }
+  // nonceLruSize <= 0 SILENTLY DISABLES replay protection: the
+  // `while (seenNonces.size > nonceLruSize)` loop in rememberNonce
+  // would evict the just-inserted nonce immediately, so the next
+  // verify() call sees an empty cache and never finds the replay.
+  // This is the worst possible failure mode — looks like it's
+  // working but the replay window is zero entries. Fail loud at
+  // boot to make the misconfig impossible.
+  if (!Number.isInteger(nonceLruSize) || nonceLruSize <= 0) {
+    throw new Error('createGatewayHmac: nonceLruSize must be a positive integer');
+  }
 
   // Map insertion order is preserved per spec — so a Map gives us
   // a size-bounded FIFO by evicting the oldest (first iterator key)

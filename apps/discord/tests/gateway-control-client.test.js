@@ -337,6 +337,21 @@ describe('pushHandoff — result mapping', () => {
     );
   });
 
+  it('returns reason:http_error when the connection aborts BEFORE headers (req error path)', async () => {
+    // Pin the pre-headers abort contract. If the socket dies before
+    // any response headers arrive, `statusCode` is undefined and the
+    // `close` handler intentionally does NOT settle (its gate is
+    // `res.destroyed && res.statusCode !== undefined`). Settlement
+    // is owned by req.on('error') in that case.
+    const hmac = makeHmac();
+    const { fakeRequest } = makeFakeHttpRequest({
+      behavior: (ctx) => ctx.error(new Error('ECONNRESET')),
+    });
+    const client = createControlClient({ hmac, logger: makeLogger(), httpRequest: fakeRequest });
+    const result = await client.pushHandoff(validArgs);
+    expect(result).toEqual({ ok: false, reason: 'http_error', error: 'ECONNRESET' });
+  });
+
   it('settles exactly once when timeout + error both fire', async () => {
     // Real http: timeout event fires THEN we destroy(err) THEN the
     // 'error' event fires. Result must be timeout, not http_error.

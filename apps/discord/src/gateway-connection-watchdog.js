@@ -61,6 +61,16 @@ const BACKOFF_CAP_MS = 5_000;
 // chain forever and exit(1) would never fire. 3 s is generous
 // vs. the 1 s expected DDB RTT; on miss we log and exit anyway.
 const RELEASE_LOCK_CEILING_MS = 3_000;
+// Hard ceiling on the watchdog's `manager.connect()` await. Mirrors
+// the leader's `inboundConnectTimeoutMs` (5 s default) — a hung
+// connect would otherwise pin the tick forever, attempts wouldn't
+// advance, and the `exit(1)` recovery would never fire. 8 s is
+// generous vs. Discord WS cold-connect's 1-3 s typical, slightly
+// wider than the leader's 5 s to leave headroom for the watchdog's
+// fail-loud-then-replace posture (the leader caps tighter because
+// it's gated on the SIGTERM ECS deadline). On timeout we throw
+// like a connect rejection; the attempts ladder advances normally.
+const CONNECT_CEILING_MS = 8_000;
 
 function createConnectionWatchdog({
   manager,
@@ -85,6 +95,9 @@ function createConnectionWatchdog({
   // the ~1 s expected DDB RTT; on miss we log and exit anyway.
   // Injected for tests so the ceiling can be tuned tiny.
   releaseLockCeilingMs = RELEASE_LOCK_CEILING_MS,
+  // Hard ceiling on the inline `manager.connect()` call. See
+  // CONNECT_CEILING_MS above for rationale. Injected for tests.
+  connectCeilingMs = CONNECT_CEILING_MS,
   // Optional. If provided, called best-effort on the exhaustion-exit
   // path alongside releaseLock. Symmetric to gateway-leader.js's
   // SIGTERM pushHandoff path which also deletes the row. Without
@@ -125,6 +138,34 @@ function createConnectionWatchdog({
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0) {
     throw new Error('createConnectionWatchdog: pollIntervalMs must be a positive integer');
   }
+  if (!Number.isInteger(releaseLockCeilingMs) || releaseLockCeilingMs <= 0) {
+    throw new Error('createConnectionWatchdog: releaseLockCeilingMs must be a positive integer');
+  }
+  if (!Number.isInteger(connectCeilingMs) || connectCeilingMs <= 0) {
+    throw new Error('createConnectionWatchdog: connectCeilingMs must be a positive integer');
+  }
+
+  // Races `promise` against a `ceilingMs` timer that rejects with a
+  // labeled Error. Used to bound `manager.connect()` and
+  // `releaseLock()` — either could hang and pin the failure-exit
+  // recovery path. Mirrors `gateway-leader.js`'s
+  // `inboundConnectTimeoutMs` pattern.
+  async function raceWithCeiling(promise, ceilingMs, label) {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`${label}_${ceilingMs}ms`)),
+            ceilingMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   let running = false;
   let loopPromise = null;
@@ -162,7 +203,9 @@ function createConnectionWatchdog({
 
     attempts += 1;
     try {
-      await manager.connect();
+      // Bounded by CONNECT_CEILING_MS — a hung connect would otherwise
+      // pin this tick and the failure-exit recovery would never fire.
+      await raceWithCeiling(manager.connect(), connectCeilingMs, 'watchdog_connect_ceiling');
       attempts = 0;
       logger.info('connection-watchdog: connect succeeded');
     } catch (err) {
@@ -171,24 +214,14 @@ function createConnectionWatchdog({
           error: err.message, attempts,
         });
         try {
-          // Race against a hard ceiling. The leader's
+          // Bounded by RELEASE_LOCK_CEILING_MS — the leader's
           // releaseLockForImmediateExit awaits through its
-          // serialization chain, so a hung inbound-handoff (parked
+          // serialization chain; a hung inbound-handoff (parked
           // inside manager.connect() with `connecting=true` latched)
-          // would block the chain forever. Without the race, exit(1)
-          // would never fire — the failover slot stays held with
-          // no live gateway. On ceiling miss we log and exit anyway;
-          // the row fades via TTL.
-          let releaseTimer;
-          await Promise.race([
-            releaseLock(),
-            new Promise((_, reject) => {
-              releaseTimer = setTimeout(
-                () => reject(new Error(`release_lock_ceiling_${releaseLockCeilingMs}ms`)),
-                releaseLockCeilingMs,
-              );
-            }),
-          ]).finally(() => clearTimeout(releaseTimer));
+          // would block the chain forever and exit(1) would never
+          // fire. On ceiling miss we log and exit anyway; the row
+          // fades via TTL.
+          await raceWithCeiling(releaseLock(), releaseLockCeilingMs, 'release_lock_ceiling');
         } catch (rerr) {
           // Logged-and-swallowed: we're already in the failure-exit
           // path; refusing to exit because of a DDB blip — or the

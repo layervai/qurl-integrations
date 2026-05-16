@@ -85,6 +85,32 @@ describe('createGatewayHmac — factory validation', () => {
     expect(() => createGatewayHmac({ secrets: { current: 'x', previous: undefined }, logger })).not.toThrow();
   });
 
+  it('throws on non-positive freshnessWindowMs (every body would 401-stale)', () => {
+    const logger = { info() {}, warn() {}, error() {}, debug() {} };
+    const baseArgs = { secrets: { current: 'x' }, logger };
+    expect(() => createGatewayHmac({ ...baseArgs, freshnessWindowMs: 0 }))
+      .toThrow(/freshnessWindowMs.*positive integer/);
+    expect(() => createGatewayHmac({ ...baseArgs, freshnessWindowMs: -1 }))
+      .toThrow(/freshnessWindowMs.*positive integer/);
+    expect(() => createGatewayHmac({ ...baseArgs, freshnessWindowMs: 1.5 }))
+      .toThrow(/freshnessWindowMs.*positive integer/);
+    expect(() => createGatewayHmac({ ...baseArgs, freshnessWindowMs: '5000' }))
+      .toThrow(/freshnessWindowMs.*positive integer/);
+  });
+
+  it('throws on non-positive nonceLruSize — would silently disable replay protection', () => {
+    const logger = { info() {}, warn() {}, error() {}, debug() {} };
+    const baseArgs = { secrets: { current: 'x' }, logger };
+    expect(() => createGatewayHmac({ ...baseArgs, nonceLruSize: 0 }))
+      .toThrow(/nonceLruSize.*positive integer/);
+    expect(() => createGatewayHmac({ ...baseArgs, nonceLruSize: -1 }))
+      .toThrow(/nonceLruSize.*positive integer/);
+    expect(() => createGatewayHmac({ ...baseArgs, nonceLruSize: 1.5 }))
+      .toThrow(/nonceLruSize.*positive integer/);
+    expect(() => createGatewayHmac({ ...baseArgs, nonceLruSize: '1024' }))
+      .toThrow(/nonceLruSize.*positive integer/);
+  });
+
   it('rejects secrets.previous = "" (empty string) — would silently disable dual-accept', () => {
     // The verify use site treats falsy `previous` as "not configured"
     // and skips the second hmac check. Without this validator, a

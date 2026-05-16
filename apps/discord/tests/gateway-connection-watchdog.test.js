@@ -51,6 +51,7 @@ function makeWatchdog({
   pollIntervalMs,
   maxAttempts,
   releaseLockCeilingMs,
+  connectCeilingMs,
   sleep = jest.fn(async () => {}),
   exit = jest.fn(),
 } = {}) {
@@ -60,7 +61,7 @@ function makeWatchdog({
   const watchdog = createConnectionWatchdog({
     manager: manager ?? makeFakeManager(),
     isHoldingLock, isConnecting, releaseLock, deleteOwnRow, logger,
-    pollIntervalMs, maxAttempts, releaseLockCeilingMs, sleep, exit,
+    pollIntervalMs, maxAttempts, releaseLockCeilingMs, connectCeilingMs, sleep, exit,
   });
   return {
     watchdog, logger, releaseLock, deleteOwnRow, sleep, exit,
@@ -283,6 +284,22 @@ describe('step() — connect retries', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       'connection-watchdog: connect failed, backing off',
       expect.objectContaining({ attempts: 1, backoffMs: 200 }),
+    );
+  });
+
+  it('treats a hung manager.connect() as a failed attempt (connect-ceiling race)', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockImplementation(() => new Promise(() => {})); // never settles
+    const { watchdog, logger } = makeWatchdog({
+      manager, maxAttempts: 10, connectCeilingMs: 10,
+    });
+
+    await watchdog._stepForTest();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog: connect failed, backing off',
+      expect.objectContaining({
+        attempts: 1, error: expect.stringMatching(/watchdog_connect_ceiling/),
+      }),
     );
   });
 });
