@@ -356,14 +356,11 @@ const DEFAULT_SHARD_ID = '0:1';
 
 let gatewayShim = null;
 if (isGateway && config.ENABLE_GATEWAY_RESUME) {
-  // DDB_TABLE_PREFIX and AWS_REGION are validated by src/store/ddb-store.js
-  // at module load when STORE_TYPE=ddb. unsupportedRoleResumeCombo above
-  // guarantees STORE_TYPE=ddb when ENABLE_GATEWAY_RESUME=true, and the
-  // `const db = require('./store')` import at the top of this file
-  // resolves to ddb-store.js — which throws before we reach this branch
-  // if either env var is missing. Keep that import ordering invariant
-  // when refactoring: removing the early `require('./store')` would
-  // silently regress the validation here.
+  // DDB_TABLE_PREFIX and AWS_REGION are validated upstream: the
+  // STORE_TYPE=ddb requirement comes from unsupportedRoleResumeCombo
+  // (above), and ddb-store.js throws on either env-var missing when
+  // it loads via `require('./store')` at the top of this file —
+  // before this branch runs.
   const ddbTablePrefix = process.env.DDB_TABLE_PREFIX;
   const awsRegion = process.env.AWS_REGION;
   const rawDdbClient = new DynamoDBClient({

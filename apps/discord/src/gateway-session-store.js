@@ -73,13 +73,9 @@ function createGatewaySessionStore({
   let lastWriteAt = 0;
   let pendingFlush = null;
   let stopped = false;
-  // Set of in-flight fire-and-forget DDB write promises. flushFinal
-  // awaits Promise.allSettled on every entry so SIGTERM doesn't exit
-  // mid-write. Each entry removes itself from the set on settle, so
-  // the steady-state size is at most one (the throttle keeps writes
-  // from overlapping under normal traffic). A simple "track only the
-  // latest" reference would lose the earlier write's settlement
-  // guarantee when a second fire-and-forget lands quickly behind it.
+  // Set of in-flight fire-and-forget DDB write promises. Each entry
+  // self-removes on settle; flushFinal awaits Promise.allSettled
+  // across the live set so SIGTERM never exits mid-write.
   const inFlightWrites = new Set();
 
   async function persistRow(info) {
@@ -120,6 +116,11 @@ function createGatewaySessionStore({
   // stale cursor). On failure the cursor isn't rolled back; the
   // throttle's next flush retries, and SIGTERM's flushFinal is
   // the backstop. Sustained failure logs every retry.
+  // Tracks a promise in `inFlightWrites` until it settles. Callers
+  // MUST pre-wrap their promise with `.catch()` so a rejection
+  // doesn't become an unhandled rejection — `p.finally` here
+  // preserves the rejected state, and `Promise.allSettled` inside
+  // flushFinal would mask the rejection silently.
   function fireWrite(promise) {
     const p = promise.finally(() => inFlightWrites.delete(p));
     inFlightWrites.add(p);
