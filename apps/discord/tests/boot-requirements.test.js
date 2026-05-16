@@ -18,6 +18,7 @@ const {
   missingKekRequiredKeys,
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
@@ -191,6 +192,74 @@ describe('unsupportedRoleShipperCombo', () => {
     ['http', false],
   ])('returns null for supported combination role=%s shipper=%s', (role, shipperEnabled) => {
     expect(unsupportedRoleShipperCombo(role, shipperEnabled)).toBeNull();
+  });
+});
+
+describe('unsupportedRoleResumeCombo', () => {
+  it('returns null when resume=false regardless of other inputs', () => {
+    // Flag-off is the legacy path — every (role, shipper, storeType)
+    // combination is supported (or rejected by
+    // unsupportedRoleShipperCombo). Pin every input as null so a
+    // future shape change can't accidentally start rejecting legacy
+    // deploys.
+    for (const role of ['combined', 'gateway', 'http']) {
+      for (const shipper of [true, false]) {
+        for (const storeType of ['sqlite', 'ddb']) {
+          expect(unsupportedRoleResumeCombo(role, false, shipper, storeType)).toBeNull();
+        }
+      }
+    }
+  });
+
+  it('rejects resume=true with combined role and surfaces shim/Client conflict', () => {
+    // combined+resume is rejected ahead of every other check because
+    // combined mode is the higher-order failure. Pin the message
+    // contract so a future wording drift can't strip the operator
+    // remediation hint.
+    const msg = unsupportedRoleResumeCombo('combined', true, true, 'ddb');
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/PROCESS_ROLE=combined/);
+    expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).toMatch(/PROCESS_ROLE=http/);
+    // combined-mode check is sequenced first so it dominates the
+    // shipper/store-type rejections.
+    expect(unsupportedRoleResumeCombo('combined', true, false, 'sqlite')).toBe(msg);
+  });
+
+  it('rejects resume=true with shipper=false on supported roles', () => {
+    for (const role of ['gateway', 'http']) {
+      const msg = unsupportedRoleResumeCombo(role, true, false, 'ddb');
+      expect(msg).not.toBeNull();
+      expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true/);
+      // Role-neutral framing: the rejection should not mention
+      // gateway-tier-specific implementation details (the shim is
+      // never constructed on http, so an http operator reading the
+      // message wouldn't see "the shim replaces Client" verbiage).
+      expect(msg).not.toMatch(/replaces discord\.js Client/);
+      expect(msg).not.toMatch(/@discordjs\/ws/);
+    }
+  });
+
+  it('rejects resume=true with storeType=sqlite (would lose state across processes)', () => {
+    // Default sqlite backend writes a local file that the next ECS
+    // task can't see. Without rejecting at boot, the bot would
+    // silently IDENTIFY on every restart — mimicking flag-off
+    // behavior and burning Discord's per-bot IDENTIFY budget.
+    // config.STORE_TYPE always coerces unset to 'sqlite' so we
+    // only test the resolved string (not undefined/empty).
+    const msg = unsupportedRoleResumeCombo('gateway', true, true, 'sqlite');
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/STORE_TYPE=ddb/);
+    expect(msg).toMatch(/gateway-session/);
+    expect(msg).toMatch(/'sqlite'/);
+  });
+
+  it('returns null for the production-shape path (gateway + shipper + ddb)', () => {
+    expect(unsupportedRoleResumeCombo('gateway', true, true, 'ddb')).toBeNull();
+    // http tier accepts resume=true as a no-op so the operator can
+    // ship one task-def with uniform env across both tiers.
+    expect(unsupportedRoleResumeCombo('http', true, true, 'ddb')).toBeNull();
   });
 });
 

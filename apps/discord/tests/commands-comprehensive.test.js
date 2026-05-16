@@ -353,28 +353,24 @@ describe('commands module exports', () => {
 });
 
 describe('registerCommands', () => {
-  it('calls client.application.commands.set', async () => {
-    const client = {
-      application: {
-        commands: {
-          set: jest.fn().mockResolvedValue([]),
-        },
-      },
+  // Signature: ({rest, appId, guilds: Map<id, name>}). Tests assert
+  // the REST-call shape that production wire calls produce.
+  it('issues rest.put for the global commands endpoint when GUILD_ID is unset', async () => {
+    const rest = {
+      put: jest.fn().mockResolvedValue([]),
+      get: jest.fn().mockResolvedValue([]),
     };
-    await registerCommands(client);
-    expect(client.application.commands.set).toHaveBeenCalled();
+    await registerCommands({ rest, appId: 'app-123', guilds: new Map() });
+    expect(rest.put).toHaveBeenCalled();
   });
 
-  it('logs error when set() fails', async () => {
+  it('logs error when rest.put rejects', async () => {
     const logger = require('../src/logger');
-    const client = {
-      application: {
-        commands: {
-          set: jest.fn().mockRejectedValue(new Error('fail')),
-        },
-      },
+    const rest = {
+      put: jest.fn().mockRejectedValue(new Error('fail')),
+      get: jest.fn().mockResolvedValue([]),
     };
-    await registerCommands(client);
+    await registerCommands({ rest, appId: 'app-123', guilds: new Map() });
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to register commands',
       expect.objectContaining({ error: 'fail' }),

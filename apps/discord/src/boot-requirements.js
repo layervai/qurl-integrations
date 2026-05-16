@@ -122,6 +122,66 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
   return null;
 }
 
+// Parallel to unsupportedRoleShipperCombo for ENABLE_GATEWAY_RESUME.
+// Three unsupported shapes:
+//
+//   1. resume=true with role=combined — combined mode runs both
+//      tiers in one process, which the legacy discord.js Client
+//      owns end-to-end. The resume shim would conflict with the
+//      Client's WS ownership.
+//   2. resume=true with shipper=false — the resume shim
+//      (@discordjs/ws WebSocketManager) replaces discord.js's Client
+//      entirely, so the in-process interaction dispatcher has no
+//      `client.on('interactionCreate')` emitter to attach to. The
+//      flag-on path is only coherent when the shipper has already
+//      moved dispatch to SQS.
+//   3. resume=true with storeType!=ddb — the resume guarantee only
+//      holds when session state is persisted across processes.
+//      The default sqlite backend writes a local file that the
+//      next ECS task won't see; a resume against the previous
+//      sequence would fail every restart. Rejecting at boot is
+//      preferable to a silent IDENTIFY-every-restart degradation
+//      that mimics flag-off behavior.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Same string-or-null shape as unsupportedRoleShipperCombo.
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, storeType) {
+  if (!resumeEnabled) return null;
+  if (role === 'combined') {
+    return (
+      'PROCESS_ROLE=combined with ENABLE_GATEWAY_RESUME=true is not supported ' +
+      '(the resume shim owns the WebSocket and conflicts with the legacy ' +
+      'discord.js Client that combined mode runs). Run two processes: ' +
+      'PROCESS_ROLE=gateway (singleton, owns the resume shim) + ' +
+      'PROCESS_ROLE=http (consumes from SQS). For local dev / sandbox in ' +
+      'one process, leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  if (!eventShipperEnabled) {
+    // Role-neutral framing: the same env may be applied uniformly
+    // across gateway + http task defs, and an http operator reading
+    // this message shouldn't see gateway-tier-specific language
+    // (the shim is never constructed on http; the rejection here
+    // is a consistency canary, not a description of what http does).
+    return (
+      'ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true. ' +
+      'The two flags co-design: the gateway tier forwards every Discord ' +
+      'frame to SQS while the worker tier consumes it, so a resume path ' +
+      'without the shipper-shape split has nowhere to dispatch. Enable ' +
+      'the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  if (storeType !== 'ddb') {
+    return (
+      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +
+      'Cross-process RESUME persists session state to the gateway-session DDB ' +
+      'table; sqlite would write a local file the next process never sees. Set ' +
+      'STORE_TYPE=ddb in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  return null;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -219,6 +279,7 @@ module.exports = {
   missingKekRequiredKeys,
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

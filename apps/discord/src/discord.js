@@ -83,6 +83,20 @@ assertNoIntent(intents, GatewayIntentBits.DirectMessages, 'DirectMessages');
 
 const client = new Client({ intents });
 
+// Bitfield form of the same `intents` array, for the Pillar 2
+// @discordjs/ws shim path (which takes a bitfield, not an array).
+// Single source of truth: both the legacy Client construction
+// above AND the shim subscribe to identical events.
+//
+// Int32 bitwise OR is safe today — Discord's highest declared
+// intent bit (GuildVoiceStates = 128, GuildMessageTyping = 16384,
+// AutoModerationConfiguration = 1048576, etc.) is well under
+// 2³⁰. If Discord ever adds an intent bit ≥ 2³¹, switch to
+// `new IntentsBitField(intents).bitfield` (BigInt-backed) — the
+// @discordjs/ws WebSocketManager constructor accepts both number
+// and bigint forms.
+const GATEWAY_INTENTS_BITFIELD = intents.reduce((acc, bit) => acc | bit, 0);
+
 // Cache for quick lookups
 let guild = null;
 let roles = {
@@ -914,6 +928,7 @@ async function shutdown() {
 
 module.exports = {
   client,
+  GATEWAY_INTENTS_BITFIELD,
   assignContributorRole,
   notifyPRMerge,
   notifyBadgeEarned,
