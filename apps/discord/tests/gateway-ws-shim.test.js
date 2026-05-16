@@ -534,6 +534,42 @@ describe('SIGTERM contract — stop() does NOT call manager.destroy()', () => {
     expect(store.flushFinal).toHaveBeenCalledTimes(1);
   });
 
+  it('drops dispatches that arrive during stop() teardown (between flag-flip and listener detach)', async () => {
+    // Symmetric to the connect-timeout late-dispatch test: a successful
+    // start() can have dispatches in flight when SIGTERM lands. stop()'s
+    // first lines set stopped=true and clear dispatchHandlers — but
+    // flushFinal awaits a DDB round-trip, leaving a window where the
+    // manager's Dispatch listener is still attached. A frame arriving
+    // mid-flush must NOT reach downstream handlers, otherwise SQS would
+    // see a stray INTERACTION_CREATE after the worker has already begun
+    // its own shutdown. Belt-and-suspenders coverage: both the
+    // stopped-flag guard AND the cleared handlers-set must hold.
+    const { shim, store, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+
+    const h = jest.fn();
+    shim.onDispatch(h);
+
+    // Make flushFinal block until we say go.
+    let resolveFlush;
+    store.flushFinal.mockImplementation(() => new Promise((r) => { resolveFlush = r; }));
+
+    const stopPromise = shim.stop();
+    await Promise.resolve(); // let stop() run up to the await
+
+    // Fire a dispatch during the teardown window. The handler must
+    // not be called.
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'INTERACTION_CREATE', d: {} },
+      shardId: 0,
+    });
+    expect(h).not.toHaveBeenCalled();
+
+    resolveFlush();
+    await stopPromise;
+  });
+
   it('stop() after a failed start still runs cleanup (listener detach + flushFinal)', async () => {
     // Regression guard for the cr-r5-caught flag-conflation bug:
     // start()'s catch sets `stopped=true` for the dispatch-race

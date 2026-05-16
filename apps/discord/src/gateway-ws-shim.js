@@ -96,7 +96,11 @@
 const { WebSocketManager, WebSocketShardEvents } = require('@discordjs/ws');
 const { REST } = require('@discordjs/rest');
 
-// Tightly bounded per the budget rationale above.
+// Tightly bounded per the budget rationale above. Assumes
+// @discordjs/ws invokes retrieveSessionInfo exactly once per
+// IDENTIFY decision — a future minor that adds a pre-flight
+// retrieve would make a cold-start throw GATEWAY_IDENTIFY_BUDGET
+// before READY ever lands. Pinned in package.json (~1.2.x).
 const MAX_IDENTIFY_ATTEMPTS = 1;
 
 // Default connect-timeout matches the legacy client.login() timeout
@@ -330,8 +334,11 @@ function createGatewayWsShim({
         // opening mid-teardown would still side-effect through
         // registerCommands / eventPublisher / gateway-activity.
         // Leave the manager handle intact so stop() can clean
-        // it up.
+        // it up. Null restInstance: a future caller that retries
+        // start() should hit the proper construction path, not
+        // inherit a half-initialized REST.
         stopped = true;
+        restInstance = null;
         if (timeoutHandle) clearTimeout(timeoutHandle);
         throw err;
       }

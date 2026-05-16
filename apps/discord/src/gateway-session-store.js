@@ -73,6 +73,7 @@ function createGatewaySessionStore({
   let lastWriteAt = 0;
   let pendingFlush = null;
   let stopped = false;
+  let flushed = false;
   // Set of in-flight fire-and-forget DDB write promises. Each entry
   // self-removes on settle; flushFinal awaits Promise.allSettled
   // across the live set so SIGTERM never exits mid-write.
@@ -127,12 +128,16 @@ function createGatewaySessionStore({
   // within ~1s. Burst-retrying on every dispatch would amplify
   // a DDB outage into a hot loop without changing the eventual
   // outcome.
-  // Tracks a promise in `inFlightWrites` until it settles. The
-  // .catch wrapper guarantees the tracked promise never carries a
-  // rejected state — without it, a caller that forgot to pre-catch
-  // would leak unhandled rejections, and Promise.allSettled in
-  // flushFinal would silently consume the rejection. Callers still
-  // attach their own .catch for per-write error logging.
+  // Tracks a promise in `inFlightWrites` until it settles. Two
+  // layers of catch by design: callers (firePersist, null-clear)
+  // attach an inner .catch that LOGS the rejection — that's the
+  // only place the failure surfaces to operators. The outer .catch
+  // here is purely a shape guarantee that the tracked promise
+  // never carries a rejected state, so a caller who forgot to
+  // pre-catch can't leak an unhandled rejection. Don't drop the
+  // outer catch and lean on the inner one: a future call site that
+  // passes a raw persistRow/deleteRow promise without wrapping
+  // would silently break.
   function fireWrite(promise) {
     const wrapped = Promise.resolve(promise).catch(() => { /* shape guarantee */ });
     const p = wrapped.finally(() => inFlightWrites.delete(p));
@@ -176,8 +181,15 @@ function createGatewaySessionStore({
     // the value @discordjs/ws sees). The (shardId) arg is unused
     // today — single-shard means we always serve the one row —
     // but accepted for forward-compat when sharding lands.
+    //
+    // Returns a shallow copy. @discordjs/ws's contract doesn't
+    // explicitly forbid mutation of the returned object, and if a
+    // future minor mutates `sequence` in place between dispatches
+    // the mirror would silently desync. Cost is one 3-field object
+    // per reconnect (not per dispatch), so the defensive copy is
+    // free.
     retrieveSessionInfo(_shardId) {
-      return mirror;
+      return mirror ? { ...mirror } : null;
     },
 
     // `updateSessionInfo(shardId, info)` — info=null means Discord
@@ -300,6 +312,13 @@ function createGatewaySessionStore({
     // error-level so operators can correlate a failed flush with
     // a degraded RESUME on the next boot.
     async flushFinal() {
+      // Idempotent: a second SIGTERM/SIGINT racing the first must
+      // not re-write the mirror to DDB. The shim's stop() is also
+      // idempotent and is the production caller, but a test or a
+      // future caller that drops the shim coordinator could call
+      // flushFinal directly twice — this is the backstop.
+      if (flushed) return;
+      flushed = true;
       stopped = true;
       cancelPendingFlush();
       // Settle every in-flight fire-and-forget write before our

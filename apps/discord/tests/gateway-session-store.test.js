@@ -443,6 +443,24 @@ describe('flushFinal', () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
+  it('is idempotent — a second call does not re-write the mirror', async () => {
+    // Backstop for the case where a caller drops the shim's stop()
+    // coordinator and invokes flushFinal directly more than once (a
+    // SIGTERM-then-SIGINT race in a non-shim caller, or a test that
+    // double-flushes). The shim's stop() is already idempotent in
+    // production; this guard makes the store safe regardless.
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(PutCommand).resolves({});
+
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    await store.flushFinal();
+    const firstCount = ddbMock.commandCalls(PutCommand).length;
+
+    await store.flushFinal();
+    await store.flushFinal();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(firstCount);
+  });
+
   it('awaits every in-flight fire-and-forget write before exit (not just the most recent)', async () => {
     // Without Promise.allSettled across the full set, a SIGTERM
     // that lands between a null-clear delete and a fresh-session
