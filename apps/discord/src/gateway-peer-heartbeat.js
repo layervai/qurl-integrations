@@ -72,6 +72,12 @@ function createPeerHeartbeat({
   ip,
   port,
   shardId,
+  // Optional. When set, written as `lock_holder` on the heartbeat
+  // row so the active's SIGTERM `transferLock(target, targetHolder)`
+  // call has a real holder string for the peer instead of inventing
+  // a placeholder. Pure operational-debug metadata; lock correctness
+  // doesn't depend on its value.
+  lockHolder,
   logger,
   clock = () => Date.now(),
   freshnessWindowSeconds = DEFAULT_FRESHNESS_WINDOW_SECONDS,
@@ -112,16 +118,20 @@ function createPeerHeartbeat({
   // the freshness window absorbs up to three misses).
   async function writeHeartbeat() {
     const now = nowSeconds();
+    const item = {
+      instance_id: instanceId,
+      ip,
+      port,
+      shard_id: shardId,
+      updated_at: now,
+      expires_at: now + ttlSeconds,
+    };
+    // Only write lock_holder if provided. DDB rejects undefined
+    // attribute values and back-compat callers may not pass it.
+    if (lockHolder) item.lock_holder = lockHolder;
     await ddbClient.send(new PutCommand({
       TableName: tableName,
-      Item: {
-        instance_id: instanceId,
-        ip,
-        port,
-        shard_id: shardId,
-        updated_at: now,
-        expires_at: now + ttlSeconds,
-      },
+      Item: item,
     }));
   }
 

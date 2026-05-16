@@ -1,0 +1,277 @@
+// In-VPC control channel for Pillar 3 push-handoff. Binds an HTTP
+// listener on the task's ENI (default 0.0.0.0 in awsvpc mode) and
+// answers a single endpoint:
+//
+//   POST /control/yours    — peer is handing the lock to us; verify
+//                            HMAC, validate routing, invoke onHandoff,
+//                            ACK.
+//
+// Spec reference: docs/zero-downtime-design.md §Pillar 3 "Control-
+// channel auth: shared HMAC secret" (lines ~436-472) and "Standby on
+// POST /control/yours" (lines ~562-618).
+//
+// ── Wire envelope ──
+// HTTP body = JSON.stringify({
+//   body: "<json-string of the signed payload>",
+//   signature: "<hex sha256>",
+// })
+//
+// The INNER `body` string is the exact UTF-8 bytes that the sender
+// signed (sender: bodyBytes = Buffer.from(JSON.stringify(payload),
+// 'utf8')). Wrapping it as a string inside an outer JSON envelope
+// preserves the inner bytes verbatim across JSON.parse + .toString:
+// JSON-stringified strings round-trip exactly. The alternative —
+// putting `body` as an object — would force the receiver to re-
+// stringify it, canonicalizing key order, which would break HMAC
+// verify on a body whose original stringification used a different
+// key order.
+//
+// ── Verification order ──
+// We hash-verify BEFORE we look at any payload field. Reasons:
+//   1. DoS: parsing a giant unsigned body before verify lets an
+//      attacker burn CPU + memory. The 8 KB cap bounds memory, but
+//      verify-first means we don't even JSON.parse on bad inputs.
+//   2. nonce-burn safety: gateway-hmac burns the nonce when verify
+//      returns ok=true. Burning a nonce on a malformed-payload body
+//      (peer_instance_id mismatch, etc.) is OK — legitimate senders
+//      don't send mis-addressed bodies, and a captured-then-replayed
+//      body addressed to a different peer hits a different replica's
+//      LRU anyway.
+//
+// ── Routing checks (after verify) ──
+//   - `payload.peer_instance_id === self.instance_id` — the body is
+//     addressed to THIS standby. Defends against intra-cluster cross-
+//     shard replay at sharding inflection (PR 15 / 16-ish).
+//   - `isKnownPeer(payload.active_instance_id)` — the sender is a
+//     replica we've seen in the peer-heartbeat table within the
+//     freshness window. Defends against handoff from a stale stopped
+//     task whose container exited but whose body was queued upstream.
+//
+// ── Body cap ──
+// 8 KB. Real handoff payload is ~250 B (4 strings + a number + nonce
+// + ts). 8 KB is 30× over-provisioned — gives room for future fields
+// without re-litigating the cap, but small enough to bound the
+// worst-case memory of an attacker spamming maximally-large bodies.
+//
+// ── Bind address ──
+// Defaults to `0.0.0.0` because in awsvpc mode each Fargate task has
+// its own ENI; binding all interfaces means "this ENI" — there are
+// no other interfaces in the task's network namespace, so this is
+// not actually a broader bind than 127.0.0.1 in the network-namespace
+// sense. The task security group is the perimeter. Tests pass
+// `127.0.0.1` to avoid binding a routable address during the suite.
+
+const http = require('node:http');
+
+const { unwrapEnvelope } = require('./gateway-hmac');
+
+const DEFAULT_BODY_BYTE_CAP = 8 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+
+function startControlChannelServer({
+  hmac,
+  selfInstanceId,
+  isKnownPeer,
+  onHandoff,
+  logger,
+  port,
+  bindAddr = '0.0.0.0',
+  bodyByteCap = DEFAULT_BODY_BYTE_CAP,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  onListenError,
+} = {}) {
+  if (!hmac || typeof hmac.verify !== 'function') {
+    throw new Error('startControlChannelServer: hmac with verify() is required');
+  }
+  if (!selfInstanceId) {
+    throw new Error('startControlChannelServer: selfInstanceId is required');
+  }
+  if (typeof isKnownPeer !== 'function') {
+    throw new Error('startControlChannelServer: isKnownPeer function is required');
+  }
+  if (typeof onHandoff !== 'function') {
+    throw new Error('startControlChannelServer: onHandoff function is required');
+  }
+  if (!logger) throw new Error('startControlChannelServer: logger is required');
+  if (typeof onListenError !== 'function') {
+    throw new Error('startControlChannelServer: onListenError function is required');
+  }
+  if (port == null) {
+    throw new Error('startControlChannelServer: port is required');
+  }
+
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res, {
+      hmac, selfInstanceId, isKnownPeer, onHandoff, logger, bodyByteCap,
+    }).catch((err) => {
+      logger.error('control-channel: unhandled handler error', { error: err.message });
+      sendJson(res, 500, { error: 'internal_error' });
+    });
+  });
+
+  // Cap idle/header timeouts to bound resource usage. Match the
+  // ordering constraint Node enforces: headersTimeout < requestTimeout.
+  server.requestTimeout = requestTimeoutMs;
+  server.headersTimeout = Math.floor(requestTimeoutMs / 2);
+
+  server.on('error', (err) => {
+    logger.error('control-channel: listener failed', { error: err.message, code: err.code });
+    onListenError(err);
+  });
+
+  server.listen(port, bindAddr, () => {
+    logger.info('control-channel: listening', { addr: bindAddr, port: server.address().port });
+  });
+
+  return server;
+}
+
+async function handleRequest(req, res, ctx) {
+  const path = req.url.split('?', 1)[0];
+
+  if (req.method !== 'POST' || path !== '/control/yours') {
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+
+  let bodyBuf;
+  try {
+    bodyBuf = await readRequestBody(req, ctx.bodyByteCap);
+  } catch (err) {
+    if (err.code === 'BODY_TOO_LARGE') {
+      ctx.logger.warn('control-channel: body exceeded cap', { cap: ctx.bodyByteCap });
+      sendJson(res, 413, { error: 'body_too_large' });
+      return;
+    }
+    ctx.logger.warn('control-channel: body read failed', { error: err.message });
+    sendJson(res, 400, { error: 'body_read_failed' });
+    return;
+  }
+
+  const unwrapped = unwrapEnvelope(bodyBuf);
+  if (!unwrapped) {
+    sendJson(res, 400, { error: 'invalid_envelope' });
+    return;
+  }
+
+  const verifyResult = ctx.hmac.verify(unwrapped);
+  if (!verifyResult.ok) {
+    ctx.logger.warn('control-channel: hmac verify failed', { reason: verifyResult.reason });
+    sendJson(res, 401, { error: 'unauthorized', reason: verifyResult.reason });
+    return;
+  }
+
+  const payload = verifyResult.payload;
+  const invalidField = findInvalidHandoffField(payload);
+  if (invalidField) {
+    ctx.logger.warn('control-channel: payload shape invalid', { field: invalidField });
+    sendJson(res, 400, { error: 'invalid_payload' });
+    return;
+  }
+
+  if (payload.peer_instance_id !== ctx.selfInstanceId) {
+    ctx.logger.warn('control-channel: body addressed to wrong peer', {
+      addressedTo: payload.peer_instance_id, self: ctx.selfInstanceId,
+    });
+    sendJson(res, 400, { error: 'wrong_peer' });
+    return;
+  }
+
+  if (!ctx.isKnownPeer(payload.active_instance_id)) {
+    ctx.logger.warn('control-channel: handoff from unknown peer', {
+      activeInstanceId: payload.active_instance_id,
+    });
+    sendJson(res, 400, { error: 'unknown_peer' });
+    return;
+  }
+
+  try {
+    await ctx.onHandoff({
+      activeInstanceId: payload.active_instance_id,
+      expectedVersion: payload.expected_version,
+    });
+  } catch (err) {
+    ctx.logger.error('control-channel: onHandoff threw', { error: err.message });
+    sendJson(res, 500, { error: 'handoff_failed' });
+    return;
+  }
+
+  ctx.logger.info('control-channel: handoff accepted', {
+    activeInstanceId: payload.active_instance_id,
+    expectedVersion: payload.expected_version,
+  });
+  sendJson(res, 200, { status: 'ok' });
+}
+
+// Per-field validation for the handoff payload. Returns the name of
+// the first invalid field, or null if everything checks out. Named-
+// field-in-log makes a 400 invalid_payload easier to root-cause than
+// a 5-clause boolean expression with a `hasActive: 'string'` log
+// entry that doesn't say which field bad.
+function findInvalidHandoffField(payload) {
+  if (typeof payload.active_instance_id !== 'string' || payload.active_instance_id.length === 0) {
+    return 'active_instance_id';
+  }
+  if (typeof payload.peer_instance_id !== 'string' || payload.peer_instance_id.length === 0) {
+    return 'peer_instance_id';
+  }
+  if (typeof payload.expected_version !== 'number'
+      || !Number.isInteger(payload.expected_version)
+      || payload.expected_version <= 0) {
+    return 'expected_version';
+  }
+  return null;
+}
+
+function readRequestBody(req, byteCap) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let totalLength = 0;
+    let settled = false;
+
+    function settle(fn, arg) {
+      if (settled) return;
+      settled = true;
+      fn(arg);
+    }
+
+    req.on('data', (chunk) => {
+      if (settled) return;
+      totalLength += chunk.length;
+      if (totalLength > byteCap) {
+        const err = new Error('body-too-large');
+        err.code = 'BODY_TOO_LARGE';
+        // Destroy the request to stop further reads. Without this,
+        // a malicious peer could keep streaming past the cap.
+        req.destroy();
+        settle(reject, err);
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on('end', () => { settle(resolve, Buffer.concat(chunks)); });
+    req.on('error', (err) => { settle(reject, err); });
+    req.on('aborted', () => { settle(reject, new Error('request_aborted')); });
+  });
+}
+
+function sendJson(res, status, body) {
+  if (res.headersSent || res.writableEnded) return;
+  const buf = Buffer.from(JSON.stringify(body), 'utf8');
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': buf.length,
+  });
+  res.end(buf);
+}
+
+module.exports = {
+  startControlChannelServer,
+  // Exported for tests that want to drive the handler without
+  // actually binding a socket.
+  _handleRequestForTest: handleRequest,
+  _readRequestBodyForTest: readRequestBody,
+  DEFAULT_BODY_BYTE_CAP,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+};

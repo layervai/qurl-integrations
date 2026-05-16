@@ -1,0 +1,351 @@
+// Unit tests for src/gateway-connection-watchdog.js — Pillar 3
+// connection watchdog that closes the "lock held, WS not connected"
+// gap. Pins the load-bearing contracts:
+//
+//   1. No-op when not holding the lock. Watchdog runs unconditionally;
+//      a standby waiting for promotion ticks but does nothing.
+//   2. No-op when manager.isConnected(). Steady-state: no work, no log.
+//   3. Tries manager.connect() exactly once per failure tick (at-most-
+//      one outstanding connect — the design depends on this).
+//   4. Attempt counter resets on:
+//        - successful connect()
+//        - lock-not-held tick (covers give-up-and-reacquire)
+//        - manager-already-connected tick
+//   5. Exponential backoff sleeps after failure: 200 / 400 / 800 / 1600 ms
+//      (capped at 5 s — dead code at maxAttempts=5, see source).
+//   6. At attempts >= maxAttempts (default 5): releaseLock() then exit(1).
+//      releaseLock failure is logged and swallowed; exit still fires.
+//   7. start() is idempotent; stop() halts the loop; post-exit, start()
+//      cannot re-enter.
+//
+// Each contract maps to a production failure mode:
+//   - (3) two parallel connect() calls would race @discordjs/ws internal state.
+//   - (4) without reset on lock-give-up, a previous task's failure ladder
+//     would carry into a re-acquired lock and prematurely exit.
+//   - (5)/(6) without bounded retry + exit, a standby that can't reach
+//     Discord blocks the only failover slot indefinitely.
+
+const {
+  createConnectionWatchdog,
+  DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_MAX_ATTEMPTS,
+  BACKOFF_BASE_MS,
+  BACKOFF_CAP_MS,
+} = require('../src/gateway-connection-watchdog');
+
+function makeFakeManager({ initialConnected = false } = {}) {
+  let connected = initialConnected;
+  return {
+    isConnected: jest.fn(() => connected),
+    connect: jest.fn(async () => { connected = true; }),
+    _setConnected(v) { connected = v; },
+  };
+}
+
+function makeWatchdog({
+  manager,
+  isHoldingLock = () => true,
+  releaseLock = jest.fn(async () => {}),
+  pollIntervalMs,
+  maxAttempts,
+  sleep = jest.fn(async () => {}),
+  exit = jest.fn(),
+} = {}) {
+  const logger = {
+    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+  };
+  const watchdog = createConnectionWatchdog({
+    manager: manager ?? makeFakeManager(),
+    isHoldingLock, releaseLock, logger,
+    pollIntervalMs, maxAttempts, sleep, exit,
+  });
+  return { watchdog, logger, releaseLock, sleep, exit };
+}
+
+describe('createConnectionWatchdog — factory validation', () => {
+  it('exposes default constants', () => {
+    expect(DEFAULT_POLL_INTERVAL_MS).toBe(1_000);
+    expect(DEFAULT_MAX_ATTEMPTS).toBe(5);
+    expect(BACKOFF_BASE_MS).toBe(100);
+    expect(BACKOFF_CAP_MS).toBe(5_000);
+  });
+
+  it('throws when manager lacks required methods', () => {
+    expect(() => createConnectionWatchdog()).toThrow(/manager.*connect.*isConnected/);
+    expect(() => createConnectionWatchdog({ manager: {} })).toThrow(/manager.*connect.*isConnected/);
+    expect(() => createConnectionWatchdog({ manager: { connect: () => {} } }))
+      .toThrow(/manager.*connect.*isConnected/);
+  });
+
+  it('throws when isHoldingLock / releaseLock / logger are missing', () => {
+    const manager = makeFakeManager();
+    expect(() => createConnectionWatchdog({ manager })).toThrow(/isHoldingLock/);
+    expect(() => createConnectionWatchdog({ manager, isHoldingLock: () => true }))
+      .toThrow(/releaseLock/);
+    expect(() => createConnectionWatchdog({
+      manager, isHoldingLock: () => true, releaseLock: async () => {},
+    })).toThrow(/logger is required/);
+  });
+});
+
+describe('step() — no-op paths', () => {
+  it('does nothing when not holding the lock', async () => {
+    const manager = makeFakeManager();
+    const { watchdog } = makeWatchdog({ manager, isHoldingLock: () => false });
+
+    await watchdog._stepForTest();
+
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(manager.isConnected).not.toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('does nothing when manager.isConnected() returns true', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const { watchdog, sleep } = makeWatchdog({ manager });
+
+    await watchdog._stepForTest();
+
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('resets attempts when transitioning lock-held → lock-not-held mid-ladder', async () => {
+    let holding = true;
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const { watchdog, sleep } = makeWatchdog({
+      manager, isHoldingLock: () => holding, maxAttempts: 10, sleep: jest.fn(async () => {}),
+    });
+
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(2);
+
+    // Give up the lock — next tick must reset.
+    holding = false;
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+    // sleep was called on each of the 2 failures, not on the no-op tick.
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('resets attempts when manager reconnects between ticks', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const { watchdog } = makeWatchdog({ manager, maxAttempts: 10 });
+
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(2);
+
+    // Manager reconnected on its own (e.g., a successful out-of-band
+    // connect from elsewhere). Next tick must reset.
+    manager._setConnected(true);
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+});
+
+describe('step() — connect retries', () => {
+  it('calls manager.connect() when lock held + not connected', async () => {
+    const manager = makeFakeManager();
+    const { watchdog } = makeWatchdog({ manager });
+
+    await watchdog._stepForTest();
+
+    expect(manager.connect).toHaveBeenCalledTimes(1);
+    expect(watchdog._getAttemptsForTest()).toBe(0); // reset after success
+  });
+
+  it('resets attempts on successful connect after prior failures', async () => {
+    const manager = makeFakeManager();
+    let nthCall = 0;
+    manager.connect.mockImplementation(async () => {
+      nthCall += 1;
+      if (nthCall < 3) throw new Error('transient');
+      // Third call succeeds.
+      manager._setConnected(true);
+    });
+    const { watchdog } = makeWatchdog({ manager, maxAttempts: 10 });
+
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(2);
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('backs off 200/400/800/1600 ms on attempts 1..4', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const sleep = jest.fn(async () => {});
+    const { watchdog } = makeWatchdog({ manager, maxAttempts: 10, sleep });
+
+    await watchdog._stepForTest(); // attempt 1 → 200 ms
+    await watchdog._stepForTest(); // attempt 2 → 400 ms
+    await watchdog._stepForTest(); // attempt 3 → 800 ms
+    await watchdog._stepForTest(); // attempt 4 → 1600 ms
+
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
+    expect(sleep).toHaveBeenNthCalledWith(3, 800);
+    expect(sleep).toHaveBeenNthCalledWith(4, 1_600);
+  });
+
+  it('caps backoff at 5000 ms (dead-code branch — pins the cap for future maxAttempts bumps)', async () => {
+    // With maxAttempts=10 and BACKOFF_BASE=100, attempt 7 would be
+    // 2^7 * 100 = 12_800 ms → capped at 5000. Validates the cap.
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const sleep = jest.fn(async () => {});
+    const { watchdog } = makeWatchdog({ manager, maxAttempts: 10, sleep });
+
+    for (let i = 0; i < 7; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+    // Last call (attempt 7) should hit the cap.
+    expect(sleep).toHaveBeenLastCalledWith(5_000);
+  });
+
+  it('logs each failed-connect attempt with attempts + backoffMs', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('econnrefused'));
+    const { watchdog, logger } = makeWatchdog({ manager, maxAttempts: 10 });
+
+    await watchdog._stepForTest();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog: connect failed, backing off',
+      expect.objectContaining({ attempts: 1, backoffMs: 200 }),
+    );
+  });
+});
+
+describe('step() — exhaustion path', () => {
+  it('releases the lock and exits(1) when attempts reaches maxAttempts', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('persistent-fail'));
+    const releaseLock = jest.fn(async () => {});
+    const exit = jest.fn();
+    const sleep = jest.fn(async () => {});
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, exit, sleep, maxAttempts: 5,
+    });
+
+    // 5 failed attempts.
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+
+    expect(manager.connect).toHaveBeenCalledTimes(5);
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'connection-watchdog: connect retries exhausted, releasing lock',
+      expect.objectContaining({ attempts: 5 }),
+    );
+    // On the exhaustion tick, the backoff sleep MUST NOT fire — the
+    // exit path supersedes it. So sleep only fired on attempts 1..4.
+    expect(sleep).toHaveBeenCalledTimes(4);
+  });
+
+  it('still exits(1) when releaseLock itself throws', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const releaseLock = jest.fn(async () => { throw new Error('ddb-blip'); });
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, exit, maxAttempts: 5,
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'connection-watchdog: releaseLock failed during exhaustion-exit',
+      expect.objectContaining({ error: 'ddb-blip' }),
+    );
+  });
+
+  it('does not re-enter start() after exhaustion-exit', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const exit = jest.fn();
+    const { watchdog } = makeWatchdog({
+      manager, exit, maxAttempts: 5,
+      // Fast poll interval so the next test setup is quick.
+      pollIntervalMs: 1,
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+    expect(exit).toHaveBeenCalledWith(1);
+
+    // Calling start() after exhaustion is a no-op (the watchdog is
+    // dead; the process is supposed to be exiting).
+    watchdog.start();
+    expect(watchdog._getRunningForTest()).toBe(false);
+  });
+});
+
+describe('start() / stop() lifecycle', () => {
+  it('start() schedules ticks via the injected sleep + stop() halts the loop', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const sleepResolvers = [];
+    // Make sleep a controllable promise — resolve it when the test
+    // wants the next tick to fire.
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { watchdog } = makeWatchdog({ manager, sleep });
+
+    watchdog.start();
+    // First sleep is queued before the first step.
+    await flushMicrotasks();
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    // Release the first poll: a step runs (no-op, isConnected=true)
+    // then the next poll-sleep is queued.
+    sleepResolvers[0]();
+    await flushMicrotasks();
+    expect(manager.isConnected).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(2);
+
+    watchdog.stop();
+    sleepResolvers[1](); // wake the loop so it observes running=false and exits
+    await flushMicrotasks();
+    expect(watchdog._getRunningForTest()).toBe(false);
+  });
+
+  it('start() is idempotent', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const sleep = jest.fn(() => new Promise(() => {})); // never resolves
+    const { watchdog } = makeWatchdog({ manager, sleep });
+
+    watchdog.start();
+    watchdog.start();
+    watchdog.start();
+    await flushMicrotasks();
+    // Only the first start scheduled a sleep; later starts must no-op.
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    watchdog.stop();
+  });
+
+  it('stop() before start() is safe', () => {
+    const { watchdog } = makeWatchdog();
+    expect(() => watchdog.stop()).not.toThrow();
+  });
+});
+
+// Lets the queued microtasks (await sleep/connect resolutions) flush
+// before the next assertion.
+function flushMicrotasks() {
+  return new Promise((resolve) => { setImmediate(resolve); });
+}
