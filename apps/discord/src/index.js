@@ -305,7 +305,7 @@ const roleResumeConflict = unsupportedRoleResumeCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_RESUME,
   config.ENABLE_EVENT_SHIPPER,
-  (process.env.STORE_TYPE ?? '').trim() || 'sqlite',
+  config.STORE_TYPE,
 );
 if (roleResumeConflict) {
   logger.error(roleResumeConflict);
@@ -357,8 +357,13 @@ const DEFAULT_SHARD_ID = '0:1';
 let gatewayShim = null;
 if (isGateway && config.ENABLE_GATEWAY_RESUME) {
   // DDB_TABLE_PREFIX and AWS_REGION are validated by src/store/ddb-store.js
-  // at module load when STORE_TYPE=ddb (which gateway-resume implies in
-  // practice). Re-checking here would duplicate the upstream guard.
+  // at module load when STORE_TYPE=ddb. unsupportedRoleResumeCombo above
+  // guarantees STORE_TYPE=ddb when ENABLE_GATEWAY_RESUME=true, and the
+  // `const db = require('./store')` import at the top of this file
+  // resolves to ddb-store.js — which throws before we reach this branch
+  // if either env var is missing. Keep that import ordering invariant
+  // when refactoring: removing the early `require('./store')` would
+  // silently regress the validation here.
   const ddbTablePrefix = process.env.DDB_TABLE_PREFIX;
   const awsRegion = process.env.AWS_REGION;
   const rawDdbClient = new DynamoDBClient({

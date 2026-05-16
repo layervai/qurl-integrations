@@ -204,7 +204,7 @@ describe('unsupportedRoleResumeCombo', () => {
     // deploys.
     for (const role of ['combined', 'gateway', 'http']) {
       for (const shipper of [true, false]) {
-        for (const storeType of ['sqlite', 'ddb', undefined]) {
+        for (const storeType of ['sqlite', 'ddb']) {
           expect(unsupportedRoleResumeCombo(role, false, shipper, storeType)).toBeNull();
         }
       }
@@ -236,17 +236,18 @@ describe('unsupportedRoleResumeCombo', () => {
     }
   });
 
-  it('rejects resume=true with storeType!=ddb (sqlite would lose state across processes)', () => {
+  it('rejects resume=true with storeType=sqlite (would lose state across processes)', () => {
     // Default sqlite backend writes a local file that the next ECS
     // task can't see. Without rejecting at boot, the bot would
     // silently IDENTIFY on every restart — mimicking flag-off
     // behavior and burning Discord's per-bot IDENTIFY budget.
-    for (const storeType of ['sqlite', undefined, '']) {
-      const msg = unsupportedRoleResumeCombo('gateway', true, true, storeType);
-      expect(msg).not.toBeNull();
-      expect(msg).toMatch(/STORE_TYPE=ddb/);
-      expect(msg).toMatch(/gateway-session/);
-    }
+    // config.STORE_TYPE always coerces unset to 'sqlite' so we
+    // only test the resolved string (not undefined/empty).
+    const msg = unsupportedRoleResumeCombo('gateway', true, true, 'sqlite');
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/STORE_TYPE=ddb/);
+    expect(msg).toMatch(/gateway-session/);
+    expect(msg).toMatch(/'sqlite'/);
   });
 
   it('returns null for the production-shape path (gateway + shipper + ddb)', () => {

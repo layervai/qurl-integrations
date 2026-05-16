@@ -74,23 +74,24 @@
 // Discord enforces a per-bot identify quota of 1000 per 24 h. An
 // unexpected churn loop (e.g., another process contending for the
 // same token, a malformed RESUME bouncing fresh sessions) can
-// burn the entire budget in minutes. MAX_IDENTIFY_ATTEMPTS=1 caps
-// in-process IDENTIFYs at one — after a single failed attempt,
-// retrieveSessionInfo throws and the manager's connect()
-// rejects. The caller (start()) propagates the rejection up to
-// gracefulShutdown(1), which crash-loops the task via ECS.
-// ECS replaces the task and the budget guard resets in the new
-// process — bounding burn to ~1 IDENTIFY per task lifetime
-// rather than 1000 per pathological loop.
+// burn the entire budget in minutes. MAX_IDENTIFY_ATTEMPTS bounds
+// the count of CONSECUTIVE IDENTIFYs without an intervening READY
+// — when a successful READY lands the counter resets to zero.
 //
-// The cap = 1 is intentional: a real cold start always IDENTIFYs
-// successfully on the first try (Discord's IDENTIFY → READY
-// handshake is reliable absent infra issues). A second attempt
-// would only happen if the first IDENTIFY succeeded but the
-// resulting session was immediately invalidated — which signals
-// either token revocation or another process colliding on the
-// same identity, both of which are operator-action items, not
-// "retry quietly" items.
+// Reset-on-READY is what makes cap=1 safe for long-lived processes.
+// Without it, the only IDENTIFY a task could ever do is its cold-
+// start one — a network blip >60s (resume buffer expires on
+// Discord's side) would burn the budget and ECS would crash-loop
+// the task while Discord refused to accept fresh IDENTIFYs from
+// the replacement. With reset-on-READY, every successful session
+// gets a fresh budget for the next reconnect.
+//
+// What the cap still catches: IDENTIFY-without-READY loops. A
+// token-contention scenario (two processes claiming the same
+// identity) produces fast IDENTIFY-reject churn with no READY
+// arriving between attempts — the counter never resets, the cap
+// trips on the second attempt, and the task exits cleanly
+// instead of burning Discord's per-bot quota.
 
 const { WebSocketManager, WebSocketShardEvents } = require('@discordjs/ws');
 const { REST } = require('@discordjs/rest');
@@ -217,6 +218,10 @@ function createGatewayWsShim({
           // commands or guild-commands endpoint.
           appId = data?.d?.application?.id ?? null;
           isReady = true;
+          // Reset the IDENTIFY budget: every successful READY
+          // restores a fresh allowance for the next reconnect.
+          // See module header.
+          identifyAttempts = 0;
           logger.info('gateway-ws-shim: READY received', {
             shardId,
             appIdPrefix: appId ? appId.slice(0, 6) : null,
@@ -278,9 +283,7 @@ function createGatewayWsShim({
     async stop({ flushFinal: shouldFlush = true } = {}) {
       stopped = true;
       // Drop dispatch handlers so any late dispatch arriving on
-      // the way out doesn't trigger a downstream side effect
-      // (the event-publisher's drain handles its own in-flight
-      // sends).
+      // the way out doesn't trigger a downstream side effect.
       dispatchHandlers.clear();
       if (shouldFlush) {
         // Persists the latest sequence so the next process's
@@ -293,7 +296,13 @@ function createGatewayWsShim({
       // NO manager.destroy() — see SIGTERM contract in module header.
       // The caller's process.exit() drops the TCP socket; Discord
       // holds the session in its 60 s buffer for the next process's
-      // RESUME.
+      // RESUME. removeAllListeners detaches the Dispatch/Error
+      // handlers we installed so a test that calls stop() without
+      // immediately exiting doesn't leak the listeners (production
+      // exits right after, so this is hygiene rather than correctness).
+      if (manager) {
+        manager.removeAllListeners();
+      }
       manager = null;
     },
 

@@ -73,13 +73,14 @@ function createGatewaySessionStore({
   let lastWriteAt = 0;
   let pendingFlush = null;
   let stopped = false;
-  // Tracks the most recently fired DDB write so flushFinal can await
-  // its settlement before exit. Writes are fire-and-forget (see
-  // updateSessionInfo) — `await ddb.send(...)` inside the @discordjs/
-  // ws callback would back-pressure the WS dispatch loop on every
-  // sequence update, undoing the Pillar 1 win of keeping the gateway
-  // forwarder responsive under load.
-  let inFlightWrite = Promise.resolve();
+  // Set of in-flight fire-and-forget DDB write promises. flushFinal
+  // awaits Promise.allSettled on every entry so SIGTERM doesn't exit
+  // mid-write. Each entry removes itself from the set on settle, so
+  // the steady-state size is at most one (the throttle keeps writes
+  // from overlapping under normal traffic). A simple "track only the
+  // latest" reference would lose the earlier write's settlement
+  // guarantee when a second fire-and-forget lands quickly behind it.
+  const inFlightWrites = new Set();
 
   async function persistRow(info) {
     // Wall-clock epoch ms for `updated_at`. Matches the design
@@ -119,12 +120,16 @@ function createGatewaySessionStore({
   // stale cursor). On failure the cursor isn't rolled back; the
   // throttle's next flush retries, and SIGTERM's flushFinal is
   // the backstop. Sustained failure logs every retry.
+  function fireWrite(promise) {
+    const p = promise.finally(() => inFlightWrites.delete(p));
+    inFlightWrites.add(p);
+  }
   function firePersist(info) {
     lastWrittenSessionId = info.sessionId;
     lastWriteAt = clock();
-    inFlightWrite = persistRow(info).catch((err) => {
+    fireWrite(persistRow(info).catch((err) => {
       logger.warn('gateway-session-store: write failed', { error: err.message });
-    });
+    }));
   }
 
   // Schedule a deferred write at (lastWriteAt + writeThrottleMs).
@@ -180,9 +185,9 @@ function createGatewaySessionStore({
         // not observe the dead session row, hence the cross-
         // process clear — but waiting on DDB here would stall the
         // WS dispatch loop.
-        inFlightWrite = deleteRow().catch((err) => {
+        fireWrite(deleteRow().catch((err) => {
           logger.warn('gateway-session-store: null-clear delete failed', { error: err.message });
-        });
+        }));
         lastWriteAt = clock();
         return;
       }
@@ -274,11 +279,13 @@ function createGatewaySessionStore({
     async flushFinal() {
       stopped = true;
       cancelPendingFlush();
-      // Settle the most recent fire-and-forget write before our
-      // own synchronous write so we don't race it with a stale
-      // value of `mirror`. Errors were already logged by the
-      // .catch inside firePersist/null-clear; swallow here.
-      try { await inFlightWrite; } catch (_) { /* logged */ }
+      // Settle every in-flight fire-and-forget write before our
+      // own synchronous write — Promise.allSettled covers the
+      // case where multiple writes are concurrently outstanding
+      // (e.g. null-clear delete chased by a fresh-session put).
+      // Inner .catch handlers in firePersist/null-clear already
+      // logged each error.
+      await Promise.allSettled([...inFlightWrites]);
       if (!mirror) return;
       try {
         await persistRow(mirror);
@@ -312,12 +319,12 @@ function createGatewaySessionStore({
     _getLastWriteAtForTest() {
       return lastWriteAt;
     },
-    // Synchronizes a test on the most recent fire-and-forget DDB
+    // Synchronizes a test on every in-flight fire-and-forget DDB
     // write. Production callers never await this (the WS dispatch
     // loop must remain non-blocking); flushFinal handles the
     // pre-exit synchronization.
     async _awaitInFlightForTest() {
-      try { await inFlightWrite; } catch (_) { /* swallowed in production .catch */ }
+      await Promise.allSettled([...inFlightWrites]);
     },
   };
 }

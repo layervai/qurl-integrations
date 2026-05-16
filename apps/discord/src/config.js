@@ -403,6 +403,13 @@ module.exports = {
   // silently flip the gateway path.
   ENABLE_GATEWAY_RESUME: process.env.ENABLE_GATEWAY_RESUME === 'true',
 
+  // Persistence backend selector. Lifted from raw env into config
+  // so the boot-guard (`unsupportedRoleResumeCombo`) and the
+  // gateway-shim wiring both read through the same parsed shape.
+  // Unset / empty / whitespace-only falls back to 'sqlite', matching
+  // src/store/index.js's selection precedence.
+  STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'sqlite',
+
   // SQS Standard queue the gateway publishes to and the worker
   // consumes from (provisioned by qurl-integrations-infra PR B).
   // Required when ENABLE_EVENT_SHIPPER=true; validated at boot in

@@ -168,7 +168,7 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
   }
   if (storeType !== 'ddb') {
     return (
-      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType ?? 'unset (defaults to sqlite)'}'). ` +
+      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +
       'Cross-process RESUME persists session state to the gateway-session DDB ' +
       'table; sqlite would write a local file the next process never sees. Set ' +
       'STORE_TYPE=ddb in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'

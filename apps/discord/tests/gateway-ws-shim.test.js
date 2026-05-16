@@ -207,6 +207,41 @@ describe('IDENTIFY budget guard', () => {
   it('exposes MAX_IDENTIFY_ATTEMPTS = 1 as a pinned constant', () => {
     expect(MAX_IDENTIFY_ATTEMPTS).toBe(1);
   });
+
+  it('resets the counter on READY so a later resume-rejection still gets an IDENTIFY', async () => {
+    // The cap=1 alone would crash-loop a long-lived task whose
+    // Discord resume buffer expires (>60s outage): cold-start
+    // IDENTIFY burns the budget, then the post-outage RESUME
+    // rejection would throw on the very next retrieve. Reset-on-
+    // READY restores the budget after every successful session
+    // so reconnects-after-outage stay healthy.
+    const { shim, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const { retrieveSessionInfo } = mgr._constructorArgs;
+
+    // Cold start: retrieve → null → IDENTIFY pending (count=1).
+    expect(retrieveSessionInfo('0:1')).toBeNull();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+
+    // READY arrives — counter resets.
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
+
+    // Later, Discord drops the session past its resume buffer.
+    // Library calls retrieve → mirror is null → another IDENTIFY
+    // is permitted (count=1, still under cap).
+    expect(retrieveSessionInfo('0:1')).toBeNull();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+
+    // A second consecutive null-mirror retrieve (no READY between)
+    // does trip the cap — the loop-without-READY hazard the cap
+    // exists to catch.
+    expect(() => retrieveSessionInfo('0:1')).toThrow(/IDENTIFY budget exhausted/);
+  });
 });
 
 describe('READY detection', () => {
@@ -379,6 +414,22 @@ describe('SIGTERM contract — stop() does NOT call manager.destroy()', () => {
     // Late dispatch after stop() — handler should NOT fire.
     mgr.emit(WebSocketShardEvents.Dispatch, { data: { t: 'X' }, shardId: 0 });
     expect(h).not.toHaveBeenCalled();
+  });
+
+  it('removes manager listeners so non-exiting callers (tests, future shapes) do not leak handler refs', async () => {
+    // Hygiene check: production exits immediately after stop(), so
+    // listener-leak is harmless there. But a test cleanup path
+    // (stop({flushFinal:false}) without process.exit) shouldn't
+    // strand the Dispatch/Error listeners on the manager.
+    const { shim, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const beforeCount = mgr.listenerCount(WebSocketShardEvents.Dispatch);
+    expect(beforeCount).toBeGreaterThan(0);
+
+    await shim.stop();
+    expect(mgr.listenerCount(WebSocketShardEvents.Dispatch)).toBe(0);
+    expect(mgr.listenerCount(WebSocketShardEvents.Error)).toBe(0);
   });
 });
 

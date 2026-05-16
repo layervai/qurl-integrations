@@ -434,6 +434,58 @@ describe('flushFinal', () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
+  it('awaits every in-flight fire-and-forget write before exit (not just the most recent)', async () => {
+    // Without Promise.allSettled across the full set, a SIGTERM
+    // that lands between a null-clear delete and a fresh-session
+    // put could exit while the earlier delete is still in flight.
+    // The Set-based tracker keeps all outstanding writes pending
+    // until flushFinal settles them.
+    let resolveFirstWrite;
+    let secondWriteFired = false;
+
+    const rawClient = new DynamoDBClient({});
+    const docClient = DynamoDBDocumentClient.from(rawClient);
+    const ddbMock = mockClient(docClient);
+    // First Put blocks until we resolve it; second Put resolves
+    // immediately. Without the Set tracker, awaiting only the
+    // second would lose the first's settlement signal.
+    ddbMock.on(PutCommand)
+      .callsFakeOnce(() => new Promise((resolve) => { resolveFirstWrite = resolve; }))
+      .callsFake(() => { secondWriteFired = true; return Promise.resolve({}); });
+
+    const logger = {
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    };
+    const store = createGatewaySessionStore({
+      ddbClient: docClient,
+      tableName: 't',
+      shardId: '0:1',
+      logger,
+    });
+
+    // Fire two writes back-to-back (sessionId change → immediate
+    // writes both times).
+    store.updateSessionInfo('0:1', { sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 });
+    store.updateSessionInfo('0:1', { sessionId: 'sess-B', resumeURL: 'wss://r/b', sequence: 2 });
+    expect(secondWriteFired).toBe(true);
+
+    // Kick off flushFinal — it must NOT resolve until the still-
+    // pending first write completes.
+    const flushPromise = store.flushFinal();
+    let flushSettled = false;
+    flushPromise.then(() => { flushSettled = true; });
+
+    // Drain the microtask queue — flush is still pending on the
+    // blocked write.
+    await new Promise((r) => setImmediate(r));
+    expect(flushSettled).toBe(false);
+
+    // Now unblock and verify flush completes.
+    resolveFirstWrite({});
+    await flushPromise;
+    expect(flushSettled).toBe(true);
+  });
+
   it('after flushFinal, subsequent updateSessionInfo calls are dropped', async () => {
     // SIGTERM lands; flushFinal runs and sets stopped=true. A late
     // dispatch arriving on the way out shouldn't trigger another
