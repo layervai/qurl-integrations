@@ -186,6 +186,13 @@ async function runPushHandoffShutdown({
     exit(forcedExitCode);
   }, ceilingMs);
   if (hardExit && typeof hardExit.unref === 'function') {
+    // `.unref()` so the timer can't pin shutdown past the explicit
+    // `exit()` below. Safe against "loop idles out early before
+    // the ceiling fires" because pushHandoff itself holds DDB +
+    // HTTP socket handles open during its await, and we exit
+    // synchronously after `await drainPromise` resolves — there's
+    // no window where the unref'd timer is the only loop handle
+    // before we call exit() explicitly.
     hardExit.unref();
   }
   // Kick the publisher drain in parallel — tryStop is null-safe,

@@ -560,6 +560,19 @@ describe('invalidHotStandbyValues', () => {
     expect(problems[0]).toMatch(/must be a valid IPv4/);
   });
 
+  it('flags leading-zero IPv4 octets (octal-parse hazard under some resolvers)', () => {
+    // `01.02.03.04` parses as octal under glibc's `inet_aton` and a
+    // handful of resolvers — a typo'd "010.0.0.1" would resolve as
+    // 8.0.0.1, silently routing the control channel to a wrong host.
+    // The closed-door fix is to require canonical no-leading-zero
+    // octets, which the ECS task-def injection always produces.
+    for (const ip of ['01.0.0.1', '10.01.0.1', '10.0.01.1', '10.0.0.01']) {
+      const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }));
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/must be a valid IPv4/);
+    }
+  });
+
   it('accepts every octet boundary (0, 9, 10, 99, 100, 199, 200, 249, 255)', () => {
     const ips = ['0.0.0.0', '255.255.255.255', '10.99.100.249', '1.9.199.200'];
     for (const ip of ips) {

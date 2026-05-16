@@ -265,10 +265,16 @@ function missingHotStandbyKeys(cfg) {
 // channel binds to the v4 ENI, peers reach each other over v4 SG
 // rules). If v6 ever lands, this check loosens.
 //
+// Leading-zero octets are rejected (`01.02.03.04` would parse as
+// octal under some resolvers); each octet is `0` alone, `1-9`, or
+// `1[0-9]-25[0-5]` with no leading zero. ECS task-def injection
+// produces canonical no-leading-zero v4 strings; this just closes
+// the operator-typo door.
+//
 // Returns an array of operator-facing message strings (one per
 // problem) or [] when all values are well-shaped. Hot-standby off
 // → skip entirely.
-const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/;
 function invalidHotStandbyValues(cfg) {
   if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
   const problems = [];

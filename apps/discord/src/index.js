@@ -828,15 +828,24 @@ async function signalShutdown() {
   }
 }
 
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => {
-    logger.info(`Received ${sig}`);
-    signalShutdown().catch(err => {
-      logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
-      process.exit(1);
-    });
-  });
-}
+// SIGTERM vs SIGINT split: only SIGTERM routes through signalShutdown
+// → pushHandoffShutdown. SIGINT (dev ctrl-c, manual `kill -2` from an
+// operator) goes straight to plain gracefulShutdown. Triggering a
+// real DDB CAS + cross-AZ HTTP round-trip on a developer's ctrl-c
+// is overkill, and ECS sends SIGTERM for production replacement —
+// so push-handoff lives on the production-deploy signal exclusively.
+const onShutdownReject = (label) => (err) => {
+  logger.error(`${label} rejected unexpectedly`, { error: err.message, stack: err.stack });
+  process.exit(1);
+};
+process.on('SIGTERM', () => {
+  logger.info('Received SIGTERM');
+  signalShutdown().catch(onShutdownReject('signalShutdown'));
+});
+process.on('SIGINT', () => {
+  logger.info('Received SIGINT');
+  gracefulShutdown(0).catch(onShutdownReject('gracefulShutdown'));
+});
 
 // Pillar 3 hot-standby wiring. Called from start() AFTER the shim is
 // constructed and started in connect-deferred mode. Sequencing matters:
