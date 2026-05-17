@@ -30,7 +30,7 @@ function expiryToMs(expiresIn) {
 }
 
 // Self-destruct timer presets — the 7 durations exposed in the
-// /qurl file + /qurl map confirm-card dropdown. Curated narrow set so
+// /qurl send + /qurl map confirm-card dropdown. Curated narrow set so
 // creators don't ship a 0.7s viewer that hits the 500ms-floor edge
 // case in the connector by accident; every preset is a value we'd
 // recommend out loud.
@@ -65,7 +65,7 @@ function findPresetBySeconds(n) {
 }
 
 // selfDestructSelectValueToSeconds — converts a StringSelectMenu value
-// from the /qurl file + /qurl map confirm card into the seconds the
+// from the /qurl send + /qurl map confirm card into the seconds the
 // bot persists and forwards.
 // The select's option set is fixed: the no-timer sentinel, or
 // `String(preset.seconds)` for each preset. Strict string equality (not

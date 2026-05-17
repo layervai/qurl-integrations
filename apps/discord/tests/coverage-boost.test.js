@@ -1,6 +1,6 @@
 /**
  * Residual coverage tests for commands.js — narrow branches that aren't
- * covered by the focused specs (qurl-file-map, send-pipeline-back-half,
+ * covered by the focused specs (qurl-send-map, send-pipeline-back-half,
  * commands-comprehensive, send-pipeline-helpers).
  *
  * Covers:
@@ -128,6 +128,8 @@ jest.mock('discord.js', () => {
     setPlaceholder: jest.fn().mockReturnThis(),
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
+    setDefaultValues: jest.fn().mockReturnThis(),
+    addDefaultUsers: jest.fn().mockReturnThis(),
   })),
   MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
   ModalBuilder: jest.fn().mockImplementation(() => ({
@@ -246,7 +248,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'file'),
+      getSubcommand: jest.fn(() => 'send'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),
@@ -344,7 +346,7 @@ describe('handleCommand — autocomplete edge cases', () => {
       isChatInputCommand: jest.fn(() => false),
       options: {
         ...makeInteraction().options,
-        getSubcommand: jest.fn(() => 'file'),
+        getSubcommand: jest.fn(() => 'send'),
         getFocused: jest.fn(() => ({ name: 'location', value: 'query' })),
       },
     });

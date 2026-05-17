@@ -40,19 +40,27 @@ const STRIP_RE = new RegExp(
   'g',
 );
 
+// Last-resort display-name fallback. Centralized so the
+// resolveSenderAlias chain, sanitizeDisplayName, and the
+// defensive default in revokeAllLinks all agree on one literal.
+const DISPLAY_NAME_FALLBACK = 'Someone';
+
 // `maxCodepoints` defaults to 64 (display-name budget). Larger
 // surfaces (locationName, attachment.name → 256) pass their own
 // cap; the strip + NFKC + codepoint-slice contract is identical.
-// Empty / undefined input returns the 'Someone' fallback for the
-// display-name caller; surface-specific callers should branch on
-// the empty case themselves rather than render "Someone".
-function stripControlAndBidi(s, maxCodepoints = 64) {
-  const cleaned = String(s ?? 'Someone').normalize('NFKC').replace(STRIP_RE, '');
+// `fallback` is the string substituted when input is null/undefined
+// AND when the strip + cap chain collapses to empty. Defaults to
+// the display-name fallback for the historical caller; non-display
+// surfaces (e.g. the per-DM guildName provenance row) pass `''`
+// to opt out — surfacing "Someone" on an all-strip hostile guild
+// name would degrade the trust signal the strip exists to defend.
+function stripControlAndBidi(s, maxCodepoints = 64, fallback = DISPLAY_NAME_FALLBACK) {
+  const cleaned = String(s ?? fallback).normalize('NFKC').replace(STRIP_RE, '');
   // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
   // code units, so a cap on a name like `'A'.repeat(63) + emoji`
   // would split a surrogate pair and Discord would render the lone high
   // surrogate as tofu. `Array.from(str)` iterates by codepoint.
-  return Array.from(cleaned).slice(0, maxCodepoints).join('') || 'Someone';
+  return Array.from(cleaned).slice(0, maxCodepoints).join('') || fallback;
 }
 
 /**
@@ -62,7 +70,7 @@ function stripControlAndBidi(s, maxCodepoints = 64) {
  * `maxCodepoints`, then escape markdown so a crafted label can't
  * inject `**bold**` / `[masked-link](https://evil)` / spoilers.
  *
- * Callers: /qurl map's `locationName`, /qurl file's
+ * Callers: /qurl map's `locationName`, /qurl send's
  * `attachment.name`-derived `resourceLabel`. Returns '' on empty /
  * all-strip-char input (NOT the 'Someone' display-name fallback) so
  * the caller can render its own empty-state.
@@ -97,17 +105,26 @@ function sanitizeContentLabel(s, maxCodepoints = 256) {
  * cannot be truncated mid-pair into a single backslash.
  */
 function sanitizeDisplayName(s) {
-  return escapeDiscordMarkdown(stripControlAndBidi(s)) || 'Someone';
+  return escapeDiscordMarkdown(stripControlAndBidi(s)) || DISPLAY_NAME_FALLBACK;
 }
 
 /**
  * Like sanitizeDisplayName but skips markdown escaping. Use for
  * plain-text contexts where backslash-escapes would render literally
- * (e.g. inside a `.txt` file attachment). NFKC + bidi/zero-width/
- * control strip + 64-codepoint cap still apply.
+ * (e.g. inside a `.txt` file attachment, or a Discord embed's
+ * setAuthor `name` slot). NFKC + bidi/zero-width/control strip +
+ * 64-codepoint cap still apply.
+ *
+ * `fallback` is what's substituted on null/undefined input or when
+ * the strip + cap chain collapses to empty (all-strip hostile
+ * input). Defaults to 'Someone' for the historical caller; surfaces
+ * that would degrade if the fallback string leaked into the rendered
+ * output (e.g. the per-DM author-row guildName, which would render
+ * the nonsense `Vik · Someone` on all-strip hostile input) pass
+ * `{ fallback: '' }` to opt out and handle the empty case themselves.
  */
-function sanitizeDisplayNamePlain(s) {
-  return stripControlAndBidi(s);
+function sanitizeDisplayNamePlain(s, { fallback = DISPLAY_NAME_FALLBACK } = {}) {
+  return stripControlAndBidi(s, 64, fallback);
 }
 
 /**
@@ -127,4 +144,12 @@ function stripBidiAndControls(s) {
   return String(s ?? '').normalize('NFKC').replace(STRIP_RE, '');
 }
 
-module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls };
+module.exports = {
+  DISPLAY_NAME_FALLBACK,
+  sanitizeFilename,
+  escapeDiscordMarkdown,
+  sanitizeDisplayName,
+  sanitizeDisplayNamePlain,
+  sanitizeContentLabel,
+  stripBidiAndControls,
+};

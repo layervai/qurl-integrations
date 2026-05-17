@@ -1,7 +1,7 @@
 {
   "name": "qurl-discord-bot",
   "version": "2.1.0",
-  "description": "qURL Discord bot — /qurl file + /qurl map for secure one-time resource sharing, GitHub OAuth linking, auto Contributor role",
+  "description": "qURL Discord bot — /qurl send + /qurl map for secure one-time resource sharing, GitHub OAuth linking, auto Contributor role",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -22,12 +22,13 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1036.0",
+    "@aws-sdk/client-sqs": "^3.1036.0",
     "@aws-sdk/lib-dynamodb": "^3.1036.0",
     "@discordjs/rest": "~2.6.0",
     "@discordjs/ws": "~1.2.3",
     "better-sqlite3": "~12.8.0",
     "discord-api-types": "^0.38.33",
-    "discord.js": "~14.25.1",
+    "discord.js": "14.25.1",
     "express": "~5.2.1",
     "helmet": "~7.2.0",
     "jose": "~5.9.6",

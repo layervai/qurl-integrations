@@ -32,6 +32,7 @@ jest.mock('../src/discord', () => {
     post: jest.fn(),
     put: jest.fn(),
     delete: jest.fn(),
+    patch: jest.fn(),
   };
   return {
     client: { rest: mockRestInstance },
@@ -41,29 +42,29 @@ jest.mock('../src/discord', () => {
 
 const restMock = require('../src/discord').__mockRestInstance;
 
-const { rest: exportedRest, sendDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
+const { sendDM, editDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
 
 beforeEach(() => {
   restMock.post.mockReset();
   restMock.put.mockReset();
   restMock.delete.mockReset();
+  restMock.patch.mockReset();
 });
 
-describe('module wiring', () => {
-  it('re-exports the shared client.rest instance (not a new one)', () => {
-    // Sharing the rate-limit bucket state is the whole reason this module
-    // imports client.rest instead of constructing its own REST().
-    expect(exportedRest).toBe(restMock);
-  });
-});
+// Shared-rate-limit-bucket invariant: every helper reads `client.rest.X`
+// directly (vs. `new REST(...)`) so the bucket state is shared with the
+// gateway-cache helpers in discord.js. The helper-level tests below
+// pin this behaviorally via `restMock.{post,put,delete,patch}.mock.calls`
+// — a future refactor that swapped to `new REST(...)` would not hit the
+// `restMock` interception and the call-count assertions would break.
 
 describe('sendDM via REST', () => {
-  it('creates DM channel then posts message, returns ok:true', async () => {
+  it('creates DM channel then posts message, returns ok:true with channel + message ids', async () => {
     restMock.post
-      .mockResolvedValueOnce({ id: 'channel-1' }) // create channel
-      .mockResolvedValueOnce({}); // post message
+      .mockResolvedValueOnce({ id: 'channel-1' })     // create channel
+      .mockResolvedValueOnce({ id: 'message-1' });    // post message
     const result = await sendDM('user-1', { content: 'hi' });
-    expect(result).toEqual({ ok: true, channelId: 'channel-1' });
+    expect(result).toEqual({ ok: true, channelId: 'channel-1', messageId: 'message-1' });
     expect(restMock.post).toHaveBeenCalledTimes(2);
     // First call: create DM channel — POST /users/@me/channels.
     expect(restMock.post.mock.calls[0][0]).toBe('/users/@me/channels');
@@ -105,6 +106,107 @@ describe('sendDM via REST', () => {
     expect(result.status).toBe(429);
     expect(result.error).toBe('rate limited');
     expect(restMock.post).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('editDM via REST', () => {
+  it('PATCHes the target message in one REST call and returns ok', async () => {
+    restMock.patch.mockResolvedValueOnce(undefined);
+    const payload = { embeds: [{ description: 'closed' }], components: [] };
+    const result = await editDM('channel-1', 'message-1', payload);
+    expect(result).toEqual({ ok: true });
+    expect(restMock.patch).toHaveBeenCalledTimes(1);
+    expect(restMock.patch.mock.calls[0][0]).toBe('/channels/channel-1/messages/message-1');
+    expect(restMock.patch.mock.calls[0][1]).toEqual({ body: payload });
+  });
+
+  it('marks 10008 (Unknown Message — recipient deleted the DM) as expected and exposes code+reason', async () => {
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Unknown Message'), { status: 404, code: 10008 }),
+    );
+    const result = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(result).toEqual({
+      ok: false,
+      expected: true,
+      code: 10008,
+      reason: expect.stringContaining('Unknown Message'),
+    });
+  });
+
+  it.each([
+    ['10003', 10003, 404, 'Unknown Channel'],
+    ['50001', 50001, 403, 'Missing Access'],
+    ['50007', 50007, 403, 'Cannot send messages to this user'],
+  ])('marks %s as expected and surfaces code+reason on the return', async (_name, code, status, descriptionFragment) => {
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('expected'), { status, code }),
+    );
+    const result = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(result).toEqual({
+      ok: false,
+      expected: true,
+      code,
+      reason: expect.stringContaining(descriptionFragment),
+    });
+  });
+
+  it('marks unrecognized errors as unexpected (logged at warn) — code passes through, reason is undefined', async () => {
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('boom'), { status: 500, code: 0 }),
+    );
+    const result = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(result).toEqual({ ok: false, expected: false, code: 0, reason: undefined });
+  });
+
+  it('marks bare 403 / 404 without a known API code as UNEXPECTED', async () => {
+    // Defense against the cr-flagged scenario: Discord-side bugs,
+    // proxy 404s, and revoked-token 403s shouldn't get the silent
+    // info-level treatment reserved for known operational outcomes.
+    // The API code is the gate; status alone is not.
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Forbidden'), { status: 403, code: undefined }),
+    );
+    const r403 = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(r403).toEqual({ ok: false, expected: false, code: undefined, reason: undefined });
+
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Not Found'), { status: 404, code: undefined }),
+    );
+    const r404 = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(r404).toEqual({ ok: false, expected: false, code: undefined, reason: undefined });
+  });
+
+  it('tags the expected log line with expectedReason for greppability', async () => {
+    // Closes the cr-flagged invisibility gap: a future spike in any
+    // single expected code (notably 50007 on PATCH, which isn't
+    // observed today — see #369) should be greppable from CloudWatch
+    // by the human-readable description rather than requiring an
+    // external code lookup.
+    const logger = require('../src/logger');
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Cannot send messages to this user'), { status: 403, code: 50007 }),
+    );
+    await editDM('c', 'm', { embeds: [], components: [] });
+    expect(logger.info).toHaveBeenCalledWith(
+      'Failed to edit DM',
+      expect.objectContaining({
+        code: 50007,
+        expectedReason: expect.stringContaining('Cannot send messages to this user'),
+      }),
+    );
+    // Unexpected branch must NOT carry the expectedReason field.
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Internal Server Error'), { status: 500, code: 0 }),
+    );
+    await editDM('c', 'm', { embeds: [], components: [] });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Failed to edit DM',
+      expect.not.objectContaining({ expectedReason: expect.anything() }),
+    );
   });
 });
 

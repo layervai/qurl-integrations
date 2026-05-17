@@ -41,6 +41,11 @@ const {
 } = require('../src/flow-dispatch');
 
 function makeInteraction(overrides = {}) {
+  // Default to MessageComponent shape — that's the dominant routing
+  // source (button + select clicks). Modal-submit tests override with
+  // `isMessageComponent: () => false`. `isMessageComponent` is the
+  // discriminator the dispatcher reads to choose update-source-card
+  // vs. reply-ephemeral on a routing-failure recovery.
   return {
     customId: 'test_prefix',
     user: { id: 'user-123' },
@@ -48,6 +53,7 @@ function makeInteraction(overrides = {}) {
     guildId: 'guild-789',
     replied: false,
     deferred: false,
+    isMessageComponent: () => true,
     reply: jest.fn().mockResolvedValue(undefined),
     followUp: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(undefined),
@@ -201,7 +207,13 @@ describe('handleFlowInteraction', () => {
     expect(ctx.row.stage).toBe('awaiting');
   });
 
-  it('replies superseded when row is missing', async () => {
+  it('updates the source card when row is missing (component path)', async () => {
+    // Clears the stale card's buttons in place so the user can't keep
+    // clicking. Repro for the cancel-on-expired-card stacking bug:
+    // each repeated reply() left the card's Cancel button live, so
+    // every click added another ephemeral with a reply-quote of the
+    // card. Editing the source message via `update` is what kills the
+    // stack.
     const handler = jest.fn();
     registerFlow('route_missing', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue(null);
@@ -210,13 +222,14 @@ describe('handleFlowInteraction', () => {
     await handleFlowInteraction(interaction);
 
     expect(handler).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith({
+    expect(interaction.update).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
-      ephemeral: true,
+      components: [],
     });
+    expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('replies superseded when row stage does not match expectedStage', async () => {
+  it('updates the source card when row stage does not match (component path)', async () => {
     const handler = jest.fn();
     registerFlow('route_stage_mismatch', { expectedStage: 'awaiting_select', handler });
     loadFlow.mockResolvedValue({
@@ -229,6 +242,52 @@ describe('handleFlowInteraction', () => {
     await handleFlowInteraction(interaction);
 
     expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: SUPERSEDED_MSG,
+      components: [],
+    });
+    expect(interaction.reply).not.toHaveBeenCalled();
+  });
+
+  it('replies (does not update) for modal submits with no source card', async () => {
+    // Modal-submit interactions don't carry the source-card contract
+    // the update path relies on — fall back to the ephemeral reply
+    // shape that worked before this change.
+    const handler = jest.fn();
+    registerFlow('route_modal_missing', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue(null);
+    const interaction = makeInteraction({
+      customId: 'route_modal_missing',
+      isMessageComponent: () => false,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: SUPERSEDED_MSG,
+      ephemeral: true,
+    });
+  });
+
+  it('falls back to reply when update fails (e.g. source ephemeral dismissed)', async () => {
+    // If the user dismissed the source ephemeral between render and
+    // click, `update` rejects with Unknown Message. The interaction
+    // token is still live, so a fresh ephemeral is the right recovery
+    // — don't silently swallow the SUPERSEDED hint.
+    const handler = jest.fn();
+    registerFlow('route_update_fails', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue(null);
+    const interaction = makeInteraction({
+      customId: 'route_update_fails',
+      update: jest.fn().mockRejectedValue(new Error('Unknown Message')),
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
       ephemeral: true,
@@ -254,7 +313,7 @@ describe('handleFlowInteraction', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('replies superseded when loadFlow throws', async () => {
+  it('updates the source card when loadFlow throws (component path)', async () => {
     const handler = jest.fn();
     registerFlow('route_load_throws', { expectedStage: 'awaiting', handler });
     loadFlow.mockRejectedValue(new Error('DDB outage'));
@@ -263,13 +322,16 @@ describe('handleFlowInteraction', () => {
     await handleFlowInteraction(interaction);
 
     expect(handler).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith({
+    expect(interaction.update).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
-      ephemeral: true,
+      components: [],
     });
+    expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('uses followUp instead of reply when interaction is already replied', async () => {
+  it('uses followUp when interaction is already acked (no source-card update)', async () => {
+    // An already-replied interaction has no live `update` slot; fall
+    // back to followUp so the recovery surfaces.
     const handler = jest.fn();
     registerFlow('route_followup', { expectedStage: 'awaiting', handler });
     loadFlow.mockResolvedValue(null);
@@ -280,6 +342,7 @@ describe('handleFlowInteraction', () => {
 
     await handleFlowInteraction(interaction);
 
+    expect(interaction.update).not.toHaveBeenCalled();
     expect(interaction.reply).not.toHaveBeenCalled();
     expect(interaction.followUp).toHaveBeenCalledWith({
       content: SUPERSEDED_MSG,
@@ -288,6 +351,11 @@ describe('handleFlowInteraction', () => {
   });
 
   it('swallows reply failures so a stale interaction does not throw', async () => {
+    // Both `update` AND the fallback `reply` reject — a fully dead
+    // interaction (token expired, source ephemeral deleted). The
+    // dispatcher's contract is silent-swallow + warn log, NOT throw,
+    // because the caller (index.js interactionCreate listener) has no
+    // meaningful retry path.
     registerFlow('route_reply_throws', {
       expectedStage: 'awaiting',
       handler: jest.fn(),
@@ -295,6 +363,7 @@ describe('handleFlowInteraction', () => {
     loadFlow.mockResolvedValue(null);
     const interaction = makeInteraction({
       customId: 'route_reply_throws',
+      update: jest.fn().mockRejectedValue(new Error('Unknown Message')),
       reply: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
     });
 
