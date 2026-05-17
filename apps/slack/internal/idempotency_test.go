@@ -61,15 +61,17 @@ func TestIdempotencyKey_DifferentInputsDiffer(t *testing.T) {
 }
 
 // TestIdempotencyKey_FieldBoundary fences the field-separator
-// invariant. Without a separator between fields, "ab"+"c" and
-// "a"+"bc" would hash identically — both are "abc" concatenated —
+// invariant. Without a separator between fields, ("ab","c") and
+// ("a","bc") would hash identically — both are "abc" concatenated —
 // and a request with a team_id that happened to be a prefix of
 // another team's would collide. NUL between fields makes that
 // collision impossible for any plausible Slack-issued ID set.
 func TestIdempotencyKey_FieldBoundary(t *testing.T) {
 	t.Parallel()
-	a := IdempotencyKey("T1abc", "", "", "")
-	b := IdempotencyKey("T1", "abc", "", "")
+	// Inputs mirror the ("ab","c") vs ("a","bc") shape from the
+	// comment so the regression is obvious-by-eye.
+	a := IdempotencyKey("ab", "c", "U1", "tr_abc")
+	b := IdempotencyKey("a", "bc", "U1", "tr_abc")
 	if a == b {
 		t.Errorf("field-boundary collision: %q == %q", a, b)
 	}

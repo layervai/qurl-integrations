@@ -104,9 +104,11 @@ func (c *Command) Reason() string {
 	return c.Flags["reason"]
 }
 
-// ErrEmptyResource is returned when a subcommand expects a `$alias` argument
-// and the user omitted it entirely.
-var ErrEmptyResource = errors.New("missing $alias argument")
+// ErrEmptyResource is returned when a subcommand expects a `$alias`
+// argument and the user either omitted it entirely OR supplied a bare
+// `$` with no name after the sigil. The handler in PR-3c.3+ renders
+// the same friendly "you forgot the alias" message in both cases.
+var ErrEmptyResource = errors.New("missing or empty $alias argument")
 
 // ErrMissingSigil is returned when a token in the resource position does
 // not start with `$`. We require the sigil to keep aliases visually
@@ -185,12 +187,20 @@ func Parse(text string) (*Command, error) {
 		return &Command{Subcommand: SubcmdHelp, Raw: text, Flags: map[string]string{}}, nil
 	}
 
+	// Invariant: Flags is initialized here so every sub-parser can
+	// call applyFlag without nil-check. Adding a new sub-parser that
+	// builds its own *Command must preserve this — applyFlag writes
+	// to cmd.Flags directly and will panic on a nil map.
 	cmd := &Command{Raw: text, Flags: map[string]string{}}
 	first := strings.ToLower(tokens[0])
 	rest := tokens[1:]
 
 	switch Subcommand(first) {
 	case SubcmdHelp:
+		// Help is the friendly default; trailing tokens are
+		// intentionally ignored so a user fumbling `help me` still
+		// gets help instead of an `ErrUnexpectedArgument`. This is
+		// the one deliberate exception to the strict-posture rule.
 		cmd.Subcommand = SubcmdHelp
 		return cmd, nil
 	case SubcmdGet:
@@ -204,6 +214,9 @@ func Parse(text string) (*Command, error) {
 		return parseAliasOnly(cmd, rest)
 	case SubcmdAliases:
 		cmd.Subcommand = SubcmdAliases
+		if len(rest) > 0 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, rest[0])
+		}
 		return cmd, nil
 	case SubcmdAdmin:
 		cmd.Subcommand = SubcmdAdmin
@@ -213,6 +226,9 @@ func Parse(text string) (*Command, error) {
 		return parseCreate(cmd, rest)
 	case SubcmdList:
 		cmd.Subcommand = SubcmdList
+		if len(rest) > 0 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, rest[0])
+		}
 		return cmd, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownSubcommand, tokens[0])
@@ -223,6 +239,14 @@ func Parse(text string) (*Command, error) {
 // single token. We don't need shell-grade quoting (no escapes, no single
 // quotes) — Slack's form already collapses surrounding control characters
 // before we see the body.
+//
+// `inQuotes` is a parity toggle, not a balanced-pair matcher: every `"`
+// flips the state. Adversarial input like `"a"b"c"` toggles four times
+// and produces a single token. Slack's slash-command box can't realistically
+// emit such input, but a future caller swapping in a different source
+// should be aware the contract is "even count of `"` → quoted runs
+// behave as expected; odd count → falls back to the unbalanced-tolerance
+// path below."
 //
 // Balanced outer double quotes around a positional token are stripped so
 // `setalias $a "https://x"` produces `Target = "https://x"` rather than
@@ -257,6 +281,17 @@ func tokenize(text string) []string {
 		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 			s = s[1 : len(s)-1]
 		}
+		// Drop tokens that are empty post-strip. A bare `""` would
+		// otherwise produce an empty-string token here (the
+		// cur.Len() == 0 guard above catches only the pre-write
+		// state, not the post-strip state), letting `setalias $a ""`
+		// slip through with Target = "" instead of ErrMissingTarget.
+		// Slack collapses adjacent whitespace before we see the
+		// body, so a non-quoted-pair empty token is unreachable.
+		if s == "" {
+			cur.Reset()
+			return
+		}
 		out = append(out, s)
 		cur.Reset()
 	}
@@ -287,6 +322,15 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	}
 	cmd.Alias = alias
 	for _, tok := range rest[1:] {
+		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
+		// `get $alias junk` reads as a typo (matches the strict
+		// posture taken on `aliases`, `list`, `admin policies`, etc.).
+		// applyFlag would otherwise report "invalid flag: \"junk\"
+		// (expected key:value)" — accurate to applyFlag but confusing
+		// to a user who didn't intend to type a flag at all.
+		if !strings.ContainsRune(tok, ':') {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
+		}
 		if err := applyFlag(cmd, tok); err != nil {
 			return nil, err
 		}
@@ -294,9 +338,14 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	return cmd, nil
 }
 
-// parseSetAlias extracts `$alias <target>`. The target is everything after
-// the alias glued back together, so URLs with spaces (rare but legal in
-// some forms) survive.
+// parseSetAlias extracts `$alias <target>`. Strict-posture like the
+// other verbs: exactly one alias and exactly one target. Quoted URLs
+// (e.g. `setalias $a "https://x with space"`) survive as a single
+// token because [tokenize] keeps quoted runs intact, so the
+// previous "join the tail" behavior was only ever reachable for
+// unquoted multi-word input — which is precisely the typo class
+// (`setalias $a https://x dm:true` silently swallowing a stray
+// flag-shaped token) we want to reject.
 func parseSetAlias(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
@@ -309,7 +358,10 @@ func parseSetAlias(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) < 2 {
 		return nil, ErrMissingTarget
 	}
-	cmd.Target = strings.Join(rest[1:], " ")
+	if len(rest) > 2 {
+		return nil, fmt.Errorf("%w: %q (quote the target if it contains spaces)", ErrUnexpectedArgument, rest[2])
+	}
+	cmd.Target = rest[1]
 	return cmd, nil
 }
 
@@ -423,13 +475,17 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 }
 
 // parseCreate keeps the legacy free-form-URL grammar working through
-// PR-3c.3 (the cutover to alias-only mints). The whole tail is treated
-// as the target.
+// PR-3c.3 (the cutover to alias-only mints). Strict-posture like
+// every other verb: exactly one target token. URLs containing spaces
+// must be quoted so [tokenize] keeps them as one token.
 func parseCreate(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrMissingTarget
 	}
-	cmd.Target = strings.Join(rest, " ")
+	if len(rest) > 1 {
+		return nil, fmt.Errorf("%w: %q (quote the target if it contains spaces)", ErrUnexpectedArgument, rest[1])
+	}
+	cmd.Target = rest[0]
 	return cmd, nil
 }
 
@@ -472,12 +528,24 @@ func matchChannel(tok string) (string, bool) {
 // set to empty" by absence in [Command.Flags] alone.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
-	if colonIdx <= 0 {
+	if colonIdx < 0 {
 		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+	}
+	if colonIdx == 0 {
+		return fmt.Errorf("invalid flag: %q (missing key before colon)", tok)
 	}
 	// Lowercase only the key portion so `Reason:"On Call"` keeps
 	// its mixed-case value intact.
 	normalized := strings.ToLower(tok[:colonIdx]) + tok[colonIdx:]
+	// Empty bare value (`reason:`) doesn't match flagPattern's
+	// `(\S+)` alternation, so the regex would surface a generic
+	// "expected key:value" error — but the shape IS key:value, just
+	// with no value. Detect it ahead of the regex so bare-empty and
+	// quoted-empty (`reason:""`) both report the same "empty value"
+	// reason.
+	if colonIdx == len(tok)-1 {
+		return fmt.Errorf("invalid flag: %q (empty value — use a non-empty value or omit the flag)", tok)
+	}
 	m := flagPattern.FindStringSubmatch(normalized)
 	if len(m) == 0 {
 		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)

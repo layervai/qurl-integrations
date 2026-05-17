@@ -2,6 +2,7 @@ package internal
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,12 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "channel ref without name", text: "admin allow <#C00001> $alias-name", wantSub: SubcmdAdmin, wantAdmin: AdminAllow, wantAlias: "alias-name", wantChannel: "C00001", wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		{name: "create with quoted target strips outer quotes", text: `create "https://x.example/with space"`, wantSub: SubcmdCreate, wantTarget: "https://x.example/with space", wantFlags: map[string]string{}},
+		// Unbalanced quotes: tokenize tolerates (does not reject)
+		// odd-count `"` runs. The opening quote stays literal in
+		// Target and downstream URL validation surfaces the error.
+		// Pinned here so a future refactor of tokenize can't
+		// silently change the tolerance contract.
+		{name: "setalias with unbalanced opening quote tolerated", text: `setalias $prod-db "https://x.example`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: `"https://x.example`, wantFlags: map[string]string{}},
 		{name: "uppercase flag key normalized", text: "get $prod-db DM:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
 		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
@@ -132,6 +139,26 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// misleading "alias must start with $" message.
 		{name: "admin allow with extra arg after both slots filled", text: "admin allow <#C1|a> $alias garbage", wantErr: ErrUnexpectedArgument},
 		{name: "admin disallow with extra arg after both slots filled", text: "admin disallow <#C1|a> $alias garbage", wantErr: ErrUnexpectedArgument},
+		// Strict-posture on `setalias`: a stray flag-shaped token
+		// after the target must reject, not silently get glued
+		// into Target via space-join. Quoted multi-word targets
+		// survive as a single token through [tokenize].
+		{name: "setalias with extra trailing token rejected", text: "setalias $prod-db https://x.example dm:true", wantErr: ErrUnexpectedArgument},
+		{name: "setalias with extra trailing positional rejected", text: "setalias $prod-db https://x.example extra-garbage", wantErr: ErrUnexpectedArgument},
+		// Empty-quoted target would otherwise tokenize to a present-
+		// but-empty Target string and bypass ErrMissingTarget.
+		// tokenize's post-strip empty-token drop ensures the verb
+		// hits the missing-target branch — matches the strict posture.
+		{name: "setalias with empty quoted target rejected", text: `setalias $prod-db ""`, wantErr: ErrMissingTarget},
+		// Strict-posture on no-arg verbs `aliases` and `list`: extra
+		// positionals reject just like `admin policies extra` does.
+		// Carve-out is `help` only (friendly default).
+		{name: "aliases with extra positional rejected", text: "aliases junk", wantErr: ErrUnexpectedArgument},
+		{name: "list with extra positional rejected", text: "list extra-garbage", wantErr: ErrUnexpectedArgument},
+		// Non-flag-shaped trailing token on `get`: surface as
+		// ErrUnexpectedArgument rather than the misleading
+		// "invalid flag" message applyFlag would otherwise return.
+		{name: "get with non-flag trailing positional rejected", text: "get $prod-db junk", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
@@ -153,16 +180,25 @@ func TestParse_ErrorPaths(t *testing.T) {
 // no-op into ephemeral-channel post. Empty values (`key:` or `key:""`)
 // reject so the handler in PR-3c.3+ can rely on absence-in-map to
 // mean "flag unset" (no third "set-to-empty" state to distinguish).
+// `wantSubstr` fences the user-visible message so both empty-value
+// shapes (`key:` and `key:""`) report a consistent "empty value"
+// reason instead of one of them landing in the generic
+// "expected key:value" bucket.
 func TestParse_GetFlagErrors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		text string
+		name       string
+		text       string
+		wantSubstr string
 	}{
-		{name: "unknown flag key", text: "get $prod-db whatever:true"},
-		{name: "malformed flag (no colon)", text: "get $prod-db reasontruly"},
-		{name: "empty bare value", text: "get $prod-db reason:"},
-		{name: "empty quoted value", text: `get $prod-db reason:""`},
+		{name: "unknown flag key", text: "get $prod-db whatever:true", wantSubstr: "unknown flag"},
+		// A trailing token with no colon hits the parseGet
+		// strict-posture check before applyFlag; it surfaces as
+		// "unexpected argument" rather than "expected key:value"
+		// because the user almost certainly didn't intend a flag.
+		{name: "malformed flag (no colon) surfaces as unexpected arg", text: "get $prod-db reasontruly", wantSubstr: "unexpected argument"},
+		{name: "empty bare value", text: "get $prod-db reason:", wantSubstr: "empty value"},
+		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSubstr: "empty value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +206,9 @@ func TestParse_GetFlagErrors(t *testing.T) {
 			_, err := Parse(tc.text)
 			if err == nil {
 				t.Fatalf("Parse(%q) error = nil, want non-nil", tc.text)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("Parse(%q) error = %q, want substring %q", tc.text, err.Error(), tc.wantSubstr)
 			}
 		})
 	}

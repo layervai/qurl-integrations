@@ -14,12 +14,6 @@ import (
 // slack-go/slack library here to avoid pulling a heavyweight
 // transitive into the binary just for a fixed set of view payloads.
 
-// responseTypeEphemeral is the Slack response_type that scopes a
-// message to the requester (visible only to them, in-channel).
-// Lifted to a constant because it appears in every response payload
-// shape — `:warning:` errors, the help block, the spinner replacement.
-const responseTypeEphemeral = "ephemeral"
-
 // callbackIDSetAliasRebind is the modal callback used by the
 // `setalias` rebind confirmation flow. The view-submission handler
 // matches on this to know which path to take.
@@ -33,8 +27,8 @@ const callbackIDAdminClaim = "admin_claim_redeem"
 // blockIDClaimCode is the block ID for the bootstrap-code field in
 // the admin-claim modal. Stable so view-submission handlers can pull
 // the value out by a known key — and so the bot's logging middleware
-// (PR-3c.3+) can match on it for the redaction set in
-// [RedactedSubmissionBlockIDs].
+// (PR-3c.3+) can match on it via [IsRedactedSubmissionBlock] before
+// serializing the payload.
 const blockIDClaimCode = "claim_code_block"
 
 // actionIDClaimCode is the action ID for the bootstrap-code input
@@ -87,7 +81,7 @@ func IsRedactedSubmissionBlock(blockID string) bool {
 // slash-command HTTP response body (not a modal).
 func HelpResponse() ([]byte, error) {
 	payload := map[string]any{
-		"response_type": responseTypeEphemeral,
+		respFieldResponseType: respTypeEphemeral,
 		"blocks": []any{
 			sectionBlock("*/qurl* — Create and manage qURLs from Slack"),
 			dividerBlock(),
@@ -95,6 +89,7 @@ func HelpResponse() ([]byte, error) {
 				"*Aliased commands (alias-only world)*",
 				"`/qurl get $alias` — mint an access link for an alias",
 				"`/qurl get $alias dm:true` — DM the link instead of channel ephemeral",
+				"`/qurl get $alias reason:\"audit text\"` — attach a reason to the mint (audit trail)",
 				"`/qurl setalias $alias <url-or-resource_id>` — bind an alias (admin only)",
 				"`/qurl unsetalias $alias` — clear an alias (admin only)",
 				"`/qurl aliases` — list channel-allowed aliases",
@@ -141,6 +136,15 @@ type SetAliasRebindMetadata struct {
 // and `newTarget` are the human-readable strings to show side-by-side.
 // The caller is expected to pass this payload to `views.open` along
 // with the Slack-supplied trigger ID.
+//
+// oldTarget/newTarget are interpolated into mrkdwn code spans
+// (a backtick-wrapped %s). URLs and r_... resource IDs realistically
+// never contain backticks, but the rebind modal is shown to one admin
+// after another admin set the target, so a malicious admin could
+// otherwise break out of the code span and inject mrkdwn
+// (e.g. <!channel>, <@U…>) into the confirming admin's view.
+// [escapeMrkdwnCode] neutralizes the only character that matters
+// for the code-span surface.
 func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error) {
 	meta, err := json.Marshal(SetAliasRebindMetadata{Alias: aliasName})
 	if err != nil {
@@ -154,13 +158,28 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 		"close":            plainTextObj("Cancel"),
 		"private_metadata": string(meta),
 		"blocks": []any{
-			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", aliasName)),
-			sectionBlock(fmt.Sprintf("*Current target:* `%s`", oldTarget)),
-			sectionBlock(fmt.Sprintf("*New target:* `%s`", newTarget)),
+			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", escapeMrkdwnCode(aliasName))),
+			sectionBlock(fmt.Sprintf("*Current target:* `%s`", escapeMrkdwnCode(oldTarget))),
+			sectionBlock(fmt.Sprintf("*New target:* `%s`", escapeMrkdwnCode(newTarget))),
 			contextBlock("This action overwrites the existing binding for everyone in the workspace."),
 		},
 	}
 	return json.Marshal(payload)
+}
+
+// escapeMrkdwnCode neutralizes the two characters that can break out
+// of a mrkdwn code span: backtick (closes the span) and newline
+// (Slack's renderer ends the span at a hard newline). Without
+// escaping, a value containing either would let the remainder
+// render as mrkdwn — opening an injection vector for user-supplied
+// targets (admin-set DDB rows). Backtick is replaced with U+02CA
+// (MODIFIER LETTER ACUTE ACCENT) which keeps a close visual
+// approximation; newline becomes a single space so the rebind
+// modal stays one-line per target.
+func escapeMrkdwnCode(s string) string {
+	s = strings.ReplaceAll(s, "`", "ˊ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
 }
 
 // AdminClaimModal renders the modal shown when a user runs
@@ -182,7 +201,7 @@ func AdminClaimModal() ([]byte, error) {
 	payload := map[string]any{
 		"type":        "modal",
 		"callback_id": callbackIDAdminClaim,
-		"title":       plainTextObj("Claim workspace"),
+		"title":       plainTextObj("Claim qURL workspace"),
 		"submit":      plainTextObj("Submit"),
 		"close":       plainTextObj("Cancel"),
 		"blocks": []any{
@@ -213,9 +232,9 @@ func AdminClaimModal() ([]byte, error) {
 // plan); false for direct slash-command response bodies.
 func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 	payload := map[string]any{
-		"response_type":    responseTypeEphemeral,
-		"replace_original": replaceOriginal,
-		"text":             ":warning: " + message,
+		respFieldResponseType: respTypeEphemeral,
+		"replace_original":    replaceOriginal,
+		respFieldText:         ":warning: " + message,
 	}
 	return json.Marshal(payload)
 }
