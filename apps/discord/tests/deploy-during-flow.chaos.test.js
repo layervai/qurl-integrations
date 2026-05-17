@@ -159,10 +159,12 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
 
   beforeEach(() => { now = 1_700_000_000_000; });
   // Cheap defense against an un-restored spy leaking between tests
-  // (jest.spyOn(leader, 'pushHandoff') in test #1 below). Works today
-  // because assembleLeader() builds a fresh leader per test, but if a
-  // future refactor pulls leader assembly into beforeAll, the
-  // unrestored spy would leak.
+  // (jest.spyOn(lock, 'transferLock') in test #1 below). Works today
+  // because assembleLeader() builds a fresh leader+lock per test, but
+  // if a future refactor pulls assembly into beforeAll, the
+  // unrestored spy would leak. Note this does NOT reset the per-test
+  // ddbMock — each test gets its own via setupChaosDdb(), so the
+  // afterEach is a no-op for the mock client.
   afterEach(() => { jest.restoreAllMocks(); });
 
   it('SIGTERM with healthy standby peer → transferLock + push ACK + clean exit(0)', async () => {
@@ -195,7 +197,7 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       ],
     });
 
-    const { leader, logger } = assembleLeader({ docClient, clock });
+    const { leader, lock, logger } = assembleLeader({ docClient, clock });
     // handleInboundHandoff is the production path that flips heldLock
     // true; it internally calls lock.adoptLockFromHandoff(expectedVersion)
     // (adopt-then-flag-then-connect ordering). Driving it here primes
@@ -207,39 +209,28 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       activeInstanceId: 'predecessor', expectedVersion: 3,
     });
 
-    // Spy on the leader's pushHandoff so we can observe call ORDER vs
-    // eventPublisher.stop. Wall-clock measurement was tried first but
-    // can't distinguish parallel from serialized at the timescales
-    // mocked-DDB pushHandoff runs at (single-digit ms); call-order is
-    // the right signal.
+    // Spy on `lock.transferLock` (the real primitive seam invoked by
+    // pushHandoff) so we can observe call ORDER vs eventPublisher.stop.
+    // Wall-clock measurement was tried first but can't distinguish
+    // parallel from serialized at the timescales mocked-DDB
+    // transferLock runs at (single-digit ms); call-order is the right
+    // signal. Spying on transferLock (rather than the leader's
+    // pushHandoff) keeps the test decoupled from the leader's surface
+    // shape — if a future refactor destructures or caches pushHandoff,
+    // the closure still holds the same `lock` reference and the spy
+    // still fires.
     //
-    // Brittleness note: this spy works because runPushHandoffShutdown
-    // calls `gatewayLeader.pushHandoff()` through the object property
-    // (`createGatewayLeader` returns an object literal of closures).
-    // If a future refactor destructures or caches the method elsewhere
-    // (e.g. `const { pushHandoff } = gatewayLeader`), this spy would
-    // silently bypass and the ordering assertion would mysteriously
-    // fail. If that lands, switch the spy target to `lock.transferLock`
-    // (the seam between real primitives that pushHandoff awaits
-    // internally) — same call-order signal, decoupled from the
-    // leader's surface shape.
-    //
-    // Timeline-based check (in addition to "both called within one
-    // tick"): record both `stop()` invoke and `pushHandoff()` resolve
-    // as ordered events, then assert stop-invoke landed BEFORE
-    // pushHandoff-resolve. A regression that serializes the drain
-    // (`await pushHandoff(); then stop()`) would resolve pushHandoff
+    // Timeline-based check (in addition to "stop was called"): record
+    // both `stop()` invoke and `transferLock()` resolve as ordered
+    // events, then assert stop-invoke landed BEFORE
+    // transferLock-resolve. A regression that serializes the drain
+    // (`await pushHandoff(); then stop()`) would resolve transferLock
     // first, then invoke stop — failing the ordering check.
     const timeline = [];
-    const origPushHandoff = leader.pushHandoff.bind(leader);
-    // Brittleness alert: this spy attaches via object-property
-    // dispatch. See the spy-brittleness paragraph in the file
-    // header — if pushHandoff is ever cached/destructured by the
-    // caller, swap this spy for `lock.transferLock` (the seam
-    // between real primitives) to preserve the call-order signal.
-    const pushHandoffSpy = jest.spyOn(leader, 'pushHandoff').mockImplementation(async (...args) => {
-      const result = await origPushHandoff(...args);
-      timeline.push('pushHandoff-resolved');
+    const origTransferLock = lock.transferLock.bind(lock);
+    jest.spyOn(lock, 'transferLock').mockImplementation(async (...args) => {
+      const result = await origTransferLock(...args);
+      timeline.push('transferLock-resolved');
       return result;
     });
     const baseEventPublisher = makeControllableEventPublisher();
@@ -257,44 +248,27 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       code: 0, gatewayLeader: leader, eventPublisher, logger,
       exit, scheduleHardExit: schedule, clearHardExit,
     });
-    // Wait for pushHandoff to fully resolve. A single setImmediate
-    // yield is enough today (the body's awaits drain in microtasks
-    // ahead of setImmediate), but bounding by a yield counter
-    // (`MAX_MICROTASK_YIELDS`) is robust if a future refactor adds
-    // another await inside pushHandoff (e.g. a metric flush or extra
-    // DDB round-trip). The diagnostic throw turns a future flake
-    // into a clear failure message.
-    let yieldsForPushResolve = 0;
-    while (!timeline.includes('pushHandoff-resolved')) {
-      if (yieldsForPushResolve++ >= MAX_MICROTASK_YIELDS) {
-        throw new Error(
-          `chaos: pushHandoff did not resolve within ${MAX_MICROTASK_YIELDS} setImmediate yields; ` +
-          `timeline: ${JSON.stringify(timeline)}. ` +
-          `If pushHandoff grew an extra await hop, raise the bound; if it now hangs, ` +
-          `that's a real regression (test #3 covers the timeout path).`
-        );
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => { setImmediate(r); });
-    }
+    // Release the pending stop() so runPushHandoffShutdown's
+    // `await drainPromise` can resolve once it's reached. Order doesn't
+    // matter — the timeline observes both events regardless.
+    eventPublisher.releaseStop();
+    // Drive the full shutdown to completion (pushHandoff body runs,
+    // transferLock resolves, drainPromise resolves, exit fires). With
+    // mocked DDB this is a few microtask hops; no polling needed.
+    await shutdownPromise;
 
-    expect(pushHandoffSpy).toHaveBeenCalled();
     expect(eventPublisher.stop).toHaveBeenCalledTimes(1);
+    expect(lock.transferLock).toHaveBeenCalledTimes(1);
 
-    // Ordering check: stop-invoke must come before pushHandoff-resolve.
-    // Tighter than "both called within one tick" — a serialized
-    // `await pushHandoff(); then stop()` would resolve pushHandoff
+    // Ordering check: stop-invoke must come before transferLock-resolve.
+    // Tighter than "both called". A serialized refactor
+    // (`await pushHandoff(); then stop()`) would resolve transferLock
     // first, then invoke stop, flipping the order.
     const stopIdx = timeline.indexOf('stop-invoked');
-    const pushResolvedIdx = timeline.indexOf('pushHandoff-resolved');
+    const transferResolvedIdx = timeline.indexOf('transferLock-resolved');
     expect(stopIdx).toBeGreaterThanOrEqual(0);
-    expect(pushResolvedIdx).toBeGreaterThanOrEqual(0);
-    expect(stopIdx).toBeLessThan(pushResolvedIdx);
-
-    // Release the pending stop() so runPushHandoffShutdown's
-    // `await drainPromise` resolves and exit() fires.
-    eventPublisher.releaseStop();
-    await shutdownPromise;
+    expect(transferResolvedIdx).toBeGreaterThanOrEqual(0);
+    expect(stopIdx).toBeLessThan(transferResolvedIdx);
 
     expect(state.lockRow).not.toBeNull();
     expect(state.lockRow.instance_id).toBe(INSTANCE_B);
@@ -441,7 +415,12 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       await new Promise((r) => { setImmediate(r); });
     }
     expect(timers).toHaveLength(1);
-    expect(timers[0].ms).toBe(12_000);
+    // A hard-exit timer was scheduled with a positive deadline; the
+    // exact `ceilingMs` value (12 s default) is pinned by
+    // gateway-shutdown-helpers' unit test. Asserting a positive bound
+    // here keeps the chaos check resilient to a future ceiling tune
+    // without losing the "a hard-exit was armed" signal.
+    expect(timers[0].ms).toBeGreaterThan(0);
     timers[0].cb();
 
     // The hard-exit path calls exit(forcedExitCode) and the shutdown

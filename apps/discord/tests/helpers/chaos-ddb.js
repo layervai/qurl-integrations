@@ -97,6 +97,14 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
   // only since Delete (releaseLock) doesn't guard on version.
   function assertLockCas(cmd, { requireSelf = true, checkVersion = false } = {}) {
     if (!state.lockRow) throw makeCcfe();
+    // Production DDB enforces CAS on the ConditionExpression itself,
+    // not on the values bound to it. A regression that strips
+    // ConditionExpression but keeps ExpressionAttributeValues would
+    // pass a values-only check; require the expression text too so
+    // the mock matches prod's enforcement boundary.
+    if (requireSelf && !(cmd.ConditionExpression && cmd.ConditionExpression.includes('instance_id = :self'))) {
+      throw makeCcfe();
+    }
     const v = cmd.ExpressionAttributeValues || {};
     if (requireSelf && v[':self'] === undefined) throw makeCcfe();
     if (v[':self'] !== undefined && v[':self'] !== state.lockRow.instance_id) {
