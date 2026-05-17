@@ -226,7 +226,7 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "missing $alias") {
+	if !strings.Contains(ack, "$alias argument") {
 		t.Errorf("ack missing alias-hint: %q", ack)
 	}
 }
