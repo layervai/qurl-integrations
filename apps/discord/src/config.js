@@ -1,4 +1,79 @@
 const path = require('path');
+const os = require('os');
+
+// Sync derivation for INSTANCE_ID / INSTANCE_IP (hot-standby identity).
+// Each helper runs once at module-load and is cached into the exported
+// config object — readers of `config.INSTANCE_ID` see a frozen value,
+// not a re-evaluation on access.
+//
+// ECS Fargate awsvpc gives each task its own hostname and ENI, but it
+// does NOT substitute `${ECS_TASK_ARN}` into task-def env-var values
+// (only `command = []` and `entryPoint = []` see that interpolation).
+// Rather than spin up an async ECS-metadata-endpoint fetch at boot —
+// which would push the missing-env guard past module load and add an
+// HTTP dependency to startup — derive both values from Node's `os`
+// module, which is sync, network-free, and works identically in ECS,
+// local docker, and unit tests. Per-field semantics are commented at
+// the call sites below.
+//
+// LOAD-BEARING INVARIANT for the lock primitive: two replicas in the
+// same ECS service MUST see different INSTANCE_ID values. Fargate
+// assigns a unique short alphanumeric hostname per task, which
+// satisfies this — but if a future runtime ever reused hostnames
+// across replicas in the same service, the DDB lock would short-
+// circuit and both replicas would believe they hold leadership.
+// The peer-heartbeat row collision (two writers on the same composite
+// key) would surface post-deploy as a telemetry signal.
+// Env overrides are trimmed for parity with GUILD_ID / STORE_TYPE /
+// ALLOWED_GITHUB_ORGS upstream — a trailing space on INSTANCE_ID
+// would otherwise silently key into the DDB lock and a replica
+// mismatch would be hard to spot.
+//
+// Shape validation for env overrides lives in `invalidHotStandbyValues`
+// (boot-requirements.js): this helper trusts env values verbatim,
+// the boot-time validator catches malformed IPv4 / template-literal
+// pastes via a single source of truth.
+//
+// `addr.family === 'IPv4'` matches Node 22's `os.networkInterfaces()`
+// string-form contract. Node 18.0.0 briefly returned numeric `4`/`6`
+// before that was reverted; we accept both shapes so a future Node
+// major regressing back to numeric doesn't return null on every
+// Fargate boot (which would surface as a misleading "no IPv4 found"
+// diagnostic at 3am).
+function deriveInstanceId() {
+  // `|| null` normalizes the rare empty-hostname case (chroot or
+  // misconfigured init namespace) for symmetry with deriveInstanceIp.
+  // missingHotStandbyKeys catches both null and '' via its falsy
+  // check, so behavior is unchanged — the symmetry is for callers
+  // reading config.INSTANCE_ID and reasoning about its possible shapes.
+  return process.env.INSTANCE_ID?.trim() || os.hostname() || null;
+}
+
+function isIPv4(addr) {
+  return (addr.family === 'IPv4' || addr.family === 4) && !addr.internal;
+}
+
+function deriveInstanceIp() {
+  const envOverride = process.env.INSTANCE_IP?.trim();
+  if (envOverride) return envOverride;
+  const ifaces = os.networkInterfaces();
+  // First pass: eth0 (the awsvpc ENI's stable name) gets priority —
+  // under Fargate this always returns on the first candidate.
+  for (const addr of ifaces.eth0 || []) {
+    if (isIPv4(addr)) return addr.address;
+  }
+  // Fallback for local/dev (macOS `en0`, stripped containers without
+  // `eth0`, etc.). Iteration order is whatever `os.networkInterfaces()`
+  // returns — best-effort only. The eth0 entries get re-walked here
+  // but yield nothing (the first pass already rejected every candidate),
+  // so a separate skip isn't worth the noise.
+  for (const addrs of Object.values(ifaces)) {
+    for (const addr of addrs || []) {
+      if (isIPv4(addr)) return addr.address;
+    }
+  }
+  return null;
+}
 
 // Safe int parser: handles NaN and falsy-zero correctly.
 //
@@ -456,22 +531,26 @@ module.exports = {
 
   // Per-replica identity. The leader coordinator writes this into the
   // DDB lock row as the holder; the control-channel server logs it on
-  // every handoff; the peer-heartbeat row keys on it. Injected by the
-  // ECS task-def `environment = []` block from `${ECS_TASK_ARN}` or
-  // the task metadata endpoint — the deploy is responsible for
-  // ensuring two replicas never share the same value (the lock would
-  // otherwise short-circuit and both replicas would think they hold
-  // it). When unset (hot-standby off), the leader code path doesn't
-  // run, so the value is never read.
-  INSTANCE_ID: process.env.INSTANCE_ID || null,
+  // every handoff; the peer-heartbeat row keys on it. Derived from
+  // `os.hostname()` (Fargate sets this to a short alphanumeric per
+  // task — distinct across replicas in the same service); env override
+  // wins. Populated unconditionally at module-load (even when
+  // hot-standby is off) — safe because every consumer in index.js
+  // lives inside `startHotStandby()`, which only runs when the flag
+  // is on. A non-null `config.INSTANCE_ID` is NOT a hot-standby
+  // indicator on its own. LOAD-BEARING INVARIANT (full rationale
+  // above `deriveInstanceId`): two replicas in the same ECS service
+  // MUST see different values, or the DDB lock short-circuits.
+  INSTANCE_ID: deriveInstanceId(),
 
   // The IPv4 address peers reach this replica on (`http://<ip>:<port>/control/yours`).
-  // ECS awsvpc mode assigns a routable VPC IP per task and exposes it
-  // on the ECS metadata endpoint `$ECS_CONTAINER_METADATA_URI_V4`;
-  // the task-def `environment = []` block plumbs that into INSTANCE_IP
-  // at boot. Used by the peer-heartbeat row's `address_v4` field so
-  // the active replica's pushHandoff client knows where to connect.
-  INSTANCE_IP: process.env.INSTANCE_IP || null,
+  // ECS awsvpc mode assigns a routable VPC IP per task on the task's
+  // eth0 ENI; `os.networkInterfaces()` exposes it sync at boot. Used
+  // by the peer-heartbeat row's `address_v4` field so the active
+  // replica's pushHandoff client knows where to connect. Env override
+  // wins; if no non-internal IPv4 exists, this is null and
+  // invalidHotStandbyValues rejects boot.
+  INSTANCE_IP: deriveInstanceIp(),
 
   // Bind/listen ports for the in-VPC control channel that receives
   // pushHandoff envelopes from the outgoing leader. The bind address
