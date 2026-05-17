@@ -148,7 +148,7 @@ func decodeSlackText(t *testing.T, raw []byte) string {
 		t.Fatalf("unmarshal response body: %v\nraw=%s", err, string(raw))
 	}
 	if resp[respFieldResponseType] != respTypeEphemeral {
-		t.Errorf("response_type = %q, want %q", resp["response_type"], respTypeEphemeral)
+		t.Errorf("response_type = %q, want %q", resp[respFieldResponseType], respTypeEphemeral)
 	}
 	return resp[respFieldText]
 }
@@ -180,14 +180,19 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		{name: "garbage target rejected", input: "$staging not-a-url", wantErr: true},
 		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " https://x.example", wantErr: true},
 		{name: "bare r_ sigil rejected", input: "$staging r_", wantErr: true},
+		// Backtick in target would break the Slack inline-code fence
+		// the success-copy interpolates the target into. Rejected at
+		// parse time so the response renders cleanly.
+		{name: "backtick in r_ target rejected", input: "$staging r_abc`bad", wantErr: true},
+		{name: "backtick in URL target rejected", input: "$staging https://example.com/`x", wantErr: true},
 
 		// Fence: http://localhost is currently ACCEPTED. The parser
 		// stays scheme-permissive because qurl-service is the
-		// authoritative validator on target reachability. If/when
-		// the parser grows a public-host gate (claude-bot review #3
-		// SSRF-adjacent follow-up), flip this row to wantErr and
-		// the test starts enforcing the new contract.
-		{name: "localhost target ACCEPTED (TODO: SSRF gate)", input: "$staging http://localhost:3000", wantAlias: "staging", wantTgt: "http://localhost:3000"},
+		// authoritative validator on target reachability. The
+		// public-host gate follow-up is tracked in #350; when that
+		// lands, flip this row to wantErr and the test starts
+		// enforcing the new contract.
+		{name: "localhost target ACCEPTED (see #350: SSRF gate)", input: "$staging http://localhost:3000", wantAlias: "staging", wantTgt: "http://localhost:3000"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,6 +368,36 @@ func TestSetChannelAlias_DuplicateAliasSameChannelReturns409(t *testing.T) {
 	b := store.bindings(testAliasTeamID, testAliasChannelID)
 	if b[testAliasName] != "r_first" {
 		t.Errorf("original binding clobbered: bindings = %v", b)
+	}
+}
+
+// TestSetAlias_MissingTeamOrChannelID pins the defensive guard in
+// aliasPreamble: a Slack form payload that arrives without team_id or
+// channel_id surfaces the "Could not read your Slack workspace or
+// channel ID" copy and never dials the store. Catches a malformed
+// fixture or a future regression in form parsing rather than silently
+// writing a row keyed on empty strings.
+func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
+	h, store := newAliasTestHandler(t)
+	// channel_id empty.
+	body, sign := aliasSlashRequest(t, "setalias $staging https://example.com", testAliasTeamID, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, "Could not read your Slack workspace or channel ID") {
+		t.Errorf("missing channel_id response = %q, want defensive-guard copy", got)
+	}
+	// team_id empty.
+	body2, sign2 := aliasSlashRequest(t, "setalias $staging https://example.com", "", testAliasChannelID)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, newSignedRequest(t, "/slack/commands", body2, sign2))
+	got2 := decodeSlackText(t, w2.Body.Bytes())
+	if !strings.Contains(got2, "Could not read your Slack workspace or channel ID") {
+		t.Errorf("missing team_id response = %q, want defensive-guard copy", got2)
+	}
+	// Store must not have been dialed in either branch.
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+		t.Errorf("missing-id guard should have short-circuited before store dial, got bindings=%v", b)
 	}
 }
 
@@ -566,4 +601,30 @@ func TestSetAliasStore_DoubleSetPanics(t *testing.T) {
 		}
 	}()
 	h.SetAliasStore(store)
+}
+
+// TestSetAliasStore_NilPassthrough pins the documented contract that
+// a nil argument is a no-op (the verbs reply with the "not configured"
+// copy via the aliasPreamble guard) and that a defensive
+// SetAliasStore(nil) doesn't block a later real wiring. This is the
+// shape cmd/main.go uses on sandbox deploys.
+func TestSetAliasStore_NilPassthrough(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	// nil is a no-op; field stays nil.
+	h.SetAliasStore(nil)
+	if h.aliasStore != nil {
+		t.Fatal("SetAliasStore(nil) should leave aliasStore unset")
+	}
+	// Real wiring afterward still works.
+	store := newFakeAliasStore()
+	h.SetAliasStore(store)
+	if h.aliasStore == nil {
+		t.Fatal("SetAliasStore(store) should wire the field after a prior nil call")
+	}
+	// A second nil call after a real store is still a no-op (doesn't
+	// swap or panic).
+	h.SetAliasStore(nil)
+	if h.aliasStore == nil {
+		t.Fatal("SetAliasStore(nil) after wiring should not clear the field")
+	}
 }

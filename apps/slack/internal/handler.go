@@ -178,16 +178,24 @@ type Handler struct {
 }
 
 // SetAliasStore wires the per-channel alias persistence surface into
-// the /qurl setalias / /qurl unsetalias verbs. Must be called exactly
-// once, before srv.Serve. nil is a no-op (the verbs will reply with
-// a "not configured" ephemeral) so cmd/main.go can omit the call on
-// sandbox deploys that haven't onboarded the slackdata package yet.
-// A second non-nil call panics — the field is read on the request
-// hot path without synchronization, and the only safe write window
-// is before any goroutine can observe it.
+// the /qurl setalias / /qurl unsetalias verbs. Must be called before
+// srv.Serve — the field is read on the request hot path without
+// synchronization, and the only safe write window is before any
+// goroutine can observe it.
+//
+// Calling with nil is a no-op for the field (the verbs will reply
+// with a "not configured" ephemeral) so cmd/main.go can omit the
+// call on sandbox deploys that haven't onboarded the slackdata
+// package yet — and a defensive `SetAliasStore(nil)` followed by a
+// real wiring later is fine. Calling with a non-nil store after the
+// field is already non-nil panics, so the real store can't be
+// silently swapped under a running handler.
 func (h *Handler) SetAliasStore(store AliasStore) {
+	if store == nil {
+		return
+	}
 	if h.aliasStore != nil {
-		panic("SetAliasStore called twice — must be called once before Serve")
+		panic("SetAliasStore called twice with a non-nil store — must be wired once before Serve")
 	}
 	h.aliasStore = store
 }

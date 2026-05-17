@@ -151,6 +151,15 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	}
 
 	tgt := tokens[1]
+	// Reject backticks before any further parsing: the handler echoes
+	// the target into a Slack inline-code fence (\`<tgt>\`) on the
+	// success-copy path, and a backtick inside `tgt` breaks the
+	// rendered formatting. The admin-gate trust model makes this
+	// rendering hygiene, not security — but a one-character footgun
+	// is worth closing at the parser rather than at the response.
+	if strings.ContainsRune(tgt, '`') {
+		return nil, msgAliasTargetInvalid
+	}
 	if strings.HasPrefix(tgt, resourceIDPrefix) {
 		// `r_…` short-circuit. We don't enforce a deeper character set
 		// here — qurl-service's resource-id validator is the
