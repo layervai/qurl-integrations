@@ -250,13 +250,11 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     eventPublisher.releaseStop();
     await shutdownPromise;
 
-    // Lock row: ownership flipped, version bumped.
     expect(state.lockRow).not.toBeNull();
     expect(state.lockRow.instance_id).toBe(INSTANCE_B);
     expect(state.lockRow.lock_holder).toBe(HOLDER_B);
     expect(state.lockRow.version).toBe(4);
 
-    // Heartbeat: A's row deleted (best-effort SIGTERM cleanup).
     const remainingPeerIds = state.peerRows.map((r) => r.instance_id);
     expect(remainingPeerIds).not.toContain(INSTANCE_A);
     expect(remainingPeerIds).toContain(INSTANCE_B);
@@ -303,20 +301,16 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       exit, scheduleHardExit: schedule, clearHardExit,
     });
 
-    // Lock row deleted (releaseLockBestEffort CAS-Delete).
     expect(state.lockRow).toBeNull();
-    // No push attempted on the no-peer branch.
     expect(controlClient.pushHandoff).not.toHaveBeenCalled();
-    // Heartbeat row for A deleted (post-handoff cleanup runs on the
-    // no_peer branch too).
     expect(state.peerRows).toEqual([]);
-    // exit(0) — the no-peer outcome is still "clean" (the standby
-    // will cold-acquire via the TTL floor); exit(0) vs exit(1)
-    // distinguishes that from the timeout path for deploy SLI.
+    // exit(0): no-peer outcome is still "clean" (standby cold-acquires
+    // via the TTL floor). exit(0) vs exit(1) distinguishes from the
+    // timeout path for deploy SLI.
     expect(exit).toHaveBeenCalledWith(0);
     assertNoUnexpectedTableCalls(ddbMock);
-    // Pin the documented no-peer log so a future regression that
-    // silently swaps the branch (e.g. always-transferLock) surfaces.
+    // Pin the documented no-peer log against a future branch swap
+    // (e.g. always-transferLock).
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('no fresh peer for handoff'),
     );

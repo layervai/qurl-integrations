@@ -35,13 +35,8 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const LOCK_TABLE = 'test-gateway-lock';
 const HEARTBEAT_TABLE = 'test-gateway-peer-heartbeat';
 
-// Stable identifiers shared by the chaos tests. A two-replica shard
-// is sufficient for every Pillar 3 SIGTERM scenario this suite covers.
-// HOLDER_A/B are opaque strings — gateway-lock and peer-heartbeat
-// treat lock_holder as operational metadata for logs/debug only and
-// don't parse it (e.g. as an ARN). The literal `task-arn:.../...`
-// shape is shorthand for "looks like a real ECS task ARN" without
-// committing to a parseable schema.
+// Stable identifiers shared by the chaos tests. HOLDER_A/B are
+// opaque (lock/heartbeat treat lock_holder as unparsed debug metadata).
 const SHARD_ID = '0:1';
 const INSTANCE_A = 'inst-A';
 const INSTANCE_B = 'inst-B';
@@ -75,31 +70,37 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
     peerRows: initialPeerRows.map((r) => ({ ...r })),
   };
 
-  // ── Lock table ──
-  ddbMock.on(PutCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
-    state.lockRow = { ...cmd.Item };
-    return {};
-  });
-  // The CAS guards below mirror what production DDB enforces. Without
-  // them, a regression that ships a corrupted `:expected` or `:self`
-  // value would silently write through the mock when production would
-  // reject — defeating the whole point of composing real primitives.
-  // gateway-lock.js's renew/transfer/release all share the
-  // `instance_id = :self AND version = :expected` (or just :self for
-  // delete) condition shape.
-  ddbMock.on(UpdateCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
+  // CAS guard for the lock row. Mirrors what production DDB enforces
+  // on gateway-lock's `instance_id = :self [AND version = :expected]`
+  // condition shape (renew/transfer use both; release uses :self only).
+  // Without these checks a regression that ships a corrupted :expected
+  // or :self would silently write through the mock when production
+  // would reject — defeating the whole point of composing real
+  // primitives. `checkVersion` is opt-in because DeleteCommand
+  // (releaseLock) doesn't guard on version.
+  function assertLockCas(cmd, { checkVersion }) {
     if (!state.lockRow) throw makeCcfe();
     const v = cmd.ExpressionAttributeValues || {};
     if (v[':self'] !== undefined && v[':self'] !== state.lockRow.instance_id) {
       throw makeCcfe();
     }
-    if (v[':expected'] !== undefined && v[':expected'] !== state.lockRow.version) {
+    if (checkVersion && v[':expected'] !== undefined && v[':expected'] !== state.lockRow.version) {
       throw makeCcfe();
     }
+  }
+
+  // ── Lock table ──
+  ddbMock.on(PutCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
+    state.lockRow = { ...cmd.Item };
+    return {};
+  });
+  ddbMock.on(UpdateCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
+    assertLockCas(cmd, { checkVersion: true });
     // Renew writes version + expires_at; transfer also flips
     // instance_id + lock_holder. Apply whichever fields the caller's
     // ExpressionAttributeValues include — matches gateway-lock.js's
-    // shape without re-implementing the SET expression parser.
+    // SET expression without re-implementing the parser.
+    const v = cmd.ExpressionAttributeValues || {};
     if (v[':peer'] !== undefined) {
       state.lockRow.instance_id = v[':peer'];
       state.lockRow.lock_holder = v[':peerHolder'];
@@ -109,14 +110,7 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
     return {};
   });
   ddbMock.on(DeleteCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
-    // gateway-lock.releaseLock's condition is `instance_id = :self`.
-    // Enforce it so a stale-cursor regression (e.g. delete from the
-    // wrong instance) surfaces as CCFE here too.
-    const v = cmd.ExpressionAttributeValues || {};
-    if (!state.lockRow) throw makeCcfe();
-    if (v[':self'] !== undefined && v[':self'] !== state.lockRow.instance_id) {
-      throw makeCcfe();
-    }
+    assertLockCas(cmd, { checkVersion: false });
     state.lockRow = null;
     return {};
   });

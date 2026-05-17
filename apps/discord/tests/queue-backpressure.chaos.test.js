@@ -112,11 +112,8 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
     expect(cap).toBe(10);
 
-    // `new Promise(() => {})` never settles — these references are
-    // released by `_resetStateForTest` in beforeEach (which calls
-    // .clear() on the inflight Set), not by GC. --detectOpenHandles
-    // doesn't flag promise references (only timers/sockets), so the
-    // suite stays clean.
+    // `new Promise(() => {})` never settles; _resetStateForTest in
+    // beforeEach .clear()s the inflight Set, releasing the references.
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         eventConsumer.trackDispatch(new Promise(() => {}));
@@ -203,20 +200,33 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
       // finally block, so a post-stop read would see null.
       const { signal } = eventConsumer._test.getStopController();
 
-      // Stop. signal abort wakes abortableSleep via its event
-      // listener — no timer advancement needed for the at-cap sleep.
-      // stop()'s drain phase DOES use a real setTimeout so the
-      // never-settling inflight promises don't pin the test; advance
-      // timers to release that drain.
+      // Call stop. Its synchronous prefix (before the first internal
+      // await) calls stopController.abort(), which fires the abort
+      // event listeners — including abortableSleep's, which calls
+      // clearTimeout(t) on the parked backoff timer.
       const stopPromise = eventConsumer.stop();
+
+      // ── Load-bearing assertion ──
+      // At this point, abort() has already run synchronously. If
+      // abortableSleep is signal-wired (current contract), its
+      // listener fired and cleared the backoff timer. stop()'s drain
+      // timer hasn't been scheduled yet (it lives after `await
+      // loopPromise` inside stop). Pending fake timer count must be 0.
+      //
+      // If a regression strips the addEventListener wiring from
+      // abortableSleep, the backoff timer would still be parked here,
+      // getTimerCount() would be 1, and this assertion fails — even
+      // though runAllTimersAsync below would later fire the orphan
+      // timer and let the loop unwind via the timeout branch (which
+      // is exactly the regression mode this test exists to catch).
+      expect(jest.getTimerCount()).toBe(0);
+      expect(signal.aborted).toBe(true);
+
+      // Let stop() finish its drain (which schedules + awaits a
+      // real-but-faked setTimeout(DRAIN_DEADLINE_MS)) and unwind.
       await new Promise((r) => { setImmediate(r); });
       await jest.runAllTimersAsync();
       await stopPromise;
-
-      // The signal aborted via stop()'s call — proves the at-cap
-      // abortableSleep was wired to observe this signal (otherwise
-      // pollLoop would not have unwound for stop to complete).
-      expect(signal.aborted).toBe(true);
     } finally {
       jest.useRealTimers();
     }
