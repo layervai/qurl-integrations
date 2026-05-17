@@ -44,8 +44,12 @@ const HOLDER_A = 'task-arn:.../inst-A';
 const HOLDER_B = 'task-arn:.../inst-B';
 
 function makeChaosLogger() {
+  // Mirrors src/logger.js's exported methods so a future chaos
+  // composition that invokes logger.audit doesn't throw on an
+  // undefined method.
   return {
-    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    info: jest.fn(), warn: jest.fn(), error: jest.fn(),
+    debug: jest.fn(), audit: jest.fn(),
   };
 }
 
@@ -76,11 +80,13 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
   // Without these checks a regression that ships a corrupted :expected
   // or :self would silently write through the mock when production
   // would reject — defeating the whole point of composing real
-  // primitives. `checkVersion` is opt-in because DeleteCommand
-  // (releaseLock) doesn't guard on version.
-  function assertLockCas(cmd, { checkVersion }) {
+  // primitives. `requireSelf` is on for Update/Delete (a stripped-CAS
+  // regression should fail here too); `checkVersion` is on for Update
+  // only since Delete (releaseLock) doesn't guard on version.
+  function assertLockCas(cmd, { requireSelf = true, checkVersion = false } = {}) {
     if (!state.lockRow) throw makeCcfe();
     const v = cmd.ExpressionAttributeValues || {};
+    if (requireSelf && v[':self'] === undefined) throw makeCcfe();
     if (v[':self'] !== undefined && v[':self'] !== state.lockRow.instance_id) {
       throw makeCcfe();
     }
@@ -95,7 +101,7 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
     return {};
   });
   ddbMock.on(UpdateCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
-    assertLockCas(cmd, { checkVersion: true });
+    assertLockCas(cmd, { requireSelf: true, checkVersion: true });
     // Renew writes version + expires_at; transfer also flips
     // instance_id + lock_holder. Apply whichever fields the caller's
     // ExpressionAttributeValues include — matches gateway-lock.js's
@@ -110,7 +116,7 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
     return {};
   });
   ddbMock.on(DeleteCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
-    assertLockCas(cmd, { checkVersion: false });
+    assertLockCas(cmd, { requireSelf: true, checkVersion: false });
     state.lockRow = null;
     return {};
   });

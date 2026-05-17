@@ -132,7 +132,11 @@ function makeScheduleHardExit() {
 // freshness window for the SIGTERM-time clock value. controlClient is
 // optional — defaults to an always-ACK fake; test #3 injects a hung
 // stub to exercise the timeout path without re-implementing the
-// surrounding wiring.
+// surrounding wiring. Hard-codes the from-A perspective (instanceId:
+// INSTANCE_A, lockHolder: HOLDER_A) since every SIGTERM chaos
+// scenario here drives the SIGTERM-on-A leg of the handoff; a future
+// chaos test that needs the from-B viewpoint will need a `selfInstance`
+// knob added here.
 function assembleLeader({ docClient, clock, controlClient } = {}) {
   const logger = makeChaosLogger();
   const lock = createGatewayLock({

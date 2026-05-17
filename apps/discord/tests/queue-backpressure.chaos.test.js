@@ -186,6 +186,12 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {
       const client = makeStubClient();
+      // start() builds promises but schedules no timer before its
+      // first internal await. The first timer this test sees is the
+      // backoff setTimeout inside pollOnce → abortableSleep. The
+      // load-bearing `getTimerCount() === 0` post-stop assertion
+      // assumes this — if start() ever schedules a setTimeout up
+      // front, that pre-existing timer would land in the count.
       await eventConsumer.start(client);
 
       // Drain microtasks so pollLoop enters and the first pollOnce
