@@ -56,63 +56,12 @@ const { createGatewayLock } = require('../src/gateway-lock');
 const { createPeerHeartbeat } = require('../src/gateway-peer-heartbeat');
 const { createGatewayLeader } = require('../src/gateway-leader');
 const { runPushHandoffShutdown } = require('../src/gateway-shutdown-helpers');
-const { __TABLE_NAME: FLOW_STATE_TABLE_NAME } = require('../src/flow-state');
 const {
   setupChaosDdb, makeChaosLogger,
   LOCK_TABLE, HEARTBEAT_TABLE, SHARD_ID,
   INSTANCE_A, INSTANCE_B, HOLDER_A, HOLDER_B,
+  MAX_MICROTASK_YIELDS, assertNoUnexpectedTableCalls,
 } = require('./helpers/chaos-ddb');
-
-// Pull every TableName an SDK command targets, including the nested
-// shapes (BatchGet/BatchWrite use `RequestItems`; TransactGet/
-// TransactWrite use `TransactItems`). Single-item shapes (Put/Get/
-// Update/Delete/Scan/Query) carry `input.TableName` directly. Returns
-// a flat string[] so callers can filter against an allowlist.
-function tableNamesTargeted(cmdInput) {
-  if (!cmdInput) return [];
-  if (cmdInput.TableName) return [cmdInput.TableName];
-  if (cmdInput.RequestItems) return Object.keys(cmdInput.RequestItems);
-  if (Array.isArray(cmdInput.TransactItems)) {
-    return cmdInput.TransactItems
-      .map((entry) => {
-        // Includes Get for TransactGet (read-side) so the allowlist
-        // gate doesn't miss it if a future read-side refactor lands.
-        const op = entry.Put || entry.Update || entry.Delete || entry.ConditionCheck || entry.Get;
-        return op?.TableName;
-      })
-      .filter(Boolean);
-  }
-  return [];
-}
-
-// Post-hoc inspection: every DDB command issued during the test must
-// have a TableName in the allowlist. Unrouted commands in mockClient
-// silently resolve, so a future refactor that writes to e.g.
-// qurl_bot_flow_state from the gateway-tier SIGTERM path would not
-// throw at runtime — this assertion is the catch. Walks every shape
-// (single-item, BatchGet/Write RequestItems, TransactGet/Write
-// TransactItems) so the regression surface is exhaustive.
-function assertNoUnexpectedTableCalls(ddbMock) {
-  const allowed = new Set([LOCK_TABLE, HEARTBEAT_TABLE]);
-  const allTables = ddbMock.calls()
-    .flatMap((c) => tableNamesTargeted(c.args[0]?.input));
-  const offenders = allTables.filter((t) => !allowed.has(t));
-  if (offenders.length > 0) {
-    throw new Error(
-      `chaos: gateway-tier SIGTERM path wrote to forbidden tables: ${[...new Set(offenders)].join(', ')}. ` +
-      `Allowed: ${[...allowed].join(', ')}. ` +
-      `If this test starts failing because the gateway tier legitimately needs ` +
-      `another table, add it here AND update gateway-shutdown-helpers.js's header ` +
-      `to document the new write surface.`
-    );
-  }
-  // Belt-and-suspenders: if a future change adds flow_state to
-  // `allowed` (mistakenly or otherwise), the throw above wouldn't
-  // fire — this expect catches that drift specifically, since the
-  // flow_state-on-gateway prohibition is the primary regression
-  // target this whole file exists to protect.
-  expect(allTables.filter((t) => t === FLOW_STATE_TABLE_NAME)).toHaveLength(0);
-}
 
 function makeFakeManager() {
   return {
@@ -283,6 +232,11 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     // first, then invoke stop — failing the ordering check.
     const timeline = [];
     const origPushHandoff = leader.pushHandoff.bind(leader);
+    // Brittleness alert: this spy attaches via object-property
+    // dispatch. See the spy-brittleness paragraph in the file
+    // header — if pushHandoff is ever cached/destructured by the
+    // caller, swap this spy for `lock.transferLock` (the seam
+    // between real primitives) to preserve the call-order signal.
     const pushHandoffSpy = jest.spyOn(leader, 'pushHandoff').mockImplementation(async (...args) => {
       const result = await origPushHandoff(...args);
       timeline.push('pushHandoff-resolved');
@@ -306,16 +260,15 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     // Wait for pushHandoff to fully resolve. A single setImmediate
     // yield is enough today (the body's awaits drain in microtasks
     // ahead of setImmediate), but bounding by a yield counter
-    // mirrors test #3's MAX_YIELDS_FOR_TRANSFER pattern — robust if
-    // a future refactor adds another await inside pushHandoff (e.g.
-    // a metric flush or extra DDB round-trip). The diagnostic throw
-    // turns a future flake into a clear failure message.
-    const MAX_YIELDS_FOR_PUSH_RESOLVE = 50;
-    let yields = 0;
+    // (`MAX_MICROTASK_YIELDS`) is robust if a future refactor adds
+    // another await inside pushHandoff (e.g. a metric flush or extra
+    // DDB round-trip). The diagnostic throw turns a future flake
+    // into a clear failure message.
+    let yieldsForPushResolve = 0;
     while (!timeline.includes('pushHandoff-resolved')) {
-      if (yields++ >= MAX_YIELDS_FOR_PUSH_RESOLVE) {
+      if (yieldsForPushResolve++ >= MAX_MICROTASK_YIELDS) {
         throw new Error(
-          `chaos: pushHandoff did not resolve within ${MAX_YIELDS_FOR_PUSH_RESOLVE} setImmediate yields; ` +
+          `chaos: pushHandoff did not resolve within ${MAX_MICROTASK_YIELDS} setImmediate yields; ` +
           `timeline: ${JSON.stringify(timeline)}. ` +
           `If pushHandoff grew an extra await hop, raise the bound; if it now hangs, ` +
           `that's a real regression (test #3 covers the timeout path).`
@@ -476,13 +429,13 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     // controlClient.pushHandoff — the exact state we want to time
     // the hard-exit fire against. setImmediate-counter (vs wall-clock)
     // so the bound doesn't drift with CI runner load: with mocked
-    // DDB, transferLock settles in ≤ 3 microtask hops; 50 yields is
-    // generous defense without depending on Date.now().
-    const MAX_YIELDS_FOR_TRANSFER = 50;
-    let yields = 0;
+    // DDB, transferLock settles in ≤ 3 microtask hops; the
+    // MAX_MICROTASK_YIELDS bound is generous defense without
+    // depending on Date.now().
+    let yieldsForTransfer = 0;
     while (state.lockRow.instance_id !== INSTANCE_B) {
-      if (yields++ >= MAX_YIELDS_FOR_TRANSFER) {
-        throw new Error(`chaos: transferLock never landed within ${MAX_YIELDS_FOR_TRANSFER} event-loop yields`);
+      if (yieldsForTransfer++ >= MAX_MICROTASK_YIELDS) {
+        throw new Error(`chaos: transferLock never landed within ${MAX_MICROTASK_YIELDS} event-loop yields`);
       }
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => { setImmediate(r); });

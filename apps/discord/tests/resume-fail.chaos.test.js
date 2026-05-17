@@ -36,6 +36,7 @@ const {
   setupChaosDdb, makeChaosLogger, makeCcfe,
   LOCK_TABLE, HEARTBEAT_TABLE, SHARD_ID,
   INSTANCE_A, INSTANCE_B, HOLDER_A,
+  assertNoUnexpectedTableCalls,
 } = require('./helpers/chaos-ddb');
 
 describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
@@ -145,6 +146,11 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     // (4) Five connect() attempts occurred — the ladder ran to
     //     completion, not short-circuited.
     expect(manager.connect).toHaveBeenCalledTimes(5);
+
+    // Forbidden-table guard: the watchdog's exhaustion-exit path is
+    // gateway-tier and must NOT touch flow_state (or any other table
+    // outside the lock/heartbeat allowlist).
+    assertNoUnexpectedTableCalls(ddbMock);
   });
 
   it('lock-table DeleteCommand mocked to throw CCFE → exit(1) still fires (defensive)', async () => {
@@ -218,7 +224,10 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     // exit(1) and heartbeat-cleanup both fired despite the lock
     // delete CAS failure.
     expect(state.lockRow).not.toBeNull();
-    expect(state.peerRows.find((r) => r.instance_id === INSTANCE_A)).toBeUndefined();
+    // Heartbeat row for A is gone. Mirror test #1's map+not.toContain
+    // shape so both heartbeat-row assertions read identically.
+    const remainingHeartbeats = state.peerRows.map((r) => r.instance_id);
+    expect(remainingHeartbeats).not.toContain(INSTANCE_A);
     expect(exit).toHaveBeenCalledWith(1);
     // gateway-lock.releaseLock logs `release CAS failed (peer took
     // over)` at warn on CCFE — pinning the log so a future regression
@@ -228,5 +237,10 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
       expect.stringContaining('release CAS failed'),
       expect.any(Object),
     );
+
+    // Forbidden-table guard: same invariant as test #1 — even on the
+    // CAS-failure branch the watchdog must not write outside the
+    // lock/heartbeat allowlist.
+    assertNoUnexpectedTableCalls(ddbMock);
   });
 });

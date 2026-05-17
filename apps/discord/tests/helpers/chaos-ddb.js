@@ -31,6 +31,14 @@ const {
   ScanCommand,
 } = require('@aws-sdk/lib-dynamodb');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { __TABLE_NAME: FLOW_STATE_TABLE_NAME } = require('../../src/flow-state');
+
+// Bound for microtask-yield polling loops (`while (!condition) await
+// setImmediate(...)`). Used by chaos tests that wait for an
+// observable DDB state mutation to land. Set generously above the
+// observed need (≤ 3 hops with mocked DDB); the diagnostic throw on
+// overflow turns a future flake into a clear failure message.
+const MAX_MICROTASK_YIELDS = 50;
 
 const LOCK_TABLE = 'test-gateway-lock';
 const HEARTBEAT_TABLE = 'test-gateway-peer-heartbeat';
@@ -163,15 +171,72 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
   return { docClient, ddbMock, state };
 }
 
+// Pull every TableName an SDK command targets, including the nested
+// shapes (BatchGet/BatchWrite use `RequestItems`; TransactGet/
+// TransactWrite use `TransactItems`). Single-item shapes (Put/Get/
+// Update/Delete/Scan/Query) carry `input.TableName` directly. Returns
+// a flat string[] so callers can filter against an allowlist.
+function tableNamesTargeted(cmdInput) {
+  if (!cmdInput) return [];
+  if (cmdInput.TableName) return [cmdInput.TableName];
+  if (cmdInput.RequestItems) return Object.keys(cmdInput.RequestItems);
+  if (Array.isArray(cmdInput.TransactItems)) {
+    return cmdInput.TransactItems
+      .map((entry) => {
+        // Includes Get for TransactGet (read-side) so the allowlist
+        // gate doesn't miss it if a future read-side refactor lands.
+        const op = entry.Put || entry.Update || entry.Delete || entry.ConditionCheck || entry.Get;
+        return op?.TableName;
+      })
+      .filter(Boolean);
+  }
+  return [];
+}
+
+// Post-hoc inspection: every DDB command issued during the test must
+// have a TableName in the allowlist. Unrouted commands in mockClient
+// silently resolve, so a future refactor that writes to e.g.
+// qurl_bot_flow_state from the gateway-tier SIGTERM path would not
+// throw at runtime — this assertion is the catch. Walks every shape
+// (single-item, BatchGet/Write RequestItems, TransactGet/Write
+// TransactItems) so the regression surface is exhaustive. Used by
+// both deploy-during-flow and resume-fail chaos tests (both
+// gateway-tier paths that must not touch flow_state).
+function assertNoUnexpectedTableCalls(ddbMock) {
+  const allowed = new Set([LOCK_TABLE, HEARTBEAT_TABLE]);
+  const allTables = ddbMock.calls()
+    .flatMap((c) => tableNamesTargeted(c.args[0]?.input));
+  const offenders = allTables.filter((t) => !allowed.has(t));
+  if (offenders.length > 0) {
+    throw new Error(
+      `chaos: gateway-tier path wrote to forbidden tables: ${[...new Set(offenders)].join(', ')}. ` +
+      `Allowed: ${[...allowed].join(', ')}. ` +
+      `If this test starts failing because the gateway tier legitimately needs ` +
+      `another table, add it here AND update the relevant source module's header ` +
+      `to document the new write surface.`
+    );
+  }
+  // Belt-and-suspenders: if a future change adds flow_state to
+  // `allowed` (mistakenly or otherwise), the throw above wouldn't
+  // fire — this expect catches that drift specifically, since the
+  // flow_state-on-gateway prohibition is the primary regression
+  // target these chaos tests exist to protect.
+  expect(allTables.filter((t) => t === FLOW_STATE_TABLE_NAME)).toHaveLength(0);
+}
+
 module.exports = {
   setupChaosDdb,
   makeChaosLogger,
   LOCK_TABLE,
   HEARTBEAT_TABLE,
+  FLOW_STATE_TABLE_NAME,
   SHARD_ID,
   INSTANCE_A,
   INSTANCE_B,
   HOLDER_A,
   HOLDER_B,
+  MAX_MICROTASK_YIELDS,
   makeCcfe,
+  tableNamesTargeted,
+  assertNoUnexpectedTableCalls,
 };
