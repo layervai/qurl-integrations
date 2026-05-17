@@ -160,11 +160,23 @@ func (ts *adminTestServers) seedPolicySingle(t *testing.T, teamID, channelID, al
 }
 
 // seedPolicySet seeds a channel_policies row carrying an
-// allowed_resource_ids SS attribute. Used for ResolvePolicy tests
-// and the multi-resource ListPolicies flatten.
+// allowed_resource_ids SS attribute. Used for ResolvePolicy tests.
+// If alias is non-empty, also seeds a single-binding alias_bindings
+// Map so /qurl aliases lists the channel — convenient for tests
+// that exercise both surfaces against the same row.
 func (ts *adminTestServers) seedPolicySet(t *testing.T, teamID, channelID, alias string, resourceIDs []string) {
 	t.Helper()
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicySet(teamID, channelID, alias, resourceIDs))
+}
+
+// seedPolicyAliasBindings seeds a channel_policies row with an
+// `alias_bindings` Map<alias_name, resource_id>. Used by
+// multi-alias /qurl aliases tests. No allowed_resource_ids set is
+// attached (orthogonal surface — callers seed both via
+// seedPolicySet when both are needed).
+func (ts *adminTestServers) seedPolicyAliasBindings(t *testing.T, teamID, channelID string, bindings map[string]string) {
+	t.Helper()
+	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyAliasBindings(teamID, channelID, bindings))
 }
 
 // failOnAllowResource installs a hook that fails the test if any

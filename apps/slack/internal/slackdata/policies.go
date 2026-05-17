@@ -13,19 +13,23 @@ import (
 )
 
 // Attribute names on the channel_policies table. PK=slack_team_id,
-// SK=slack_channel_id; the row carries the alias→resource_id binding
-// (`alias`, `resource_id`) plus the allowed_resource_ids set the
-// resolve path checks. The dual representation (per-row alias +
-// resource_id AND a set on the same row) is a transition shape; the
-// pre-pivot schema had separate rows per alias/channel/resource, but
-// the post-pivot terraform models one row per (team, channel) with
-// the allowed set as an SS attribute. Handlers below treat the
-// alias+resource_id as the primary key shape, falling back to the
-// set membership for the resolve path.
+// SK=slack_channel_id. The row carries two orthogonal surfaces:
+//
+//   - `alias_bindings`: app-managed DDB Map<alias_name, resource_id>.
+//     A channel can carry many alias bindings simultaneously;
+//     `/qurl aliases` lists every binding for the channel.
+//   - `allowed_resource_ids`: SS attribute; the multi-resource gate
+//     `/qurl get` checks via ResolvePolicy. Orthogonal to the alias
+//     map — a resource can be in the allowed set without an alias,
+//     and an alias can be bound without being in the allowed set
+//     (the two surfaces serve different commands).
+//
+// Schema decision locked 2026-05-17: app-managed Map, no GSI, no
+// SK reshape. channel_policies table is empty pending Slack bot
+// sandbox deploy so no data migration is required.
 const (
 	attrSlackChannelID     = "slack_channel_id"
-	attrAlias              = "alias"
-	attrResourceID         = "resource_id"
+	attrAliasBindings      = "alias_bindings"
 	attrAllowedResourceIDs = "allowed_resource_ids"
 )
 
@@ -68,9 +72,9 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 
 // AllowResource adds `resourceID` to the (teamID, channelID) row's
 // allowed_resource_ids set. Uses `UpdateItem ADD` so DDB handles
-// set-create-or-add atomically; on a fresh (team, channel) pair we
-// also seed alias + resource_id from the caller so a follow-up
-// /qurl admin policies listing has something to render.
+// set-create-or-add atomically. Orthogonal to alias_bindings —
+// AllowResource only touches the allowed-set surface that
+// ResolvePolicy gates on.
 //
 // Returns 409 (via *Error) on a duplicate add — this is "operator's
 // mental model already satisfied," and the handler maps it to the
@@ -188,12 +192,13 @@ func (s *Store) DisallowResource(ctx context.Context, teamID, channelID, resourc
 // base64-encoded JSON of the DDB LastEvaluatedKey; opaque to the
 // caller. Limit caps the page size (DDB enforces its own max).
 //
-// Each row may carry an allowed_resource_ids SET with multiple
-// resource_ids; we flatten that into one PolicyEntry per resource so
-// the rendered /qurl admin policies listing stays one-resource-per-
-// line. The pre-pivot HTTP shape was one PolicyEntry per
-// (channel, alias, resource_id) tuple — matching that here means the
-// handler renderers don't need restructuring.
+// Each row carries an `alias_bindings` Map<alias_name, resource_id>;
+// ListPolicies flattens the map into one PolicyEntry per binding so
+// `/qurl aliases` can render one line per (channel, alias). Rows
+// without alias_bindings (only `allowed_resource_ids` populated)
+// emit zero entries — they're orthogonal to the alias listing.
+// `allowed_resource_ids` is the gate for `/qurl get` via
+// ResolvePolicy and intentionally NOT mirrored here.
 func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit int) (*PolicyList, error) {
 	if teamID == "" {
 		return nil, &Error{
@@ -235,25 +240,17 @@ func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit i
 	}
 	for _, item := range out.Items {
 		channelID := readString(item, attrSlackChannelID)
-		alias := readString(item, attrAlias)
-		// Single-resource row (legacy / single-allow shape):
-		if rid := readString(item, attrResourceID); rid != "" {
+		createdAt := readTime(item, attrCreatedAt)
+		// One PolicyEntry per alias_bindings binding. Rows without
+		// an alias_bindings Map (or with an empty one) contribute
+		// zero entries — `/qurl aliases` renders the empty-state
+		// hint when the post-filter slice is empty.
+		for alias, rid := range readStringMap(item, attrAliasBindings) {
 			list.Entries = append(list.Entries, PolicyEntry{
 				ChannelID:  channelID,
 				Alias:      alias,
 				ResourceID: rid,
-				CreatedAt:  readTime(item, attrCreatedAt),
-			})
-		}
-		// Multi-resource row — flatten the set into per-resource
-		// entries with the row's alias as the (possibly shared)
-		// display label.
-		for _, rid := range readStringSet(item, attrAllowedResourceIDs) {
-			list.Entries = append(list.Entries, PolicyEntry{
-				ChannelID:  channelID,
-				Alias:      alias,
-				ResourceID: rid,
-				CreatedAt:  readTime(item, attrCreatedAt),
+				CreatedAt:  createdAt,
 			})
 		}
 	}

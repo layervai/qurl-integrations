@@ -27,6 +27,7 @@ const (
 	fAttrAlias              = "alias"
 	fAttrResourceID         = "resource_id"
 	fAttrAllowedResourceIDs = "allowed_resource_ids"
+	fAttrAliasBindings      = "alias_bindings"
 )
 
 // fixtureFingerprint is the canned api_key_fingerprint value tests
@@ -80,14 +81,50 @@ func seedChannelPolicySingle(teamID, channelID, alias, resourceID string) map[st
 
 // seedChannelPolicySet returns a channel_policies row carrying an
 // allowed_resource_ids SS attribute. Used for the multi-resource
-// flatten path in ListPolicies and for ResolvePolicy lookups.
+// ResolvePolicy gate (`/qurl get`).
+//
+// `alias_bindings` and `allowed_resource_ids` are orthogonal surfaces
+// (see slackdata/policies.go preamble), so this helper attaches both
+// when an alias is supplied so existing /qurl get + /qurl aliases
+// tests can share a fixture. Callers that need ONLY the allowed-set
+// (no alias listing) pass alias="".
 func seedChannelPolicySet(teamID, channelID, alias string, resourceIDs []string) map[string]ddbtypes.AttributeValue {
-	return map[string]ddbtypes.AttributeValue{
+	item := map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:        stringMember(teamID),
 		fAttrSlackChannelID:     stringMember(channelID),
-		fAttrAlias:              stringMember(alias),
 		fAttrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: resourceIDs},
 		fAttrCreatedAt:          stringMember("2026-04-20T12:00:00Z"),
+	}
+	if alias != "" && len(resourceIDs) > 0 {
+		// Bind the alias to the first allowed resource so the
+		// /qurl aliases listing has something to render. Tests that
+		// want a precise (alias→resource) map use
+		// seedChannelPolicyAliasBindings instead.
+		item[fAttrAliasBindings] = &ddbtypes.AttributeValueMemberM{
+			Value: map[string]ddbtypes.AttributeValue{
+				alias: stringMember(resourceIDs[0]),
+			},
+		}
+	}
+	return item
+}
+
+// seedChannelPolicyAliasBindings returns a channel_policies row
+// carrying an `alias_bindings` Map<alias_name, resource_id>. Used by
+// the multi-alias /qurl aliases tests. Callers that also need an
+// allowed_resource_ids set (e.g. to exercise /qurl get against the
+// same row) merge the result with seedChannelPolicySet's SS attr at
+// the call site.
+func seedChannelPolicyAliasBindings(teamID, channelID string, bindings map[string]string) map[string]ddbtypes.AttributeValue {
+	m := make(map[string]ddbtypes.AttributeValue, len(bindings))
+	for alias, rid := range bindings {
+		m[alias] = stringMember(rid)
+	}
+	return map[string]ddbtypes.AttributeValue{
+		fAttrSlackTeamID:    stringMember(teamID),
+		fAttrSlackChannelID: stringMember(channelID),
+		fAttrAliasBindings:  &ddbtypes.AttributeValueMemberM{Value: m},
+		fAttrCreatedAt:      stringMember("2026-04-20T12:00:00Z"),
 	}
 }
 

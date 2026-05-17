@@ -341,6 +341,27 @@ func readStringSet(item map[string]ddbtypes.AttributeValue, key string) []string
 	return v.Value
 }
 
+// readStringMap reads a Map<string,string> attr. Returns nil if
+// missing or wrong type. Values that aren't strings are skipped
+// rather than failing the whole read — a corrupt entry shouldn't
+// drop the rest of the map. Iteration order of the returned map is
+// non-deterministic; callers that render to UI must sort.
+func readStringMap(item map[string]ddbtypes.AttributeValue, key string) map[string]string {
+	m, ok := item[key].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(m.Value))
+	for k, v := range m.Value {
+		s, ok := v.(*ddbtypes.AttributeValueMemberS)
+		if !ok {
+			continue
+		}
+		out[k] = s.Value
+	}
+	return out
+}
+
 // readTime parses an RFC3339 string attr into a time.Time. Returns
 // zero time if missing/unparseable so the caller can fall back to
 // "unknown" in the rendered output.

@@ -12,15 +12,7 @@ import (
 
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
 // flow: ListPolicies → filter by channel → per-row resource fetch →
-// rendered list.
-//
-// SCHEMA NOTE (design fence): channel_policies is keyed by
-// (team_id, channel_id), so a single channel can only carry one
-// alias scalar today. Multiple aliases per channel would need
-// either the `aliases` SS attribute (option A) or per-alias SK
-// reshape (option B) — see project_channel_policies_schema_gap.md.
-// This test exercises one alias per channel; multi-alias rendering
-// is unblocked once Justin picks A vs B.
+// rendered list. Single alias binding on the channel.
 func TestHandleAliases_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -39,6 +31,67 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHandleAliases_MultiAliasChannelDisplaysAllBindings fences the
+// post-pivot multi-binding behavior: a channel with three
+// alias_bindings emits a PolicyEntry per binding, and `/qurl
+// aliases` renders all three in deterministic alias-name ascending
+// order (the handler sorts lines lexicographically; each line
+// starts with `• \`$<alias>\“ so byte-order = alias-name order).
+func TestHandleAliases_MultiAliasChannelDisplaysAllBindings(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"zeta":  "r_zeta",
+		"alpha": "r_alpha",
+		"mu":    "r_mu",
+	})
+	// Per-alias resource fetch returns the alias label + a unique
+	// target URL so we can assert all three lines independently.
+	ts.addCustomer("GET", "/v1/resources/by-alias/alpha", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceFixtureWithTarget(t, w, "r_alpha", "alpha", "https://alpha.example.com")
+	})
+	ts.addCustomer("GET", "/v1/resources/by-alias/mu", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceFixtureWithTarget(t, w, "r_mu", "mu", "https://mu.example.com")
+	})
+	ts.addCustomer("GET", "/v1/resources/by-alias/zeta", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceFixtureWithTarget(t, w, "r_zeta", "zeta", "https://zeta.example.com")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	for _, alias := range []string{"alpha", "mu", "zeta"} {
+		if !strings.Contains(async, "`$"+alias+"`") {
+			t.Errorf("async reply missing alias %q line: %q", alias, async)
+		}
+	}
+	// Deterministic order — alpha < mu < zeta when sorted lex.
+	idxAlpha := strings.Index(async, "`$alpha`")
+	idxMu := strings.Index(async, "`$mu`")
+	idxZeta := strings.Index(async, "`$zeta`")
+	if idxAlpha >= idxMu || idxMu >= idxZeta {
+		t.Errorf("alias lines not in ascending order: alpha=%d mu=%d zeta=%d body=%q", idxAlpha, idxMu, idxZeta, async)
+	}
+}
+
+// TestHandleAliases_ChannelWithNoAliasBindingsShowsNone fences the
+// orthogonality of `alias_bindings` and `allowed_resource_ids`: a
+// channel with only the allowed-set populated (no alias_bindings)
+// renders the empty-state hint, not silent success. This is the
+// `/qurl get`-only channel shape.
+func TestHandleAliases_ChannelWithNoAliasBindingsShowsNone(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// allowed_resource_ids populated, alias_bindings absent — pass
+	// alias="" to seedPolicySet so it does NOT auto-seed a binding.
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{testResourceIDFix})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "No aliases are allowed") {
+		t.Errorf("async reply missing empty-state hint: %q", async)
+	}
+}
+
 // TestHandleAliases_NoEntries fences the empty-list path: the user
 // gets a helpful "ask an admin" hint rather than an empty reply.
 func TestHandleAliases_NoEntries(t *testing.T) {
@@ -51,35 +104,6 @@ func TestHandleAliases_NoEntries(t *testing.T) {
 	if !strings.Contains(async, "No aliases are allowed") {
 		t.Errorf("async reply missing empty-state hint: %q", async)
 	}
-}
-
-// TestHandleAliases_PerRowFailureDegradesToIDOnly fences the
-// parallel-fetch fault tolerance: a 404 on one resource doesn't
-// drop the row — it renders as the resource_id-only fallback.
-//
-// DESIGN FENCE: channel_policies is (team_id, channel_id)-keyed
-// (only one alias scalar per row). Multiple alias entries in the
-// same channel require either the `aliases` SS attribute (option A)
-// or per-alias SK reshape (option B). See
-// project_channel_policies_schema_gap.md and SLACK_QURL_ROLLOUT.md
-// §"Wave 4". Justin to decide A vs B; this skip stays until the
-// decision lands.
-func TestHandleAliases_PerRowFailureDegradesToIDOnly(t *testing.T) {
-	t.Skip("design fence (channel_policies schema gap): asserting per-row degrade across multiple aliases in one channel requires the multi-alias schema. Awaiting Justin's call on option A (aliases SS attr) vs option B (per-alias SK reshape). See project_channel_policies_schema_gap.md.")
-}
-
-// TestHandleAliases_MultipleAliasesInOneChannel fences the user
-// promise from the pre-pivot UX: a channel can have two distinct
-// aliases visible in `/qurl aliases`.
-//
-// DESIGN FENCE: blocked on the channel_policies schema gap (see
-// the sibling skip above). Today's (team_id, channel_id) key with
-// a single `alias` scalar collapses multi-alias-per-channel into
-// a single row whose alias field can hold only one value. This
-// skip preserves the test as documentation of the expected
-// behavior once the schema lands.
-func TestHandleAliases_MultipleAliasesInOneChannel(t *testing.T) {
-	t.Skip("design fence (channel_policies schema gap): pre-pivot UX promised two distinct aliases per channel. Today's schema can't carry it. Justin's call on option A (aliases SS attr) vs option B (per-alias SK reshape). See project_channel_policies_schema_gap.md.")
 }
 
 // TestHandleAliases_AdminStoreNil fences the no-DDB sandbox case.
