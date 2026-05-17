@@ -209,6 +209,12 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
   const clock = () => now;
 
   beforeEach(() => { now = 1_700_000_000_000; });
+  // Cheap defense against an un-restored spy leaking between tests
+  // (jest.spyOn(leader, 'pushHandoff') in test #1 below). Works today
+  // because assembleLeader() builds a fresh leader per test, but if a
+  // future refactor pulls leader assembly into beforeAll, the
+  // unrestored spy would leak.
+  afterEach(() => { jest.restoreAllMocks(); });
 
   it('SIGTERM with healthy standby peer → transferLock + push ACK + clean exit(0)', async () => {
     // Pre-seed: A holds the lock (version=3), B has a fresh
