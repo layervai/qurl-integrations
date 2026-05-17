@@ -357,6 +357,37 @@ describe('event-publisher: send-failure logging', () => {
     await flushMicro();
     expect(eventPublisher._test.getInFlightCount()).toBe(0);
   });
+
+  test('sustained SendMessage failure → inFlightSends stays bounded, no retry buffer accumulates (fire-and-log invariant)', async () => {
+    // Pins the documented fire-and-log design (this file's module
+    // header explicitly rejects in-process retry / accumulation). A
+    // future "let's add a retry buffer" refactor would break the
+    // invariant — inFlightSends would grow unboundedly with drained-
+    // but-pending sends. Publishing N packets against a throwing SQS
+    // and asserting post-settle count is zero catches both the
+    // .finally→delete-bypassed and .catch-bypassed regressions in
+    // one shot. N=20 is enough — every iteration takes the same
+    // code path; 200 added no extra coverage and made the test
+    // visibly slower.
+    sqsMock.on(SendMessageCommand).rejects(new Error('persistent SQS outage'));
+    eventPublisher.start();
+    const N = 20;
+    withMockedSqs(() => {
+      for (let i = 0; i < N; i += 1) {
+        eventPublisher.publish(rawPacket({ s: i + 1 }));
+      }
+    });
+    await flushMicro();
+    // The load-bearing invariant: no in-memory accumulation. A future
+    // batch/coalesce optimization could legitimately reduce the
+    // per-publish log ratio, so the count assertion is `> 0` (must
+    // log SOMETHING per failure) — the count-to-zero is what matters.
+    expect(eventPublisher._test.getInFlightCount()).toBe(0);
+    const failureLogs = logger.error.mock.calls.filter(
+      ([, ctx]) => ctx && ctx.kind === 'unhandledRejection',
+    );
+    expect(failureLogs.length).toBeGreaterThan(0);
+  });
 });
 
 describe('event-publisher: drain on stop', () => {
