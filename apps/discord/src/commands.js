@@ -14,11 +14,12 @@ const {
   TextInputStyle,
   AttachmentBuilder,
 } = require('discord.js');
+const { Routes } = require('discord-api-types/v10');
 const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -35,6 +36,15 @@ const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
+const {
+  searchPlaces,
+  findPlaceFromText,
+  getPlaceDetails,
+  buildPlaceUrl,
+  encodePlaceIdSentinel,
+  decodePlaceIdSentinel,
+  PLACE_ID_SHAPE_RE,
+} = require('./places');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -71,6 +81,7 @@ function largeSendThreshold() {
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
 const { sendDM } = require('./discord');
+const { editDM } = require('./discord-rest');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -161,7 +172,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
+const { DISPLAY_NAME_FALLBACK, sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -228,6 +239,69 @@ function sliceWithEllipsis(s, maxCodepoints, indicator) {
 // `personalMessageRaw` storage uses this cap so forged interactions
 // can't grow flow rows past the legitimate ceiling.
 const PERSONAL_MESSAGE_INPUT_MAX = 280;
+
+// Triggers `guild.members.fetch()` pre-warm before parsing recipients —
+// any `@everyone` text token OR any `<@&{snowflake}>` role-mention. Both
+// paths read `guild.members.cache`, which discord.js v14 leaves empty
+// (we deliberately skip `chunkOnStartup`/`ws.large_threshold` on the
+// multi-tenant gateway — eagerly fetching every member of every joined
+// guild on connect would blow the rate-limit budget at install spikes).
+// Shape-only — permission gating happens later inside the parser via
+// `allowMassMention` / `role.mentionable`. Word-boundary class is a
+// parallel copy of recipient-parser.js's `EVERYONE_TOKEN_RE` so
+// `@everyonefoo` doesn't false-trigger the fetch (drift between the
+// two would silently cache-warm for inputs the parser then ignores).
+// If `EVERYONE_TOKEN_RE` ever moves to a shared module, derive this
+// from it rather than maintaining the parallel copy.
+const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
+const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
+
+// Helper for the two pre-warm sites. Returns a Promise so the caller
+// can await before reading `guild.members.cache`. Swallows errors —
+// degraded expansion (parser sees a partial cache) is the correct
+// fallback for transient API blips; surfacing the failure to the user
+// would confuse them about a problem they can't act on. Skipped when
+// the cache already reports `memberCount` (defaults to `Infinity` if
+// memberCount is missing so we fail-open and fetch when uncertain) so
+// a hot cache from a prior invocation isn't burned a second time. The
+// populated cache is intentionally retained — discord.js `Collection`
+// has no LRU and eviction relies on `GUILD_MEMBER_REMOVE` gateway
+// events. Acceptable for our scale; revisit if a future regression in
+// gateway event delivery causes drift.
+//
+// In-flight de-duplication via the `prewarmInFlight` map below: two
+// concurrent `/qurl send @everyone` invocations in the same guild from
+// a cold cache share the same underlying `members.fetch()` promise.
+// Without coalescing, abuse via concurrent invocations could burn
+// chunk-request budget linearly. discord.js may also coalesce the
+// `GUILD_REQUEST_MEMBERS` chunks internally, but we don't rely on it
+// — the map is keyed by `guild.id` so cross-guild calls still proceed
+// in parallel.
+const prewarmInFlight = new Map();
+async function prewarmGuildMembersCache(guild, logCtx) {
+  // Uniform Promise return shape regardless of which branch the caller
+  // hits — early-exit paths used to resolve `undefined`, which works
+  // for `await prewarmGuildMembersCache(...)` callers but would surprise
+  // a future caller that does `.then(...)`.
+  if (!guild || !guild.members || typeof guild.members.fetch !== 'function') return;
+  const cacheSize = guild.members.cache?.size ?? 0;
+  if (cacheSize >= (guild.memberCount ?? Infinity)) return;
+  const existing = prewarmInFlight.get(guild.id);
+  if (existing) return existing;
+  const inFlight = (async () => {
+    try {
+      await guild.members.fetch({ time: TIMEOUTS.MEMBER_PREFETCH });
+    } catch (err) {
+      logger.warn('members.fetch pre-warm failed; @everyone/role expansion may underresolve', {
+        ...logCtx, guild_id: guild.id, error: err && err.message,
+      });
+    } finally {
+      prewarmInFlight.delete(guild.id);
+    }
+  })();
+  prewarmInFlight.set(guild.id, inFlight);
+  return inFlight;
+}
 
 function sanitizeMessage(msg) {
   // Order matters:
@@ -356,7 +430,7 @@ function clearCooldown(userId) {
 // Soften an existing cooldown so `residualMs` remain. Monotonic SHRINK
 // — only reduces remaining time, never extends. Used by Cancel paths
 // so a legitimate "I changed my mind" doesn't lock the full window
-// out, but rapid /qurl file → Cancel → /qurl file → Cancel spam still
+// out, but rapid /qurl send → Cancel → /qurl send → Cancel spam still
 // pays a small throttle on each iteration (preventing supersedeOrCreate
 // + interaction-reply abuse).
 function softenCooldown(userId, residualMs) {
@@ -392,16 +466,35 @@ async function batchSettled(items, fn, batchSize = 5) {
 //      discord.js v14.18+).
 //   3. user.username — direct username read; defends against test
 //      mocks or shapes where the v14 displayName getter is absent.
-//   4. 'Someone' — last-resort literal so callers never get null.
+//   4. DISPLAY_NAME_FALLBACK — last-resort so callers never get null.
 // Optional chains throughout so a malformed interaction (no user, no
-// member) returns 'Someone' instead of throwing inside DM-dispatch.
+// member) returns the fallback instead of throwing inside DM-dispatch.
 // Used by the DM-embed renderer so every recipient sees the same
 // sender name across the dispatch.
 function resolveSenderAlias(interaction) {
   return interaction?.member?.displayName
     ?? interaction?.user?.displayName
     ?? interaction?.user?.username
-    ?? 'Someone';
+    ?? DISPLAY_NAME_FALLBACK;
+}
+
+// Author-row provenance fields for the per-recipient DM. The
+// `interaction?.guild?` chain defends the edge case where guild is
+// null (commands are guild-only so this shouldn't happen in
+// production). `iconURL()` returns `string | null`; coalesce to
+// `undefined` because some discord.js versions stringify null into
+// the iconURL slot.
+//
+// `size: 64` matches Discord's embed-author iconURL rendering
+// (~24×24px on most clients, 2× retina ≈ 48px). The default size
+// is the guild-icon-store resolution (up to 4096px), which would
+// ship a much larger asset than gets rendered. Per-DM bandwidth
+// savings × the dispatch loop = a real win at scale.
+function resolveGuildProvenance(interaction) {
+  return {
+    guildName: interaction?.guild?.name,
+    guildIconUrl: interaction?.guild?.iconURL({ size: 64 }) ?? undefined,
+  };
 }
 
 // Resolve a recipient's per-guild display alias: guild nickname >
@@ -423,42 +516,48 @@ function resolveRecipientAlias(r, interaction) {
   return sanitizeDisplayNamePlain(raw);
 }
 
+// Resolve role IDs to display names for the `roleMentionsDeniedNames`
+// warning surface (#326). `||` (not `??`) so empty-string names —
+// forged interaction / future API shape — also fall through to
+// `unknown-role` rather than rendering `@` with broken backticks.
+function resolveRoleNames(guild, ids) {
+  if (!ids?.length) return [];
+  return ids.map((id) => guild?.roles?.cache?.get(id)?.name || 'unknown-role');
+}
+
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
-// embed copy is intentionally evocative ("opened a door", "Door closes")
+// embed copy is intentionally evocative ("opened a door", "Closes")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
-// The qURL link is rendered as a `🔗 Step Through` Link button rather
+// The qURL link is rendered as a `🚪 Step Through` Link button rather
 // than a bare URL field; recipients click the button to open the link
 // in their default browser.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
 // > globalName > username) sourced from resolveSenderAlias.
 // `personalMessage` is optional caller-provided context; if present, it
-// renders as an italicized blockquote above the body paragraph.
+// renders as an italicized blockquote between the sender line and the
+// expiry line.
 //
 // Returns the full Discord message options object (`embeds` + `components`)
 // rather than just the embed, since the button is not part of the embed
 // — it lives in a top-level component row alongside it. Callers pass the
 // returned payload directly to `sendDM`.
 //
-// Example of what the recipient sees:
+// Rendered output (blank rows = Discord's natural section spacing,
+// NOT literal `\n` separators — descLines.join('\n') is single-newline):
 //
 //     ┌─────────────────────────────────────────────────────────────┐
 //     │  qURL · APP · Today at 2:47 PM                              │  (Discord-rendered header)
 //     │                                                             │
-//     │  Vik opened a door for you.                                 │  (description)
-//     │                                                             │
-//     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
-//     │                                                             │
-//     │  🕐 Door closes in 1 day                                    │  (Discord <t:N:R> — auto-updates client-side
-//     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
-//     │                                                             │
-//     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
-//     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
+//     │  Vik opened a door for you.                                 │  (description, line 1)
+//     │  > "Quarterly numbers — for your eyes only."                │  (description, line 2 — optional italic blockquote)
+//     │  🕐 Closes in 1 day                                         │  (description, line 3 — Discord <t:N:R>, auto-updates
+//     │                                                             │   client-side to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
-//     │  │   🔗 Step Through        │  (Link button — opens qURL)
+//     │  │   🚪 Step Through        │  (Link button — opens qURL)
 //     │  └──────────────────────────┘                               │
 //     └─────────────────────────────────────────────────────────────┘
 //
@@ -481,11 +580,36 @@ const EXPIRY_LABELS = {
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
-// Per-pick cap on UserSelectMenuBuilder.setMaxValues. Discord's hard
-// limit is 25; capping at 10 bounds the UX. The initial confirm-card
-// UserSelectMenu AND the post-send "Add Recipients" flow both use this
-// — keep them in lockstep so a future bump doesn't drift.
-const USER_SELECT_PER_PICK_CAP = 10;
+// Pure predicate for the EXPIRY_LABELS closed-set membership check.
+// `Object.prototype.hasOwnProperty.call` (NOT `EXPIRY_LABELS[v]`) is
+// load-bearing: a caller-supplied `'toString'`/`'constructor'` key
+// would otherwise pass a truthy check via prototype access.
+// `git grep isValidExpiry` for call sites.
+function isValidExpiry(v) {
+  return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
+}
+
+// Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
+// max_values hard limit. Used by both the initial confirm-card picker
+// and the post-send "Add Recipients" flow — keep them in lockstep.
+const USER_SELECT_PER_PICK_CAP = 25;
+
+// Shared render caps for warnings-block bullets that surface user-
+// or admin-controlled strings (invalidTokens, roleMentionsDeniedNames).
+// 10-bullet cap bounds the embed footprint under a forged-interaction
+// enumeration attempt; 80-codepoint per-string cap keeps a single
+// pathological role name / mention token from dwarfing the rest of
+// the card. Hoisted here (not inline in renderRecipientWarnings) so
+// the shared intent is explicit — one place to bump if Discord's
+// embed budget changes.
+const WARNING_LIST_DISPLAY_MAX = 10;
+const WARNING_NAME_CODEPOINT_CAP = 80;
+
+// Discord's protocol-level cap on select-menu max_values. Authoritative
+// — both picker sites must include this in their Math.min so we never
+// construct a menu Discord rejects at validation regardless of how
+// USER_SELECT_PER_PICK_CAP or QURL_SEND_MAX_RECIPIENTS are configured.
+const DISCORD_SELECT_MAX_VALUES_HARD_CAP = 25;
 
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option
 // `location:` consumes these — extracted to a single source so a
@@ -511,16 +635,18 @@ function safeDecodeURIComponent(s) {
   try { return decodeURIComponent(s); } catch { return s; }
 }
 
-// Parse a free-form `location:` input into `{ locationUrl, locationName }`.
-// Detection order:
-//   1. Google Maps URL embedded anywhere in the input → preserve URL,
-//      extract name from `?q=` or `/place/<name>`.
-//   2. Anything else → synthesize a `/maps/search/<input>` URL with the
-//      whole input as the name.
+// Parse a free-form `location:` input into one of three shapes:
+//   - URL input → { locationUrl, locationName }
+//   - place_id sentinel from autocomplete → { placeId }
+//   - free text → { text }
 //
-// Returns BOTH fields; caller is responsible for escaping the name
-// (markdown injection defense) and applying any cap.
+// Callers pass the result to resolveLocation, which hits Places for the
+// sentinel + text branches. The URL branch synchronously short-circuits.
 function parseLocationInput(rawInput) {
+  const decodedPlaceId = decodePlaceIdSentinel(rawInput);
+  if (decodedPlaceId !== null) {
+    return { locationUrl: null, locationName: null, placeId: decodedPlaceId };
+  }
   let detectedUrl = null;
   for (const pattern of MAPS_URL_PATTERNS) {
     const match = rawInput.match(pattern);
@@ -528,102 +654,374 @@ function parseLocationInput(rawInput) {
   }
   if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
     const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+    // `?api=1&query=…` is the canonical "Maps URL" form (the one
+    // resolveLocation constructs). Match it too so a sender who
+    // re-shares a previously-constructed qURL map URL still gets a
+    // name extracted instead of falling back to "location" in the
+    // recipient embed.
+    const apiQueryMatch = detectedUrl.match(/[?&]query=([^&]+)/);
     const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
     let name = null;
     if (queryMatch) name = safeDecodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+    else if (apiQueryMatch) name = safeDecodeURIComponent(apiQueryMatch[1].replace(/\+/g, ' '));
     else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
     return { locationUrl: detectedUrl, locationName: name };
   }
   return {
-    locationUrl: `https://www.google.com/maps/search/${encodeURIComponent(rawInput)}`,
-    locationName: rawInput,
+    locationUrl: null,
+    locationName: null,
+    text: rawInput,
   };
 }
 
-function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
-  // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
-  // + 64-char cap + 'Someone' fallback. Centralized so a future caller
-  // adding another sender-name surface picks up the same spoof defense.
-  const safeSender = sanitizeDisplayName(senderAlias);
+// Failure modes of resolveLocation. handleQurlMap maps each to a
+// distinct user-facing reply.
+const RESOLVE_REASON = Object.freeze({
+  NO_API_KEY: 'no_api_key',
+  NOT_FOUND: 'not_found',
+  ERROR: 'error',
+});
 
-  const embed = new EmbedBuilder()
-    .setColor(COLORS.QURL_BRAND)
-    .setDescription(`**${safeSender}** opened a door for you.`);
-
-  if (personalMessage) {
-    // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file` and
-    // `/qurl map` pipe raw input through `sanitizeMessage` (markdown
-    // escape + @-mention strip) before constructing this payload, and the
-    // addRecipients path reads from `sendConfig.personal_message` which
-    // was sanitized at write time. Raw interpolation into the template
-    // below is safe ONLY because of that upstream pass. A future caller
-    // that bypasses sanitizeMessage (or a DB row read that skips re-
-    // sanitize) would silently regress to markdown injection — keep the
-    // contract.
-    //
-    // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
-    // does not span newlines, so a multi-line message would render with
-    // only the first line styled. Flatten newlines to a space so the
-    // recipient sees one tidy quote — matches the design mockup which
-    // shows the message as a single-line styled box. 280-char cap keeps
-    // the embed visually compact now that the fixed body copy is gone.
-    const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
-    embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
+// Discriminated result of resolveLocation. Callers check `.ok`:
+//   { ok: true,  locationUrl, locationName }            (success)
+//   { ok: false, reason: RESOLVE_REASON.<...> }         (failure)
+async function resolveLocation(parsed) {
+  if (parsed.locationUrl) {
+    return { ok: true, locationUrl: parsed.locationUrl, locationName: parsed.locationName };
   }
+  if (!config.GOOGLE_MAPS_API_KEY) {
+    return { ok: false, reason: RESOLVE_REASON.NO_API_KEY };
+  }
+  try {
+    const place = parsed.placeId
+      ? await getPlaceDetails(parsed.placeId)
+      : await findPlaceFromText(parsed.text);
+    if (!place || !place.placeId) {
+      return { ok: false, reason: RESOLVE_REASON.NOT_FOUND };
+    }
+    return {
+      ok: true,
+      locationUrl: buildPlaceUrl(place.name, place.placeId),
+      locationName: place.name || place.address || null,
+    };
+  } catch (err) {
+    logger.warn('resolveLocation: Places API call failed', {
+      kind: parsed.placeId ? 'placeId' : 'text',
+      error: err && err.message,
+    });
+    return { ok: false, reason: RESOLVE_REASON.ERROR };
+  }
+}
 
-  embed.addFields(
-    {
-      // Discord's native relative-time markdown: <t:UNIX:R> renders
-      // CLIENT-SIDE based on the viewer's current time, so the recipient
-      // sees "in 1 day" at send time, "in 16 hours" 8 hours later, and
-      // "1 hour ago" once the link has expired. No bot-side editing
-      // needed — Discord handles the live update.
-      //
-      // Fail-loud on a missing/invalid expiresAt rather than rendering
-      // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
-      // the contract-violation throw in handleAddRecipients (same fail-
-      // loud-over-silent-degradation principle).
-      name: '\u200B',
-      value: (() => {
-        if (!Number.isFinite(expiresAt)) {
-          throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
-        }
-        return `\ud83d\udd50 Door closes <t:${expiresAt}:R>`;
-      })(),
-    },
-    {
-      // Brand line lives in a regular embed field (NOT setFooter) because
-      // Discord embed footers are plain-text only and we need the markdown
-      // hyperlink on `qURL` to point at https://layerv.ai. The brand line
-      // anchors the recipient back to the qURL product page.
-      name: '\u200B',
-      value: 'Quantum URL ([qURL](https://layerv.ai)) · The internet has a hidden layer. This is how you enter.',
-    },
-  );
-
-  // Link button: opens qurlLink in the recipient's browser on a
-  // single click. No interaction handler needed — Discord handles
-  // the redirect.
-  //
-  // Style is `ButtonStyle.Link` because Discord requires URL buttons
-  // to be Link-style (Primary/Success/Danger/Secondary cannot carry
-  // a URL — they only fire interaction handlers). Link buttons render
-  // gray, which can read as "text" rather than a clickable affordance.
-  // The leading 🔗 emoji adds visual weight so the recipient sees a
-  // clear button shape; arrow `→` dropped from the label since the
-  // emoji conveys the same "go elsewhere" intent.
-  const stepThrough = new ButtonBuilder()
+// Trust-signal Link button surfaced beside Step Through on every
+// delivery DM. Mirrors a browser address bar's "click the lock to
+// verify" affordance: a first-time recipient can hit qURL's public
+// landing page to confirm the brand exists before clicking Step
+// Through.
+function buildTrustButton() {
+  return new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
-    .setEmoji('🔗')
+    // U+1F6E1 + U+FE0F. The FE0F variation selector forces emoji-
+    // presentation rendering — without it some clients (older Linux,
+    // some web fallbacks) render the bare shield codepoint as a
+    // text-style glyph rather than the colored emoji.
+    .setEmoji('🛡️')
+    .setLabel('What is qURL?')
+    .setURL(TRUST.LANDING_URL);
+}
+
+// The Step Through Link button is the primary action on every DM.
+// Extracted as a factory so the bulk-path call site can compose
+// per-link buttons without round-tripping through buildDeliveryPayload
+// (which always pairs it with a trust button — wasteful when the
+// bulk path packs a single trust button at the bottom for the whole
+// message). 🚪 emoji ties the "opened a door for you" copy to the
+// action — author row, embed accent, and button emoji all reinforce
+// one metaphor.
+function buildStepThroughButton(qurlLink) {
+  return new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    .setEmoji('🚪')
     .setLabel('Step Through')
     .setURL(qurlLink);
-  const components = [new ActionRowBuilder().addComponents(stepThrough)];
+}
 
+// Pack a list of qURL links into the bulk-path component rows:
+// one Step Through button per link plus one trust button at the
+// end, chunked 5-per-ActionRow (Discord's per-row cap). The
+// dispatch caller upstream caps links at 10 (Discord's 10-embed-
+// per-message limit), so the worst case is 11 buttons → 3 rows.
+// Behavior at N=1 produces the same single-row [Step Through,
+// What is qURL?] shape executeSendPipeline emits, so a /qurl send
+// followed by /qurl add-recipients renders identically on the
+// recipient side.
+//
+// PRECONDITION: 1 <= qurlLinks.length <= 10.
+//   - Empty: a single row containing only the trust button would
+//     ship without any embeds, which Discord rejects.
+//   - >10: N + 1 buttons across 5-per-row chunks exceeds Discord's
+//     5-ActionRow message cap (e.g. N=11 → 3 rows, N=24 → 5 rows,
+//     N=25 → 6 rows = API rejection). The upstream caller in
+//     handleAddRecipients already caps via `links.slice(0, 10)` to
+//     match Discord's 10-embed-per-message limit; the throw below
+//     pins both ends of the contract for any future caller that
+//     misses the docstring.
+function packBulkDeliveryComponents(qurlLinks) {
+  if (!Array.isArray(qurlLinks) || qurlLinks.length === 0) {
+    throw new Error('packBulkDeliveryComponents: qurlLinks must be a non-empty array');
+  }
+  if (qurlLinks.length > 10) {
+    throw new Error(`packBulkDeliveryComponents: qurlLinks length ${qurlLinks.length} exceeds the 10-link cap`);
+  }
+  const allButtons = [
+    ...qurlLinks.map(buildStepThroughButton),
+    buildTrustButton(),
+  ];
+  const rows = [];
+  for (let i = 0; i < allButtons.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
+  }
+  return rows;
+}
+
+// Cap a string at `maxUtf16Units` UTF-16 code units (matching how
+// Discord's API measures `embed.author.name` and similar limits),
+// trimming a trailing lone high surrogate if the cap lands mid-pair
+// so the result is never an invalid UTF-16 sequence. Discord renders
+// a lone surrogate as tofu; the trim ensures a clean cut.
+function capUtf16Units(s, maxUtf16Units) {
+  if (s.length <= maxUtf16Units) return s;
+  let truncated = s.slice(0, maxUtf16Units);
+  const lastCharCode = truncated.charCodeAt(truncated.length - 1);
+  // High-surrogate range (U+D800..U+DBFF): if the cap split a pair,
+  // drop the orphan so the result decodes cleanly. The low-surrogate
+  // case (U+DC00..U+DFFF at the boundary) is unreachable by
+  // construction — `slice(0, n)` would have excluded a low surrogate
+  // at position n, so the high half is the only orphan possible at
+  // position n-1. The asymmetric check is correct, not a bug.
+  if (lastCharCode >= 0xD800 && lastCharCode <= 0xDBFF) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated;
+}
+
+// Composes the embed only (no button row). Split out so the bulk-path
+// dispatch in handleAddRecipients can build N embeds + N step-through
+// buttons + 1 trust button without round-tripping through
+// buildDeliveryPayload (which always allocates a trust button per
+// call). The single-path call sites use buildDeliveryPayload below.
+function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage }) {
+  // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
+  // value; anything else renders a misleading recipient surface (e.g.
+  // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
+  // `<t:1735689600.5:R>` → parse failure). Match the contract exactly
+  // and fail loud — call sites all compute via `Math.floor(...)` so no
+  // legitimate input is rejected. `typeof` in the throw closes the
+  // null-vs-undefined-vs-object triage gap for operators.
+  if (!Number.isInteger(expiresAt) || expiresAt <= 0) {
+    const got = String(expiresAt);
+    const gotType = typeof expiresAt;
+    throw new Error(
+      `buildDeliveryEmbed: expiresAt must be a positive integer `
+      + `Unix-seconds number (got ${got}, typeof=${gotType})`
+    );
+  }
+
+  // Author row is plaintext (no markdown rendering), so the PLAIN
+  // sanitization variant is the right tool for both sender and
+  // guildName halves — backslash-escapes would render literally
+  // here, but the bidi/zero-width spoof defense still applies.
+  // guildName opts into an empty fallback ({ fallback: '' }) so an
+  // all-strip hostile name (RLO/ZWSP/BOM only) collapses to "" and
+  // the author row falls back to sender-only — rather than rendering
+  // the nonsense `Vik · Someone` that the DISPLAY_NAME_FALLBACK
+  // default would produce, degrading the trust signal on the exact
+  // hostile input the strip exists to defend.
+  //
+  // Combined-length budget: 64 (sender cap) + 3 (` · `) + 64 (guild
+  // cap) = 131 codepoints. Discord's author.name limit is 256, but
+  // measured in UTF-16 code units (not codepoints), so a worst-case
+  // mix of 64 surrogate-pair emoji on each half is 64×2 + 3 + 64×2
+  // = 259 UTF-16 units — over the cap. Vanishingly rare in practice
+  // (would need both halves attacker-controlled and all-emoji), but
+  // the slice-and-trim below caps the final string at 256 UTF-16
+  // units codepoint-aware so the API never rejects the embed.
+  const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
+  const safeGuildName = sanitizeDisplayNamePlain(guildName, { fallback: '' });
+  const authorName = capUtf16Units(
+    safeGuildName ? `${safeSenderPlain} · ${safeGuildName}` : safeSenderPlain,
+    256,
+  );
+
+  // Discord renders fields BELOW the description, so all lines (optional
+  // personal message + expiry) must live in one setDescription block —
+  // an addFields personal-message would land after the expiry line, not
+  // between description and expiry. Folding also strips addFields'
+  // vertical padding, keeping the Step Through button close.
+  //
+  // `<t:N:R>` is Discord's client-side relative-time markdown: the
+  // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
+  // and "1 hour ago" once expired. No bot-side editing needed.
+  //
+  // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl send`
+  // and `/qurl map` pipe raw input through `sanitizeMessage`
+  // (markdown escape + @-mention strip) before constructing this
+  // payload, and the addRecipients path reads from
+  // `sendConfig.personal_message` which was sanitized at write time.
+  // Raw interpolation below is safe ONLY because of that upstream
+  // pass. A future caller that bypasses sanitizeMessage (or a DB row
+  // read that skips re-sanitize) would silently regress to markdown
+  // injection — keep the contract.
+  //
+  // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
+  // does not span newlines, so a multi-line message would render with
+  // only the first line styled. Flatten newlines to a space so the
+  // recipient sees one tidy quote — matches the design mockup which
+  // shows the message as a single-line styled box. 280-codepoint cap
+  // keeps the embed visually compact. Headroom: 280 codepoints ≤ 1120
+  // UTF-8 bytes + ~10 chars of `> *"…"*` wrapper + ~30-char expiry
+  // line ≪ Discord's 4096-char description cap.
+  const descLines = ['opened a door for you.'];
+  if (personalMessage) {
+    // Skip the styled-blockquote line if the input collapses to an
+    // empty string after newline-flatten + trim (e.g. "  \n \n  ").
+    // The call sites already pass `sanitizeMessage(...) || null` so
+    // an empty input arrives as null and short-circuits the outer
+    // `if (personalMessage)`. This guard only matters if a future
+    // caller bypasses that contract — belt-and-braces vs rendering
+    // a visible-but-empty `> *""*` row between sender and expiry.
+    //
+    // Order is intentional: cap → replace → trim. The 280-codepoint
+    // cap applies to RAW input (bounds the work done by replace/trim
+    // against a 10KB single-line pathological input) rather than to
+    // the rendered output. A future "fix" to `replace().trim()` then
+    // cap would be a subtly different contract — the visible output
+    // would be capped at 280 but unbounded work would happen before.
+    //
+    // `Array.from(s).slice(0, 280).join('')` is codepoint-aware: a
+    // 4-byte emoji (surrogate pair) is one element in the resulting
+    // array, so the cap can't split it into a lone high surrogate.
+    // 280 codepoints = at most 560 UTF-16 units = still well under
+    // Discord's 4096-char description cap. Mirrors the cap pattern
+    // sanitizeDisplayName uses for senderAlias.
+    const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
+    if (capped) descLines.push(`> *"${capped}"*`);
+  }
+  descLines.push(`🕐 Closes <t:${expiresAt}:R>`);
+
+  // Author row is the embed's "address bar" — anchored top, visually
+  // distinct from the description, the closest analog Discord offers
+  // to a browser's origin display. Icon is only attached when the
+  // guild has one — bare `undefined` (NOT null) is what discord.js
+  // wants for "no icon"; some versions stringify null into the URL slot.
+  const authorOpts = { name: authorName };
+  if (guildIconUrl) authorOpts.iconURL = guildIconUrl;
+
+  return new EmbedBuilder()
+    .setColor(COLORS.QURL_BRAND)
+    .setAuthor(authorOpts)
+    .setDescription(descLines.join('\n'))
+    // Footer reinforces the destination domain — same trust idea as a
+    // browser showing where a link points before you click. Literal
+    // string (not interpolated from qurlLink) keeps the recipient
+    // surface stable even if a future minted link uses a subdomain.
+    .setFooter({ text: `opens ${TRUST.DESTINATION_DOMAIN}` });
+}
+
+// Convenience wrapper composing the embed + one ActionRow holding
+// [Step Through, What is qURL?]. Used by the single-path call site
+// (executeSendPipeline); the bulk path composes from the primitives
+// directly so it can pack N step-throughs with one shared trust button.
+function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage }) {
+  const embed = buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage });
+  const components = [new ActionRowBuilder().addComponents(buildStepThroughButton(qurlLink), buildTrustButton())];
   return { embeds: [embed], components };
 }
 
+// CONTRACT: `components: []` MUST be passed explicitly. Discord's
+// PATCH /messages does NOT clear fields that aren't supplied —
+// omitting components would leave the original Step Through button
+// live in the recipient's DM, pointing at a now-dead qURL resource.
+function buildRevokedDMPayload({ senderAlias }) {
+  const safeSender = sanitizeDisplayName(senderAlias);
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.QURL_BRAND)
+    .setDescription(`🚪 **${safeSender}** closed the door.\nThis qURL is no longer active.`);
+  return { embeds: [embed], components: [] };
+}
+
+// Records the outcome of a sendDM dispatch attempt into qurl_sends.
+// Happy path coalesces dm_status='sent' + DM refs into one DDB Update
+// so the hot dispatch path stays at one write per recipient. Failure
+// path is status-only — there's no message to edit later.
+//
+// NEVER throws on a delivered DM. If the DDB write fails (outage,
+// throttle, validation), DISPATCH_PERSIST_FAILED fires + an error is
+// logged, but the function returns normally so the caller continues
+// to report the recipient as delivered. Throwing here would convert
+// a real DM into a "could not be reached" line on the operator's
+// reply — worse than the bookkeeping miss.
+//
+// CALLER INVARIANT: every call site MUST await db.recordQURLSendBatch
+// before invoking the dispatch loop that calls this function. The
+// underlying UpdateCommand has no attribute_exists guard (#366), so
+// without that ordering a stale recipient_discord_id would create an
+// orphan row. executeSendPipeline + handleAddRecipients both honor
+// this — recordQURLSendBatch awaits to completion (with an early-
+// return on throw) before the batchSettled dispatch loop starts.
+async function persistDispatchResult(sendId, recipientDiscordId, result) {
+  // Wraps the DDB call so a write failure can't propagate up as a
+  // failed dispatch. `delivered` ⇒ the DM is real and the operator
+  // should still see this recipient as reached.
+  const persist = async (op, delivered) => {
+    try {
+      await op();
+    } catch (err) {
+      if (delivered) {
+        logger.audit(AUDIT_EVENTS.DISPATCH_PERSIST_FAILED, { send_id: sendId });
+      }
+      logger.error('persistDispatchResult: qurl_sends write failed', {
+        sendId, recipientDiscordId, delivered, errorMessage: err.message,
+      });
+    }
+  };
+
+  if (result.ok === true && result.channelId && result.messageId) {
+    await persist(
+      () => db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId),
+      true,
+    );
+    return;
+  }
+  if (result.ok === true) {
+    // sendDM said ok but discord.js omitted channelId / messageId.
+    // Record SENT so DDB delivery rollups stay faithful; the revoke
+    // path's missing-refs guard skips the DM edit naturally.
+    // dispatch_sent_no_refs is a CANARY (not a DISPATCH_SENT
+    // subtractor) — emitted before the persist so a DDB outage
+    // can't mask a discord.js shape-drift.
+    logger.audit(AUDIT_EVENTS.DISPATCH_SENT_NO_REFS, { send_id: sendId });
+    logger.warn('sendDM resolved ok but missing channelId/messageId — recording as sent (revoke edit will skip)', {
+      sendId, recipientDiscordId,
+      hasChannelId: Boolean(result.channelId),
+      hasMessageId: Boolean(result.messageId),
+    });
+    await persist(
+      () => db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT),
+      true,
+    );
+    return;
+  }
+  // sendDM failed — the DM is not real. A bookkeeping error here is
+  // strictly a dropped status update; the recipient was never reached.
+  await persist(
+    () => db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED),
+    false,
+  );
+}
+
 // --- Link status monitor ---
-// Track live monitors so a burst of `/qurl file` + `/qurl map` commands
+// Track live monitors so a burst of `/qurl send` + `/qurl map` commands
 // can't stack more than MAX_CONCURRENT_MONITORS setIntervals. When we
 // cross the cap, the oldest monitor is stopped to make room (the user
 // can still `/qurl revoke`; they just stop seeing live status updates in
@@ -849,7 +1247,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   return control;
 }
 
-// --- qurl send pipeline (back-half shared by /qurl file + /qurl map) ---
+// --- qurl send pipeline (back-half shared by /qurl send + /qurl map) ---
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 //
 // REVIEW NOTE: The size of commands.js is tracked as a follow-up in
@@ -897,7 +1295,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 }
 
 // executeSendPipeline — back-half of the qurl send lifecycle, shared
-// by `/qurl file` and `/qurl map` after the user clicks the Send
+// by `/qurl send` and `/qurl map` after the user clicks the Send
 // button on the confirm card. The destructure signature is the
 // authoritative param surface; the notes below capture only non-obvious
 // contract guarantees that a reader couldn't infer from the call sites
@@ -1018,7 +1416,7 @@ async function executeSendPipeline(interaction, {
     throw new ErrorCtor(msg);
   }
 
-  // Defense-in-depth SSRF re-check. `/qurl file`'s front-half
+  // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
   // validates attachment.url against isAllowedSourceUrl BEFORE
   // calling the pipeline; this gate catches a future caller that
   // forgets.
@@ -1043,7 +1441,7 @@ async function executeSendPipeline(interaction, {
   // ship an off-set value (`'25h'`, `'bogus'`) that lands in the
   // DB and trips downstream when `expiryToISO` / `expiryToMs`
   // hit it. Validate at the boundary instead.
-  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+  if (!isValidExpiry(expiresIn)) {
     failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
@@ -1059,7 +1457,7 @@ async function executeSendPipeline(interaction, {
   }
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
-  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the `/qurl file`
+  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the `/qurl send`
   // + `/qurl map` front-half today; this is defense-in-depth for a
   // future caller (deserialized payload, programmatic retry, admin tool)
   // that skips those checks. Trips here would otherwise surface deep
@@ -1256,6 +1654,31 @@ async function executeSendPipeline(interaction, {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
+  // Compute the absolute expiry instant once for this dispatch (Unix
+  // seconds — Discord's <t:N:R> format requires seconds, not millis).
+  // Using send-time + duration rather than reading from the API mint
+  // response since `mintLinks` doesn't currently surface `expires_at`.
+  // Drift between this clock and the API's enforcement clock is the
+  // wall-clock gap between THIS compute site and the earlier mint call
+  // (mintLinksInBatches has already returned by the time we land here
+  // on the send-pipeline path; on handleAddRecipients the gap also
+  // covers re-download + re-upload + re-mint). So recipients see
+  // "in 24 hours" measured against send-time, not mint-time. Negligible
+  // at the 30m–7d horizon — even a worst-case 10s gap rounds the same
+  // way in the relative-time display.
+  //
+  // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
+  // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
+  // are written — otherwise the DB writes would happen, then the throw
+  // would bubble out with no DMs sent, leaving orphan QURL records
+  // with no recipient. The throw fires HERE (at the hoisted compute
+  // site below, function-scoped) rather than at the per-recipient
+  // render step inside batchSettled — that distinction matters for
+  // the failure-mode bookkeeping: a thrown expiryToMs surfaces as a
+  // single uncaught error at the function level, not as N
+  // `DISPATCH_FAILED` audit emissions. Closes #352.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the QURL side but there's no local record to revoke them
   // later — abort the send and surface the error instead of continuing to DMs.
@@ -1265,10 +1688,10 @@ async function executeSendPipeline(interaction, {
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
       // CONTRACT: targetType is always 'user' for new rows post-PR
       // #313 (the only caller is executeSendPipeline via the confirm
-      // card on /qurl file + /qurl map, both of which DM individual
+      // card on /qurl send + /qurl map, both of which DM individual
       // recipients). The column is kept because the revoke-list
       // renderer's branch on `s.target_type` still has to handle
-      // historical /qurl send rows ('channel') during the TTL drain
+      // historical legacy /qurl send wizard rows ('channel') during the TTL drain
       // window. #318 drops the formatRevokeLabel non-'user' branch
       // once no revoke-visible row has `target_type !== 'user'` — the
       // drain happens naturally as the revoke renderer filters on
@@ -1292,51 +1715,51 @@ async function executeSendPipeline(interaction, {
     });
   }
 
-  // Send DMs
+  // Send DMs. `expiresAt` is Unix seconds, computed above the DDB
+  // write — see the #352 hoist comment near recordQURLSendBatch for
+  // the clock-drift caveat that was previously documented here.
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
-  // Compute the absolute expiry instant once for this dispatch (Unix
-  // seconds — Discord's <t:N:R> format requires seconds, not millis).
-  // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on the
-  // send-pipeline path; can be a few seconds on handleAddRecipients
-  // which re-downloads + re-uploads + re-mints first). Negligible at
-  // the 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+  // Mirror handleAddRecipients: hoist resolveSenderAlias out of the
+  // per-recipient batchSettled callback. The function is a pure
+  // resolution of nickname > globalName > username from `interaction`,
+  // so the per-link call inside the callback was N redundant
+  // resolutions of the same string. Both pipelines now share the same
+  // hoist pattern for both expiresAt AND senderAlias.
+  const senderAlias = resolveSenderAlias(interaction);
+  const { guildName, guildIconUrl } = resolveGuildProvenance(interaction);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
     // Audit in `finally` so the metric fires for every recipient regardless
     // of where the dispatch fails — sendDM resolving to false, sendDM
     // throwing (against contract — see apps/discord/src/discord.js), OR
-    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
+    // buildDeliveryPayload throwing (e.g. on a non-integer expiresAt —
+    // see its `Number.isInteger` guard; would throw on every iteration
+    // of the batch, since expiresAt is computed once above).
     // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
     // it either — that's the failure mode the audit metric exists to
     // measure. Coverage spans the entire dispatch attempt, not just the
     // network leg.
-    let sent = false;
+    let result = { ok: false };
     try {
       const dmPayload = buildDeliveryPayload({
-        // member.displayName resolves to nickname || globalName || username,
-        // so it works whether the sender has a per-guild nickname, only a
-        // global display name, or just the legacy @-handle.
-        senderAlias: resolveSenderAlias(interaction),
+        senderAlias,
+        guildName,
+        guildIconUrl,
         qurlLink: link.qurlLink,
         expiresAt,
         personalMessage,
       });
-      sent = await sendDM(link.recipientId, dmPayload);
+      result = await sendDM(link.recipientId, dmPayload);
     } finally {
-      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }
-    await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { recipientId: link.recipientId, username: recipient?.username, sent };
+    await persistDispatchResult(sendId, link.recipientId, result);
+    return { recipientId: link.recipientId, username: recipient?.username, sent: result.ok === true };
   }, 5);
 
   for (const r of dmResults) {
@@ -1520,7 +1943,7 @@ async function executeSendPipeline(interaction, {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
-          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
           // Iterate `recipients` (canonical send-confirmation order)
           // and filter by membership — `successUserIds` walks Set
           // insertion order from resource-grouped iteration, which
@@ -1585,8 +2008,12 @@ async function executeSendPipeline(interaction, {
           }
           setCooldown(interaction.user.id);
 
-          // Show user select menu — collect the response on the REPLY message
-          const maxSelect = Math.min(USER_SELECT_PER_PICK_CAP, remaining);
+          // Show user select menu — collect the response on the REPLY message.
+          const maxSelect = Math.min(
+            USER_SELECT_PER_PICK_CAP,
+            remaining,
+            DISCORD_SELECT_MAX_VALUES_HARD_CAP,
+          );
           const userSelectRow = new ActionRowBuilder().addComponents(
             new UserSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)
@@ -1688,6 +2115,29 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: [] };
+  }
+
+  // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
+  // predicate as the executeSendPipeline failGate
+  // (`grep "expiresIn must be one of"`), closing the unprotected
+  // path where a stale/regressed sendConfig row could ship an
+  // off-set value. Protects BOTH downstream `expiryToMs` AND
+  // `expiryToISO` (each used below for mint + DM dispatch) from
+  // their shared silent-24h-default fallback. Failure shape
+  // diverges from failGate intentionally: failGate throws (caller
+  // catches at the slash-command boundary), while this gate returns
+  // an error object — handleAddRecipients's caller renders the
+  // string on the post-send confirm card, where a throw would land
+  // as a generic "Internal error" with no actionable message.
+  if (!isValidExpiry(sendConfig.expires_in)) {
+    // warn (not error): a stale/corrupted DDB row is user-recoverable
+    // (re-send), not paging-worthy. Matches renderConfirmCardRows's
+    // analogous off-EXPIRY_LABELS log level. Forensics-only signal.
+    logger.warn('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
+    return {
+      msg: `Cannot add recipients — this send's saved expiry is invalid (the original send's links still work; create a new send to reach additional recipients).`,
+      newResourceIds: [], delivered: 0, failed: 0, newRecipients: [],
+    };
   }
 
   // Filter out bots and the sender. Convert the Discord Collection to a
@@ -1858,6 +2308,34 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
+  // Hoist payload-shared inputs to the top of the dispatch block so
+  // the entire batch shares one expiry timestamp and one resolved
+  // sender alias. Mirrors executeSendPipeline's structure — both
+  // pipelines now compute the Unix-seconds expiresAt once per call,
+  // eliminating Date.now() drift between recipients in the same
+  // batch. (The ISO-string `expiresAt` inside the file/location prep
+  // branches calls expiryToISO independently for mintLinks — that's
+  // a separate type for a separate consumer; sub-second drift between
+  // the minted-link expiry and the DM-payload expiry is negligible
+  // at the 30m–7d horizon.) resolveSenderAlias is a pure function of
+  // originalInteraction so hoisting also avoids re-resolving the
+  // nickname/globalName/username chain per dispatch.
+  //
+  // Computed BEFORE recordQURLSendBatch so a malformed
+  // `sendConfig.expires_in` throwing in `expiryToMs` aborts the
+  // dispatch BEFORE any DDB rows are written — otherwise the DB
+  // writes would happen, then the throw would bubble out with no DMs
+  // sent, leaving orphan QURL records with no recipient. The
+  // `handleAddRecipients` path is especially exposed here because
+  // sendConfig.expires_in is read from DDB (rather than validated
+  // upstream like executeSendPipeline's slash-command param), so a
+  // stale/regressed row predating the current validation would slip
+  // through. Throwing pre-write makes the failure mode visible at
+  // the function level rather than as orphan rows. Closes #352.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+  const senderAlias = resolveSenderAlias(originalInteraction);
+  const { guildName, guildIconUrl } = resolveGuildProvenance(originalInteraction);
+
   // Persist to DB before DMs
   const batchSends = [];
   for (const [rid, links] of Object.entries(recipientLinks)) {
@@ -1914,52 +2392,41 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // packing, network call — so a malformed sendConfig (e.g. pathological
     // personalMessage that throws inside buildDeliveryPayload) still
     // counts as dispatch_failed instead of disappearing from CloudWatch.
-    let sent = false;
+    let result = { ok: false };
     try {
-      // Same Unix-seconds expiry computation as executeSendPipeline —
-      // see comment there. Computed once per recipient (cheap; the
-      // alternative would be threading a single timestamp through
-      // sendConfig).
-      const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
-      const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
-        // Same alias resolution as executeSendPipeline — see comment
-        // there for the nickname > globalName > username fallback
-        // rationale.
-        senderAlias: resolveSenderAlias(originalInteraction),
-        qurlLink: link.qurlLink,
+      // links.slice(0, 10) caps at Discord's 10-embed-per-message
+      // limit. The embed body is identical per-link (sender + guild +
+      // expiry don't vary), so build the EmbedBuilder once and repeat
+      // the reference N times. discord.js serializes each embeds[]
+      // entry via .toJSON() — a pure read of internal state — so
+      // reference sharing is safe. Saves N-1 EmbedBuilder allocations
+      // + N-1 sanitize-chain runs on the senderAlias/guildName halves.
+      // packBulkDeliveryComponents enforces 1 <= len <= 10 with
+      // fail-loud throws; the upstream guard at line 2372 above
+      // (`if (!links || links.length === 0)`) is what keeps us out
+      // of the lower-bound throw. If a future refactor splits this
+      // dispatch loop or drops that guard, the throw will surface
+      // here at the helper boundary — see packBulkDeliveryComponents
+      // docstring for the contract.
+      const cappedLinks = links.slice(0, 10);
+      const sharedEmbed = buildDeliveryEmbed({
+        senderAlias,
+        guildName,
+        guildIconUrl,
         expiresAt,
         personalMessage: sendConfig.personal_message,
-      }));
-      // Contract with buildDeliveryPayload: each payload's `components`
-      // array contains exactly one ActionRow whose `components` are the
-      // per-link buttons. We pull each payload's first row's children
-      // (one Step Through button per link) and re-pack into 5-per-row
-      // ActionRows since Discord caps at 5 buttons per ActionRow.
-      const allEmbeds = payloads.flatMap(p => p.embeds);
-      const allButtons = payloads.flatMap(p => {
-        // Hard fail rather than silently drop buttons if the contract
-        // ever changes — easier to catch than a button quietly missing
-        // from a recipient's DM.
-        if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
-          throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
-        }
-        return p.components[0].components;
       });
-      const allComponents = [];
-      for (let i = 0; i < allButtons.length; i += 5) {
-        allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
-      }
+      const allEmbeds = Array(cappedLinks.length).fill(sharedEmbed);
+      const allComponents = packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
-      sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+      result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
-      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }
-    // updateSendDMStatus updates every qurl_sends row matching (sendId,
-    // recipient.id), so a single call covers all links for this recipient.
-    // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
-    // same update links.length times.
-    await db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { sent, username: recipient.username };
+    // One persist write per recipient regardless of links.length —
+    // both store methods key on (send_id, recipient_discord_id).
+    await persistDispatchResult(sendId, recipient.id, result);
+    return { sent: result.ok === true, username: recipient.username };
   }, 5);
 
   for (const r of dmResults) {
@@ -2207,7 +2674,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }
 
   const sendId = interaction.values[0];
-  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
@@ -2269,7 +2736,9 @@ const SETUP_API_KEY_MAX_LENGTH = 64;
 // hardcoding a copy that drifts.
 const SETUP_SUCCESS_MSG =
   '✅ **qURL is now configured for this server!**\n\n'
-  + 'Your team can use `/qurl file` and `/qurl map` to share files and locations securely.\n'
+  + (config.MAP_COMMAND_ENABLED
+    ? 'Your team can use `/qurl send` and `/qurl map` to share files and locations securely.\n'
+    : 'Your team can use `/qurl send` to share files securely.\n')
   + 'All qURL usage will be billed to your API key.';
 
 // Button-stage handler. Routed by flow-dispatch when the admin
@@ -2537,12 +3006,12 @@ async function handleSetupModal(interaction, { flow_id }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// /qurl file + /qurl map — slash-driven sends.
+// /qurl send + /qurl map — slash-driven sends.
 //
 // All-options-up-front slash commands that render an in-channel
 // ephemeral confirm card. The flow:
 //
-//   /qurl file recipients:<text> attachment:<file> [expires-in]
+//   /qurl send recipients:<text> attachment:<file> [expires-in]
 //                                                  [self-destruct]
 //                                                  [personal-message]
 //   /qurl map  recipients:<text> location:<text>   [location-name]
@@ -2588,7 +3057,7 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 const CONFIRM_USER_SELECT_CUSTOM_ID = 'qurl_confirm_user_select';
 const CONFIRM_SEND_CUSTOM_ID = 'qurl_confirm_send';
 const CONFIRM_CANCEL_CUSTOM_ID = 'qurl_confirm_cancel';
-// Confirm-card menus / button — slash options on /qurl file + /qurl map
+// Confirm-card menus / button — slash options on /qurl send + /qurl map
 // remain as initial defaults (one-shot for power users), but a user who
 // didn't fill them in can still adjust expiry, self-destruct, and note
 // inline on the card.
@@ -2596,21 +3065,23 @@ const CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_confirm_expiry';
 const CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_confirm_self_destruct';
 const CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_confirm_note_btn';
 const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
-// Confirm-card "Everyone in this voice channel" button. Rendered only
+// Confirm-card "Everyone on voice" button. Rendered only
 // when the slash command was invoked from a voice / stage-voice channel
 // (`payload.voiceChannelId` is set by `handleQurlSlashSend`). Mirrors
 // the role-mention/`<#voice>` parser path: resolve voice-connected
 // non-bot members via `channel.members` AT CLICK TIME, not render time,
 // so a 30s-old member snapshot doesn't silently send to people who
 // left. PR #174's "voice-connected only" semantics are restored here
-// (replacing the legacy `/qurl send`'s wizard option deleted in
-// PR #313 alongside `getChannelMembers`).
+// (replacing the legacy multi-step `/qurl send` wizard's option,
+// deleted in PR #313 alongside `getChannelMembers`. Note: the
+// current `/qurl send` is the renamed `/qurl file` subcommand,
+// NOT the deleted wizard — the name was reused after rename).
 //
 // STAGE-CHANNEL SEMANTICS: discord.js's `channel.members` for stage
 // channels includes BOTH speakers and audience (everyone currently
 // connected to the voice gateway in that stage). This is the
 // "voice-connected" contract carried over from PR #174 and matches
-// the legacy `/qurl send` behavior. A future stage-specific UX
+// the legacy multi-step `/qurl send` wizard's behavior. A future stage-specific UX
 // might want speakers-only (filter by `member.voice.suppress ===
 // false`) — that's a separate affordance, not a regression in this
 // path. Today the live `(N)` count on the button label is the user's
@@ -2627,6 +3098,58 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // Tracked in #339 if a future product decision (stage channels with
 // thousands of audience) needs to revisit this for stage-only.
 const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
+// "Pick people instead" button — rendered in voice-mode and
+// everyone-mode (i.e. `payload.recipientMode` is `'voice'` or
+// `'everyone'`). Clicking it flips the card back to picker-mode
+// (recipientIds dropped, MentionableSelect row restored). Lives on
+// its own customId so flow-dispatch routes directly instead of
+// branching inside the voice/@everyone handlers.
+const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
+// Whole-guild `@everyone` button on the confirm card. Workaround for
+// Discord's MentionableSelectMenu omitting the `@everyone` role from
+// its dropdown (platform UI filter), which would otherwise leave
+// MENTION_EVERYONE-bearing users with no in-picker affordance for
+// the "fan out to the whole server" intent. Click-time semantics
+// match a synthetic `@everyone` text-mention pick. Picker-mode only —
+// voice-mode already targets the voice population (different
+// "everyone"), and everyone-mode is the post-click state where this
+// button has already done its job (re-rendering it would invite a
+// re-click that just churns the version with no state change).
+const CONFIRM_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_everyone';
+
+// Three recipient-source modes carried on `payload.recipientMode`:
+//   - 'picker' (default): MentionableSelect row is the source of
+//     truth; bottom row carries the "🔊 Everyone on voice" affordance
+//     when the slash command was invoked from voice, plus the
+//     "📢 @everyone" affordance when the sender has MENTION_EVERYONE.
+//   - 'voice': recipientIds were resolved from `channel.members` and
+//     the picker row is hidden. Bottom row swaps in "👥 Pick people
+//     instead" so the user can fall back to manual selection.
+//   - 'everyone': recipientIds were resolved from the guild's full
+//     non-bot member set via the 📢 @everyone shortcut. Like voice,
+//     the picker row is hidden and the bottom row carries the
+//     "👥 Pick people instead" escape hatch — auto-filling the
+//     picker would either silently truncate at Discord's 25-entry
+//     hard cap or read back through `handleConfirmUserSelect` and
+//     replace the @everyone fan-out with a subset.
+// Stale flow_state rows (created before this field existed) read as
+// undefined — `normalizeRecipientMode` below maps undefined / any
+// off-set value to RECIPIENT_MODE_PICKER so they keep the legacy
+// picker shape until they expire.
+const RECIPIENT_MODE_PICKER = 'picker';
+const RECIPIENT_MODE_VOICE = 'voice';
+const RECIPIENT_MODE_EVERYONE = 'everyone';
+
+// Single source of truth for the closed-set map. Multiple render
+// sites (renderConfirmCardContent, renderConfirmCardRows,
+// rerenderConfirmCard) previously open-coded the ternary; an off-set
+// or typo'd constant would silently fall through to PICKER and break
+// the layout swap. The helper pins the stale-row default in one place.
+function normalizeRecipientMode(mode) {
+  if (mode === RECIPIENT_MODE_VOICE) return RECIPIENT_MODE_VOICE;
+  if (mode === RECIPIENT_MODE_EVERYONE) return RECIPIENT_MODE_EVERYONE;
+  return RECIPIENT_MODE_PICKER;
+}
 
 // Recipient-rejection reason strings shared by every handler that
 // can drop a selection to empty (picker, voice-everyone). Hoisted
@@ -2645,11 +3168,11 @@ const SEND_NOTE_MODAL_FIELD_ID = 'message_value';
 
 // 3-minute confirm-card window — the time-to-finish budget a user has
 // to review the confirm card and click Send/Cancel after invoking
-// /qurl file or /qurl map.
+// /qurl send or /qurl map.
 const SEND_FLOW_TTL_SECONDS = 180;
 
 // On a successful Cancel, soften (don't clear) the cooldown so 5s of
-// throttle remain — defuses the rapid /qurl file → Cancel → /qurl file
+// throttle remain — defuses the rapid /qurl send → Cancel → /qurl send
 // → Cancel spam vector (which would otherwise rack up supersedeOrCreate
 // DDB writes with zero throttle).
 const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
@@ -2657,7 +3180,23 @@ const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
 // requires touching this set, not the dispatcher fall-through.
-const API_KEY_GATED_SUBCOMMANDS = new Set(['file', 'map', 'revoke']);
+//
+// `'map'` joins the set only when MAP_COMMAND_ENABLED is on. The
+// conditional removal is load-bearing — the gate runs BEFORE the
+// dispatch in execute() below, so if `'map'` stayed in the set with
+// the flag off, a stale-client /qurl map in an unconfigured guild
+// would hit "qURL is not configured for this server" instead of
+// QURL_MAP_DISABLED_REPLY.
+const API_KEY_GATED_SUBCOMMANDS = new Set(
+  config.MAP_COMMAND_ENABLED ? ['send', 'map', 'revoke'] : ['send', 'revoke'],
+);
+
+// User-facing reply for stale /qurl map submissions when the toggle
+// is off. Reached when a Discord client routes a cached `map`
+// submission after the registration has dropped it. Copy mirrors
+// the flag-off branch of SETUP_SUCCESS_MSG so both surfaces describe
+// the same remaining capability.
+const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl send` to share files securely.';
 
 // Slash-option choice arrays. The same wording flows into both the
 // slash-command autocomplete and the confirm-card dropdowns so users
@@ -2769,8 +3308,14 @@ async function resolveRecipientUsers(interaction, ids) {
 // Filter resolved Users: drop bots, detect whether the sender is
 // included. Returns `{ valid, droppedBots, selfIncluded }` so the
 // caller can surface "X bots were dropped" as a warning and "send
-// includes yourself" as a neutral notice. Sender is NOT filtered —
-// self-send is supported.
+// includes yourself" as a neutral notice. Sender is NOT filtered by
+// default — self-send is supported via the picker / text paths.
+//
+// `excludeSender: true` is the voice-everyone contract: the "Everyone
+// in #voice" affordance is interpreted as "everyone else in the room",
+// not "and CC myself". Sender is dropped pre-validity so `selfIncluded`
+// is always false on that path (the content renderer's "Send includes
+// you." notice would be misleading after exclusion).
 //
 // Known v1 cap-skew: parseRecipientMentions caps to QURL_SEND_MAX_RECIPIENTS
 // BEFORE knowing which IDs are bots. A mention list of
@@ -2790,7 +3335,7 @@ async function resolveRecipientUsers(interaction, ids) {
 // yields self + 24 others (was: 25 others, pre self-send). This is
 // symmetric with the bot cap-skew above and aligns with the supported-
 // recipient model — sender is just another recipient.
-function partitionRecipients(users, senderId) {
+function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
   // Dedup contract is OWNED upstream: parseRecipientMentions dedupes
   // via a Set (recipient-parser.js:197-198) and the UserSelectMenu
   // gateway-event surfaces each picked user at most once. This loop
@@ -2802,6 +3347,12 @@ function partitionRecipients(users, senderId) {
   let selfIncluded = false;
   for (const u of users) {
     if (u.bot) { droppedBots++; continue; }
+    // Voice-everyone path drops the sender silently — they pressed
+    // the "Everyone on voice" affordance, which semantically means
+    // "everyone else." No droppedBots-style accounting because the
+    // exclusion is inferred from voice-mode semantics rather than
+    // surfaced in user-visible copy.
+    if (u.id === senderId && excludeSender) continue;
     if (u.id === senderId) selfIncluded = true;
     valid.push(u);
   }
@@ -2811,8 +3362,12 @@ function partitionRecipients(users, senderId) {
 // Merge a MentionableSelectMenu pick (users + roles) into a deduped
 // User[] for partitionRecipients. The `@everyone` role
 // (role.id === guild.id) is gated on `canMentionEveryone` — same
-// gate as the text-path #323. Non-@everyone role gating is tracked
-// in #326.
+// gate as the text-path #323. Non-mentionable role gating (#326)
+// requires the same MENTION_EVERYONE permission (or `role.mentionable
+// === true` as a per-role bypass) — Discord's picker filters this
+// client-side, but a forged interaction would otherwise bypass it.
+// Denied non-@everyone roles surface via `roleMentionsDenied:
+// string[]` so the caller can render per-role copy with the name.
 //
 // Picked users seed `userMap` BEFORE role expansion so they get cap
 // priority over role-expanded members (mirrors the text-path #323
@@ -2849,6 +3404,15 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // silent deferUpdate-only no-op the user-visible path would
   // otherwise hit.
   let everyoneCacheCold = false;
+  // Per-role denied list (issue #326): a picked role that's not
+  // `mentionable: true` AND the sender lacks MENTION_EVERYONE lands
+  // here as `roleId`. Dedup via parallel Set so a future picker that
+  // surfaces the same role twice doesn't double-render. Tracked as
+  // IDs; the caller resolves names via `guild.roles.cache.get(id)
+  // ?.name` so renderRecipientWarnings stays pure (no guild
+  // dependency).
+  const roleMentionsDenied = [];
+  const roleMentionsDeniedIds = new Set();
   // Distinct bot IDs filtered across all picked roles — caller renders
   // .size as "N bot(s) filtered." Tracking as a Set (not a counter)
   // so overlap (bot in two roles, or directly-picked bot also in a
@@ -2879,6 +3443,36 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         // is a user-visible signal worth showing regardless of whether
         // expansion would have added anyone.
         massMentionDenied = true;
+        continue;
+      }
+      // Skip undefined-role entries (theoretical — Discord's picker
+      // surfaces roles via `interaction.roles.entries()`, which should
+      // always carry the Role object alongside the ID; but a partial
+      // fetch shape could deliver a bare ID). Gate placement parallels
+      // the text-path parser's `if (!role) { pushInvalidIfNew(...) }`
+      // branch — without this short-circuit, the `role?.mentionable
+      // !== true` gate below would route a cache-miss role through
+      // the deny path and surface "Non-mentionable role" copy for
+      // what's actually a missing object. RESIDUE DIVERGES BY DESIGN:
+      // the parser surfaces invalid-role IDs in `invalidTokens` so
+      // the user sees a "couldn't parse" bullet, but the picker has
+      // no parse-error context to surface (the picker submitted IDs
+      // are by definition Discord-rendered choices), so silent
+      // `continue` is the right residue here.
+      if (!isEveryoneRole && !role) continue;
+      // Per-role MENTION_EVERYONE gate (issue #326), parallel to the
+      // text-path gate in recipient-parser.js. Discord's picker filters
+      // non-mentionable roles client-side for users without the perm —
+      // this gate is defense-in-depth against a forged interaction or
+      // a future client-side filter regression. The @everyone-role
+      // branch above already handled (isEveryoneRole), so this gate
+      // only fires for non-@everyone roles. `role.mentionable === true`
+      // is the per-role bypass (set explicitly by a role owner).
+      if (!isEveryoneRole && role.mentionable !== true && !canMentionEveryone) {
+        if (!roleMentionsDeniedIds.has(roleId)) {
+          roleMentionsDeniedIds.add(roleId);
+          roleMentionsDenied.push(roleId);
+        }
         continue;
       }
       // `guild` is provably truthy in the @everyone branch (gated by
@@ -2961,6 +3555,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     everyoneCacheCold,
+    roleMentionsDenied,
   };
 }
 
@@ -2975,10 +3570,21 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * builds its own joined-sentence reasons list with shorter copy
  * (rejection banner vs. warnings block — different UI contexts).
  * Both surface the SAME set of signals (droppedBots,
- * droppedFromRoles, massMentionDenied, everyoneCacheCold). When
- * adding or renaming a signal, update BOTH surfaces in lockstep —
- * the helpers don't share a copy table, so a future contributor
- * could easily land one half and not the other.
+ * droppedFromRoles, massMentionDenied, everyoneCacheCold,
+ * roleMentionsDeniedNames). When adding or renaming a signal, update
+ * BOTH surfaces in lockstep — the helpers don't share a copy table,
+ * so a future contributor could easily land one half and not the
+ * other.
+ *
+ * `roleMentionsDeniedNames` is a pre-resolved list of role NAMES
+ * (caller maps role IDs through `guild.roles.cache.get(id)?.name`,
+ * falling back to a placeholder for cache-miss / deleted roles).
+ * Keeping the helper pure of guild lookups mirrors how
+ * `invalidTokens` arrives pre-formatted from the parser. Names are
+ * truncated AT RENDER time here: each name is capped at
+ * WARNING_NAME_CODEPOINT_CAP (80) codepoints with backticks stripped,
+ * and the listed count is capped at WARNING_LIST_DISPLAY_MAX (10)
+ * with a tail-count line — callers don't need to pre-sanitize.
  *
  * @param {{
  *   invalidTokens?: string[],
@@ -2989,6 +3595,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
 function renderRecipientWarnings({
@@ -3000,8 +3607,16 @@ function renderRecipientWarnings({
   droppedFromRoles = 0,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
+  // Shared sanitizer for user-/admin-controlled strings rendered inline
+  // in a bullet: strip backticks (prevent code-fence breakout) then
+  // codepoint-slice with ellipsis. Used by both the invalidTokens and
+  // roleMentionsDeniedNames bullets — single-sourced so the two paths
+  // can't drift.
+  const sanitizeForBullet = (s) =>
+    sliceWithEllipsis(s.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
   if (cappedCount > 0) {
     lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
   }
@@ -3014,17 +3629,18 @@ function renderRecipientWarnings({
     // also cap the listed count at 10 so a pathological list can't
     // blow the Discord content budget.
     //
-    // Per-token codepoint cap (80) keeps the worst case bounded:
-    // recipient-parser.js caps each token at 256 chars, so 10 × 256
-    // = 2.5KB of code-fenced text would dwarf the rest of the card
-    // and risk crowding out the action prompt. 80 codepoints is
-    // enough to spot the typo / paste error without rendering the
-    // attacker's entire payload.
-    const TOKEN_DISPLAY_MAX = 80;
-    const shown = invalidTokens.slice(0, 10).map(
-      (t) => sliceWithEllipsis(t.replace(/`/g, ''), TOKEN_DISPLAY_MAX, '…'),
-    );
-    const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
+    // Per-token codepoint cap (WARNING_NAME_CODEPOINT_CAP, 80) keeps
+    // the worst case bounded: recipient-parser.js caps each token at
+    // 256 chars, so 10 × 256 = 2.5KB of code-fenced text would dwarf
+    // the rest of the card and risk crowding out the action prompt.
+    // 80 codepoints is enough to spot the typo / paste error without
+    // rendering the attacker's entire payload. List cap
+    // (WARNING_LIST_DISPLAY_MAX, 10) bounds the bullet count; both
+    // constants are shared with the role-mentions-denied path below.
+    const shown = invalidTokens.slice(0, WARNING_LIST_DISPLAY_MAX).map(sanitizeForBullet);
+    const more = invalidTokens.length > WARNING_LIST_DISPLAY_MAX
+      ? ` (+${invalidTokens.length - WARNING_LIST_DISPLAY_MAX} more)`
+      : '';
     lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
   }
   if (unresolvedIds.length > 0) {
@@ -3062,6 +3678,32 @@ function renderRecipientWarnings({
     // copy here doesn't need a context qualifier.
     lines.push('• `@everyone` requires the **Mention Everyone** permission — skipped.');
   }
+  if (roleMentionsDeniedNames.length > 0) {
+    // One bullet per denied role so the user can tell which mention
+    // tripped the gate (the @everyone bullet above doesn't enumerate
+    // because it's always a single semantic action).
+    // WARNING_LIST_DISPLAY_MAX (10) bounds the embed footprint under
+    // a forged-interaction attempt to enumerate every guild role;
+    // tail-count discloses the rest.
+    //
+    // Sanitization mirrors the invalidTokens path above:
+    //   - inline code fence (single backtick) so a role name
+    //     containing Discord markdown renders literally;
+    //   - backticks inside the name stripped to prevent fence
+    //     breakout;
+    //   - codepoint-aware slice via sliceWithEllipsis
+    //     (WARNING_NAME_CODEPOINT_CAP, 80) so a 100-codepoint role
+    //     name can't dwarf the rest of the card. Role names are
+    //     admin-controlled but Discord doesn't restrict the character
+    //     set, so treat the input as untrusted for rendering.
+    const shown = roleMentionsDeniedNames.slice(0, WARNING_LIST_DISPLAY_MAX);
+    for (const name of shown) {
+      lines.push(`• \`@${sanitizeForBullet(name)}\` requires the **Mention Everyone** permission or \`role.mentionable: true\` — skipped.`);
+    }
+    if (roleMentionsDeniedNames.length > WARNING_LIST_DISPLAY_MAX) {
+      lines.push(`• (+${roleMentionsDeniedNames.length - WARNING_LIST_DISPLAY_MAX} more role mention(s) skipped.)`);
+    }
+  }
   if (lines.length === 0) return '';
   return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
 }
@@ -3074,8 +3716,10 @@ function renderConfirmCardContent({
   resourceType, resourceLabel, validRecipients,
   expiresIn, selfDestructSeconds, personalMessage,
   warningsBlock, needsPicker, interaction, selfIncluded = false,
+  recipientMode, voiceChannelId,
 }) {
   let content = warningsBlock || '';
+  const mode = normalizeRecipientMode(recipientMode);
   // Explicit branch per RESOURCE_TYPES value — a future resource
   // type (audio, contact card, etc.) MUST add its own branch here.
   // Throwing on unknown beats silently rendering the new type as a
@@ -3092,13 +3736,39 @@ function renderConfirmCardContent({
   // list. Self-send is supported as a first-class flow; surface it on
   // the confirm card so the user can verify they meant to include
   // themselves before clicking Send.
-  if (selfIncluded) {
+  //
+  // Mode guard: every voice-mode write path explicitly sets
+  // `selfIncluded: false` (slash-entry override + handleConfirmVoiceEveryone
+  // + handleConfirmPickManual), so `selfIncluded === true` is
+  // structurally unreachable in voice-mode. The guard is defense
+  // against a forged or schema-drifted payload that would otherwise
+  // produce contradictory copy ("Send includes you." stacked on top
+  // of a voice-mode "To:" line whose semantics exclude the sender).
+  if (selfIncluded && mode !== RECIPIENT_MODE_VOICE) {
     content += 'ℹ\u{FE0F} **Send includes you.**\n';
   }
   if (needsPicker) {
-    content += '\n**Pick recipients below** (1–'
-      + String(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
-      + ' users), then click **Send**.\n';
+    content += '\n**Pick recipients below.**\n';
+  } else if (mode === RECIPIENT_MODE_VOICE) {
+    // Voice-mode "To:" — names omitted in favor of the channel context.
+    // The #voice mention is the source of truth for who's included;
+    // listing alias names would just duplicate the scrollback the user
+    // already sees in Discord. Sender exclusion is left inferred from
+    // voice-mode semantics (the user clicked "Everyone on voice" knowing
+    // they themselves wouldn't qURL themselves) rather than spelled out
+    // — the explicit "(you not included)" disclosure dropped per UX
+    // call; selfIncluded:false is still load-bearing on the data side.
+    //
+    // SAFETY: use Discord's native channel-mention syntax `<#id>` (which
+    // Discord renders client-side from the channel id) instead of
+    // interpolating `channel.name` raw. A name like `**spoiler**`,
+    // `_underline_`, or `||hidden||` would otherwise inject markdown
+    // into the confirm card. Mirrors the same gotcha noted at the
+    // voice-button label site (where button-label rendering doesn't
+    // process markdown, but message content does).
+    const channelRef = voiceChannelId ? `<#${voiceChannelId}>` : 'the voice channel';
+    const userWord = validRecipients.length === 1 ? 'user' : 'users';
+    content += `\n**To:** ${validRecipients.length} ${userWord} in ${channelRef}\n`;
   } else {
     // First-N preview keeps the card scannable when a paste resolves
     // to many users. resolveRecipientAlias prefers nickname > globalName >
@@ -3130,7 +3800,7 @@ function renderConfirmCardContent({
     // of the card.
     content += `**Note:** ${formatPersonalMessagePreview(personalMessage)}\n`;
   }
-  content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
+  content += '\nClick **Send** to deliver one-time qURL, or **Cancel** to abort.';
   // Fail-safe cap below Discord's 2000-char content limit so adversarial
   // inputs can't trip a 400 from editReply and orphan the flow row.
   // Cap (1988) + '…(truncated)' indicator (12 codepoints) = 2000 max
@@ -3181,9 +3851,9 @@ function formatPersonalMessagePreview(message) {
   return `> ${safeCodepointSlice(oneLine, 80)}…`;
 }
 
-// Build the ActionRow set for the confirm card. Always 4 rows so the
-// layout is stable from frame 0 — each select needs its own row
-// (Discord forbids selects + buttons in the same ActionRow).
+// Build the ActionRow set for the confirm card. Layout depends on
+// `recipientMode` — each select needs its own row (Discord forbids
+// selects + buttons in the same ActionRow).
 //
 // MentionableSelect (per #328) surfaces users AND roles in one menu;
 // role picks expand in handleConfirmUserSelect via
@@ -3193,36 +3863,112 @@ function formatPersonalMessagePreview(message) {
 // need the 180s flow_state drain coordination from #316.
 //
 // Row math (Discord 5-row max, 5-buttons-per-row max):
-//   Mentionable + SelfDestruct + Expiry +
-//   [(optional 🔊 Voice), Note, Send, Cancel] = 4 rows, ≤ 4 buttons
+//   PICKER mode:   Mentionable + SelfDestruct + Expiry +
+//     [(optional 🔊 Voice), (optional 📢 @everyone), Note, Send, Cancel]
+//     = 4 rows, ≤ 5 buttons
+//   VOICE mode:    SelfDestruct + Expiry +
+//     [👥 Pick people instead, Note, Send, Cancel]   = 3 rows, 4 buttons
+//   EVERYONE mode: SelfDestruct + Expiry +
+//     [👥 Pick people instead, Note, Send, Cancel]   = 3 rows, 4 buttons
 //
-// The voice button is rendered only when `voiceChannelId` is non-null
-// (snapshot into payload by `handleQurlSlashSend` when the slash
-// command was invoked from a voice / stage-voice channel). Disabled
-// with a `(0)` count when the channel has no connected non-bot members
-// at render time — honest UX so the user can see WHY the button is
-// inert. The actual member resolution still happens at click time
-// (see `handleConfirmVoiceEveryone`); the count here is a snapshot
-// hint so the label isn't blank.
+// The bottom-row affordance flips with the mode:
+//   - `'picker'` + voiceChannelId set → 🔊 Everyone on voice button.
+//     Disabled with a `(0)` count when the channel has no connected
+//     non-bot members at render time — honest UX so the user can see
+//     WHY the button is inert.
+//   - `'voice'` or `'everyone'` → 👥 Pick people instead button.
+//     Picker row is removed entirely; the user has committed to a
+//     bulk-select semantics and this button is their escape hatch
+//     back to manual selection. Both modes share a single handler
+//     (handleConfirmPickManual) that resets recipientMode to 'picker'.
+// The actual member resolution still happens at click time (see
+// `handleConfirmVoiceEveryone` and `handleConfirmEveryone`); the
+// counts here are snapshot hints so the labels aren't blank.
+//
+// `recipientMode` defaults to RECIPIENT_MODE_PICKER for stale rows that
+// existed before this field was introduced; the legacy shape is exactly
+// the picker-mode branch below.
+
+// Memoized non-bot count for the @everyone button label. Confirm cards
+// re-render on every picker change / expiry select / note add+edit; in
+// a single flow the cache typically doesn't change between re-renders,
+// so iterating it on every render is wasted work. The WeakMap is keyed
+// by `guild` and entries auto-evict when the Guild is GC'd.
+//
+// FRESHNESS FINGERPRINT: `cache.size:memberCount` busts the memo when
+// either changes (the common case for member join/leave). KNOWN GAP:
+// a swap event — one human leaves and one bot joins near-simultaneously
+// — keeps both values stable but flips the non-bot count by 1. The
+// memo would return the stale count until the next non-swap churn.
+// Acceptable because (a) the label is documented as a hint, not
+// authoritative, and (b) the click-time `partitionRecipients` is the
+// source of truth. Folding a churn signal into the fingerprint would
+// be cheap if this ever needs tightening.
+//
+// Returns `{ count, accurate }`:
+//   - `accurate: true` when the warm-cache branch fired (cache fully
+//     populated AND bots filtered) — safe to gate render-time disables
+//     on the count
+//   - `accurate: false` for the cold-cache fallback (`memberCount`
+//     includes bots — over-counts by bot population, so a guild near
+//     the cap could false-positive on over-cap disable)
+//   - `count: null` when neither branch can produce a number
+const everyoneCountMemo = new WeakMap();
+function computeEveryoneDisplayCount(guild) {
+  const cache = guild?.members?.cache;
+  const memberCount = guild?.memberCount;
+  if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
+    const fingerprint = `${cache.size}:${memberCount}`;
+    const cached = everyoneCountMemo.get(guild);
+    if (cached && cached.fingerprint === fingerprint) return { count: cached.count, accurate: true };
+    let n = 0;
+    for (const [, m] of cache) {
+      // `m?.user &&` aligns the render-time label with the click-time
+      // filter in handleConfirmEveryone — that path tallies rows
+      // without `.user` as `partialCacheDrops` and excludes them from
+      // recipients. Without the guard, a degraded GUILD_MEMBERS_CHUNK
+      // row counts as a non-bot here (isBotMember reads `.user?.bot`,
+      // returning false on missing `.user`) but never reaches the
+      // recipient set, leaving the label over-stated.
+      if (m?.user && !isBotMember(m)) n++;
+    }
+    everyoneCountMemo.set(guild, { fingerprint, count: n });
+    return { count: n, accurate: true };
+  }
+  if (typeof memberCount === 'number') return { count: memberCount, accurate: false };
+  return { count: null, accurate: false };
+}
+
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
-  voiceChannelId, interaction,
+  voiceChannelId, interaction, recipientIds, recipientMode,
 }) {
   const rows = [];
-  const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
-  // Placeholder surfaces both ceilings: pick-slot count (Discord's
-  // setMaxValues) AND the post-expansion recipient cap. With roles in
-  // the picker, a single slot can expand to many members — saying
-  // only "1–10" would mislead users who pick 10 roles expecting 10
-  // recipients.
-  const recipientCap = config.QURL_SEND_MAX_RECIPIENTS;
-  rows.push(new ActionRowBuilder().addComponents(
-    new MentionableSelectMenuBuilder()
+  const mode = normalizeRecipientMode(recipientMode);
+  // Pre-resolved recipientIds past maxValues stay in payload.recipientIds
+  // and still get sent — only the visual pre-check via addDefaultUsers
+  // truncates.
+  const defaults = Array.isArray(recipientIds) ? recipientIds : [];
+  const maxValues = Math.min(
+    USER_SELECT_PER_PICK_CAP,
+    config.QURL_SEND_MAX_RECIPIENTS,
+    DISCORD_SELECT_MAX_VALUES_HARD_CAP,
+  );
+  if (mode === RECIPIENT_MODE_PICKER) {
+    const picker = new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
+      .setPlaceholder(`Pick up to ${maxValues} ${maxValues === 1 ? 'user/role' : 'users/roles'}`)
       .setMinValues(1)
-      .setMaxValues(maxValues)
-  ));
+      .setMaxValues(maxValues);
+    if (defaults.length > 0) {
+      // Text-path recipientIds are user IDs only — parseRecipientMentions
+      // expands roles to members before partition. addDefaultUsers is the
+      // matching API on MentionableSelectMenuBuilder (addDefaultRoles
+      // would be wrong here — we never persist role IDs).
+      picker.addDefaultUsers(...defaults.slice(0, maxValues));
+    }
+    rows.push(new ActionRowBuilder().addComponents(picker));
+  }
   // Self-destruct StringSelectMenu: "No self-destruct timer" + 7
   // curated presets sourced from SELF_DESTRUCT_PRESETS in utils/time.
   // The `default: true` flag on the matching option keeps the
@@ -3266,7 +4012,7 @@ function renderConfirmCardRows({
   // option's label, misrepresenting the actual stored value. Falls
   // back to defaulting the codebase-default '24h' option so the card
   // still shows SOMETHING meaningful.
-  const hasExpiryMatch = EXPIRY_CHOICES.some((c) => c.value === expiresIn);
+  const hasExpiryMatch = isValidExpiry(expiresIn);
   if (!hasExpiryMatch && expiresIn != null) {
     // Log so corrupted rows surface in forensics rather than just
     // getting papered over by the 24h fallback.
@@ -3287,11 +4033,36 @@ function renderConfirmCardRows({
         }))
       )
   ));
-  // Bottom row: [optional 🔊 Voice] + Note + Send + Cancel. Note label
-  // flips between "Add a note" and "Edit note" based on current state
-  // so the user can tell at a glance whether a note is attached.
+  // Bottom row: [optional 🔊 Voice | 👥 Pick people instead] + Note +
+  // Send + Cancel. Note label flips between "Add a note" and "Edit
+  // note" based on current state so the user can tell at a glance
+  // whether a note is attached. The leading-button affordance is
+  // mode-dependent: picker-mode shows the voice-everyone entry button
+  // (only when the slash was invoked from voice); voice-mode and
+  // everyone-mode show the "Pick people instead" escape hatch.
   const bottomRow = new ActionRowBuilder();
-  if (voiceChannelId) {
+  // Voice-mode and everyone-mode share the same escape hatch: picker
+  // row is hidden above, so this button is the only path back to
+  // manual selection without re-running the slash command. Style as
+  // Secondary so it doesn't compete visually with Send (Success).
+  // Handler is shared (handleConfirmPickManual) and resets
+  // recipientMode → 'picker'.
+  //
+  // DEFENSIVE: voice-mode gate does NOT require voiceChannelId.
+  // Every production write path pairs voice-mode with voiceChannelId,
+  // but a forged or schema-drifted payload presenting voice-mode
+  // without it would otherwise fall through to the picker-no-voice
+  // branch below and render the 📢 @everyone entry button against a
+  // hidden picker — no recovery path. Closing the gate here keeps
+  // the escape hatch reachable in that degraded state.
+  if (mode === RECIPIENT_MODE_VOICE || mode === RECIPIENT_MODE_EVERYONE) {
+    bottomRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID)
+        .setLabel('\u{1F465} Pick people instead')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  } else if (mode === RECIPIENT_MODE_PICKER && voiceChannelId) {
     // Live count via interaction.guild for the label. Every production
     // caller (handleQurlSlashSend, handleConfirmUserSelect,
     // handleConfirmVoiceEveryone, rerenderConfirmCard) passes
@@ -3304,21 +4075,8 @@ function renderConfirmCardRows({
     // Count is render-time, not click-time — members can join/leave
     // voice between renders. Click-time resolution in
     // handleConfirmVoiceEveryone is the authoritative recipient set;
-    // the label is a freshness hint that re-derives on every other
-    // confirm-card interaction (picker / expiry / note edits all flow
-    // through renderConfirmCardRows again).
-    // Filter-drift contract: the render-time count below uses
-    // `isBotMember(m)` to compute (N), while click-time resolution
-    // in handleConfirmVoiceEveryone routes channel.members through
-    // `partitionRecipients` for the authoritative recipient set.
-    // Both apply the same bot filter today, so the count is honest.
-    // If `partitionRecipients` ever picks up additional drops (role-
-    // blocklist, self-filter toggle, etc.), the render-time `(N)`
-    // will silently overstate the click-time set — keep the two
-    // filter sources aligned, or accept a stale label and document
-    // the drift here.
+    // the count here only drives the disable state.
     let connectedCount = null;
-    let channelName = null;
     if (interaction) {
       const channel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
       if (channel?.members) {
@@ -3327,53 +4085,86 @@ function renderConfirmCardRows({
           if (!isBotMember(m)) n++;
         }
         connectedCount = n;
-        channelName = channel.name || null;
       }
     }
-    const labelCount = connectedCount == null ? '?' : String(connectedCount);
-    // Name the target channel in the label so a user who invoked
-    // from #voice-A and drifted to #voice-B mid-flow can tell the
-    // button still targets the original channel. Discord button-label
-    // hard cap is 80 UTF-16 code units (NOT codepoints — Discord
-    // measures UTF-16 surrogate-pair-aware, so an emoji-heavy 46-
-    // codepoint name occupies up to 92 UTF-16 units). Budget the
-    // name in UTF-16 units (channelName.length, which IS UTF-16 unit
-    // count in JS strings) so the upper bound is hard-guaranteed
-    // regardless of emoji density.
-    //
-    // Fixed prefix + suffix:
-    //   `🔊 ` (3) + `Everyone in #` (13) + ` (NNNNN)` (max 8) = 24
-    //   (🔊 is a surrogate pair = 2 UTF-16 units + a space).
-    // 50 leaves 6 units of headroom for label evolution. The `…`
-    // ellipsis adds 1 UTF-16 unit, so the budget includes its slot:
-    // a max-truncation label measures 24 + 49 + 1 = 74 UTF-16 units.
-    //
-    // SAFETY: channel.name is interpolated raw into the button label
-    // — Discord BUTTON labels do not render markdown / mentions /
-    // emoji shortcodes, so a channel name containing `**bold**` or
-    // `<@123>` is displayed verbatim. A future refactor that moves
-    // this label into an embed description / message content would
-    // need to escape `channel.name` against markdown/mention parsing.
-    const VOICE_LABEL_NAME_UTF16_BUDGET = 50;
-    // Back off if the cut would split a surrogate pair (a high
-    // surrogate at the last position with no paired low surrogate
-    // would render as `�`). Reserve 1 UTF-16 unit for the ellipsis.
-    const safeName = (() => {
-      if (!channelName) return null;
-      if (channelName.length <= VOICE_LABEL_NAME_UTF16_BUDGET) return channelName;
-      let cut = VOICE_LABEL_NAME_UTF16_BUDGET - 1;
-      // High surrogate at cut-1 → cut would split it; back off 1 unit.
-      const code = channelName.charCodeAt(cut - 1);
-      if (code >= 0xD800 && code <= 0xDBFF) cut -= 1;
-      return `${channelName.slice(0, cut)}…`;
-    })();
-    const labelTarget = safeName ? `#${safeName}` : 'this voice channel';
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID)
-        .setLabel(`\u{1F50A} Everyone in ${labelTarget} (${labelCount})`)
+        .setLabel('\u{1F50A} Everyone on voice')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(connectedCount == null || connectedCount === 0),
+    );
+  }
+  // @everyone button — workaround for Discord's MentionableSelectMenu
+  // filtering @everyone out of its dropdown. Gated on the sender's
+  // MENTION_EVERYONE permission (channel-effective, same as the text-
+  // path #323 gate) AND on picker-mode + guild context. In voice-mode
+  // the card already targets the voice population, so showing the
+  // button there would confuse "everyone" semantics. DM context has
+  // no @everyone meaning.
+  //
+  // Count is render-time non-bot when the cache is fully populated
+  // (`cache.size >= memberCount`); falls back to `guild.memberCount`
+  // (total, includes bots — over-count, but the only reliable number
+  // when the cache is cold). FILTER DRIFT (distinct from voice-
+  // everyone's): voice-everyone's render-time count can drift from
+  // click-time via members joining/leaving the voice channel between
+  // render and click; @everyone's drift is cold-cache-overcounts-by-
+  // bots OR stale-row-inflation (departed members lingering in cache
+  // briefly between gateway events), resolved when the click-time
+  // pre-warm fills the cache. In all cases the label is a hint and
+  // `partitionRecipients` is the click-time authority.
+  if (
+    mode === RECIPIENT_MODE_PICKER
+    && interaction && interaction.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true
+  ) {
+    const guild = interaction.guild;
+    const { count: displayCount, accurate: countIsAccurate } = computeEveryoneDisplayCount(guild);
+    // Disable on three conditions:
+    //  - `null` (memberCount unavailable + cache cold) → `(?)` label
+    //    so the user sees the button can't act vs. silent no-op
+    //  - `0` reachable in degraded cache states (all-bots guild with
+    //    sender's row temporarily missing). The bots-only click-time
+    //    reject still surfaces the right copy, but disabling at render
+    //    avoids the dead-click round trip
+    //  - `> QURL_SEND_MAX_RECIPIENTS` ONLY when `countIsAccurate` —
+    //    the cold-cache fallback returns `memberCount` (over-counts
+    //    by bot population), so disabling on it would false-positive
+    //    on a near-cap guild whose actual non-bot count is under cap
+    //    (e.g., 20100 members with 200 bots → 19900 non-bots, well
+    //    under default 20000 cap, but raw memberCount = 20100). Cold-
+    //    cache over-cap defers to click-time hard-reject in
+    //    handleConfirmEveryone (authoritative — partition runs against
+    //    the prewarmed cache).
+    const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
+    // Fixed label — no live count, no overcap suffix. The disabled+
+    // greyed-out button is the visual signal for the three degraded
+    // states (count unavailable, empty guild, exceeds cap).
+    //
+    // UX TRADE-OFF: the warm-cache over-cap branch DOES disable here
+    // with no in-card "exceeds N cap" hint anymore. Previously the
+    // label spelled out the reason; now the user sees only a greyed-
+    // out button. Deliberate per product call ("terse labels"); the
+    // disable trigger is structurally rare (guild with > 20k non-bot
+    // members), and the cold-cache over-cap branch still surfaces
+    // the actionable copy via `handleConfirmEveryone`'s click-time
+    // reject (this render-time disable can't fire on cold cache, so
+    // the click goes through). If the warm-cache hint ever needs to
+    // come back, the lever is right here.
+    //
+    // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
+    // components. The current worst-case render is
+    // [🔊 Voice] + [📢 @everyone] + Note + Send + Cancel = 5, exactly
+    // at the limit. Adding another button below would silently throw
+    // at discord.js builder time. Re-evaluate the layout (e.g., a
+    // second row for affordances vs. fixed buttons) before adding.
+    bottomRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
+        .setLabel('\u{1F4E2} @everyone')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(displayCount == null || displayCount === 0 || overCap),
     );
   }
   bottomRow.addComponents(
@@ -3395,7 +4186,7 @@ function renderConfirmCardRows({
   return rows;
 }
 
-// Shared entry point — both `/qurl file` and `/qurl map` route here
+// Shared entry point — both `/qurl send` and `/qurl map` route here
 // after collecting their resource-specific options. `params` carries:
 //   resourceType: RESOURCE_TYPES.FILE | RESOURCE_TYPES.MAPS
 //   attachment:   {url, name, contentType, size} | null  (file path)
@@ -3416,7 +4207,7 @@ async function handleQurlSlashSend(interaction, params) {
       ephemeral: true,
     });
   }
-  // Cooldown gate is owned by the front-half handlers (handleQurlFile /
+  // Cooldown gate is owned by the front-half handlers (handleQurlSend /
   // handleQurlMap) so invalid inputs are throttled too. By the time we
   // get here the cooldown is already set; legitimate clearCooldown calls
   // on individual error branches below still unlock retry.
@@ -3436,7 +4227,12 @@ async function handleQurlSlashSend(interaction, params) {
   let flow_id;
   let orphanFlowCreated = false;
   try {
-    await interaction.deferReply({ ephemeral: true });
+    // /qurl map defers before resolveLocation; skip the redundant
+    // defer here so discord.js doesn't throw "Already replied or
+    // deferred".
+    if (!interaction.deferred) {
+      await interaction.deferReply({ ephemeral: true });
+    }
 
     const recipientsRaw = interaction.options.getString('recipients');
     const expiresIn = interaction.options.getString('expires-in') || '24h';
@@ -3446,7 +4242,7 @@ async function handleQurlSlashSend(interaction, params) {
     // Defense-in-depth: expiresIn comes from the slash command's choice
     // list which Discord enforces server-side, but a forged interaction
     // could carry an off-set value. EXPIRY_LABELS owns the closed set.
-    if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+    if (!isValidExpiry(expiresIn)) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
@@ -3484,6 +4280,17 @@ async function handleQurlSlashSend(interaction, params) {
     // refactor switching to `interaction.member.permissions` would
     // silently lose the channel-overwrite respect — keep this property.
     const canMentionEveryone = interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+    // Skip the fetch when only `@everyone` is in the input AND the
+    // sender lacks MENTION_EVERYONE — the parser will deny the
+    // expansion (massMentionDenied), so the chunk request would be
+    // wasted. Role-mention shapes (`<@&id>`) still trigger the fetch
+    // regardless of permission because role expansion gates on
+    // `role.mentionable === true` per-role, not the global perm.
+    const hasMassMention = MASS_MENTION_HINT_RE.test(recipientsRaw || '');
+    const hasRoleMention = ROLE_MENTION_HINT_RE.test(recipientsRaw || '');
+    if (hasMassMention && (canMentionEveryone || hasRoleMention)) {
+      await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' });
+    }
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
       allowMassMention: canMentionEveryone,
     });
@@ -3494,7 +4301,7 @@ async function handleQurlSlashSend(interaction, params) {
         resolved = await resolveRecipientUsers(interaction, parsed.ids);
       } catch (err) {
         clearCooldown(interaction.user.id);
-        logger.error('qurl file/map: resolveRecipientUsers threw', {
+        logger.error('qurl send/map: resolveRecipientUsers threw', {
           user_id: interaction.user.id, error: err && err.message,
         });
         return interaction.editReply({
@@ -3516,7 +4323,16 @@ async function handleQurlSlashSend(interaction, params) {
     // there) and "requires the Mention Everyone permission" reads
     // strangely when there's no permission to grant. The other
     // warnings (bot/capped/unresolved) still apply and surface.
+    //
+    // `roleMentionsDenied` does NOT need an isDmContext guard: the
+    // parser's role loop won't fire without a `guild`, so
+    // `parsed.roleMentionsDenied` is always `[]` in DM —
+    // `resolveRoleNames` returns `[]` for empty input. Symmetric
+    // with the picker-path call site, which calls `resolveRoleNames`
+    // unconditionally (the picker path can't reach DM context at
+    // all because `canMentionEveryone` requires `interaction.guild`).
     const isDmContext = !interaction.guild;
+    const roleMentionsDeniedNames = resolveRoleNames(interaction.guild, parsed.roleMentionsDenied);
     const warningsBlock = renderRecipientWarnings({
       invalidTokens: parsed.invalidTokens,
       cappedCount: parsed.cappedCount,
@@ -3524,6 +4340,7 @@ async function handleQurlSlashSend(interaction, params) {
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
       massMentionDenied: parsed.massMentionDenied && !isDmContext,
+      roleMentionsDeniedNames,
     });
     if (!recipientsOmitted && valid.length === 0) {
       clearCooldown(interaction.user.id);
@@ -3535,7 +4352,8 @@ async function handleQurlSlashSend(interaction, params) {
         && resolved.unresolvedIds.length === 0
         && droppedBots === 0
         && parsed.invalidTokens.length === 0
-        && parsed.cappedCount === 0;
+        && parsed.cappedCount === 0
+        && roleMentionsDeniedNames.length === 0;
       if (transientOnly) {
         return interaction.editReply({
           content: warningsBlock + '❌ **Could not look up recipients right now.** Try again in a moment.',
@@ -3551,7 +4369,8 @@ async function handleQurlSlashSend(interaction, params) {
         && resolved.unresolvedIds.length === 0
         && resolved.transientFailureIds.length === 0
         && parsed.invalidTokens.length === 0
-        && parsed.cappedCount === 0;
+        && parsed.cappedCount === 0
+        && roleMentionsDeniedNames.length === 0;
       const detail = breakdownEmpty
         ? '\n\nMake sure you @-mention real users (bots are skipped automatically).'
         : '';
@@ -3570,10 +4389,196 @@ async function handleQurlSlashSend(interaction, params) {
       });
     }
 
-    const needsPicker = recipientsOmitted;
-    const recipientIds = valid.map((u) => u.id);
+    // Voice-channel context snapshot. The "Everyone on voice"
+    // confirm-card button is rendered when this is set.
+    // Snapshot at slash-command time (NOT re-derived at button-click)
+    // because:
+    //   - interaction.channel at click time tracks the channel the
+    //     ephemeral message lives in, which DOES match invocation
+    //     channel in practice — but pinning via payload is the durable
+    //     contract and matches the rest of the flow-state pattern.
+    //   - A user who opens /qurl send from a voice channel, then
+    //     drags themselves into a different channel mid-confirm,
+    //     should still see "Everyone on voice" target
+    //     the channel they invoked from, not the channel they're now
+    //     in.
+    // The actual member resolution still happens at click time via
+    // channel.members — see handleConfirmVoiceEveryone.
+    const voiceChannelId = isVoiceChannelType(interaction.channel?.type)
+      ? interaction.channel.id
+      : null;
 
-    // supersedeOrCreate handles the "another /qurl file/map is open"
+    // Voice-everyone auto-default. When the slash command was invoked
+    // from a voice channel AND `recipients:` was omitted, resolve to
+    // voice-connected members (excluding sender + bots) and render the
+    // card in voice-mode. This makes "/qurl send" from inside #voice
+    // behave the way users naturally expect — the room is the audience.
+    //
+    // Sender is filtered pre-validity via partitionRecipients's
+    // `excludeSender` option; the "Everyone on voice" affordance
+    // semantically means "everyone else," not "and CC myself."
+    //
+    // Banner asymmetry on the picker-mode fallback: sender-only /
+    // bots-only / truly-empty falls back QUIETLY (the user didn't ask
+    // for voice-everyone — surfacing "voice is empty" would be noise),
+    // while over-cap and cache-miss surface a banner because they're
+    // degraded states the user can't otherwise diagnose. The picker +
+    // bottom voice button remain available throughout so the user can
+    // recover when voice state changes (someone joins, bots kicked).
+    //
+    // SNAPSHOT vs. CLICK-TIME asymmetry: this slash-entry path freezes
+    // `recipientIds` at command receipt — someone joining the channel
+    // between `/qurl send` and the Send click is NOT added. The "🔊
+    // Everyone on voice" button (handleConfirmVoiceEveryone) goes the
+    // other way: re-resolves `channel.members` at click time. The two
+    // shapes are reachable from the same UI but produce different
+    // recipient sets; that's a deliberate UX call (the auto-default
+    // card shows "N users in #voice" and Send must mean that set,
+    // not whoever happens to be in voice at click time). Documented
+    // here so a future contributor doesn't "fix" the asymmetry.
+    let recipientMode = RECIPIENT_MODE_PICKER;
+    let finalValid = valid;
+    let finalSelfIncluded = selfIncluded;
+    let finalWarningsBlock = warningsBlock;
+    // Text-mention `@everyone` (typed in the `recipients:` slash option,
+    // or its `<@&{guildId}>` wire form) lands the card in EVERYONE
+    // mode — same as clicking the 📢 @everyone confirm-card button.
+    // Auto-filling the picker with up to 25 of the expanded set would
+    // either misrepresent the recipient list (only a subset shows) or
+    // invite a picker re-interaction that silently replaces the
+    // expansion with a truncated subset via handleConfirmUserSelect.
+    // Hiding the picker matches the button-click UX.
+    //
+    // MIXED MENTIONS: `recipients: @everyone @alice` lands in
+    // EVERYONE mode too — alice is already in the @everyone set, so
+    // the explicit mention is semantically absorbed (the parser
+    // dedups via `seen`). A user trying to NARROW @everyone by
+    // listing names doesn't get that — they get the full fan-out.
+    // Correct behavior (you can't subtract from "everyone") but
+    // worth knowing if support asks.
+    //
+    // Gated on `valid.length > 0` as defense-in-depth — pins the
+    // EVERYONE-mode invariant locally so a future refactor that
+    // loosens the upstream `!recipientsOmitted && valid.length === 0`
+    // early-return can't silently land us in EVERYONE-mode with no
+    // recipients (which would render a card with no recipients AND
+    // no picker).
+    //
+    // ORDERING: this branch deliberately precedes the voice-mode
+    // auto-default below. `massMentionExpanded` requires
+    // `recipientsOmitted: false` (the user typed something to be
+    // parsed), and voice-mode auto-default requires
+    // `recipientsOmitted: true`, so the two branches are mutually
+    // exclusive in production. The ordering still encodes "explicit
+    // @everyone wins over voice auto-default" as documentation — a
+    // future refactor that loosens either guard MUST keep this
+    // precedence or the auto-default could shadow an explicit @-text.
+    //
+    // SENDER-PUSH DIVERGENCE: handleConfirmEveryone (the button-click
+    // path) defensively pushes `interaction.user` when the sender's
+    // row is missing from `members.cache` (shard-resume / partial-
+    // chunk race after prewarm). The text path here intentionally
+    // does NOT mirror that — `partitionRecipients` runs on the parser
+    // output upstream, which has already been prewarmed at line 4142.
+    // In the narrow race where the sender is missing post-prewarm,
+    // the text path yields `selfIncluded: false` while a click on the
+    // 📢 @everyone button would yield `selfIncluded: true`. Acceptable
+    // because the user explicitly typed `@everyone` (so they're aware
+    // of the recipient list at Send time), but documented so a future
+    // contributor pursuing strict click/text parity knows the lever.
+    if (parsed.massMentionExpanded && valid.length > 0) {
+      recipientMode = RECIPIENT_MODE_EVERYONE;
+      // `finalValid`, `finalSelfIncluded`, `finalWarningsBlock` stay as-is —
+      // parser output is authoritative for EVERYONE mode (no voice-resolve
+      // re-partition needed). Pinned here so a future refactor that adds
+      // an EVERYONE-mode re-partition step doesn't forget which branch
+      // owns the reassignment.
+    } else if (recipientsOmitted && voiceChannelId) {
+      // Read voice-connected members through the same channel cache
+      // lookup that handleConfirmVoiceEveryone and the bottom-button
+      // count use (`guild.channels.cache.get(voiceChannelId)`). Reading
+      // via `interaction.channel.members` would land identical state in
+      // production but diverge in tests and on the rare command-from-
+      // -outside-guild path; the cache lookup is the established
+      // contract for "voice members at this channel id."
+      const voiceChannel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
+      if (!voiceChannel?.members) {
+        // Cache miss: voice channel evicted or `GuildVoiceStates`
+        // intent dropped mid-flight. Surface a banner + log so a
+        // degraded environment doesn't silently lose voice-mode.
+        //
+        // Banner replaces (not appends to) `warningsBlock`: the
+        // text-path warnings can't exist on this branch because
+        // `recipientsOmitted` is true (no `recipients:` arg means no
+        // tokens to parse, so `warningsBlock` is always `''` here).
+        logger.info('handleQurlSlashSend: voice-mode skipped — channel members cache missing', {
+          user_id: interaction.user.id, voice_channel_id: voiceChannelId,
+        });
+        finalWarningsBlock = `⚠\u{FE0F} Couldn't read voice channel members — pick recipients below.\n\n`;
+      } else {
+        const voiceMembers = [];
+        for (const [, m] of voiceChannel.members) {
+          if (m?.user) voiceMembers.push(m.user);
+        }
+        const voicePart = partitionRecipients(
+          voiceMembers, interaction.user.id, { excludeSender: true }
+        );
+        // Inverted shape: commit voice-mode iff the resolved set fits
+        // the cap; otherwise branch by reason. Sender-only / truly-
+        // empty falls through to picker-mode with NO banner (user
+        // didn't ask for voice-everyone; there's nothing actionable to
+        // surface). Bots-only DOES surface a banner — a voice channel
+        // populated entirely by bots is the kind of "wait, didn't it
+        // know I was in voice?" state that benefits from the dropped-
+        // bots accounting being visible.
+        if (voicePart.valid.length > 0
+            && voicePart.valid.length <= config.QURL_SEND_MAX_RECIPIENTS) {
+          recipientMode = RECIPIENT_MODE_VOICE;
+          finalValid = voicePart.valid;
+          finalSelfIncluded = false;
+          // Voice path produces its own warnings — only droppedBots is
+          // relevant when `recipients:` was omitted (no text-parsing
+          // warnings apply). Surface bot drops so the user knows why the
+          // count is lower than the channel's connected total.
+          finalWarningsBlock = renderRecipientWarnings({
+            droppedBots: voicePart.droppedBots,
+          });
+        } else if (voicePart.valid.length === 0 && voicePart.droppedBots > 0) {
+          // Bots-only voice channel. Quiet fallback would leave the
+          // user wondering why the auto-default didn't take; the bot-
+          // drop accounting explains it.
+          finalWarningsBlock = renderRecipientWarnings({
+            droppedBots: voicePart.droppedBots,
+          });
+        } else if (voicePart.valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+          // Over-cap (mirrors button-handler hard-reject). Under default
+          // config (20k cap vs 99-member voice cap) unreachable, but a
+          // shrunk env override could trip this — silent fallback would
+          // leave the user wondering why voice-mode didn't take.
+          //
+          // Wording note: `voicePart.valid.length` is the POST-filter
+          // count (sender + bots excluded). The Discord client's voice
+          // panel shows raw connections, so phrasing this as "eligible
+          // recipients" avoids a confusing cross-check (e.g., panel
+          // shows 100 / banner says "39 connected"). The log field
+          // stays `eligible` for consistency.
+          logger.info('handleQurlSlashSend: voice-mode skipped — exceeds QURL_SEND_MAX_RECIPIENTS', {
+            user_id: interaction.user.id,
+            voice_channel_id: voiceChannelId,
+            eligible: voicePart.valid.length,
+            cap: config.QURL_SEND_MAX_RECIPIENTS,
+          });
+          // Banner replaces `warningsBlock` (always `''` on this
+          // branch — see cache-miss comment above).
+          finalWarningsBlock = `⚠\u{FE0F} Voice channel has ${voicePart.valid.length} eligible recipients `
+            + `(max ${config.QURL_SEND_MAX_RECIPIENTS}) — pick recipients below.\n\n`;
+        }
+      }
+    }
+    const needsPicker = recipientMode === RECIPIENT_MODE_PICKER && recipientsOmitted;
+    const recipientIds = finalValid.map((u) => u.id);
+
+    // supersedeOrCreate handles the "another /qurl send/map is open"
     // case — sibling-flow disambig surfaces a stage-specific message;
     // same-stage rerun atomically claims the slot. Mirrors /qurl
     // revoke's pattern.
@@ -3586,26 +4591,8 @@ async function handleQurlSlashSend(interaction, params) {
     // resolveRecipientAlias returns the PLAIN form — markdown escape
     // happens at render time.
     const recipientAliases = Object.fromEntries(
-      valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+      finalValid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
     );
-    // Voice-channel context snapshot. The "Everyone in this voice
-    // channel" confirm-card button is rendered when this is set.
-    // Snapshot at slash-command time (NOT re-derived at button-click)
-    // because:
-    //   - interaction.channel at click time tracks the channel the
-    //     ephemeral message lives in, which DOES match invocation
-    //     channel in practice — but pinning via payload is the durable
-    //     contract and matches the rest of the flow-state pattern.
-    //   - A user who opens /qurl file from a voice channel, then
-    //     drags themselves into a different channel mid-confirm,
-    //     should still see "Everyone in this voice channel" target
-    //     the channel they invoked from, not the channel they're now
-    //     in.
-    // The actual member resolution still happens at click time via
-    // channel.members — see handleConfirmVoiceEveryone.
-    const voiceChannelId = isVoiceChannelType(interaction.channel?.type)
-      ? interaction.channel.id
-      : null;
     const payload = {
       resourceType: params.resourceType,
       attachment: params.attachment,
@@ -3615,6 +4602,11 @@ async function handleQurlSlashSend(interaction, params) {
       recipientIds,
       recipientAliases,
       voiceChannelId,
+      // Mode token. Drives both the row layout (picker vs. pick-people-
+      // -instead button) and the "To:" copy. Defaults to 'picker' at
+      // every read site so a row that pre-dates this field (in-flight
+      // at deploy time) keeps the legacy shape until it TTLs out.
+      recipientMode,
       expiresIn,
       selfDestructSeconds,
       personalMessage,
@@ -3632,8 +4624,9 @@ async function handleQurlSlashSend(interaction, params) {
       // bot/unresolved mentions persist into the payload so menu
       // interactions (which don't recompute) still render them.
       // Picker re-pick OVERWRITES with a fresh warningsBlock from the
-      // new partition.
-      warningsBlock,
+      // new partition. Voice-mode override replaces text-path warnings
+      // with the voice-partition's droppedBots-only summary.
+      warningsBlock: finalWarningsBlock,
       // Neutral notice signal — surfaced on the confirm card as
       // "Send includes you." when the sender is in the recipient
       // list. Persisted (rather than derived from
@@ -3642,7 +4635,8 @@ async function handleQurlSlashSend(interaction, params) {
       // re-render path stateless about who computed what. Derivation
       // would also work — both shapes are defensible, but mirroring
       // warningsBlock keeps the payload contract uniform.
-      selfIncluded,
+      // Always false in voice-mode (sender is excluded pre-validity).
+      selfIncluded: finalSelfIncluded,
       sendNonce,
     };
     let supersede;
@@ -3677,14 +4671,16 @@ async function handleQurlSlashSend(interaction, params) {
     const content = renderConfirmCardContent({
       resourceType: params.resourceType,
       resourceLabel: params.resourceLabel,
-      validRecipients: valid,
+      validRecipients: finalValid,
       expiresIn,
       selfDestructSeconds,
       personalMessage,
-      warningsBlock,
+      warningsBlock: finalWarningsBlock,
       needsPicker,
       interaction,
-      selfIncluded,
+      selfIncluded: finalSelfIncluded,
+      recipientMode,
+      voiceChannelId,
     });
     const rows = renderConfirmCardRows({
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
@@ -3693,6 +4689,8 @@ async function handleQurlSlashSend(interaction, params) {
       personalMessage,
       voiceChannelId,
       interaction,
+      recipientIds,
+      recipientMode,
     });
     // `return await` (not bare `return`) is load-bearing: without it
     // a Discord-side rejection on the confirm-card delivery would
@@ -3737,7 +4735,7 @@ async function handleQurlSlashSend(interaction, params) {
   }
 }
 
-async function handleQurlFile(interaction) {
+async function handleQurlSend(interaction) {
   // DM rejection first — no cooldown burned on a guild-only invocation
   // attempted from DMs.
   if (!interaction.guildId || !interaction.guild) {
@@ -3754,7 +4752,7 @@ async function handleQurlFile(interaction) {
     // Log at INFO so capacity-tuning has a trend signal — a sudden
     // burst of these would indicate either MAX_CONCURRENT_FILE_SENDS
     // is undersized or a downstream pipeline is stuck holding slots.
-    logger.info('handleQurlFile: capacity backpressure', {
+    logger.info('handleQurlSend: capacity backpressure', {
       user_id: interaction.user.id,
       active_file_sends: activeFileSends,
       max_concurrent: MAX_CONCURRENT_FILE_SENDS,
@@ -3791,7 +4789,7 @@ async function handleQurlFile(interaction) {
   try {
     attachment = interaction.options.getAttachment('attachment', true);
   } catch (err) {
-    logger.warn('handleQurlFile: required attachment option missing', {
+    logger.warn('handleQurlSend: required attachment option missing', {
       user_id: interaction.user.id, error: err && err.message,
     });
     clearCooldown(interaction.user.id);
@@ -3809,7 +4807,7 @@ async function handleQurlFile(interaction) {
     });
   }
   if (!isAllowedSourceUrl(attachment.url)) {
-    logger.warn('handleQurlFile: attachment.url failed SSRF gate', {
+    logger.warn('handleQurlSend: attachment.url failed SSRF gate', {
       user_id: interaction.user.id, host: safeUrlHost(attachment.url),
     });
     return interaction.reply({
@@ -3865,12 +4863,12 @@ async function handleQurlMap(interaction) {
       ephemeral: true,
     });
   }
-  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlFile).
+  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlSend).
   // The capacity gate guards the connector upload path that file sends
   // hit during back-half dispatch; map sends never touch that resource.
   // Sharing the gate would punish maps for file-pipeline saturation.
   //
-  // Cooldown gate — cross-command bucket shared with /qurl file
+  // Cooldown gate — cross-command bucket shared with /qurl send
   // (sendCooldowns Map). Tests pin the contract.
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({
@@ -3884,7 +4882,7 @@ async function handleQurlMap(interaction) {
   // enforces required server-side; the more likely cause in production
   // is a client/schema desync (redeploy timing) than abuse. Clear
   // cooldown on the throw catch so the user can retry once the deploy
-  // stabilizes — same rationale as handleQurlFile's required-option
+  // stabilizes — same rationale as handleQurlSend's required-option
   // throw branch.
   let locationValue;
   try {
@@ -3912,7 +4910,7 @@ async function handleQurlMap(interaction) {
   if (locationValue.length === 0) {
     // Honest user error (pasted only whitespace, or empty string) —
     // unlock retry. Same shape as the file-type / size cap branches
-    // in handleQurlFile.
+    // in handleQurlSend.
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Location is empty.',
@@ -3922,14 +4920,13 @@ async function handleQurlMap(interaction) {
 
   // Shared parser: see `parseLocationInput` near the top of this file.
   // Wrap in try/catch as a defensive symmetry with
-  // handleQurlFile's catches: a future regex change in parseLocationInput
+  // handleQurlSend's catches: a future regex change in parseLocationInput
   // or a pathological input could throw synchronously before reaching
   // handleQurlSlashSend's safety net, leaving cooldown set with no
   // visible response.
-  let locationUrl;
-  let locationName;
+  let parsedLocation;
   try {
-    ({ locationUrl, locationName } = parseLocationInput(locationValue));
+    parsedLocation = parseLocationInput(locationValue);
   } catch (err) {
     logger.error('handleQurlMap: parseLocationInput threw', {
       user_id: interaction.user.id, error: err && err.message,
@@ -3940,7 +4937,48 @@ async function handleQurlMap(interaction) {
       ephemeral: true,
     });
   }
-  // Explicit location-name override wins over the URL-derived name.
+
+  // Defer before Places resolve to stay inside Discord's 3 s ACK window.
+  // handleQurlSlashSend below checks `interaction.deferred` and skips
+  // its own defer.
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    // Token already expired or Discord transiently degraded — clear
+    // cooldown so the user can retry without waiting it out.
+    logger.warn('handleQurlMap: deferReply failed', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return undefined;
+  }
+  const resolved = await resolveLocation(parsedLocation);
+  if (!resolved.ok) {
+    clearCooldown(interaction.user.id);
+    let content;
+    switch (resolved.reason) {
+      case RESOLVE_REASON.NO_API_KEY:
+        content = '❌ Location search is unavailable on this server. Re-run with a full Google Maps URL.';
+        break;
+      case RESOLVE_REASON.NOT_FOUND:
+        // A stale-sentinel miss (sender picked a suggestion that's since
+        // been deleted upstream) gets a place-specific message. For
+        // free-text misses, echo the (sanitized) input so the sender
+        // can see what they typed.
+        content = parsedLocation.placeId
+          ? '❌ That place is no longer available. Pick another suggestion or paste a Google Maps URL.'
+          : `❌ Couldn't find a place matching "${sanitizeContentLabel(locationValue.slice(0, 80))}". Try a more specific name or paste a Google Maps URL.`;
+        break;
+      default:
+        content = '❌ Location lookup failed. Please try again, or paste a Google Maps URL.';
+    }
+    return interaction.editReply({ content });
+  }
+  let { locationUrl, locationName } = resolved;
+
+  // Explicit location-name override wins over the resolved name
+  // (whether that came from a URL, a place_id lookup, or a free-text
+  // resolve).
   if (locationNameRaw && locationNameRaw.trim().length > 0) {
     locationName = locationNameRaw.trim();
   }
@@ -3962,7 +5000,7 @@ async function handleQurlMap(interaction) {
   });
 }
 
-// --- Confirm-card handlers for `/qurl file` + `/qurl map` ---
+// --- Confirm-card handlers for `/qurl send` + `/qurl map` ---
 // Any future rename of the `qurl_confirm_*` wire literals (or these
 // handler names, since they're paired with them via registerFlow)
 // needs a SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so
@@ -4008,21 +5046,45 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // the text-path gate in #323.
   const canMentionEveryone = !!interaction.guild
     && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+  // Trigger on any role pick (not just @everyone): `role.members` for a
+  // non-@everyone role is a filtered view of `guild.members.cache`, so
+  // both hit the same empty-cache failure mode. Direct user picks skip
+  // the fetch — Discord ships the User object in `interaction.users`.
+  //
+  // DIVERGES from the text-path gate at handleQurlSlashSend, which
+  // additionally requires `canMentionEveryone || hasRoleMention` to
+  // skip the wasted fetch on bare `@everyone` typed without perm. The
+  // picker omits the @everyone role from its UI (Discord platform
+  // filter — out of scope here), so the only roles reaching this gate
+  // are user-deliberately-picked custom roles. A wasted fetch on a
+  // non-mentionable custom role pick (which the per-role
+  // `role.mentionable` gate inside `resolveMentionableSelection` will
+  // ultimately deny) is rare enough that the simpler trigger is worth
+  // the marginal optimization loss.
+  if (interaction.roles?.size > 0) {
+    await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmUserSelect', flow_id });
+  }
   const {
     users: selected,
     massMentionDenied,
     droppedFromRoles,
     everyoneCacheCold,
+    roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
     canMentionEveryone,
     flow_id,
   });
+  // Resolve denied role IDs to names (with fallback for cache miss /
+  // deleted role) for the warnings block. Kept caller-side so the
+  // renderer stays pure of guild lookups, mirroring the text path.
+  const roleMentionsDeniedNames = resolveRoleNames(interaction.guild, roleMentionsDenied);
   if (
     selected.length === 0
     && !massMentionDenied
     && droppedFromRoles === 0
     && !everyoneCacheCold
+    && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
     // bot-only roles, cache not cold) → already acked via deferUpdate
@@ -4055,7 +5117,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // warning banner prepended. Replacing card content with just the
   // warning string strips the resource header ("Sending file:
   // report.pdf / Expires: 24h / Self-destruct: …") that the user
-  // chose at /qurl file time — they shouldn't have to scroll back to
+  // chose at /qurl send time — they shouldn't have to scroll back to
   // remember what they're sending. needsPicker:true keeps the "Pick
   // recipients below" prompt; sendDisabled:true keeps Send greyed.
   const rejectPick = (warning) => interaction.editReply({
@@ -4069,6 +5131,8 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       warningsBlock: warning,
       needsPicker: true,
       interaction,
+      recipientMode: RECIPIENT_MODE_PICKER,
+      voiceChannelId: payload.voiceChannelId,
     }),
     components: renderConfirmCardRows({
       sendDisabled: true,
@@ -4077,6 +5141,11 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
+      // Mirror payload.recipientIds (unchanged on the reject branch — no
+      // transitionFlow fires here) so the user can recover their prior
+      // valid selection on re-open instead of starting from empty.
+      recipientIds: payload.recipientIds || [],
+      recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
@@ -4090,6 +5159,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
       everyone_cache_cold: everyoneCacheCold,
+      role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
     //   - bot-only individual pick (droppedBots > 0)
@@ -4110,19 +5180,47 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // for the same set of signals but with longer bulleted copy
     // (warnings block vs. rejection banner — different UI contexts).
     // When adding a new reason, update BOTH surfaces.
+    // Reason ordering mirrors renderRecipientWarnings's bullet
+    // ordering (droppedBots → droppedFromRoles → everyoneCacheCold →
+    // massMentionDenied → roleMentionsDenied) so the two surfaces
+    // present multi-signal picks in the same sequence. Most picks
+    // hit at most one signal so ordering is rarely user-visible,
+    // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
+    if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
+    if (roleMentionsDenied.length > 0) {
+      // Condensed copy (count, not per-role) for the rejection banner —
+      // the warnings block (renderRecipientWarnings) does per-role
+      // bullets. Different UI contexts, COPY PARITY noted in
+      // renderRecipientWarnings's docstring. Surfaces the
+      // `role.mentionable: true` bypass inline so a user who hits
+      // this banner knows the workaround without having to find the
+      // per-role copy (which only the partial-valid surface renders).
+      // Phrase the bypass as "have the role marked" rather than
+      // "mark the role" — by definition the user hitting this banner
+      // lacks MENTION_EVERYONE and likely lacks Manage Roles too, so
+      // imperative phrasing reads as misleading agency. The workaround
+      // ("ask an admin") is real but indirect; reflect that in the copy.
+      // Singular/plural noun AND verb stay in lockstep so the single-
+      // role case ("Non-mentionable role requires …") doesn't render
+      // as a noun/verb mismatch — most one-role picks hit this banner.
+      const isSingular = roleMentionsDenied.length === 1;
+      const noun = isSingular ? 'role' : 'roles';
+      const verb = isSingular ? 'requires' : 'require';
+      reasons.push(`Non-mentionable ${noun} ${verb} the **Mention Everyone** permission (or have the role marked as mentionable)`);
+    }
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
   // Defense-in-depth — unreachable in production today: the picker's
-  // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
-  // QURL_SEND_MAX_RECIPIENTS=25) = 10, so the user physically can't
-  // pick more than 25. Kept against a future bump to either constant
-  // (or a forged interaction) so the cap stays honored.
+  // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=25,
+  // QURL_SEND_MAX_RECIPIENTS) and Discord's own hard cap on max_values
+  // is 25, so the user physically can't pick more than 25. Kept against
+  // a future change to either constant (or a forged interaction) so the
+  // cap stays honored.
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
     return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }
@@ -4139,6 +5237,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedFromRoles,
     massMentionDenied,
     everyoneCacheCold,
+    roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
@@ -4157,6 +5256,15 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     recipientAliases: newRecipientAliases,
     warningsBlock: newWarningsBlock,
     selfIncluded,
+    // Picker activity definitionally lands the card in picker-mode.
+    // If the user clicked the picker (which is the only entry to this
+    // handler), they are NOT in voice or everyone mode — even if the
+    // inbound payload still carried `'voice'` / `'everyone'` from a
+    // stale superseded flow (picker is hidden in those modes, but a
+    // forged interaction or stale UI could still emit the event).
+    // Explicit override here keeps a `...payload` spread from leaking
+    // a non-picker mode forward.
+    recipientMode: RECIPIENT_MODE_PICKER,
   };
   // Targeted catch around transitionFlow mirrors the same shape
   // handleConfirmSendClick / handleConfirmCancelClick use around their
@@ -4194,10 +5302,9 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   }
 
   // The CONTENT renders the resolved recipient summary
-  // ("**To:** N user(s)") with needsPicker:false; the ROWS always
-  // keep the UserSelectMenu attached (renderConfirmCardRows always
-  // produces 4 rows) so the user can re-pick. Send is enabled now
-  // that we have a valid recipient set.
+  // ("**To:** N user(s)") with needsPicker:false; the ROWS keep the
+  // picker attached in picker-mode so the user can re-pick. Send is
+  // enabled now that we have a valid recipient set.
   const content = renderConfirmCardContent({
     resourceType: payload.resourceType,
     resourceLabel: payload.resourceLabel,
@@ -4209,6 +5316,8 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     needsPicker: false,
     interaction,
     selfIncluded,
+    recipientMode: RECIPIENT_MODE_PICKER,
+    voiceChannelId: payload.voiceChannelId,
   });
   return interaction.editReply({
     content,
@@ -4219,11 +5328,13 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
+      recipientIds: newPayload.recipientIds,
+      recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
 }
 
-// Confirm-card "Everyone in this voice channel" button. Mirrors the
+// Confirm-card "Everyone on voice" button. Mirrors the
 // UserSelectMenu handler's shape (deferUpdate → resolve → partition →
 // transitionFlow → re-render) but reads the voice-connected member
 // set AT CLICK TIME from the guild's voice-state cache rather than
@@ -4313,6 +5424,13 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // so the stale recipientIds can't fan out; the picker re-pick
   // path is the natural way to refresh them. Matches `rejectPick`'s
   // pattern in handleConfirmUserSelect.
+  // Reject paths render in picker-mode regardless of the inbound
+  // `payload.recipientMode` — the warning copy ("Pick recipients
+  // below.") wires the user toward the picker, so the picker row must
+  // be present. The flow_state row's `recipientMode` is NOT updated
+  // here (no transitionFlow fires on reject); a subsequent picker /
+  // expiry / note interaction will re-derive layout from whatever
+  // mode the payload still carries.
   const rejectVoice = (warning) => interaction.editReply({
     content: renderConfirmCardContent({
       resourceType: payload.resourceType,
@@ -4324,6 +5442,8 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       warningsBlock: warning,
       needsPicker: true,
       interaction,
+      recipientMode: RECIPIENT_MODE_PICKER,
+      voiceChannelId,
     }),
     components: renderConfirmCardRows({
       sendDisabled: true,
@@ -4332,6 +5452,11 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
+      // Mirror payload.recipientIds (unchanged on the reject branch —
+      // no transitionFlow fires) so the user can recover their prior
+      // valid selection on re-open of the picker.
+      recipientIds: payload.recipientIds || [],
+      recipientMode: RECIPIENT_MODE_PICKER,
     }),
   }).catch(logIgnoredDiscordErr);
 
@@ -4376,15 +5501,24 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       channel_size: channel.members.size,
     });
   }
-  const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
+  // Sender is excluded from the voice-everyone set: clicking "Everyone
+  // in #voice" semantically means "everyone else in the room," not
+  // "and CC myself." This matches the slash-command auto-default at
+  // handleQurlSlashSend's voice-mode override.
+  const { valid, droppedBots } = partitionRecipients(
+    selectedUsers, interaction.user.id, { excludeSender: true }
+  );
   if (valid.length === 0) {
     // Reached when every connected member was filtered out — today
-    // that's the bots-only case (droppedBots > 0). The fallback
+    // that's the bots-only case (droppedBots > 0), the sender-only
+    // case (sender is the only non-bot in voice), or both. The fallback
     // text covers a future filter addition (e.g., role-blocklist)
     // that drops everyone for a different reason.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
-    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in voice channel';
+    const reasonText = reasons.length > 0
+      ? reasons.join('. ')
+      : "You're the only one in this voice channel";
     return rejectVoice(`⚠\u{FE0F} ${reasonText}. Pick recipients below.\n\n`);
   }
   // The 20k QURL_SEND_MAX_RECIPIENTS default is sized to accommodate
@@ -4408,7 +5542,12 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // Tracked in #339 if a future product decision needs to align
   // these surfaces (e.g., button truncates with confirm-card warning).
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    return rejectVoice(`⚠\u{FE0F} Voice channel has ${valid.length} connected (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
+    // "eligible recipients" (NOT "connected") — `valid.length` is the
+    // post-partition count (sender + bots already filtered out).
+    // Discord's voice panel shows raw connections, so phrasing this as
+    // "connected" would diverge from what the user sees there. Stays
+    // in lockstep with the slash-entry over-cap banner.
+    return rejectVoice(`⚠\u{FE0F} Voice channel has ${valid.length} eligible recipients (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
   }
 
   const newWarningsBlock = renderRecipientWarnings({
@@ -4422,7 +5561,15 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     recipientIds: valid.map((u) => u.id),
     recipientAliases: newRecipientAliases,
     warningsBlock: newWarningsBlock,
-    selfIncluded,
+    // Sender was excluded in `partitionRecipients` above with
+    // `{ excludeSender: true }`, so `selfIncluded` is structurally
+    // false on this path. Explicit so a future refactor that drops
+    // the option can't silently flip the flag back to true via the
+    // `...payload` spread carrying a stale value forward.
+    selfIncluded: false,
+    // Voice-mode commits the layout: picker row disappears, bottom
+    // row swaps in the "👥 Pick people instead" escape hatch.
+    recipientMode: RECIPIENT_MODE_VOICE,
   };
   let result;
   try {
@@ -4454,6 +5601,19 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
+  // Audit-log parity with handleConfirmEveryone — voice fan-outs
+  // need to be findable in logs without a qurl_send_configs scan.
+  // Asymmetry: no guild-total peer at voice scope (channel.userLimit
+  // is a capacity cap, not a count), so one channel-size field —
+  // (voice_member_count - valid_count) = partial-cache + filter gap.
+  logger.info('handleConfirmVoiceEveryone: voice @everyone expansion succeeded', {
+    flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
+    voice_channel_id: voiceChannelId,
+    valid_count: valid.length, dropped_bots: droppedBots,
+    partial_cache_drops: partialCacheDrops, self_included: false,
+    voice_member_count: channel.members.size,
+  });
+
   const content = renderConfirmCardContent({
     resourceType: payload.resourceType,
     resourceLabel: payload.resourceLabel,
@@ -4464,7 +5624,9 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     warningsBlock: newWarningsBlock,
     needsPicker: false,
     interaction,
-    selfIncluded,
+    selfIncluded: false,
+    recipientMode: RECIPIENT_MODE_VOICE,
+    voiceChannelId,
   });
   return interaction.editReply({
     content,
@@ -4475,8 +5637,350 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
+      recipientIds: newPayload.recipientIds,
+      recipientMode: RECIPIENT_MODE_VOICE,
     }),
   }).catch(logIgnoredDiscordErr);
+}
+
+// Confirm-card "👥 Pick people instead" button — escape hatch from
+// both voice-mode and everyone-mode back to picker-mode. Flips
+// `recipientMode` to 'picker', clears recipientIds (the voice- or
+// guild-resolved set was authored for "everyone," not a starting
+// point for hand-curation; carrying it forward would land the user
+// in picker-mode with the population pre-selected, which is a
+// confusing "did my switch take?" state — and a 25-entry truncated
+// view of any larger set).
+//
+// No resource resolution / member lookups happen here — purely a UI
+// mode toggle. transitionFlow still fires so the persisted payload
+// matches what the card shows; otherwise a subsequent expiry / note
+// re-render would re-derive picker layout from a payload that still
+// carried the prior mode and snap back.
+async function handleConfirmPickManual(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  const payload = row.payload || {};
+  // resourceType guard mirrors the other confirm-card handlers — a
+  // corrupt or stale row would otherwise throw inside
+  // renderConfirmCardContent's resource-type switch.
+  const payloadResource = payload.resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleConfirmPickManual: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Drop recipientIds (and the voice-derived aliases) so the picker
+  // re-renders with the "Pick recipients below" prompt + Send disabled
+  // — the user is starting recipient selection over by definition of
+  // having clicked "Pick people instead."
+  const newPayload = {
+    ...payload,
+    recipientIds: [],
+    recipientAliases: {},
+    recipientMode: RECIPIENT_MODE_PICKER,
+    selfIncluded: false,
+    // Voice-mode's warningsBlock (e.g. droppedBots from voice members)
+    // doesn't apply once the user opts into manual selection — the
+    // picker will produce its own warningsBlock on the next pick.
+    warningsBlock: '',
+  };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleConfirmPickManual: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not switch to manual picker right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  return rerenderConfirmCard(interaction, newPayload);
+}
+
+// @everyone button — workaround for Discord's MentionableSelectMenu
+// filtering out the @everyone role from its dropdown. Click-time
+// semantics mirror handleConfirmUserSelect's @everyone-role branch:
+// pre-warm cache → expand to all non-bot guild members → partition →
+// transition flow. Permission re-check is defense-in-depth against a
+// forged button click (renderConfirmCardRows already gates button
+// visibility on MENTION_EVERYONE + picker-mode; this defends against
+// a crafted HTTP interaction bypassing the render).
+async function handleConfirmEveryone(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  const payload = row.payload || {};
+  const payloadResource = payload.resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleConfirmEveryone: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Symmetric with handleConfirmVoiceEveryone's rejectVoice — same
+  // surface shape (warning banner + re-render with needsPicker). The
+  // persisted recipientIds stay unchanged on rejection (no transition-
+  // Flow fires); the picker re-pick is the natural recovery.
+  const rejectEveryone = (warning) => interaction.editReply({
+    content: renderConfirmCardContent({
+      resourceType: payload.resourceType,
+      resourceLabel: payload.resourceLabel,
+      validRecipients: [],
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      warningsBlock: warning,
+      needsPicker: true,
+      interaction,
+      recipientMode: RECIPIENT_MODE_PICKER,
+      voiceChannelId: payload.voiceChannelId,
+    }),
+    components: renderConfirmCardRows({
+      sendDisabled: true,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
+      recipientIds: payload.recipientIds || [],
+      recipientMode: RECIPIENT_MODE_PICKER,
+    }),
+  }).catch(logIgnoredDiscordErr);
+
+  // Defense-in-depth permission re-check. The render-time gate already
+  // hides the button without MENTION_EVERYONE, but a forged HTTP
+  // interaction could carry the custom_id without the underlying perm.
+  // Channel-effective perms (interaction.memberPermissions) — same as
+  // the text-path gate at handleQurlSlashSend.
+  const canMentionEveryone = !!interaction.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true;
+  if (!canMentionEveryone) {
+    logger.warn('handleConfirmEveryone: click without MENTION_EVERYONE — likely forged', {
+      flow_id, interaction_id: interaction.id,
+      // `guild_id` for cross-line correlation with the success info
+      // log; `null` in DM context which is itself the forge signal.
+      guild_id: interaction.guildId ?? null,
+    });
+    return rejectEveryone('⚠\u{FE0F} `@everyone` requires the **Mention Everyone** permission.\n\n');
+  }
+
+  await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmEveryone', flow_id });
+
+  // Include bots in selectedUsers and let partitionRecipients filter
+  // them — same pattern as handleConfirmVoiceEveryone. Without this,
+  // the bots-only case would surface as "cache not ready" (misleading)
+  // instead of "all recipients are bots" (accurate); droppedBots count
+  // is also load-bearing for the warning copy.
+  //
+  // NO early break on `selectedUsers.length > cap` (rejected). Such a
+  // break is unsound under bot-clustered iteration order: a 20001-human
+  // guild with bots iterated around the cap boundary would early-exit
+  // before the (cap+1)th HUMAN, producing `valid.length === cap` and
+  // silently bypassing the cap-reject below — the send would proceed
+  // at exactly the cap with the over-cap members invisibly dropped.
+  // Full-cache iteration costs O(cache_size) (~10ms even at 100k),
+  // which is acceptable post-deferUpdate; correctness wins.
+  //
+  // partial-cache rows (member without `.user` — degraded shape from
+  // a partially-loaded `GUILD_MEMBERS_CHUNK`) are silently filtered
+  // and counted for forensics, matching `handleConfirmVoiceEveryone`'s
+  // `partialCacheDrops` telemetry so a future "@everyone under-
+  // resolved on guild X" report has a debug hook.
+  const selectedUsers = [];
+  let partialCacheDrops = 0;
+  let senderInCache = false;
+  let hasOtherNonBotInCache = false;
+  const cache = interaction.guild.members?.cache;
+  // Guard matches the operation: `for ... of` reads `[Symbol.iterator]`,
+  // which both `Map` and discord.js `Collection` provide. Truthy-check
+  // alone would NPE on a degraded `{}` cache shape from a partial init.
+  if (cache && typeof cache[Symbol.iterator] === 'function') {
+    for (const [, member] of cache) {
+      if (member?.user) {
+        selectedUsers.push(member.user);
+        if (member.user.id === interaction.user.id) senderInCache = true;
+        else if (!member.user.bot) hasOtherNonBotInCache = true;
+      } else {
+        partialCacheDrops++;
+      }
+    }
+  }
+  if (partialCacheDrops > 0) {
+    logger.debug('handleConfirmEveryone: partial-cache rows dropped from @everyone resolution', {
+      flow_id, guild_id: interaction.guildId,
+      dropped: partialCacheDrops, cache_size: cache?.size,
+    });
+  }
+  if (selectedUsers.length === 0) {
+    // "member cache not ready" is the common case (cold cache + non-
+    // zero guild). The degenerate genuinely-empty guild
+    // (`memberCount === 0`) can't reach this branch in production —
+    // handleQurlSlashSend's guild-gate rejects DM at entry and a
+    // guild with zero members can't host a slash command anyway. The
+    // shared copy is acceptable.
+    // Important: gate the defensive sender push below on cache having
+    // members. A truly empty cache should surface "cache not ready"
+    // rather than silently expanding to just the sender — the latter
+    // would mislead the user into thinking @everyone succeeded.
+    return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');
+  }
+  // Defensive sender push: cache has OTHER non-bot members but the
+  // sender's row is somehow missing (rare race during shard resume /
+  // partial chunk delivery post-prewarm). Without this, clicking
+  // 📢 `@everyone` could land `selfIncluded: false` and the user
+  // wouldn't be in the recipient set they explicitly triggered.
+  //
+  // Gated on `hasOtherNonBotInCache` so a bots-only cache still
+  // surfaces the bots-only reject below — silently expanding to
+  // "send to just me" from a bots-only guild misrepresents the
+  // @everyone click. `partitionRecipients` does NOT re-dedup
+  // (contract at commands.js:~3077), so the `senderInCache` check is
+  // load-bearing — pushing unconditionally would land the sender
+  // twice in `valid`.
+  if (!senderInCache && hasOtherNonBotInCache) {
+    // `interaction.user.bot` may be undefined depending on interaction
+    // shape (slash commands can't come from bots in production, so
+    // `partitionRecipients`'s `if (u.bot)` is a no-op here regardless).
+    // Falsy `.bot` → kept; the invariant holds across context-menu /
+    // future interaction types too.
+    selectedUsers.push(interaction.user);
+  }
+  // Sender-only degenerate: guild has the sender (+ optionally bots)
+  // but no other non-bot members. @everyone's click intent is "fan out
+  // to OTHERS"; falling through to partition would land `valid=[sender]`
+  // and silently send to just the sender — defensible self-send
+  // semantics, but misleading for a click labeled 📢 @everyone. Reject
+  // with explicit copy so the user can decide (self-send via the
+  // picker is still possible). Reached only when sender's row IS in
+  // cache and no other non-bots are present — the bots-only-no-sender
+  // case lands in `valid.length === 0` below with droppedBots > 0.
+  if (senderInCache && !hasOtherNonBotInCache) {
+    return rejectEveryone('⚠\u{FE0F} `@everyone` matched only you — no other non-bot members to send to.\n\n');
+  }
+  // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes
+  // the sender (voice-mode semantic is "everyone else in this voice
+  // channel"). The @everyone button intentionally INCLUDES the sender
+  // — it's the dropdown's "select all" shortcut, not a separate "all
+  // others" affordance. A future contributor aligning the two handlers
+  // would silently flip the self-inclusion behavior; the `selfIncluded`
+  // flag flows through to the card's "Send includes you." notice so
+  // the user sees they're in the recipient list.
+  const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
+  if (valid.length === 0) {
+    const reasons = [];
+    if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
+    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients';
+    return rejectEveryone(`⚠\u{FE0F} ${reasonText}. Pick recipients below.\n\n`);
+  }
+  // Cap rejection mirrors handleConfirmVoiceEveryone: hard-reject past
+  // QURL_SEND_MAX_RECIPIENTS rather than silently truncate — the click
+  // is unambiguous all-or-nothing intent.
+  if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return rejectEveryone(`⚠\u{FE0F} Guild has ${valid.length} non-bot members (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
+  }
+
+  const newWarningsBlock = renderRecipientWarnings({ droppedBots });
+  const newRecipientAliases = Object.fromEntries(
+    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+  );
+  // Mode switches to EVERYONE — like voice-everyone, the click is
+  // unambiguous "fan out to all" intent. Picker row is hidden in the
+  // re-render so the user can't accidentally read back a 25-entry
+  // truncated picker selection over the @everyone fan-out (Discord's
+  // MentionableSelect default_values is capped at 25, and any picker
+  // interaction routes through handleConfirmUserSelect which replaces
+  // recipientIds with the picker's view of the world).
+  const newPayload = {
+    ...payload,
+    recipientIds: valid.map((u) => u.id),
+    recipientAliases: newRecipientAliases,
+    warningsBlock: newWarningsBlock,
+    selfIncluded,
+    recipientMode: RECIPIENT_MODE_EVERYONE,
+  };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleConfirmEveryone: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your selection right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Success-path telemetry: a successful @everyone expansion is a
+  // load-bearing audit signal (an admin fanned a send to N members
+  // of the guild). Error paths already log; without this, ops can
+  // only see "did someone fan out to 18k users?" via a DDB scan of
+  // qurl_send_configs. Info level matches the cadence of other
+  // confirm-card success signals.
+  logger.info('handleConfirmEveryone: @everyone expansion succeeded', {
+    flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
+    valid_count: valid.length, dropped_bots: droppedBots,
+    partial_cache_drops: partialCacheDrops, self_included: selfIncluded,
+    // Cache shape for "@everyone underresolved on guild X" forensics —
+    // makes the success line self-contained (no need to cross-reference
+    // the partial-cache debug log to know the cache state at click time).
+    cache_size: cache?.size, member_count: interaction.guild.memberCount,
+  });
+
+  return rerenderConfirmCard(interaction, newPayload);
 }
 
 // Shared re-render after a confirm-card menu/button updates the flow
@@ -4486,7 +5990,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
 // handlers drifting on `sendDisabled` / content flags.
 //
 // `sendDisabled` is derived from recipientIds — without it, a user
-// who opened /qurl file without `recipients:` could change expiry
+// who opened /qurl send without `recipients:` could change expiry
 // before picking and see an enabled Send button against an empty
 // recipient set.
 // All four entry paths (picker, expiry, self-destruct, note modal)
@@ -4530,7 +6034,18 @@ async function rerenderConfirmCard(interaction, newPayload) {
     const alias = persistedAliases[id];
     return { id, displayName: alias || `user-${id}`, bot: false };
   });
-  const needsPicker = recipientIds.length === 0;
+  // recipientMode drives both row layout AND content prefix. Default
+  // 'picker' for stale flow_state rows that pre-date the field (they
+  // keep the legacy picker shape until they TTL out).
+  const recipientMode = normalizeRecipientMode(newPayload.recipientMode);
+  // `needsPicker` (the "Pick recipients below" prompt) is only shown
+  // in picker-mode with no recipients yet. In voice-mode with an empty
+  // recipientIds (e.g., voice channel emptied after switch), the card
+  // shows "To: 0 users in #voice" — the user can click "Pick people
+  // instead" to recover.
+  const needsPicker = recipientMode === RECIPIENT_MODE_PICKER && recipientIds.length === 0;
+  // Send-disabled is recipient-empty regardless of mode.
+  const sendDisabled = recipientIds.length === 0;
   const content = renderConfirmCardContent({
     resourceType: newPayload.resourceType,
     resourceLabel: newPayload.resourceLabel,
@@ -4542,16 +6057,20 @@ async function rerenderConfirmCard(interaction, newPayload) {
     needsPicker,
     interaction,
     selfIncluded: newPayload.selfIncluded === true,
+    recipientMode,
+    voiceChannelId: newPayload.voiceChannelId,
   });
   return interaction.editReply({
     content,
     components: renderConfirmCardRows({
-      sendDisabled: needsPicker,
+      sendDisabled,
       expiresIn: newPayload.expiresIn,
       selfDestructSeconds: newPayload.selfDestructSeconds,
       personalMessage: newPayload.personalMessage,
       voiceChannelId: newPayload.voiceChannelId,
       interaction,
+      recipientIds,
+      recipientMode,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -4569,7 +6088,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   // Validate before deferring so the forgery branch can use `reply`
   // (the cheaper, single-call ack) instead of `followUp` after a
   // wasted deferUpdate. Symmetric with the self-destruct handler.
-  if (!picked || !Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, picked)) {
+  if (!picked || !isValidExpiry(picked)) {
     logger.warn('handleConfirmExpirySelect: forged off-set expiry value', {
       flow_id, value: truncForLog(picked),
     });
@@ -5057,7 +6576,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // for the two buckets — "left the server" is stable, "lookup
   // blipped" encourages a fresh rerun if they want to include the
   // missed recipients. The rerun hint names the actual subcommand
-  // they invoked (resourceType drives /qurl file vs /qurl map).
+  // they invoked (resourceType drives /qurl send vs /qurl map).
   //
   // followUp (not edited into the "Preparing send…" editReply) is
   // INTENTIONAL: executeSendPipeline will rewrite editReply to
@@ -5066,7 +6585,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // message. followUp is a separate ephemeral that persists past
   // the back-half's editReply rewrites.
   if (partialLeftCount > 0 || partialTransientCount > 0) {
-    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl file';
+    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl send';
     const parts = [];
     if (partialLeftCount > 0) {
       parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
@@ -5112,7 +6631,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
 //
 // On a successful Cancel, `softenCooldown` retains 5s of throttle
 // instead of fully clearing — a full clear would let a user spam
-// /qurl file → Cancel → /qurl file → Cancel and rack up
+// /qurl send → Cancel → /qurl send → Cancel and rack up
 // supersedeOrCreate DDB writes + Discord interactions with zero
 // throttle. The cooldown-loser branch leaves cooldown untouched
 // (Send is mid-fanout; bypassing is the abuse vector).
@@ -5255,10 +6774,15 @@ function renderSendConfirm({
   return { content: msg, attachmentText: null, needsExpand: successNames.length > REVOKE_TRUNC_LIMIT };
 }
 
-async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
-  // Pull per-recipient items so per-link success can be mapped back to
-  // a Discord user id for display. Caller resolves IDs → usernames
-  // against its in-scope `recipients` array.
+// Defaulted senderAlias is defense-in-depth — production callers
+// always pass resolveSenderAlias(interaction), which has its own
+// DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
+// gracefully on the recipient side.
+async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
+  // Items carry dm_channel_id / dm_message_id / dm_status so the post-
+  // revoke step can edit each strict-success recipient's DM in place.
+  // Legacy rows predating that wire-up have the refs unset — the edit
+  // step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId);
 
   // deleteLink deletes the whole resource; one DELETE per unique
@@ -5328,6 +6852,116 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     total: auditTotal,
     users: { success, total },
   });
+
+  // Edit each strict-success recipient's DM to "Alice closed the door"
+  // so they see immediately that the link is dead rather than tapping a
+  // Step Through button that now 404s. Per-recipient (one DM per
+  // recipient, even if multiple resources fanned out to them) — keep
+  // the first VALID row per recipient_discord_id. Invalid rows fall
+  // through without setting, so editTargets.has() stays false until a
+  // valid row lands, which then wins the slot.
+  //
+  // INVARIANT(one-dm-per-recipient): "first valid wins" is safe
+  // because each recipient has at most one DM channel (the bot opens
+  // one DM thread per user via sendDM's POST /users/@me/channels).
+  // Multi-resource fan-out reuses the same dm_channel_id /
+  // dm_message_id pair across rows for that recipient, so picking
+  // the first one isn't lossy.
+  //
+  // INVARIANT-BREAKER: if a future change ever sends a recipient two
+  // SEPARATE DMs for one send_id (e.g., multi-message dispatch when
+  // the embed/component count exceeds Discord's limits), the second
+  // DM becomes silently un-editable. Grep for `INVARIANT-BREAKER`
+  // from that PR to find this site, and flip to a per-message-id
+  // Map keyed by `(recipient_discord_id, dm_message_id)`.
+  //
+  // ORDERING: DELETEs ran above; the edit fires AFTER they settle.
+  // Reversing the order would create a window where the recipient sees
+  // "closed the door" while the link still resolves until DELETE
+  // completes. With DELETE first, the worst case is a brief window where
+  // the live button now 404s — the same window that existed before this
+  // feature, minus the post-revoke rewrite.
+  //
+  // Skips:
+  //   - recipients not in successUserIds (their revoke didn't fully
+  //     succeed — the link may have been already opened, a transient
+  //     qURL API error during DELETE, or a mixed-outcome recipient
+  //     with some links failed. Either way the door isn't fully
+  //     closed for them, so the "closed the door" copy would be
+  //     misleading)
+  //   - rows with dm_status !== 'sent' (DM never made it; no message
+  //     exists to edit)
+  //   - rows lacking dm_channel_id / dm_message_id (legacy, pre-
+  //     ref-capture rows)
+  //
+  // Errors are swallowed (logged inside editDM at info/warn) — a 404 /
+  // 403 / unknown-message is operational, not a bug, and must not
+  // skew the revoke success counts the caller reports to the operator.
+  if (success > 0) {
+    const successSet = new Set(successUserIds);
+    const editTargets = new Map(); // recipient_id → {channelId, messageId}
+    for (const it of items) {
+      if (!successSet.has(it.recipient_discord_id)) continue;
+      if (editTargets.has(it.recipient_discord_id)) continue;
+      if (it.dm_status !== DM_STATUS.SENT) continue;
+      if (!it.dm_channel_id || !it.dm_message_id) continue;
+      editTargets.set(it.recipient_discord_id, {
+        channelId: it.dm_channel_id, messageId: it.dm_message_id,
+      });
+    }
+    if (editTargets.size === 0) {
+      // Surface the silent-skip path so a developer running locally
+      // against SQLite (where DM refs are intentionally not persisted
+      // — see #365) can tell the edit is being skipped on purpose
+      // rather than chasing a phantom bug. Debug level so it doesn't
+      // surface in prod logs by default.
+      logger.debug('Revoke succeeded but no editable DM targets', {
+        sendId, revoke_success: success,
+      });
+    } else {
+      const editPayload = buildRevokedDMPayload({ senderAlias });
+      // Same fan-out width as the DELETE batch above. Discord's per-
+      // channel rate-limit buckets are unique per recipient (each DM
+      // channel is its own bucket), so 5 concurrent PATCHes don't share
+      // a bucket; the bound exists to limit global rate-limit pressure
+      // and audit-log burst, not per-channel contention.
+      const entries = [...editTargets.entries()];
+      // editDM swallows its own exceptions and returns { ok, expected }.
+      // Re-throw on `!ok` so batchSettled buckets failures uniformly;
+      // pass through res.expected so the rolled-up log can distinguish
+      // operational outcomes (recipient deleted DM / blocked bot) from
+      // surprises that warrant oncall attention.
+      const editResults = await batchSettled(entries, async ([, refs]) => {
+        const res = await editDM(refs.channelId, refs.messageId, editPayload);
+        if (!res.ok) {
+          const e = new Error('editDM returned not-ok');
+          e.expected = res.expected;
+          throw e;
+        }
+        return res;
+      }, 5);
+      let edited = 0;
+      let expectedFailures = 0;
+      let failed = 0;
+      for (const r of editResults) {
+        if (r.status === 'fulfilled') edited++;
+        else if (r.reason?.expected === true) expectedFailures++;
+        else failed++;
+      }
+      logger.info('Edited DMs after revoke', {
+        sendId,
+        attempted: editTargets.size,
+        edited,
+        // Recipient-side operational outcomes (DM deleted, bot blocked,
+        // etc.) — already logged at info inside editDM. Split out here
+        // so the rolled-up failure count in CloudWatch isn't poisoned
+        // by user-side state changes.
+        expectedFailures,
+        failed,
+      });
+    }
+  }
+
   // failureUserIds is computed but not yet rendered — the "Note:
   // already-opened links cannot be revoked" disclaimer covers the
   // common cause. Returned for callers that want to surface partial-
@@ -5925,102 +7559,115 @@ const commands = [
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
     // pins the subcommand NAME set (not option types, requiredness, or
     // descriptions) to catch registration regressions at deploy time.
-    data: new SlashCommandBuilder()
-      .setName('qurl')
-      .setDescription('Share resources securely via qURL')
-      .addSubcommand(sub =>
-        sub.setName('file')
-          .setDescription('Share a file via one-time qURL links')
-          .addAttachmentOption(opt =>
-            opt.setName('attachment')
-              .setDescription('The file to share')
-              .setRequired(true)
-          )
-          .addStringOption(opt =>
-            opt.setName('recipients')
-              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-              .setRequired(false)
-              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-          )
-          .addStringOption(opt =>
-            opt.setName('expires-in')
-              .setDescription('How long the qURL links stay valid (default: 24 hours)')
-              .setRequired(false)
-              .addChoices(...EXPIRY_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('self-destruct')
-              .setDescription('Optional countdown after first open (default: no timer)')
-              .setRequired(false)
-              .addChoices(...SELF_DESTRUCT_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('personal-message')
-              .setDescription('Optional note included in each recipient\'s DM')
-              .setRequired(false)
-              .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-          )
-      )
-      .addSubcommand(sub =>
-        sub.setName('map')
-          .setDescription('Share a Google Maps location via one-time qURL links')
-          .addStringOption(opt =>
-            opt.setName('location')
-              .setDescription('Google Maps URL, or a place / address to search')
-              .setRequired(true)
-              // 500 chars covers full Google Maps URLs (which can be
-              // 200-400 chars after place params + coordinates) plus
-              // headroom; not tied to the recipients-parser cap because
-              // location is a single URL/address, not a token list.
-              .setMaxLength(500)
-          )
-          .addStringOption(opt =>
-            opt.setName('recipients')
-              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-              .setRequired(false)
-              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-          )
-          .addStringOption(opt =>
-            opt.setName('location-name')
-              .setDescription('Override the label shown to recipients (defaults to URL/address)')
-              .setRequired(false)
-              .setMaxLength(256)
-          )
-          .addStringOption(opt =>
-            opt.setName('expires-in')
-              .setDescription('How long the qURL links stay valid (default: 24 hours)')
-              .setRequired(false)
-              .addChoices(...EXPIRY_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('self-destruct')
-              .setDescription('Optional countdown after first open (default: no timer)')
-              .setRequired(false)
-              .addChoices(...SELF_DESTRUCT_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('personal-message')
-              .setDescription('Optional note included in each recipient\'s DM')
-              .setRequired(false)
-              .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-          )
-      )
-      .addSubcommand(sub =>
+    // IIFE so the `/qurl map` subcommand can be conditionally added
+    // based on config.MAP_COMMAND_ENABLED — a plain fluent chain
+    // can't host an `if`. The order of `addSubcommand` calls below
+    // matches the chain we'd write inline, with `map` inserted
+    // between `send` and `revoke` when the flag is on.
+    data: (() => {
+      const builder = new SlashCommandBuilder()
+        .setName('qurl')
+        .setDescription('Share resources securely via qURL')
+        .addSubcommand(sub =>
+          sub.setName('send')
+            .setDescription('Share a file via one-time qURL links')
+            .addAttachmentOption(opt =>
+              opt.setName('attachment')
+                .setDescription('The file to share')
+                .setRequired(true)
+            )
+            .addStringOption(opt =>
+              opt.setName('recipients')
+                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+                .setRequired(false)
+                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+            )
+            .addStringOption(opt =>
+              opt.setName('expires-in')
+                .setDescription('How long the qURL links stay valid (default: 24 hours)')
+                .setRequired(false)
+                .addChoices(...EXPIRY_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('self-destruct')
+                .setDescription('Optional countdown after first open (default: no timer)')
+                .setRequired(false)
+                .addChoices(...SELF_DESTRUCT_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('personal-message')
+                .setDescription('Optional note included in each recipient\'s DM')
+                .setRequired(false)
+                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+            )
+        );
+      if (config.MAP_COMMAND_ENABLED) {
+        builder.addSubcommand(sub =>
+          sub.setName('map')
+            .setDescription('Share a Google Maps location via one-time qURL links')
+            .addStringOption(opt =>
+              opt.setName('location')
+                .setDescription('Google Maps URL, or a place / address to search')
+                .setRequired(true)
+                // Picking a suggestion sends a `qurl_place:<id>` sentinel;
+                // free text is resolved server-side via resolveLocation.
+                .setAutocomplete(true)
+                // 500 chars covers full Google Maps URLs (which can be
+                // 200-400 chars after place params + coordinates) plus
+                // headroom; not tied to the recipients-parser cap because
+                // location is a single URL/address, not a token list.
+                .setMaxLength(500)
+            )
+            .addStringOption(opt =>
+              opt.setName('recipients')
+                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+                .setRequired(false)
+                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+            )
+            .addStringOption(opt =>
+              opt.setName('location-name')
+                .setDescription('Override the label shown to recipients (defaults to URL/address)')
+                .setRequired(false)
+                .setMaxLength(256)
+            )
+            .addStringOption(opt =>
+              opt.setName('expires-in')
+                .setDescription('How long the qURL links stay valid (default: 24 hours)')
+                .setRequired(false)
+                .addChoices(...EXPIRY_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('self-destruct')
+                .setDescription('Optional countdown after first open (default: no timer)')
+                .setRequired(false)
+                .addChoices(...SELF_DESTRUCT_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('personal-message')
+                .setDescription('Optional note included in each recipient\'s DM')
+                .setRequired(false)
+                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+            )
+        );
+      }
+      builder.addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
-      )
-      .addSubcommand(sub =>
+      );
+      builder.addSubcommand(sub =>
         sub.setName('help')
           .setDescription('Show qURL bot help')
-      )
-      .addSubcommand(sub =>
+      );
+      builder.addSubcommand(sub =>
         sub.setName('setup')
           .setDescription('Configure your qURL API key for this server (admin only)')
-      )
-      .addSubcommand(sub =>
+      );
+      builder.addSubcommand(sub =>
         sub.setName('status')
           .setDescription('Check if qURL is configured (admin only)')
-      ),
+      );
+      return builder;
+    })(),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
@@ -6231,10 +7878,27 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for file/map/revoke (the set
+      // Stale-client rename reply — `/qurl file` was renamed to
+      // `/qurl send`. Discord clients cache slash registrations and
+      // can submit the old name for up to ~1h after a global rollout
+      // (near-instant on guild-scoped registration). Caught here
+      // BEFORE API_KEY_GATED_SUBCOMMANDS so unconfigured guilds get
+      // the rename hint instead of "qURL is not configured".
+      if (sub === 'file') {
+        logger.debug('qurl_file_renamed_reply: stale-client /qurl file submission caught by rename gate', {
+          user_id: interaction.user?.id,
+          guild_id: interaction.guildId,
+        });
+        return interaction.reply({
+          content: '⚠️ `/qurl file` has been renamed to `/qurl send`. Please use `/qurl send` instead — your Discord client may take up to an hour to refresh the command list.',
+          ephemeral: true,
+        });
+      }
+
+      // Gate: require guild API key for send/map/revoke (the set
       // in API_KEY_GATED_SUBCOMMANDS, hoisted to module scope).
       //
-      // For /qurl file + /qurl map this read is a fail-fast presence
+      // For /qurl send + /qurl map this read is a fail-fast presence
       // check — the resolved value is intentionally NOT threaded
       // through to the back-half. handleConfirmSendClick re-fetches at
       // Send-click time so a key rotation during the 3-minute confirm-
@@ -6257,13 +7921,27 @@ const commands = [
         resolvedApiKey = guildApiKey || config.QURL_API_KEY;
       }
 
-      // /qurl file and /qurl map deliberately don't accept the
+      // /qurl send and /qurl map deliberately don't accept the
       // dispatcher-resolved apiKey — handleConfirmSendClick re-fetches
       // at Send time so a mid-flow rotation still uses the live key.
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
-      if (sub === 'file') return handleQurlFile(interaction);
-      if (sub === 'map') return handleQurlMap(interaction);
+      if (sub === 'send') return handleQurlSend(interaction);
+      if (sub === 'map') {
+        if (!config.MAP_COMMAND_ENABLED) {
+          // Debug (not warn) — expected post-deploy traffic from
+          // clients with cached command defs, not an error. Cache
+          // TTL depends on registration mode: up to 1h on global
+          // (multi-tenant) registration, near-instant on guild-
+          // scoped (single-GUILD_ID). Grep this line to see decay.
+          logger.debug('qurl_map_disabled_reply: stale-client /qurl map submission caught by toggle gate', {
+            user_id: interaction.user?.id,
+            guild_id: interaction.guildId,
+          });
+          return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, ephemeral: true });
+        }
+        return handleQurlMap(interaction);
+      }
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it
@@ -6284,11 +7962,28 @@ const commands = [
           : '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        // `cmd` is used in two spots (Terms + Large servers); a
+        // single token keeps them in lockstep across copy edits.
+        const mapCopy = config.MAP_COMMAND_ENABLED
+          ? {
+            sectionVerb: 'Share resources',
+            bullet: '  `/qurl map` — share a Google Maps location via one-time qURL links\n',
+            runLine: '\t1. Run `/qurl send` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
+            resource: 'the file or location',
+            cmd: '`/qurl send` or `/qurl map`',
+          }
+          : {
+            sectionVerb: 'Share files',
+            bullet: '',
+            runLine: '\t1. Run `/qurl send` (attach a file)\n',
+            resource: 'the file',
+            cmd: '`/qurl send`',
+          };
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
-            '**Getting started — Share resources securely via one-time links:**\n' +
-            '  `/qurl file` — share a file with users via one-time qURL links\n' +
-            '  `/qurl map` — share a Google Maps location via one-time qURL links\n' +
+            `**Getting started — ${mapCopy.sectionVerb} securely via one-time links:**\n` +
+            '  `/qurl send` — share a file with users via one-time qURL links\n' +
+            mapCopy.bullet +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
@@ -6298,16 +7993,16 @@ const commands = [
             // misalign "1." with "2.", "3.", "4."). The tab indent now
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
-            '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n' +
+            mapCopy.runLine +
             '  2. Optionally `recipients:@a @b @role` (up to 25 users via @mentions or role expansion) — '
               + 'leave blank to pick from a menu (up to 10 at a time)\n' +
             '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
-            '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
+            `**Terms:** a *protected resource* is ${mapCopy.resource} you're sharing. ` +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
-            'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
-            '**Large servers (~1000+ members):** `/qurl file` or `/qurl map` with role @mentions ' +
+            `You create a qurl for a protected resource each time you run ${mapCopy.cmd}.\n\n` +
+            `**Large servers (~1000+ members):** ${mapCopy.cmd} with role @mentions ` +
             'may skip members the bot has not yet cached locally (the bot fetches members lazily, ' +
             'and very large servers may not be fully populated). ' +
             'If you need to reach a specific person for sure, use an explicit user @mention instead of a role.\n\n' +
@@ -6351,56 +8046,53 @@ function getActiveCommands() {
 
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
-// not purge each other on a fresh .set() call, so a bot that previously
+// not purge each other on a fresh PUT call, so a bot that previously
 // ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
 // X) and is now redeployed in multi-tenant or single-guild-plain mode
 // will leave /link, /leaderboard, etc. visible in X's slash-command
 // autocomplete until Discord's cache ages out. The dispatch-time filter
 // in handleCommand prevents those stale commands from doing anything
 // harmful, but users still see dead commands in the picker. Issuing
-// .set([], guildId) clears the guild-scoped set; any ALIVE guild-scoped
-// registration for the CURRENT mode gets reinstalled by the main
-// registerCommands path below.
+// PUT-with-empty-body on the guild-commands endpoint clears the
+// guild-scoped set.
 //
 // Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
 // guild-scoped commands to config.GUILD_ID, so purging there would
-// race with the upcoming set(). Only iterates guilds the bot is
-// actually in (client.guilds.cache) — we can't and shouldn't enumerate
-// guilds we've never joined.
-async function purgeStaleGuildCommands(client) {
+// race with the upcoming PUT. Only iterates the `guilds` map the caller
+// passes in — we can't and shouldn't enumerate guilds we've never joined.
+async function purgeStaleGuildCommands({ rest, appId, guilds }) {
   if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
-  // Parallelize the per-guild fetch+set. Sequentializing makes boot
-  // time O(guilds) at ~500ms per round-trip, which scales badly for
-  // the public-bot install path this PR targets. Promise.allSettled
-  // so one slow/failing guild doesn't block the others, and so a
-  // single rejection doesn't bubble and abort registerCommands.
-  // Discord's guild-commands endpoint has a separate rate bucket
-  // per guild, so parallel fans out cleanly until the global
-  // app-command rate limit (~200/min) — well above any realistic
-  // boot-time burst.
-  const guilds = [...client.guilds.cache.values()];
-  await Promise.allSettled(guilds.map(async (guild) => {
+  // Parallelize the per-guild fetch+put. Promise.allSettled so one
+  // slow/failing guild doesn't block the others; Discord's guild-
+  // commands endpoint uses a separate rate bucket per guild.
+  await Promise.allSettled(Array.from(guilds, ([guildId, guildName]) => (async () => {
     try {
-      const existing = await client.application.commands.fetch({ guildId: guild.id });
-      if (existing.size === 0) return;
-      await client.application.commands.set([], guild.id);
-      logger.info(`Purged ${existing.size} stale guild-scoped commands from ${guild.name} (${guild.id})`);
+      const existing = await rest.get(Routes.applicationGuildCommands(appId, guildId));
+      const existingCount = Array.isArray(existing) ? existing.length : 0;
+      if (existingCount === 0) return;
+      await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: [] });
+      logger.info(`Purged ${existingCount} stale guild-scoped commands from ${guildName ?? guildId} (${guildId})`);
     } catch (error) {
       // Don't fail boot on a purge error — the dispatch-time filter in
       // handleCommand is the correctness guarantee; purge is UX polish.
-      logger.warn(`Could not purge stale commands from guild ${guild.id}`, { error: error.message });
+      logger.warn(`Could not purge stale commands from guild ${guildId}`, { error: error.message });
     }
-  }));
+  })()));
 }
 
 // Register commands with Discord. `config.isOpenNHPActive` is the
 // single source of truth for "this deployment exercises the OpenNHP
 // community surface" — see config.js for the derivation.
-async function registerCommands(client) {
-  // Purge first — prevents stale OpenNHP-era registrations in guilds the
-  // bot is still in. See purgeStaleGuildCommands for details + why this
-  // is scoped to non-OpenNHP modes.
-  await purgeStaleGuildCommands(client);
+//
+// Signature decoupled from discord.js Client so both the legacy
+// Client path AND the @discordjs/ws shim path can call this:
+//   - Legacy path: build `guilds` as `Map<guildId, guildName>` from
+//     client.guilds.cache.
+//   - Shim path: empty Map — gateway-tier shim doesn't track guild
+//     cache, and the handleCommand dispatch-time filter remains the
+//     correctness guarantee for stale registrations.
+async function registerCommands({ rest, appId, guilds = new Map() }) {
+  await purgeStaleGuildCommands({ rest, appId, guilds });
 
   const activeCommands = getActiveCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());
@@ -6411,14 +8103,14 @@ async function registerCommands(client) {
       // guild. Used by the single-guild OpenNHP deployment where fast command
       // iteration matters more than appearing in other guilds.
       logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
-      await client.application.commands.set(commandData, config.GUILD_ID);
+      await rest.put(Routes.applicationGuildCommands(appId, config.GUILD_ID), { body: commandData });
     } else {
       // Global registration: commands appear in every guild the bot joins.
       // Discord caches global commands for up to 1 hour, so newly-added
       // commands may take that long to propagate. Used for multi-tenant
       // deployments (customers invite the bot to their own servers).
       logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
-      await client.application.commands.set(commandData);
+      await rest.put(Routes.applicationCommands(appId), { body: commandData });
     }
     logger.info('Slash commands registered.');
   } catch (error) {
@@ -6443,13 +8135,161 @@ function isAckTimeoutError(err) {
   return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
 }
 
+// Below this length, autocomplete suggestions are noise (single-letter
+// prefixes match thousands of places) and the per-keystroke Places
+// cost isn't justified.
+const AUTOCOMPLETE_MIN_QUERY_LENGTH = 2;
+
+// Sampled-warn cadence for autocomplete failures. The catch logs at
+// `debug` per-call to avoid keystroke-rate log spam during a Places
+// outage; this counter emits one `warn` per AUTOCOMPLETE_FAILURE_LOG_BURST
+// failures so SRE has a coarse signal that autocomplete is degraded
+// (vs. no traffic) without flooding logs. resolveLocation's send-time
+// `warn` carries the load-bearing signal — this is secondary visibility.
+const AUTOCOMPLETE_FAILURE_LOG_BURST = 50;
+let autocompleteFailureBurst = 0;
+
+// Discord caps each choice's `name` (label) and `value` (handler input)
+// at 100 chars. Labels (name + address) often need truncation; values
+// (`qurl_place:<placeId>`) almost never do, but we drop pathological
+// ones so one bad result doesn't fail the whole response.
+const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
+const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
+const AUTOCOMPLETE_MAX_CHOICES = 25;
+
+// Per Discord's contract, MUST respond within 3 s. Two-layer error
+// handling: the inner try catches Places I/O failures (ticks the
+// sampled SRE counter; that's its intent — "Places is degraded"); the
+// outer try catches anything else (early-return respond([]) throws on
+// expired token, etc.) without ticking the counter, since those aren't
+// Places-degradation signals.
+async function handleAutocomplete(interaction) {
+  try {
+    // `return await` (not bare `return`) so a rejected `respond([])`
+    // promise is caught by the outer try/catch instead of leaking out
+    // of the async function unhandled. Each early-return is the
+    // contract handler — surface the rejection through the outer
+    // recovery path instead of propagating up to the dispatch caller.
+    if (interaction.commandName !== 'qurl') {
+      return await interaction.respond([]);
+    }
+    // Reject DM autocomplete — handleQurlMap rejects DMs at submit time
+    // (see commands.js:~3502) but Discord could still deliver an
+    // autocomplete interaction without a guildId. Without this guard a
+    // user who somehow triggered autocomplete in DM would burn the
+    // operator's global GOOGLE_MAPS_API_KEY quota for a send that's
+    // about to be rejected.
+    if (!interaction.guildId) {
+      return await interaction.respond([]);
+    }
+    const subcommand = interaction.options.getSubcommand(false);
+    const focused = interaction.options.getFocused(true);
+    if (subcommand !== 'map' || focused?.name !== 'location') {
+      return await interaction.respond([]);
+    }
+    // Feature-flag gate. When MAP_COMMAND_ENABLED is off the map
+    // subcommand isn't registered, so Discord shouldn't deliver an
+    // autocomplete for it — but a stale client racing the registration
+    // roll could. Short-circuit before searchPlaces so we don't burn
+    // operator GOOGLE_MAPS_API_KEY quota on a submit that will be
+    // rejected by the dispatcher anyway.
+    if (!config.MAP_COMMAND_ENABLED) {
+      return await interaction.respond([]);
+    }
+    const rawQuery = (focused.value || '').trim();
+    if (rawQuery.length < AUTOCOMPLETE_MIN_QUERY_LENGTH) {
+      return await interaction.respond([]);
+    }
+    // A pasted URL is already a stable identifier — parseLocationInput
+    // passes it through verbatim and suggestions would just clutter.
+    if (/^https?:\/\//i.test(rawQuery)) {
+      return await interaction.respond([]);
+    }
+
+    let results;
+    try {
+      results = await searchPlaces(rawQuery);
+    } catch (err) {
+      // Per-call log at debug so keystroke-rate failures don't spam.
+      logger.debug('autocomplete handler failed', {
+        command: interaction.commandName,
+        error: err && err.message,
+      });
+      // Sampled SRE signal: emit one warn per BURST failures so a
+      // Places outage is visible (vs. silent autocomplete-only degrade).
+      if (++autocompleteFailureBurst >= AUTOCOMPLETE_FAILURE_LOG_BURST) {
+        logger.warn('autocomplete handler failure burst', {
+          count: autocompleteFailureBurst,
+          error: err && err.message,
+        });
+        autocompleteFailureBurst = 0;
+      }
+      return await interaction.respond([]);
+    }
+
+    const choices = [];
+    for (const p of results) {
+      if (choices.length >= AUTOCOMPLETE_MAX_CHOICES) break;
+      // Skip dud entries early instead of relying on submit-time decode
+      // to reject them — saves the user a "place no longer available"
+      // error on a malformed Google response.
+      if (!PLACE_ID_SHAPE_RE.test(p.placeId)) {
+        // Debug, not warn: would fire per-keystroke during a Google
+        // place_id format drift, drowning logs. Operator can grep for
+        // this when investigating "why is my dropdown empty?" — that's
+        // the upstream-shape-drift signal.
+        logger.debug('autocomplete: dropped prediction (place_id failed shape check)', {
+          place_id: p.placeId,
+        });
+        continue;
+      }
+      // Places marks `main_text` and `description` as optional; if both
+      // are missing, searchPlaces returns `name: undefined` and the
+      // label would render as the literal string "undefined". Discord
+      // also rejects empty/whitespace names, so just skip.
+      if (!p.name) continue;
+      const value = encodePlaceIdSentinel(p.placeId);
+      if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
+      const label = p.address ? `${p.name} — ${p.address}` : p.name;
+      // Discord validates name length in UTF-16 code units, not code
+      // points, so we cap by `.length`. Back off by 1 if the boundary
+      // would leave a lone high surrogate so we don't ship a
+      // half-emoji (which Discord renders as tofu). Deliberately NOT
+      // `safeCodepointSlice` — that helper counts codepoints, which
+      // can ship a string whose `.length` > 100 for emoji-heavy
+      // labels (each surrogate pair is 2 UTF-16 units but 1 codepoint).
+      // Always-check (not just on truncation): a label that's exactly
+      // 100 UTF-16 units AND ends with a lone high surrogate would
+      // otherwise slip through the fast path.
+      let end = Math.min(label.length, AUTOCOMPLETE_CHOICE_NAME_MAX);
+      if (end > 0) {
+        const lastUnit = label.charCodeAt(end - 1);
+        if (lastUnit >= 0xD800 && lastUnit <= 0xDBFF) end -= 1;
+      }
+      const name = end === label.length ? label : label.slice(0, end);
+      choices.push({ name, value });
+    }
+    return await interaction.respond(choices);
+  } catch (err) {
+    // Non-Places-I/O failure (respond() on expired token, getSubcommand
+    // throw on malformed interaction, etc.). Doesn't advance the burst
+    // counter — those aren't Places-degradation signals.
+    logger.debug('autocomplete handler unhandled', {
+      command: interaction.commandName,
+      error: err && err.message,
+    });
+    try { await interaction.respond([]); } catch { /* ignore */ }
+    return undefined;
+  }
+}
+
 // Handle command interactions
 async function handleCommand(interaction) {
-  // /qurl now has zero options after the button-driven redesign; no other
-  // command in this file uses autocomplete. Discord can still deliver
-  // autocomplete events (legacy clients, stale registrations) — short-
-  // circuit them so they don't fall through to the chat-input path.
-  if (interaction.isAutocomplete()) return;
+  // Autocomplete fires per-keystroke and must respond within 3s. Route
+  // it off the chat-input path so the autocomplete handler doesn't drag
+  // in the metrics + mode-flip-defense overhead that handleQurlSlashSend
+  // and friends need.
+  if (interaction.isAutocomplete()) return handleAutocomplete(interaction);
 
   if (!interaction.isChatInputCommand()) return;
 
@@ -6587,7 +8427,7 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
   siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
 });
 
-// /qurl file + /qurl map confirm-card components. All three customIds
+// /qurl send + /qurl map confirm-card components. All three customIds
 // share the same expectedStage — they're three component types
 // (button + user-select + button) attached to the same confirm-card
 // message, all routed by stage. siblingMessage is registered on the
@@ -6596,14 +8436,14 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
 registerFlow(CONFIRM_USER_SELECT_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmUserSelect,
-  siblingMessage: 'You have a `/qurl file` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
+  siblingMessage: 'You have a `/qurl send` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
 });
 // siblingMessage intentionally omitted on the SEND + CANCEL custom-
 // id registrations below — flow-dispatch's `siblingMessages` map is
 // keyed by stage (not by customId), so the message registered on
 // USER_SELECT above is reachable from any of the three customIds
 // at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
-// test in qurl-file-map.test.js pins this contract.
+// test in qurl-send-map.test.js pins this contract.
 registerFlow(CONFIRM_SEND_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmSendClick,
@@ -6642,6 +8482,19 @@ registerFlow(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmVoiceEveryone,
 });
+// "Pick people instead" — voice/everyone-mode → picker-mode toggle.
+// Same stage contract as the other CONFIRM_* registrations.
+registerFlow(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleConfirmPickManual,
+});
+// @everyone button — only rendered when sender has MENTION_EVERYONE
+// and recipientMode is PICKER. Same stage + siblingMessage-keyed-by-
+// stage contract as the other CONFIRM_* registrations.
+registerFlow(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleConfirmEveryone,
+});
 
 module.exports = {
   commands,
@@ -6660,6 +8513,8 @@ module.exports = {
   handleConfirmNoteButton,
   handleConfirmNoteModal,
   handleConfirmVoiceEveryone,
+  handleConfirmPickManual,
+  handleConfirmEveryone,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -6676,13 +8531,31 @@ module.exports = {
       batchSettled,
       expiryToISO,
       sendCooldowns,
+      // Renderer exposed so tests can pin the bottom-row button
+      // composition directly (e.g., the DM-context @everyone-gate
+      // assertion) without driving through handleQurlSend's entry path.
+      renderConfirmCardRows,
+      // Memo for the @everyone non-bot count is module-scoped. Tests
+      // that reuse a guild reference across cases could otherwise get
+      // surprising memo hits; exposing the WeakMap lets a beforeEach
+      // hook clear specific entries. Production callers never need
+      // this — the memo busts on cache.size/memberCount changes.
+      _everyoneCountMemo: everyoneCountMemo,
+      computeEveryoneDisplayCount,
       handleAddRecipients,
       buildDeliveryPayload,
+      buildDeliveryEmbed,
+      buildStepThroughButton,
+      buildTrustButton,
+      packBulkDeliveryComponents,
+      buildRevokedDMPayload,
+      persistDispatchResult,
       resolveSenderAlias,
+      resolveGuildProvenance,
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these
       // hooks, coverage of the polling/revoke/add-recipients code paths
-      // can only be reached via full /qurl file + /qurl map integration
+      // can only be reached via full /qurl send + /qurl map integration
       // tests, which require mocking the entire state-machine front-half
       // before the back-half even runs. Direct exposure means each
       // function gets a focused spec without that setup overhead.
@@ -6696,7 +8569,7 @@ module.exports = {
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
       // its contract against a constructed param object — without
-      // re-driving the full /qurl file + /qurl map confirm-card flow.
+      // re-driving the full /qurl send + /qurl map confirm-card flow.
       executeSendPipeline,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
@@ -6723,23 +8596,35 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
-      // /qurl file + /qurl map handlers + flow constants. Tests pin
+      // /qurl send + /qurl map handlers + flow constants. Tests pin
       // against production values via these exports rather than
       // re-stating the strings.
-      handleQurlFile,
+      handleQurlSend,
       handleQurlMap,
       resolveRecipientUsers,
       partitionRecipients,
       resolveMentionableSelection,
+      resolveRoleNames,
       selfDestructOptionToSeconds,
       renderRecipientWarnings,
       renderConfirmCardContent,
       parseLocationInput,
+      resolveLocation,
+      RESOLVE_REASON,
+      // Disabled-state reply for stale /qurl map submissions. Exported
+      // so flag-off tests pin against the production string.
+      QURL_MAP_DISABLED_REPLY,
+      handleAutocomplete,
+      // Test-only reset: the autocomplete-failure burst counter is
+      // module-level state that accumulates across tests within a
+      // file unless explicitly cleared.
+      _resetAutocompleteFailureBurst: () => { autocompleteFailureBurst = 0; },
+      AUTOCOMPLETE_FAILURE_LOG_BURST,
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
       // Every confirm-card customId is exported so the contract test
-      // in qurl-file-map.test.js can pin every wire value — a typo
+      // in qurl-send-map.test.js can pin every wire value — a typo
       // in any of these silently breaks routing for in-flight confirm
       // cards, so they need to be test-asserted.
       CONFIRM_USER_SELECT_CUSTOM_ID,
@@ -6750,6 +8635,11 @@ module.exports = {
       CONFIRM_NOTE_BUTTON_CUSTOM_ID,
       CONFIRM_NOTE_MODAL_CUSTOM_ID,
       CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
+      CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
+      RECIPIENT_MODE_PICKER,
+      RECIPIENT_MODE_VOICE,
+      RECIPIENT_MODE_EVERYONE,
+      normalizeRecipientMode,
       SEND_FLOW_TTL_SECONDS,
       SELF_DESTRUCT_NO_TIMER_CHOICE,
     },

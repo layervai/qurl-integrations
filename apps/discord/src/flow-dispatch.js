@@ -179,7 +179,7 @@ async function handleFlowInteraction(interaction) {
     logger.warn('flow-dispatch: failed to derive flow_id from interaction', {
       customId, error: err.message,
     });
-    await safeReply(interaction, SUPERSEDED_MSG);
+    await supersededRoutingFailureReply(interaction);
     return;
   }
 
@@ -190,7 +190,7 @@ async function handleFlowInteraction(interaction) {
     logger.error('flow-dispatch: loadFlow failed', {
       customId, flow_id, error: err.message,
     });
-    await safeReply(interaction, SUPERSEDED_MSG);
+    await supersededRoutingFailureReply(interaction);
     return;
   }
 
@@ -204,7 +204,7 @@ async function handleFlowInteraction(interaction) {
       stage: row ? row.stage : null,
       expected_stage: route.expectedStage,
     });
-    await safeReply(interaction, SUPERSEDED_MSG);
+    await supersededRoutingFailureReply(interaction);
     return;
   }
 
@@ -231,6 +231,49 @@ async function handleFlowInteraction(interaction) {
       'Something went wrong — please run the command again.',
     );
   }
+}
+
+// Routing-failure reply: the dispatcher has decided the flow row is
+// gone or in the wrong stage and the registered handler will NOT run.
+// For MessageComponent interactions, replace the stale card via
+// `update` instead of sending a fresh ephemeral — `interaction.reply`
+// would leave the source card's buttons live, so each repeated click
+// (e.g. Cancel on a confirm card whose flow row TTL'd out) stacks
+// another ephemeral with a reply-quote of the source card. Editing
+// the source message also clears the buttons so the user can't keep
+// firing dead-flow interactions.
+//
+// Falls back to `safeReply` (ephemeral reply / followUp) for:
+//   - Modal submits — the `update` API on a ModalSubmit only edits
+//     the source message when the modal was opened from a component
+//     click, and even then the modal's submit ack model is divergent
+//     enough that the simpler ephemeral reply is the right shape.
+//   - Already-acked interactions — defend against a future reorder
+//     where this helper is reached after a handler-internal defer.
+//   - `update` failures — most commonly Unknown Message (10008) if
+//     the user dismissed the source ephemeral between rendering and
+//     clicking; the interaction token is still live so a fresh reply
+//     is the right recovery.
+async function supersededRoutingFailureReply(interaction) {
+  // `isMessageComponent` is guaranteed to exist — `index.js` only
+  // routes here when `isMessageComponent() || isModalSubmit()` is
+  // true (interactionCreate listener), and discord.js declares both
+  // methods on the base Interaction class.
+  if (interaction.isMessageComponent() && !interaction.replied && !interaction.deferred) {
+    try {
+      await interaction.update({ content: SUPERSEDED_MSG, components: [] });
+      return;
+    } catch (err) {
+      logger.warn('flow-dispatch: update failed on routing failure, falling back to reply', {
+        error: err.message,
+      });
+      // Fall through to safeReply. `update` failures leave the
+      // interaction unacked (Discord rejects the update without
+      // consuming the token on Unknown Message), so the followup
+      // reply still has a valid token to spend.
+    }
+  }
+  await safeReply(interaction, SUPERSEDED_MSG);
 }
 
 // Best-effort reply that swallows Discord errors. The dispatcher may

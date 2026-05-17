@@ -37,8 +37,8 @@ function assertIntent(intentsList, bit, requiredFor) {
   }
 }
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
-assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
-assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl file + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl send + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
+assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl send + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)');
 
 // Negative-intent canaries — pin that the bot has NOT silently
 // re-broadened gateway scope. Every intent listed here is either:
@@ -82,6 +82,20 @@ assertNoIntent(intents, GatewayIntentBits.GuildPresences, 'GuildPresences');
 assertNoIntent(intents, GatewayIntentBits.DirectMessages, 'DirectMessages');
 
 const client = new Client({ intents });
+
+// Bitfield form of the same `intents` array, for the Pillar 2
+// @discordjs/ws shim path (which takes a bitfield, not an array).
+// Single source of truth: both the legacy Client construction
+// above AND the shim subscribe to identical events.
+//
+// Int32 bitwise OR is safe today — Discord's highest declared
+// intent bit (GuildVoiceStates = 128, GuildMessageTyping = 16384,
+// AutoModerationConfiguration = 1048576, etc.) is well under
+// 2³⁰. If Discord ever adds an intent bit ≥ 2³¹, switch to
+// `new IntentsBitField(intents).bitfield` (BigInt-backed) — the
+// @discordjs/ws WebSocketManager constructor accepts both number
+// and bigint forms.
+const GATEWAY_INTENTS_BITFIELD = intents.reduce((acc, bit) => acc | bit, 0);
 
 // Cache for quick lookups
 let guild = null;
@@ -879,16 +893,20 @@ async function postWeeklyDigest() {
   }
 }
 
-// Send DM to user
+// Returns `{ ok, channelId, messageId }`. The refs feed the /qURL
+// revoke path (see buildRevokedDMPayload + editDM in discord-rest.js)
+// so it can edit the recipient's DM in place after a successful
+// revoke. Fire-and-forget callers (welcome DMs, OAuth callbacks)
+// can keep awaiting and discarding the result.
 async function sendDM(discordId, message) {
   try {
     const user = await client.users.fetch(discordId);
-    await user.send(message);
+    const sent = await user.send(message);
     logger.debug('Sent DM', { discordId });
-    return true;
+    return { ok: true, channelId: sent.channelId, messageId: sent.id };
   } catch (error) {
     logger.warn(`Failed to DM user ${discordId}`, { error: error.message });
-    return false;
+    return { ok: false };
   }
 }
 
@@ -910,6 +928,7 @@ async function shutdown() {
 
 module.exports = {
   client,
+  GATEWAY_INTENTS_BITFIELD,
   assignContributorRole,
   notifyPRMerge,
   notifyBadgeEarned,

@@ -1,7 +1,7 @@
 // recipient-parser — extracts user/role mentions from the `recipients:`
 // slash-command option string and resolves them to a flat user-ID list.
 //
-// `/qurl file` and `/qurl map` expose `recipients:` as a STRING option
+// `/qurl send` and `/qurl map` expose `recipients:` as a STRING option
 // rather than a list of mentionables because Discord's slash-command
 // `mentionable` option type is single-value — a power-user one-shot
 // path needs a free-form text that can carry many mentions, role
@@ -74,14 +74,34 @@
 //
 // Output shape:
 //   {
-//     ids:                [<user_id>, ...],   // deduped, cap-applied
-//     invalidTokens:      [<raw_token>, ...], // pre-escaped (see above)
-//     cappedCount:        <number>,           // 0 if not capped; else
-//                                             // `total_pre_cap - cap`
-//     massMentionDenied:  <boolean>,          // true when @everyone
-//                                             // appeared but the caller
-//                                             // denied via the
-//                                             // `allowMassMention` opt
+//     ids:                  [<user_id>, ...],   // deduped, cap-applied
+//     invalidTokens:        [<raw_token>, ...], // pre-escaped (see above)
+//     cappedCount:          <number>,           // 0 if not capped; else
+//                                               // `total_pre_cap - cap`
+//     massMentionDenied:    <boolean>,          // true when @everyone
+//                                               // appeared but the caller
+//                                               // denied via the
+//                                               // `allowMassMention` opt
+//     massMentionExpanded:  <boolean>,          // true iff @everyone was
+//                                               // allowed AND the walk
+//                                               // iterated at least one
+//                                               // non-bot member from
+//                                               // `members.cache` (the
+//                                               // member may already be
+//                                               // in `ids` via a prior
+//                                               // named mention — dedup
+//                                               // happens inside
+//                                               // `consider()`; the flag
+//                                               // records that the
+//                                               // expansion ran, not
+//                                               // that it added new
+//                                               // entries). False when
+//                                               // cache was cold,
+//                                               // all-bot, or cap-
+//                                               // saturated before the
+//                                               // walk reached it.
+//                                               // Mutually exclusive
+//                                               // with massMentionDenied.
 //   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
@@ -178,7 +198,7 @@ const VIEW_CHANNEL_PERMISSION = 1n << 10n;
 // pasted formatting without ever hitting the parser cap.
 const MAX_INPUT_LENGTH = 4000;
 
-// Max length applied to `/qurl file` / `/qurl map` `recipients:`
+// Max length applied to `/qurl send` / `/qurl map` `recipients:`
 // slash options. Discord enforces this server-side, so anything past
 // it never reaches the parser — the parser's MAX_INPUT_LENGTH cap
 // (above) is genuine defense-in-depth, only reachable via a forged
@@ -187,7 +207,7 @@ const MAX_INPUT_LENGTH = 4000;
 // Picked at half of MAX_INPUT_LENGTH so the headroom relationship is
 // load-bearing: a future bump to MAX_INPUT_LENGTH (e.g. for a larger
 // guild's role-expansion needs) preserves the 2× gap automatically.
-// Both /qurl file and /qurl map builders read this; 7b.3+ should
+// Both /qurl send and /qurl map builders read this; 7b.3+ should
 // continue to honor the gap.
 const SLASH_OPTION_HEADROOM_DIVISOR = 2;
 const MAX_SLASH_OPTION_LENGTH = Math.floor(MAX_INPUT_LENGTH / SLASH_OPTION_HEADROOM_DIVISOR);
@@ -217,8 +237,8 @@ function isBotMember(member) {
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / `@everyone`)
 // to a flat user-ID list with the cap + bot filter applied. Returns
-// `{ ids, invalidTokens, cappedCount, massMentionDenied }`; never
-// throws on parse errors — invalid tokens always land in
+// `{ ids, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied }`;
+// never throws on parse errors — invalid tokens always land in
 // `invalidTokens` for caller-side surfacing. Sender is NOT filtered —
 // self-send is supported; the confirm-card renderer surfaces a neutral
 // notice when sender appears in `ids`.
@@ -232,6 +252,22 @@ function isBotMember(member) {
 //               can surface "you don't have permission to @everyone".
 // Either way the token is stripped from `invalidTokens` to avoid
 // double-surfacing.
+//
+// `<@&roleId>` mentions follow the same privilege model Discord enforces
+// for in-chat role mentions:
+//   - `role.mentionable === true` → expanded unconditionally.
+//   - `role.mentionable === false` → requires `allowMassMention === true`;
+//     denied roles land in `roleMentionsDenied: [roleId, ...]` (array
+//     because a single send can attempt multiple denied roles) so the
+//     caller can emit per-role copy with the role name resolved via
+//     `guild.roles.cache`.
+// The `<@&{guildId}>` wire form (Discord's @everyone-role mention) is
+// routed through the `@everyone` channel above (massMentionDenied /
+// guild.members.cache expansion) rather than `role.members`. The
+// wire-form check (`guild && roleId === guild.id`) fires BEFORE the
+// `roles.cache.get(roleId)` lookup, so a cold cache that doesn't yet
+// hold the @everyone role still routes correctly (pinned by the
+// `<@&{guildId}> wire form routes to massMentionDenied` test).
 //
 // `interaction` is the slash-command interaction; we need it for:
 //   - interaction.guild               → role-mention expansion via
@@ -247,7 +283,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
@@ -255,7 +291,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
@@ -285,7 +321,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
 
   // `seen` is the canonical post-filter unique-candidate set (every
@@ -380,11 +416,55 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     seenIds.add(id);
     invalidTokens.push(rawToken);
   }
+  // Roles that the sender attempted to mention but lacks the permission
+  // for (`role.mentionable !== true` AND `!allowMassMention`). Tracked
+  // as IDs; the caller resolves to names via `guild.roles.cache.get(id)
+  // ?.name` so renderRecipientWarnings can emit "@<roleName> requires
+  // the Mention Everyone permission or role.mentionable: true." Deduped
+  // via a parallel Set so `<@&999> <@&999>` yields one entry — same
+  // pattern as invalidRoleIds above.
+  const roleMentionsDenied = [];
+  const roleMentionsDeniedIds = new Set();
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
+    // `<@&{guildId}>` is Discord's wire form for the @everyone role —
+    // the @everyone role's ID always equals `guild.id`. Semantically
+    // this is the same action as the `@everyone` text token, so route
+    // through the existing massMentionDenied / everyonePresent channel:
+    //   - Allowed → set everyonePresent=true and skip the role-loop
+    //     branch; the dedicated @everyone expansion below walks
+    //     guild.members.cache (discord.js's @everyone role.members
+    //     doesn't reliably surface all members — see commands.js:2821).
+    //   - Denied  → mark massMentionDenied so the caller emits the
+    //     "@everyone requires Mention Everyone" copy (not the
+    //     "role mention requires …" copy, which would confuse the user).
+    if (guild && roleId === guild.id) {
+      if (allowMassMention) {
+        everyonePresent = true;
+      } else {
+        massMentionDenied = true;
+      }
+      continue;
+    }
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
       pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
+      continue;
+    }
+    // Permission gate (issue #326): non-mentionable roles require
+    // MENTION_EVERYONE — same rule Discord enforces for in-chat role
+    // mentions. Without this gate, a non-admin sender could
+    // `/qurl send recipients:<@&adminRoleId>` to fan a send to admin-
+    // role members, bypassing the same protection the @everyone path
+    // got in #323. `role.mentionable === true` is the per-role bypass
+    // (set explicitly by a role owner). Lands in `roleMentionsDenied`
+    // (NOT invalidTokens) so the caller can emit permission-specific
+    // copy with the role NAME rather than the generic "couldn't parse."
+    if (role.mentionable !== true && !allowMassMention) {
+      if (!roleMentionsDeniedIds.has(roleId)) {
+        roleMentionsDeniedIds.add(roleId);
+        roleMentionsDenied.push(roleId);
+      }
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
@@ -452,9 +532,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
-    const isVoice = channel.type === VOICE_CHANNEL_TYPE
-      || channel.type === STAGE_VOICE_CHANNEL_TYPE;
-    if (!isVoice) {
+    if (!isVoiceChannelType(channel.type)) {
       // Non-voice channel mention — reject. We intentionally do NOT
       // restore the legacy "Everyone in this text channel" behavior
       // (PR #174 fixed the @everyone-on-default-server expansion bug
@@ -468,7 +546,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // it has visibility into, so without this check a user who
     // discovers a private voice channel's snowflake (audit logs,
     // mod-tool exports, leaked URLs) could DM-blast its connected
-    // members via `/qurl file recipients:<#hidden-voice-id>` even
+    // members via `/qurl send recipients:<#hidden-voice-id>` even
     // when they themselves can't see the channel in the client.
     // Fail-closed: a missing `interaction.member` (DM context the
     // outer guild check already eliminated; defense-in-depth here
@@ -544,6 +622,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // `@everyone <@uncachedUser>`, the direct mention claims a cap slot
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
+  let massMentionExpanded = false;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
@@ -581,6 +660,22 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
         if (ids.size >= cap) break;
         if (isBotMember(member)) continue;
         consider(memberId);
+        // Set inside the walk (rather than deriving from
+        // `everyonePresent && allowMassMention` at the bottom) so the
+        // flag means "expansion iterated at least one non-bot member,"
+        // not "expansion was permitted." Robust against future short-
+        // circuits — cap exhausted by named mentions before this loop
+        // runs, empty cache, all-bot cache — that would otherwise
+        // leave the flag overstating.
+        //
+        // NOTE: `consider()` is a silent no-op when `seen.has(id)`, so
+        // a mixed-mentions input like `<@alice> @everyone` where alice
+        // is also in the @everyone set still sets the flag — the walk
+        // iterated alice and dedup'd internally. Documented call-site
+        // behavior (`commands.js`'s MIXED MENTIONS comment) intentionally
+        // treats this as EVERYONE-mode, so the dedup-then-set ordering
+        // matches the intended downstream semantic.
+        massMentionExpanded = true;
       }
     }
   }
@@ -662,7 +757,18 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     });
   }
 
-  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied };
+  // `massMentionExpanded` was set inside the @everyone walk above
+  // (true iff the walk iterated at least one non-bot member —
+  // `consider()` dedups internally, so a mixed-mentions input still
+  // sets the flag). Surfacing it lets callers route the slash-text
+  // "@everyone" path into RECIPIENT_MODE_EVERYONE without duplicating
+  // the regex-match-and-permission-check (or reaching past the parser
+  // to detect the `<@&{guildId}>` wire form). False when the user typed
+  // @everyone but lacked permission (the denied path lands on
+  // `massMentionDenied` instead) or when the cache was cold /
+  // cap-saturated by the time the walk reached it (caller's
+  // `valid.length` check still catches that downstream).
+  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 
 // `isVoiceChannelType` is the same voice/stage-voice predicate the

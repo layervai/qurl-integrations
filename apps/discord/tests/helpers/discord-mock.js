@@ -51,6 +51,8 @@ function makeComponentChainable(extra = {}) {
     addOptions: jest.fn().mockReturnThis(),
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
+    setDefaultValues: jest.fn().mockReturnThis(),
+    addDefaultUsers: jest.fn().mockReturnThis(),
     addComponents: jest.fn().mockReturnThis(),
     setDisabled: jest.fn().mockReturnThis(),
     setValue: jest.fn().mockReturnThis(),

@@ -1,14 +1,122 @@
 const path = require('path');
+const os = require('os');
 
-// Safe int parser: handles NaN and falsy-zero correctly. If minPositive
-// is set (the common case for cooldowns + caps), reject non-positive
-// values — an env of "0" would otherwise silently disable a cooldown or
-// block every send.
-function intEnv(key, defaultVal, { minPositive = false } = {}) {
-  const v = parseInt(process.env[key], 10);
-  if (isNaN(v)) return defaultVal;
+// Sync derivation for INSTANCE_ID / INSTANCE_IP (hot-standby identity).
+// Each helper runs once at module-load and is cached into the exported
+// config object — readers of `config.INSTANCE_ID` see a frozen value,
+// not a re-evaluation on access.
+//
+// ECS Fargate awsvpc gives each task its own hostname and ENI, but it
+// does NOT substitute `${ECS_TASK_ARN}` into task-def env-var values
+// (only `command = []` and `entryPoint = []` see that interpolation).
+// Rather than spin up an async ECS-metadata-endpoint fetch at boot —
+// which would push the missing-env guard past module load and add an
+// HTTP dependency to startup — derive both values from Node's `os`
+// module, which is sync, network-free, and works identically in ECS,
+// local docker, and unit tests. Per-field semantics are commented at
+// the call sites below.
+//
+// LOAD-BEARING INVARIANT for the lock primitive: two replicas in the
+// same ECS service MUST see different INSTANCE_ID values. Fargate
+// assigns a unique short alphanumeric hostname per task, which
+// satisfies this — but if a future runtime ever reused hostnames
+// across replicas in the same service, the DDB lock would short-
+// circuit and both replicas would believe they hold leadership.
+// The peer-heartbeat row collision (two writers on the same composite
+// key) would surface post-deploy as a telemetry signal.
+// Env overrides are trimmed for parity with GUILD_ID / STORE_TYPE /
+// ALLOWED_GITHUB_ORGS upstream — a trailing space on INSTANCE_ID
+// would otherwise silently key into the DDB lock and a replica
+// mismatch would be hard to spot.
+//
+// Shape validation for env overrides lives in `invalidHotStandbyValues`
+// (boot-requirements.js): this helper trusts env values verbatim,
+// the boot-time validator catches malformed IPv4 / template-literal
+// pastes via a single source of truth.
+//
+// `addr.family === 'IPv4'` matches Node 22's `os.networkInterfaces()`
+// string-form contract. Node 18.0.0 briefly returned numeric `4`/`6`
+// before that was reverted; we accept both shapes so a future Node
+// major regressing back to numeric doesn't return null on every
+// Fargate boot (which would surface as a misleading "no IPv4 found"
+// diagnostic at 3am).
+function deriveInstanceId() {
+  // `|| null` normalizes the rare empty-hostname case (chroot or
+  // misconfigured init namespace) for symmetry with deriveInstanceIp.
+  // missingHotStandbyKeys catches both null and '' via its falsy
+  // check, so behavior is unchanged — the symmetry is for callers
+  // reading config.INSTANCE_ID and reasoning about its possible shapes.
+  return process.env.INSTANCE_ID?.trim() || os.hostname() || null;
+}
+
+function isIPv4(addr) {
+  return (addr.family === 'IPv4' || addr.family === 4) && !addr.internal;
+}
+
+function deriveInstanceIp() {
+  const envOverride = process.env.INSTANCE_IP?.trim();
+  if (envOverride) return envOverride;
+  const ifaces = os.networkInterfaces();
+  // First pass: eth0 (the awsvpc ENI's stable name) gets priority —
+  // under Fargate this always returns on the first candidate.
+  for (const addr of ifaces.eth0 || []) {
+    if (isIPv4(addr)) return addr.address;
+  }
+  // Fallback for local/dev (macOS `en0`, stripped containers without
+  // `eth0`, etc.). Iteration order is whatever `os.networkInterfaces()`
+  // returns — best-effort only. The eth0 entries get re-walked here
+  // but yield nothing (the first pass already rejected every candidate),
+  // so a separate skip isn't worth the noise.
+  for (const addrs of Object.values(ifaces)) {
+    for (const addr of addrs || []) {
+      if (isIPv4(addr)) return addr.address;
+    }
+  }
+  return null;
+}
+
+// Safe int parser: handles NaN and falsy-zero correctly.
+//
+// Options:
+//   minPositive: reject values <= 0 (common case for cooldowns + caps —
+//     an env of "0" would otherwise silently disable a cooldown).
+//   strictInteger: reject non-integer or trailing-garbage values like
+//     "100abc". Use Number() + Number.isInteger() instead of parseInt's
+//     lenient parse. Pair with minPositive for "must be a positive
+//     integer" semantics. Required when the value's range is bounded
+//     and a typo would silently truncate to a different valid value.
+//   min, max: inclusive range. Out-of-range values warn + fall back
+//     to the default (NOT clamp — clamping would silently mask a typo
+//     past the boundary). When both are set, the warn quotes the
+//     range so an operator can fix the env without diffing the source.
+//
+// Returns defaultVal on any rejection, with a console.warn for every
+// rejected path (visible at boot regardless of LOG_LEVEL or logger
+// transport state — logger isn't loaded this early in config import).
+function intEnv(key, defaultVal, opts = {}) {
+  const { minPositive = false, strictInteger = false, min, max } = opts;
+  const raw = process.env[key];
+  if (raw === undefined || raw === '') return defaultVal;
+  let v;
+  if (strictInteger) {
+    v = Number(raw);
+    if (!Number.isInteger(v)) {
+      console.warn(`[config] ${key}=${JSON.stringify(raw)} rejected (must be an integer); using default ${defaultVal}`);
+      return defaultVal;
+    }
+  } else {
+    v = parseInt(raw, 10);
+    if (isNaN(v)) return defaultVal;
+  }
   if (minPositive && v <= 0) {
     console.warn(`[config] ${key}=${v} rejected (must be > 0); using default ${defaultVal}`);
+    return defaultVal;
+  }
+  if ((min !== undefined && v < min) || (max !== undefined && v > max)) {
+    const rangeLabel = min !== undefined && max !== undefined
+      ? `[${min}, ${max}]`
+      : min !== undefined ? `>= ${min}` : `<= ${max}`;
+    console.warn(`[config] ${key}=${v} out of range ${rangeLabel}; using default ${defaultVal}`);
     return defaultVal;
   }
   return v;
@@ -155,6 +263,32 @@ const isDiscordInstallConfigured = Boolean(
 // export point so a future grep-and-replace doesn't miss a callsite.
 const SHARD_ID = process.env.SHARD_ID || '0:1';
 
+// One-shot getter for the GATEWAY_HANDOFF_HMAC secret. The raw value
+// is captured into a module-private binding at require time, then
+// surfaced exactly once via takeGatewayHandoffHmac() which nulls the
+// binding before returning.
+//
+// Defense in depth against heap-dump key exposure: even if a future
+// caller adds telemetry that captures the config object wholesale,
+// or a debugger attaches mid-process, the secret string is no longer
+// reachable through any module-level reference once startHotStandby
+// has consumed it. The live HMAC instance created by createGatewayHmac
+// still holds the parsed bytes (necessary for sign/verify) — that's
+// the only retained reference.
+//
+// Why a private binding rather than a config-object property: the
+// `config` object is exported and any module can capture it at
+// require time. A `delete config.GATEWAY_HANDOFF_HMAC` after the
+// secret is consumed does NOT remove already-captured references.
+// A private binding inside this module is unreachable to anything
+// except this getter.
+let _gatewayHandoffHmacRaw = process.env.GATEWAY_HANDOFF_HMAC;
+function takeGatewayHandoffHmac() {
+  const value = _gatewayHandoffHmacRaw;
+  _gatewayHandoffHmacRaw = undefined;
+  return value;
+}
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -274,7 +408,24 @@ module.exports = {
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
-  // qURL send limits (/qurl file + /qurl map) — both must be > 0. A
+  // /qurl map feature toggle. Default OFF — the bot ships without
+  // /qurl map registered as a slash subcommand. Operator opts in per
+  // deploy by setting MAP_COMMAND_ENABLED=true on the task definition
+  // (terraform var `map_command_enabled` plumbs this through). Must
+  // be the literal string "true"; any other value (unset, empty,
+  // "TRUE", "1", "yes") keeps the feature off, so an env-var typo
+  // can't silently re-enable a command that requires a working
+  // GOOGLE_MAPS_API_KEY in SSM. See the slash-command builder IIFE
+  // in commands.js for the full set of MAP_COMMAND_ENABLED gates.
+  //
+  // Snapshot semantics: this value is read ONCE at module load and
+  // baked into the slash registration (commands.js IIFE) +
+  // SETUP_SUCCESS_MSG. Flipping MAP_COMMAND_ENABLED at runtime is
+  // a no-op until the task restarts; the deploy model handles this
+  // (ECS rolls fresh tasks on every task-def revision).
+  MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
+
+  // qURL send limits (/qurl send + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.
   //
@@ -306,4 +457,183 @@ module.exports = {
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
 
   SHARD_ID,
+
+  // Event-shipper (zero-downtime design, Pillar 1). When true, the
+  // gateway tier forwards every Discord dispatch to SQS instead of
+  // running handlers in-process, and the worker tier (PROCESS_ROLE=http
+  // or combined) polls SQS and routes events through the same
+  // handleCommand / handleFlowInteraction path. When false, the bot
+  // runs the legacy in-process shape — gateway role both receives WS
+  // dispatches AND runs handlers; worker role is dormant on the queue.
+  //
+  // Must be the literal string "true" — same shape as
+  // ENABLE_OPENNHP_FEATURES so an env-var typo (TRUE/1/yes/etc.) can't
+  // silently flip a production deploy into the new dispatch path.
+  //
+  // Rollback cliff: this flag is valid only through PR 10 (gateway
+  // strip-down). The follow-up that removes the in-process fallback
+  // also removes this flag; after that, rollback is a `git revert` +
+  // emergency redeploy. See `apps/discord/docs/zero-downtime-design.md`
+  // → "Rollback cliff: ENABLE_EVENT_SHIPPER".
+  ENABLE_EVENT_SHIPPER: process.env.ENABLE_EVENT_SHIPPER === 'true',
+
+  // Gateway RESUME (zero-downtime design, Pillar 2). When true and
+  // PROCESS_ROLE=gateway, the gateway tier replaces the discord.js
+  // `Client` with `@discordjs/ws` `WebSocketManager` and persists
+  // session state (session_id / resume_url / sequence) to the
+  // `${DDB_TABLE_PREFIX}gateway-session` DDB table. On a process
+  // restart the new gateway boots, reads the persisted session, and
+  // Discord's `RESUME` (op 6) replays buffered events from the last
+  // sequence — eliminating the ~10 s IDENTIFY cold-start that the
+  // legacy single-process deploy carried on every restart.
+  //
+  // Requires `ENABLE_EVENT_SHIPPER=true` because the @discordjs/ws
+  // shim doesn't run the in-process dispatcher; it forwards every
+  // frame to SQS (same path Pillar 1 set up). `ENABLE_GATEWAY_RESUME=true`
+  // with the shipper off is rejected at boot — the shim would have
+  // nowhere to send dispatches. Combined mode is also rejected
+  // because the legacy Client owns the WS in that shape.
+  //
+  // No-op when role is http/worker (those tiers don't open a WS).
+  // Default off so a deploy without the flag set behaves identically
+  // to the pre-Pillar-2 codebase — matches the ENABLE_EVENT_SHIPPER
+  // rollout pattern.
+  //
+  // Literal-'true' string check (not truthy parsing) for the same
+  // reason as ENABLE_EVENT_SHIPPER: a typo (TRUE/1/yes) must not
+  // silently flip the gateway path.
+  ENABLE_GATEWAY_RESUME: process.env.ENABLE_GATEWAY_RESUME === 'true',
+
+  // Gateway hot-standby (zero-downtime design, Pillar 3). When true
+  // and PROCESS_ROLE=gateway, the gateway tier runs two replicas
+  // (active + standby) that elect a leader via the DDB lock table,
+  // exchange heartbeats via the peer-heartbeat table, and push
+  // ownership of the live WebSocket via an HMAC-authenticated control
+  // channel on SIGTERM. Eliminates the IDENTIFY/RESUME gap on every
+  // deploy — the incoming task `manager.connect()`s synchronously
+  // inside the outgoing task's pushHandoff so the next dispatch
+  // lands without a cold start. See `apps/discord/docs/zero-downtime-design.md`
+  // → "Pillar 3: hot-standby + push handoff".
+  //
+  // Requires ENABLE_GATEWAY_RESUME=true AND PROCESS_ROLE=gateway —
+  // the hot-standby control plane drives the gateway-ws-shim's
+  // manager handle, so neither the legacy single-process shape nor
+  // the http/worker tiers have a manager to hand off. Combined +
+  // hot-standby is rejected for the same reason as combined + RESUME
+  // (the legacy Client owns the WS). Boot-requirements rejects every
+  // unsupported combo at startup.
+  //
+  // Default off so a deploy without the flag set behaves identically
+  // to the pre-Pillar-3 codebase — single replica, single-process
+  // gateway, no control channel listening. Literal-'true' check for
+  // the same typo-rejection reason as ENABLE_EVENT_SHIPPER.
+  ENABLE_GATEWAY_HOT_STANDBY: process.env.ENABLE_GATEWAY_HOT_STANDBY === 'true',
+
+  // Per-replica identity. The leader coordinator writes this into the
+  // DDB lock row as the holder; the control-channel server logs it on
+  // every handoff; the peer-heartbeat row keys on it. Derived from
+  // `os.hostname()` (Fargate sets this to a short alphanumeric per
+  // task — distinct across replicas in the same service); env override
+  // wins. Populated unconditionally at module-load (even when
+  // hot-standby is off) — safe because every consumer in index.js
+  // lives inside `startHotStandby()`, which only runs when the flag
+  // is on. A non-null `config.INSTANCE_ID` is NOT a hot-standby
+  // indicator on its own. LOAD-BEARING INVARIANT (full rationale
+  // above `deriveInstanceId`): two replicas in the same ECS service
+  // MUST see different values, or the DDB lock short-circuits.
+  INSTANCE_ID: deriveInstanceId(),
+
+  // The IPv4 address peers reach this replica on (`http://<ip>:<port>/control/yours`).
+  // ECS awsvpc mode assigns a routable VPC IP per task on the task's
+  // eth0 ENI; `os.networkInterfaces()` exposes it sync at boot. Used
+  // by the peer-heartbeat row's `address_v4` field so the active
+  // replica's pushHandoff client knows where to connect. Env override
+  // wins; if no non-internal IPv4 exists, this is null and
+  // invalidHotStandbyValues rejects boot.
+  INSTANCE_IP: deriveInstanceIp(),
+
+  // Bind/listen ports for the in-VPC control channel that receives
+  // pushHandoff envelopes from the outgoing leader. The bind address
+  // defaults to 0.0.0.0 (awsvpc-routable) rather than 127.0.0.1
+  // because the peer reaches it via the task's VPC IP. The security
+  // posture is HMAC-on-every-request (gateway-hmac) plus a security-
+  // group rule that restricts the listening port to peer tasks in the
+  // same service — see qurl-integrations-infra `qurl-bot-discord/terraform/control-channel.tf`.
+  GATEWAY_CONTROL_PORT: intEnv('GATEWAY_CONTROL_PORT', 7800, {
+    strictInteger: true,
+    min: 1024,
+    max: 65535,
+  }),
+  GATEWAY_CONTROL_BIND_ADDR: process.env.GATEWAY_CONTROL_BIND_ADDR || '0.0.0.0',
+
+  // JSON-shaped HMAC secret for the control channel. NOT a direct
+  // property — read once via the `takeGatewayHandoffHmac` helper
+  // exported below. The boot-presence check
+  // (`missingHotStandbyKeys`) reads from `_gatewayHandoffHmacRaw` via
+  // a separate `hasGatewayHandoffHmac` flag exposed below so the
+  // gate can fire before takeGatewayHandoffHmac is called.
+  //
+  // Surfaced this way (not as a property on the exported config
+  // object) so a heap dump after secret consumption can't recover
+  // the raw value through `config.GATEWAY_HANDOFF_HMAC`. See the
+  // takeGatewayHandoffHmac definition near the top of this file
+  // for the security rationale.
+  //
+  // Operator note: the boot-presence check below uses
+  // `process.env.GATEWAY_HANDOFF_HMAC` directly (via the flag), so
+  // an unset env var still surfaces the same "required key missing"
+  // error message as before — no observable behavior change.
+  hasGatewayHandoffHmac: Boolean(process.env.GATEWAY_HANDOFF_HMAC),
+
+  // Persistence backend selector. Lifted from raw env into config
+  // so the boot-guard (`unsupportedRoleResumeCombo`) and the
+  // gateway-shim wiring both read through the same parsed shape.
+  // Unset / empty / whitespace-only falls back to 'sqlite', matching
+  // src/store/index.js's selection precedence.
+  STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'sqlite',
+
+  // DDB table-name prefix shared by every per-table consumer
+  // (ddb-store.js + gateway-session-store.js construction in
+  // index.js). Trimmed here so a whitespace-padded env value
+  // doesn't compute a different table name at one call site than
+  // the others — ddb-store.js's `.trim()` was the original
+  // normalization point.
+  DDB_TABLE_PREFIX: (process.env.DDB_TABLE_PREFIX ?? '').trim(),
+
+  // SQS Standard queue the gateway publishes to and the worker
+  // consumes from (provisioned by qurl-integrations-infra PR B).
+  // Required when ENABLE_EVENT_SHIPPER=true; validated at boot in
+  // index.js so a misconfigured deploy fails closed instead of
+  // silently no-op'ing the consumer or dropping every dispatch on
+  // the producer side.
+  QURL_BOT_EVENTS_QUEUE_URL: process.env.QURL_BOT_EVENTS_QUEUE_URL,
+
+  // Backpressure cap for the event consumer's in-flight handler
+  // tracker (see src/event-consumer.js module header). Read here
+  // instead of in event-consumer.js so the value goes through the
+  // single intEnv validation path — strictInteger rejects trailing
+  // garbage like "100abc" the same way as the prior IIFE.
+  QURL_BOT_MAX_INFLIGHT_HANDLERS: intEnv('QURL_BOT_MAX_INFLIGHT_HANDLERS', 100, {
+    minPositive: true,
+    strictInteger: true,
+  }),
+
+  // Graceful-shutdown drain deadline (ms). Consumed by both
+  // event-consumer.js and event-publisher.js — see each module's
+  // stop() comment for the contract. Range bound is the upper limit
+  // of gracefulShutdown's 10s budget minus headroom for db.close()
+  // + Discord teardown. Values outside [100, 8000] fall back to the
+  // default with a warn — clamping would silently mask a typo past
+  // the boundary.
+  QURL_BOT_DRAIN_DEADLINE_MS: intEnv('QURL_BOT_DRAIN_DEADLINE_MS', 3000, {
+    strictInteger: true,
+    min: 100,
+    max: 8000,
+  }),
+
+  // One-shot getter for the GATEWAY_HANDOFF_HMAC raw value (see the
+  // takeGatewayHandoffHmac definition near the top of this file).
+  // Exposed as a function, NOT a property — second call returns
+  // undefined.
+  takeGatewayHandoffHmac,
 };

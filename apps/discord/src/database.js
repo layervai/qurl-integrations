@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
+const { DM_STATUS } = require('./constants');
 
 // Ensure data directory exists
 const dbDir = path.dirname(config.DATABASE_PATH);
@@ -163,7 +164,7 @@ const SAFE_ALTERS = {
   // dropdown so users don't re-select a no-op and see "0/0 links revoked".
   revoked_at: 'ALTER TABLE qurl_send_configs ADD COLUMN revoked_at TEXT',
   // Self-destruct timer (seconds) — one of the SELF_DESTRUCT_PRESETS the
-  // user picked on the /qurl file + /qurl map confirm card, forwarded to
+  // user picked on the /qurl send + /qurl map confirm card, forwarded to
   // the connector as `viewer_ttl_seconds` so the rendered viewer page
   // wipes content after N seconds. REAL because the smallest preset is
   // 0.5. NULL ⇒ no timer (default). Persisted so the Add Recipients flow
@@ -717,6 +718,25 @@ const dbModule = {
   updateSendDMStatus(sendId, recipientDiscordId, status) {
     const stmt = db.prepare('UPDATE qurl_sends SET dm_status = ? WHERE send_id = ? AND recipient_discord_id = ?');
     stmt.run(status, sendId, recipientDiscordId);
+  },
+
+  // SQLite is local-dev only — STORE_TYPE=ddb in prod. We still write
+  // dm_status='sent' so local delivery-count rollups stay consistent;
+  // the DM refs are intentionally not persisted (signature mirrors the
+  // DDB contract; `_channelId` / `_messageId` are swallowed here, the
+  // leading-underscore convention is exempted by the project's eslint
+  // argsIgnorePattern), so /qURL revoke skips the recipient-side DM
+  // edit when running against SQLite.
+  //
+  // Debug log surfaces the divergence at WRITE time (not just at
+  // revoke time when the missing-refs guard finally fires) so a
+  // local dev sees the silent-skip the moment a DM dispatch lands.
+  // See #365 for the full SQLite getSendItems projection wire-up.
+  markSendDMDelivered(sendId, recipientDiscordId, _channelId, _messageId) {
+    this.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
+    logger.debug('SqliteStore.markSendDMDelivered: dm_channel_id / dm_message_id intentionally not persisted (see #365)', {
+      sendId, recipientDiscordId,
+    });
   },
 
   getRecentSends(senderDiscordId, limit = 10) {
