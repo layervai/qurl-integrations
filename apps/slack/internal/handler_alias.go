@@ -198,10 +198,10 @@ func requireAlias(tok string) (alias, userMsg string) {
 		return "", msgAliasEmptyName
 	}
 	if len(alias) > aliasMaxLen {
-		return "", fmt.Sprintf("Alias `$%s` is longer than %d characters.", alias, aliasMaxLen)
+		return "", fmt.Sprintf("Alias `$%s` is longer than %d characters.\n\n%s", alias, aliasMaxLen, aliasUsage)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "", fmt.Sprintf("Alias `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).", alias)
+		return "", fmt.Sprintf("Alias `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).\n\n%s", alias, aliasUsage)
 	}
 	return alias, ""
 }
@@ -301,6 +301,11 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Failed to update alias. Please try again.")
 		return
 	}
+	// Admin-verb audit trail: log the bound (alias, target) pair on
+	// success so post-incident reconstruction doesn't depend on
+	// re-querying the DDB table at the time of the question. team/channel/alias
+	// are validated upstream; target is the literal we just persisted.
+	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", args.Target) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
 	respondSlack(w, fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", args.Alias, args.Target))
 }
 
@@ -342,5 +347,8 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Failed to clear alias. Please try again.")
 		return
 	}
+	// Admin-verb audit trail: counterpart to the setalias "alias bound"
+	// audit line. team/channel/alias are validated upstream.
+	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
 	respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
 }

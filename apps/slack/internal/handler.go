@@ -186,10 +186,13 @@ type Handler struct {
 // Calling with nil is a no-op for the field (the verbs will reply
 // with a "not configured" ephemeral) so cmd/main.go can omit the
 // call on sandbox deploys that haven't onboarded the slackdata
-// package yet — and a defensive `SetAliasStore(nil)` followed by a
-// real wiring later is fine. Calling with a non-nil store after the
-// field is already non-nil panics, so the real store can't be
-// silently swapped under a running handler.
+// package yet. Both directions of the nil/non-nil sequence are
+// allowed: a defensive `SetAliasStore(nil)` followed by a real
+// wiring later is fine, and a real wiring followed by a defensive
+// `SetAliasStore(nil)` is also a no-op (the real store stays wired).
+// Calling with a non-nil store after the field is already non-nil
+// panics, so the real store can't be silently swapped under a
+// running handler.
 func (h *Handler) SetAliasStore(store AliasStore) {
 	if store == nil {
 		return

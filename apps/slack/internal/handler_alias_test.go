@@ -430,7 +430,9 @@ func TestSetAlias_StoreWriteError(t *testing.T) {
 
 func TestUnsetAlias_Happy(t *testing.T) {
 	h, store := newAliasTestHandler(t)
-	_ = store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, testAliasURL)
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, testAliasURL); err != nil {
+		t.Fatalf("seed bind: %v", err)
+	}
 
 	body, sign := aliasSlashRequest(t, "unsetalias $staging", testAliasTeamID, testAliasChannelID)
 	w := httptest.NewRecorder()
@@ -494,7 +496,9 @@ func TestClearChannelAlias_NotPresentWithOtherAliasBound(t *testing.T) {
 	// typed not-found refusal AND leave $other intact. This is the
 	// multi-alias analog of the old "mismatch refuses" test.
 	h, store := newAliasTestHandler(t)
-	_ = store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testOtherAlias, "r_existing")
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testOtherAlias, "r_existing"); err != nil {
+		t.Fatalf("seed bind: %v", err)
+	}
 
 	body, sign := aliasSlashRequest(t, "unsetalias $foo", testAliasTeamID, testAliasChannelID)
 	w := httptest.NewRecorder()
@@ -566,7 +570,9 @@ func TestHelpListsNewVerbs(t *testing.T) {
 // = channel only) would break tenancy hard, so pin the fence here.
 func TestSetAlias_CrossTenancyIsolation(t *testing.T) {
 	h, store := newAliasTestHandler(t)
-	_ = store.BindChannelAlias(context.Background(), "T1", "C_shared", testAliasName, testAliasURL)
+	if err := store.BindChannelAlias(context.Background(), "T1", "C_shared", testAliasName, testAliasURL); err != nil {
+		t.Fatalf("seed T1 bind: %v", err)
+	}
 
 	// T2 admin in the same channel ID — should see "no alias" and
 	// be allowed to set their own.
