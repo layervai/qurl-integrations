@@ -222,11 +222,11 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
       await new Promise((r) => { setImmediate(r); });
 
       // Loop parked on exactly one (fake) backoff timer — the
-      // structural shape. If start() ever schedules an additional
+      // structural shape. If this fails (count=2), the regression
+      // likely lives in event-consumer.js's start(): it added a
       // setTimeout before its first internal await (a future metrics
-      // tick, say), this would catch the new timer as a count of 2
-      // and force a revisit of the load-bearing `=== 0` post-stop
-      // assertion below (which would need to subtract the extra one).
+      // tick, say), and the load-bearing `=== 0` post-stop assertion
+      // below needs to be revisited.
       expect(jest.getTimerCount()).toBe(1);
 
       // Capture the signal NOW — stop() nulls stopController in its

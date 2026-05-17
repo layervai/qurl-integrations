@@ -229,6 +229,9 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     // TTL lapse will free it). A future refactor that succeeds the
     // delete via a different path (without throwing) would set
     // state.lockRow=null and silently pass the .not.toBeNull check.
+    // Note: this test does NOT exercise the TTL-lapse itself
+    // (`clock` is frozen at `now`); the cold-acquire-via-TTL
+    // recovery is integration-test territory, out of chaos scope.
     expect(state.lockRow.instance_id).toBe(INSTANCE_A);
     // Heartbeat row for A is gone. Mirror test #1's map+not.toContain
     // shape so both heartbeat-row assertions read identically.

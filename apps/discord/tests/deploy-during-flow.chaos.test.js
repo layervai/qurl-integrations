@@ -93,6 +93,15 @@ function makeControllableEventPublisher() {
 function makeScheduleHardExit() {
   const timers = [];
   const schedule = jest.fn((cb, ms) => {
+    // Pin the zero-arity callback contract — production `setTimeout`
+    // (the default scheduleHardExit) invokes its callback with no
+    // args, and test #3's `timers[0].cb()` matches that shape. If a
+    // future refactor changes scheduleHardExit's callback signature
+    // (e.g. passing the deadline as an arg), the test would still
+    // call `cb()` and silently take the wrong branch.
+    if (typeof cb !== 'function' || cb.length !== 0) {
+      throw new Error(`chaos: scheduleHardExit callback must be zero-arity, got arity=${cb?.length}`);
+    }
     const timer = { cb, ms, unref: jest.fn(), cleared: false };
     timers.push(timer);
     return timer;
