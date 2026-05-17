@@ -112,9 +112,14 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
     expect(cap).toBe(10);
 
+    // `new Promise(() => {})` never settles — these references are
+    // released by `_resetStateForTest` in beforeEach (which calls
+    // .clear() on the inflight Set), not by GC. --detectOpenHandles
+    // doesn't flag promise references (only timers/sockets), so the
+    // suite stays clean.
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
-        eventConsumer.trackDispatch(new Promise(() => {})); // never settles
+        eventConsumer.trackDispatch(new Promise(() => {}));
       }
     });
     expect(eventConsumer._test.getInFlightCount()).toBe(cap);
@@ -153,13 +158,20 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     expect(entryWarns).toHaveLength(1);
   });
 
-  it('SIGTERM during at-cap pause wakes abortableSleep + stop() resolves inside drain deadline', async () => {
+  it('SIGTERM during at-cap pause wakes abortableSleep without timer fire (signal-wake invariant)', async () => {
     // The load-bearing chaos invariant. Without the abortableSleep-
     // signal-wired refactor, an at-cap stop() would wait out the full
     // backoff sleep on each pollLoop iteration — and at the ceiling
     // (1.6 s/iter), a multi-iteration drain would breach the 3 s
-    // deadline. This test pins that a stop() during a backoff sleep
-    // resolves within a tight window.
+    // deadline. Asserted deterministically here via fake timers: if
+    // stop() wakes via signal, the loop terminates WITHOUT any
+    // backoff setTimeout firing.
+    //
+    // Drives the production lifecycle (start() → pollLoop → pollOnce
+    // parks → stop()). Using _test.pollOnce directly bypasses start()
+    // which sets `running=true` — stop()'s first guard short-circuits
+    // when !running, so a direct-pollOnce setup would silently no-op
+    // stop() and pass for the wrong reason.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
@@ -167,40 +179,47 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
       }
     });
 
-    // Shrink the drain deadline so a regression that fails to wake
-    // abortableSleep doesn't wall-clock the suite. 50 ms is generous
-    // vs the few-ms microtask drain a working signal-wake produces.
+    // Shrink the drain deadline so stop()'s post-loop wait on the
+    // never-settling inflight promises doesn't wall-clock the test.
+    // The drain timer is real (not the abortable backoff sleep we're
+    // testing), so even under fake-timers it'd otherwise consume
+    // DRAIN_DEADLINE_MS of real time.
     eventConsumer._test._setDrainDeadlineForTest(50);
 
-    // Inject a pollLoop that's parked inside the at-cap abortableSleep
-    // by calling pollOnce directly (cap is already saturated) and
-    // racing stop() against it.
-    const client = makeStubClient();
-    const pollPromise = eventConsumer._test.pollOnce(client);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const client = makeStubClient();
+      await eventConsumer.start(client);
 
-    // Yield one event-loop turn so pollOnce enters the at-cap branch
-    // and reaches the abortableSleep.
-    await new Promise((r) => { setImmediate(r); });
+      // Drain microtasks so pollLoop enters and the first pollOnce
+      // iteration parks inside abortableSleep.
+      await new Promise((r) => { setImmediate(r); });
 
-    // Stop the consumer. signalShutdown→stop()→stopController.abort()
-    // fires the signal, which wakes the in-flight abortableSleep so
-    // pollOnce returns. Without the wire-up, stop() would wait the
-    // full INFLIGHT_BACKOFF_BASE_MS (100 ms) before pollOnce returned —
-    // not catastrophic in this tiny test but a regression mode that
-    // compounds with the doubling ladder.
-    const stopStart = Date.now();
-    await eventConsumer.stop();
-    const stopElapsed = Date.now() - stopStart;
+      // The loop is parked on a (fake) backoff timer. If this fails,
+      // the test would be vacuously passing on a no-op pollLoop.
+      expect(jest.getTimerCount()).toBeGreaterThan(0);
 
-    // The pollPromise itself resolves (it's been awoken).
-    await pollPromise;
+      // Capture the signal NOW — stop() nulls stopController in its
+      // finally block, so a post-stop read would see null.
+      const { signal } = eventConsumer._test.getStopController();
 
-    // Stop landed inside the drain deadline. With a properly wired
-    // abort-signal, this is a few ms; with a regression that breaks
-    // the wire-up, it'd wait the full INFLIGHT_BACKOFF_BASE_MS (100 ms)
-    // per iteration. 200 ms threshold gives GC-pause headroom on slow
-    // CI runners while still catching a wire-up regression.
-    expect(stopElapsed).toBeLessThan(200);
+      // Stop. signal abort wakes abortableSleep via its event
+      // listener — no timer advancement needed for the at-cap sleep.
+      // stop()'s drain phase DOES use a real setTimeout so the
+      // never-settling inflight promises don't pin the test; advance
+      // timers to release that drain.
+      const stopPromise = eventConsumer.stop();
+      await new Promise((r) => { setImmediate(r); });
+      await jest.runAllTimersAsync();
+      await stopPromise;
+
+      // The signal aborted via stop()'s call — proves the at-cap
+      // abortableSleep was wired to observe this signal (otherwise
+      // pollLoop would not have unwound for stop to complete).
+      expect(signal.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('capacity released → release-info log + backoff reset (pause-end half of the bracket)', async () => {

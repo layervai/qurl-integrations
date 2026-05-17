@@ -44,10 +44,6 @@
 //      no-peer case below asserts the DDB DeleteCommand lands on the
 //      lock table within the SIGTERM window.
 
-const {
-  PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand,
-} = require('@aws-sdk/lib-dynamodb');
-
 const { createGatewayLock } = require('../src/gateway-lock');
 const { createPeerHeartbeat } = require('../src/gateway-peer-heartbeat');
 const { createGatewayLeader } = require('../src/gateway-leader');
@@ -63,18 +59,13 @@ const {
 // have a TableName in the allowlist. Unrouted commands in mockClient
 // silently resolve, so a future refactor that writes to e.g.
 // qurl_bot_flow_state from the gateway-tier SIGTERM path would not
-// throw at runtime — this assertion is the catch.
+// throw at runtime — this assertion is the catch. Uses ddbMock.calls()
+// rather than per-command enumeration so a future BatchGet / Query /
+// TransactWrite against a forbidden table also surfaces.
 function assertNoUnexpectedTableCalls(ddbMock) {
   const allowed = new Set([LOCK_TABLE, HEARTBEAT_TABLE]);
-  const allCalls = [
-    ...ddbMock.commandCalls(PutCommand),
-    ...ddbMock.commandCalls(GetCommand),
-    ...ddbMock.commandCalls(UpdateCommand),
-    ...ddbMock.commandCalls(DeleteCommand),
-    ...ddbMock.commandCalls(ScanCommand),
-  ];
-  const offenders = allCalls
-    .map((c) => c.args[0].input.TableName)
+  const offenders = ddbMock.calls()
+    .map((c) => c.args[0]?.input?.TableName)
     .filter((t) => t && !allowed.has(t));
   if (offenders.length > 0) {
     throw new Error(
@@ -90,9 +81,8 @@ function assertNoUnexpectedTableCalls(ddbMock) {
   // fire — this expect catches that drift specifically, since the
   // flow_state-on-gateway prohibition is the primary regression
   // target this whole file exists to protect.
-  const flowStateCalls = allCalls.filter(
-    (c) => c.args[0].input.TableName === FLOW_STATE_TABLE_NAME,
-  );
+  const flowStateCalls = ddbMock.calls()
+    .filter((c) => c.args[0]?.input?.TableName === FLOW_STATE_TABLE_NAME);
   expect(flowStateCalls).toHaveLength(0);
 }
 
@@ -218,19 +208,14 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       ],
     });
 
-    const { leader, lock, logger } = assembleLeader({ docClient, clock });
-    // Synthesize A's prior acquisition: prime the lock's version cursor
-    // to 3 so transferLock's CAS sees the matching :expected. In
-    // production the tick loop's renewLock would have done this; we
-    // skip the tick churn here because the chaos test is scoped to
-    // the SIGTERM body, not the tick loop.
-    lock.adoptLockFromHandoff(3);
-    // The leader's `heldLock` flag is private and set by tick or
-    // handleInboundHandoff. For the SIGTERM-only path we drive
-    // through handleInboundHandoff so heldLock flips true without
-    // running the full tick loop. (gateway-leader's handleInboundHandoff
-    // body documents the adopt-then-flag-then-connect ordering that
-    // makes this safe.)
+    const { leader, logger } = assembleLeader({ docClient, clock });
+    // handleInboundHandoff is the production path that flips heldLock
+    // true; it internally calls lock.adoptLockFromHandoff(expectedVersion)
+    // (adopt-then-flag-then-connect ordering). Driving it here primes
+    // the lock cursor without running the full tick loop, AND keeps
+    // the test honest — if a future refactor removed the internal
+    // adopt call, the test would fail (vs. silently passing if we
+    // pre-primed the cursor ourselves).
     await leader.handleInboundHandoff({
       activeInstanceId: 'predecessor', expectedVersion: 3,
     });
@@ -265,25 +250,21 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     eventPublisher.releaseStop();
     await shutdownPromise;
 
-    // ── Steady-state assertions ──
-
-    // (a) Lock row in DDB: ownership flipped to B; version bumped to 4.
+    // Lock row: ownership flipped, version bumped.
     expect(state.lockRow).not.toBeNull();
     expect(state.lockRow.instance_id).toBe(INSTANCE_B);
     expect(state.lockRow.lock_holder).toBe(HOLDER_B);
     expect(state.lockRow.version).toBe(4);
 
-    // (b) Heartbeat: A's row was deleted (best-effort cleanup at SIGTERM).
+    // Heartbeat: A's row deleted (best-effort SIGTERM cleanup).
     const remainingPeerIds = state.peerRows.map((r) => r.instance_id);
     expect(remainingPeerIds).not.toContain(INSTANCE_A);
     expect(remainingPeerIds).toContain(INSTANCE_B);
 
-    // (c) Clean exit code path.
     expect(exit).toHaveBeenCalledWith(0);
     expect(exit).toHaveBeenCalledTimes(1);
     expect(clearHardExit).toHaveBeenCalledWith(timers[0]);
 
-    // (d) No flow_state table writes/reads.
     assertNoUnexpectedTableCalls(ddbMock);
   });
 
@@ -307,8 +288,7 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       }],
     });
 
-    const { leader, lock, controlClient, logger } = assembleLeader({ docClient, clock });
-    lock.adoptLockFromHandoff(5);
+    const { leader, controlClient, logger } = assembleLeader({ docClient, clock });
     await leader.handleInboundHandoff({
       activeInstanceId: 'predecessor', expectedVersion: 5,
     });
@@ -323,22 +303,20 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       exit, scheduleHardExit: schedule, clearHardExit,
     });
 
-    // (a) Lock row deleted (releaseLockBestEffort's CAS-Delete).
+    // Lock row deleted (releaseLockBestEffort CAS-Delete).
     expect(state.lockRow).toBeNull();
-    // (b) No transferLock attempted — controlClient.pushHandoff never called.
+    // No push attempted on the no-peer branch.
     expect(controlClient.pushHandoff).not.toHaveBeenCalled();
-    // (c) Heartbeat row for A deleted (post-handoff cleanup runs on
-    //     the no_peer branch too).
+    // Heartbeat row for A deleted (post-handoff cleanup runs on the
+    // no_peer branch too).
     expect(state.peerRows).toEqual([]);
-    // (d) Exit(0) — the no-peer outcome is still "clean" (the
-    //     standby will cold-acquire via the TTL floor). exit(0)
-    //     vs exit(1) signals dashboards.
+    // exit(0) — the no-peer outcome is still "clean" (the standby
+    // will cold-acquire via the TTL floor); exit(0) vs exit(1)
+    // distinguishes that from the timeout path for deploy SLI.
     expect(exit).toHaveBeenCalledWith(0);
-    // (e) No flow_state touches.
     assertNoUnexpectedTableCalls(ddbMock);
-    // (f) Documented no-peer log fires so a future regression that
-    //     silently swaps the branch under us (e.g. always-transferLock)
-    //     surfaces here.
+    // Pin the documented no-peer log so a future regression that
+    // silently swaps the branch (e.g. always-transferLock) surfaces.
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('no fresh peer for handoff'),
     );
@@ -381,10 +359,9 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     const hungControlClient = {
       pushHandoff: jest.fn(() => new Promise(() => {})),
     };
-    const { leader, lock, logger } = assembleLeader({
+    const { leader, logger } = assembleLeader({
       docClient, clock, controlClient: hungControlClient,
     });
-    lock.adoptLockFromHandoff(7);
     await leader.handleInboundHandoff({
       activeInstanceId: 'predecessor', expectedVersion: 7,
     });
@@ -403,12 +380,15 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     // flipped to B). This indicates the pushHandoff body has cleared
     // listFreshPeers + transferLock and is now awaiting the hung
     // controlClient.pushHandoff — the exact state we want to time
-    // the hard-exit fire against. Polling on observable DDB state is
-    // deterministic where setImmediate-counting would be fragile.
-    const transferredBy = Date.now() + 1_000;
+    // the hard-exit fire against. setImmediate-counter (vs wall-clock)
+    // so the bound doesn't drift with CI runner load: with mocked
+    // DDB, transferLock settles in ≤ 3 microtask hops; 50 yields is
+    // generous defense without depending on Date.now().
+    const MAX_YIELDS_FOR_TRANSFER = 50;
+    let yields = 0;
     while (state.lockRow.instance_id !== INSTANCE_B) {
-      if (Date.now() > transferredBy) {
-        throw new Error('chaos: transferLock never landed within 1 s');
+      if (yields++ >= MAX_YIELDS_FOR_TRANSFER) {
+        throw new Error(`chaos: transferLock never landed within ${MAX_YIELDS_FOR_TRANSFER} event-loop yields`);
       }
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => { setImmediate(r); });
