@@ -95,6 +95,13 @@ afterAll(() => sqsMock.restore());
 // trackDispatch is gated by isWorkerDispatch; flip the flag via the
 // test-only setter so calls from this test land in the inflight Set
 // the way pollOnce's production dispatch would.
+//
+// Scoping: this helper wraps the cap-pre-fill ONLY. The flag flips
+// back to false before any subsequent pollOnce runs, so anything
+// pollOnce would try to track via processMessage's trackDispatch is
+// a no-op (the gate skips). That's intentional — we want the cap
+// saturated by the pre-fill and pollOnce's at-cap branch to fire;
+// pollOnce shouldn't ADD to inflight during the test.
 function withWorkerDispatch(fn) {
   eventConsumer._test._setWorkerDispatchingForTest(true);
   try { return fn(); } finally {
@@ -103,6 +110,14 @@ function withWorkerDispatch(fn) {
 }
 
 describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => {
+  // Pin the floor cap once. Mocked config sets MAX_INFLIGHT_HANDLERS=10
+  // (matches RECEIVE_MAX_MESSAGES so validateInflightCap stays quiet).
+  // If the mocked value drifts, this surfaces it once at the describe
+  // boundary instead of per-test.
+  beforeAll(() => {
+    expect(eventConsumer._test.MAX_INFLIGHT_HANDLERS).toBe(10);
+  });
+
   it('inflight is bounded across many at-cap iterations (no OOM growth)', async () => {
     // Saturate inflight at the cap with pending Promises that never
     // settle. Then iterate pollOnce 10 times. Inflight count must stay
@@ -110,16 +125,11 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     // enqueue a new handler each iteration (which would grow the Set
     // unbounded → OOM under sustained load).
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
-    expect(cap).toBe(10);
 
     // `new Promise(() => {})` never settles; _resetStateForTest in
     // beforeEach .clear()s the inflight Set, releasing the references.
-    // withWorkerDispatch wraps the pre-fill only. The flag flips back
-    // to false before pollOnce runs, so any handler pollOnce would
-    // try to track via processMessage's trackDispatch is a no-op (the
-    // gate skips). That's intentional — we want the cap saturated and
-    // pollOnce's at-cap branch to fire; pollOnce shouldn't ADD to
-    // inflight during the test.
+    // (See withWorkerDispatch's docstring for why the flag scoping is
+    // pre-fill only.)
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         eventConsumer.trackDispatch(new Promise(() => {}));
@@ -176,12 +186,7 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     // when !running, so a direct-pollOnce setup would silently no-op
     // stop() and pass for the wrong reason.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
-    // withWorkerDispatch wraps the pre-fill only. The flag flips back
-    // to false before pollOnce runs, so any handler pollOnce would
-    // try to track via processMessage's trackDispatch is a no-op (the
-    // gate skips). That's intentional — we want the cap saturated and
-    // pollOnce's at-cap branch to fire; pollOnce shouldn't ADD to
-    // inflight during the test.
+    // (See withWorkerDispatch's docstring for the flag scoping rationale.)
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         eventConsumer.trackDispatch(new Promise(() => {}));
@@ -198,24 +203,25 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {
       const client = makeStubClient();
-      // start() builds promises but schedules no timer before its
-      // first internal await. The first timer this test sees is the
-      // backoff setTimeout inside pollOnce → abortableSleep. The
-      // load-bearing `getTimerCount() === 0` post-stop assertion
-      // assumes this — if start() ever schedules a setTimeout up
-      // front, that pre-existing timer would land in the count.
+      // start() is synchronous (kicks off pollLoop as a detached
+      // promise). The `await` consumes one microtask tick, which is
+      // enough for pollLoop to enter its first pollOnce → at-cap →
+      // schedule a backoff setTimeout via abortableSleep. So by the
+      // time start() resolves to the test, the loop is already
+      // parked on exactly one (fake) backoff timer.
       await eventConsumer.start(client);
 
-      // Drain microtasks so pollLoop enters and the first pollOnce
-      // iteration parks inside abortableSleep.
+      // One more setImmediate yield to flush any straggling
+      // microtasks pollLoop may have queued; not load-bearing —
+      // the post-await timer count is already 1.
       await new Promise((r) => { setImmediate(r); });
 
-      // Loop parked on a single (fake) backoff timer — exactly one
-      // is the structural shape. If start() ever schedules a setTimeout
-      // before its first internal await (a future metrics tick, say),
-      // this would catch the new timer and force us to revisit the
-      // load-bearing `=== 0` assertion below (which would need to
-      // account for the extra one).
+      // Loop parked on exactly one (fake) backoff timer — the
+      // structural shape. If start() ever schedules an additional
+      // setTimeout before its first internal await (a future metrics
+      // tick, say), this would catch the new timer as a count of 2
+      // and force a revisit of the load-bearing `=== 0` post-stop
+      // assertion below (which would need to subtract the extra one).
       expect(jest.getTimerCount()).toBe(1);
 
       // Capture the signal NOW — stop() nulls stopController in its
