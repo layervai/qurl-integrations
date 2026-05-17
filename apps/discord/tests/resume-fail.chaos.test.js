@@ -216,5 +216,13 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     expect(state.lockRow).not.toBeNull();
     expect(state.peerRows.find((r) => r.instance_id === INSTANCE_A)).toBeUndefined();
     expect(exit).toHaveBeenCalledWith(1);
+    // gateway-lock.releaseLock logs `release CAS failed (peer took
+    // over)` at warn on CCFE — pinning the log so a future regression
+    // that silently swallows the warning (and lose the operational
+    // signal) is caught here.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('release CAS failed'),
+      expect.any(Object),
+    );
   });
 });

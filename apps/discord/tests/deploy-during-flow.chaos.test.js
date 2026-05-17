@@ -55,18 +55,38 @@ const {
   INSTANCE_A, INSTANCE_B, HOLDER_A, HOLDER_B,
 } = require('./helpers/chaos-ddb');
 
+// Pull every TableName an SDK command targets, including the nested
+// shapes (BatchGet/BatchWrite use `RequestItems`; TransactGet/
+// TransactWrite use `TransactItems`). Single-item shapes (Put/Get/
+// Update/Delete/Scan/Query) carry `input.TableName` directly. Returns
+// a flat string[] so callers can filter against an allowlist.
+function tableNamesTargeted(cmdInput) {
+  if (!cmdInput) return [];
+  if (cmdInput.TableName) return [cmdInput.TableName];
+  if (cmdInput.RequestItems) return Object.keys(cmdInput.RequestItems);
+  if (Array.isArray(cmdInput.TransactItems)) {
+    return cmdInput.TransactItems
+      .map((entry) => {
+        const op = entry.Put || entry.Update || entry.Delete || entry.ConditionCheck;
+        return op?.TableName;
+      })
+      .filter(Boolean);
+  }
+  return [];
+}
+
 // Post-hoc inspection: every DDB command issued during the test must
 // have a TableName in the allowlist. Unrouted commands in mockClient
 // silently resolve, so a future refactor that writes to e.g.
 // qurl_bot_flow_state from the gateway-tier SIGTERM path would not
-// throw at runtime — this assertion is the catch. Uses ddbMock.calls()
-// rather than per-command enumeration so a future BatchGet / Query /
-// TransactWrite against a forbidden table also surfaces.
+// throw at runtime — this assertion is the catch. Walks every shape
+// (single-item, BatchGet/Write RequestItems, TransactGet/Write
+// TransactItems) so the regression surface is exhaustive.
 function assertNoUnexpectedTableCalls(ddbMock) {
   const allowed = new Set([LOCK_TABLE, HEARTBEAT_TABLE]);
-  const offenders = ddbMock.calls()
-    .map((c) => c.args[0]?.input?.TableName)
-    .filter((t) => t && !allowed.has(t));
+  const allTables = ddbMock.calls()
+    .flatMap((c) => tableNamesTargeted(c.args[0]?.input));
+  const offenders = allTables.filter((t) => !allowed.has(t));
   if (offenders.length > 0) {
     throw new Error(
       `chaos: gateway-tier SIGTERM path wrote to forbidden tables: ${[...new Set(offenders)].join(', ')}. ` +
@@ -81,9 +101,7 @@ function assertNoUnexpectedTableCalls(ddbMock) {
   // fire — this expect catches that drift specifically, since the
   // flow_state-on-gateway prohibition is the primary regression
   // target this whole file exists to protect.
-  const flowStateCalls = ddbMock.calls()
-    .filter((c) => c.args[0]?.input?.TableName === FLOW_STATE_TABLE_NAME);
-  expect(flowStateCalls).toHaveLength(0);
+  expect(allTables.filter((t) => t === FLOW_STATE_TABLE_NAME)).toHaveLength(0);
 }
 
 function makeFakeManager() {

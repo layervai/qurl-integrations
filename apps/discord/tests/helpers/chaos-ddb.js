@@ -56,6 +56,10 @@ function makeChaosLogger() {
 function makeCcfe() {
   const err = new Error('conditional check failed');
   err.name = 'ConditionalCheckFailedException';
+  // Match the real AWS error shape so any future branch on
+  // err.$metadata.httpStatusCode (e.g. distinguishing 4xx vs 5xx)
+  // behaves the same against the mock as against prod DDB.
+  err.$metadata = { httpStatusCode: 400 };
   return err;
 }
 
@@ -100,13 +104,30 @@ function setupChaosDdb({ initialLockRow = null, initialPeerRows = [] } = {}) {
     state.lockRow = { ...cmd.Item };
     return {};
   });
+  // The known set of `:`-keys this mock recognizes. If gateway-lock's
+  // SET expression ever renames one (e.g. :peer → :newOwner), the
+  // mock would silently no-op the state mutation and downstream
+  // assertions would fail with "the row never flipped" instead of a
+  // clear "your rename broke the mock contract" error. Throw on any
+  // unknown key to surface drift at the point of breakage.
+  const KNOWN_UPDATE_KEYS = new Set([
+    ':self', ':expected',                        // CAS guards
+    ':next', ':exp',                             // renew
+    ':peer', ':peerHolder',                      // transfer
+  ]);
   ddbMock.on(UpdateCommand, { TableName: LOCK_TABLE }).callsFake((cmd) => {
     assertLockCas(cmd, { requireSelf: true, checkVersion: true });
-    // Renew writes version + expires_at; transfer also flips
-    // instance_id + lock_holder. Apply whichever fields the caller's
-    // ExpressionAttributeValues include — matches gateway-lock.js's
-    // SET expression without re-implementing the parser.
     const v = cmd.ExpressionAttributeValues || {};
+    for (const key of Object.keys(v)) {
+      if (!KNOWN_UPDATE_KEYS.has(key)) {
+        throw new Error(
+          `chaos-ddb: UpdateCommand on ${LOCK_TABLE} carried unknown ExpressionAttributeValues key "${key}". ` +
+          `If gateway-lock.js added or renamed an expression key, update KNOWN_UPDATE_KEYS + the SET-apply switch below.`
+        );
+      }
+    }
+    // Renew writes version + expires_at; transfer also flips
+    // instance_id + lock_holder.
     if (v[':peer'] !== undefined) {
       state.lockRow.instance_id = v[':peer'];
       state.lockRow.lock_holder = v[':peerHolder'];

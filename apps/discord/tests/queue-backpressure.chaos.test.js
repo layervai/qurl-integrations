@@ -114,6 +114,12 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
 
     // `new Promise(() => {})` never settles; _resetStateForTest in
     // beforeEach .clear()s the inflight Set, releasing the references.
+    // withWorkerDispatch wraps the pre-fill only. The flag flips back
+    // to false before pollOnce runs, so any handler pollOnce would
+    // try to track via processMessage's trackDispatch is a no-op (the
+    // gate skips). That's intentional — we want the cap saturated and
+    // pollOnce's at-cap branch to fire; pollOnce shouldn't ADD to
+    // inflight during the test.
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         eventConsumer.trackDispatch(new Promise(() => {}));
@@ -170,6 +176,12 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
     // when !running, so a direct-pollOnce setup would silently no-op
     // stop() and pass for the wrong reason.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    // withWorkerDispatch wraps the pre-fill only. The flag flips back
+    // to false before pollOnce runs, so any handler pollOnce would
+    // try to track via processMessage's trackDispatch is a no-op (the
+    // gate skips). That's intentional — we want the cap saturated and
+    // pollOnce's at-cap branch to fire; pollOnce shouldn't ADD to
+    // inflight during the test.
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         eventConsumer.trackDispatch(new Promise(() => {}));
@@ -198,9 +210,13 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
       // iteration parks inside abortableSleep.
       await new Promise((r) => { setImmediate(r); });
 
-      // The loop is parked on a (fake) backoff timer. If this fails,
-      // the test would be vacuously passing on a no-op pollLoop.
-      expect(jest.getTimerCount()).toBeGreaterThan(0);
+      // Loop parked on a single (fake) backoff timer — exactly one
+      // is the structural shape. If start() ever schedules a setTimeout
+      // before its first internal await (a future metrics tick, say),
+      // this would catch the new timer and force us to revisit the
+      // load-bearing `=== 0` assertion below (which would need to
+      // account for the extra one).
+      expect(jest.getTimerCount()).toBe(1);
 
       // Capture the signal NOW — stop() nulls stopController in its
       // finally block, so a post-stop read would see null.
@@ -271,7 +287,7 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
       // Backoff doubled to 200 ms post-iteration.
       expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
 
-      // Settle a handler — capacity drops to cap-1 (= 4).
+      // Settle a handler — capacity drops to cap-1 (= 9).
       resolveOne();
       // Yield so the .then(remove) cleanup runs.
       await new Promise((r) => { setImmediate(r); });
@@ -281,22 +297,48 @@ describe('Pillar 1 chaos — sustained backpressure + SIGTERM-mid-pause', () => 
       p = eventConsumer._test.pollOnce(client);
       await jest.runOnlyPendingTimersAsync();
       await p;
+
+      // Release-side post-conditions land here, before the follow-on
+      // streak rewrites them. atCapPauseLogged is now false, backoff
+      // back to base, release-info logged.
+      expect(logger.info).toHaveBeenCalledWith(
+        eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
+        // The release log snapshots the inflight count that triggered
+        // the release (necessarily below cap). Don't assert exact value
+        // — cap-1 at log time is what we'd see today, but the contract
+        // is "< cap", not "= cap-1".
+        expect.objectContaining({ inFlight: expect.any(Number), cap }),
+      );
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(
+        eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS,
+      );
+      expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+
+      // ── Follow-on at-cap streak: entry-warn must re-fire ──
+      // Re-saturate to cap and run one more pollOnce. The entry warn
+      // must fire a SECOND time — a regression that fails to clear
+      // atCapPauseLogged on release would silently suppress every
+      // subsequent at-cap warning, costing operators the signal.
+      // isAtCapPauseLogged()=false above is the necessary condition;
+      // this iteration is the sufficient one (closes the bracketing
+      // contract on a real second entry, not just the flag flip).
+      withWorkerDispatch(() => {
+        eventConsumer.trackDispatch(new Promise(() => {}));
+      });
+      expect(eventConsumer._test.getInFlightCount()).toBe(cap);
+
+      p = eventConsumer._test.pollOnce(client);
+      await jest.runOnlyPendingTimersAsync();
+      await p;
     } finally {
       jest.useRealTimers();
     }
 
-    expect(logger.info).toHaveBeenCalledWith(
-      eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
-      // The release log snapshots the inflight count that triggered the
-      // release (necessarily below cap). Don't assert exact value —
-      // cap=4 at log time is what we'd see today, but the contract is
-      // "< cap", not "= cap-1".
-      expect.objectContaining({ inFlight: expect.any(Number), cap }),
+    // Entry-warn fired on the first AND on the follow-on streak —
+    // exactly two over the test.
+    const entryWarns = logger.warn.mock.calls.filter(
+      ([msg]) => msg === eventConsumer._test.AT_CAP_PAUSE_WARN_MSG,
     );
-    // Backoff reset to base.
-    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(
-      eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS,
-    );
-    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    expect(entryWarns).toHaveLength(2);
   });
 });
