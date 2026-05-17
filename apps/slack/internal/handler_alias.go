@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // AliasStore is the persistence surface the alias verbs depend on.
@@ -151,14 +152,17 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	}
 
 	tgt := tokens[1]
-	// Reject backticks before any further parsing: the handler echoes
-	// the target into a Slack inline-code fence (\`<tgt>\`) on the
-	// success-copy path, and a backtick inside `tgt` breaks the
-	// rendered formatting. The admin-gate trust model makes this
-	// rendering hygiene, not security — but a one-character footgun
-	// is worth closing at the parser rather than at the response.
-	if strings.ContainsRune(tgt, '`') {
-		return nil, msgAliasTargetInvalid
+	// Reject backticks and any non-printable rune before any further
+	// parsing. The handler echoes the target into a Slack inline-code
+	// fence (\`<tgt>\`) on the success-copy path, and the audit log
+	// emits it on the happy path — backticks break the fence, control
+	// bytes garble the log line, and both are footguns we close at
+	// the parser rather than at the response. The admin-gate trust
+	// model makes these rendering/logging hygiene, not security.
+	for _, r := range tgt {
+		if r == '`' || !unicode.IsPrint(r) {
+			return nil, msgAliasTargetInvalid
+		}
 	}
 	if strings.HasPrefix(tgt, resourceIDPrefix) {
 		// `r_…` short-circuit. We don't enforce a deeper character set
@@ -213,7 +217,11 @@ func requireAlias(tok string) (alias, userMsg string) {
 // error" rather than "Slack reported timeout while we kept working
 // and the user retried." Re-evaluate (move to runAsync + response_url)
 // only if DDB tail latency starts exceeding this budget in practice.
-const aliasSyncTimeout = 2500 * time.Millisecond
+//
+// `var` (not `const`) so tests can swap in a short budget without
+// dropping a 2.5-second real-time wait into the suite. Production
+// code never mutates this — the test path is the only writer.
+var aliasSyncTimeout = 2500 * time.Millisecond
 
 // aliasPreamble is the shared prelude for both alias verbs after
 // argument parsing: pull team_id + channel_id off the form, verify
@@ -304,9 +312,35 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// Admin-verb audit trail: log the bound (alias, target) pair on
 	// success so post-incident reconstruction doesn't depend on
 	// re-querying the DDB table at the time of the question. team/channel/alias
-	// are validated upstream; target is the literal we just persisted.
-	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", args.Target) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
+	// are validated upstream; target is redacted (userinfo + raw query
+	// stripped) so credentials embedded by a setting admin don't
+	// land in operator-visible logs where the readership is wider
+	// than the writer's admin scope.
+	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", redactURLForLog(args.Target)) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
 	respondSlack(w, fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", args.Alias, args.Target))
+}
+
+// redactURLForLog strips userinfo (e.g. `user:token@`) and any raw
+// query string from a setalias target before it lands in operator
+// logs. The success-copy path still shows the verbatim target to the
+// admin who set it, but the audit-log readership is typically wider
+// than the manifest-gated admin pool and shouldn't see embedded
+// credentials. Non-URL targets (`r_…` resource ids, or anything that
+// fails to re-parse) are returned unchanged — the parser has already
+// fenced backticks and non-printable runes upstream.
+func redactURLForLog(target string) string {
+	if strings.HasPrefix(target, resourceIDPrefix) {
+		return target
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return target
+	}
+	redacted := *u
+	redacted.User = nil
+	redacted.RawQuery = ""
+	redacted.Fragment = ""
+	return redacted.String()
 }
 
 // handleUnsetAlias routes `/qurl unsetalias $<alias>`.

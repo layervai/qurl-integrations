@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Shared fixture values for alias-handler tests. Lifted to package
@@ -39,6 +40,12 @@ type fakeAliasStore struct {
 	// / ErrAliasNotFound) to exercise the typed-conflict branches.
 	errBind   error
 	errUnbind error
+
+	// blockBind, when true, makes BindChannelAlias wait on ctx.Done()
+	// and return ctx.Err(). Used by the aliasSyncTimeout fence test
+	// (a slow DDB write must surface as a write-failed reply, not
+	// block past Slack's ack window).
+	blockBind bool
 }
 
 func newFakeAliasStore() *fakeAliasStore {
@@ -49,7 +56,16 @@ func (f *fakeAliasStore) key(teamID, channelID string) string {
 	return teamID + "|" + channelID
 }
 
-func (f *fakeAliasStore) BindChannelAlias(_ context.Context, teamID, channelID, aliasName, resourceID string) error {
+func (f *fakeAliasStore) BindChannelAlias(ctx context.Context, teamID, channelID, aliasName, resourceID string) error {
+	// Block before taking the row lock so the timeout test doesn't
+	// also have to coordinate with anything else holding f.mu.
+	f.mu.Lock()
+	block := f.blockBind
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.errBind != nil {
@@ -185,6 +201,12 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		// parse time so the response renders cleanly.
 		{name: "backtick in r_ target rejected", input: "$staging r_abc`bad", wantErr: true},
 		{name: "backtick in URL target rejected", input: "$staging https://example.com/`x", wantErr: true},
+		// Non-printable runes in target garble the audit log line and
+		// the Slack response. Rejected at parse time alongside the
+		// backtick guard so the success-copy + slog.Info surfaces
+		// remain hygienic.
+		{name: "control byte in r_ target rejected", input: "$staging r_abc\x01bad", wantErr: true},
+		{name: "control byte in URL target rejected", input: "$staging https://example.com/\x01x", wantErr: true},
 
 		// Fence: http://localhost is currently ACCEPTED. The parser
 		// stays scheme-permissive because qurl-service is the
@@ -338,7 +360,7 @@ func TestSetChannelAlias_SecondAliasOnSameChannelSucceeds(t *testing.T) {
 	}
 }
 
-func TestSetChannelAlias_DuplicateAliasSameChannelReturns409(t *testing.T) {
+func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 	// Binding the same alias name twice in the same channel must
 	// surface as a typed conflict (ErrAliasAlreadyBound). A different
 	// resource id on the second call does NOT silently overwrite.
@@ -398,6 +420,58 @@ func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	// Store must not have been dialed in either branch.
 	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
 		t.Errorf("missing-id guard should have short-circuited before store dial, got bindings=%v", b)
+	}
+}
+
+// TestRedactURLForLog fences the audit-log redaction contract:
+// userinfo (credentials embedded by a setting admin) and raw query
+// strings (often carry tokens/keys) are stripped before the target
+// lands in operator-visible logs. r_… resource ids and unparseable
+// strings pass through unchanged.
+func TestRedactURLForLog(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "plain https", input: "https://example.com/path", want: "https://example.com/path"},
+		{name: "userinfo stripped", input: "https://user:token@example.com/path", want: "https://example.com/path"},
+		{name: "raw query stripped", input: "https://example.com/path?key=secret", want: "https://example.com/path"},
+		{name: "fragment stripped", input: "https://example.com/path#section", want: "https://example.com/path"},
+		{name: "userinfo + query stripped", input: "https://u:p@example.com/path?k=v", want: "https://example.com/path"},
+		{name: "resource id passthrough", input: "r_abc123", want: "r_abc123"},
+		{name: "unparseable passthrough", input: "::not-a-url", want: "::not-a-url"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactURLForLog(tc.input)
+			if got != tc.want {
+				t.Errorf("redactURLForLog(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetAlias_SyncTimeoutExceeded fences the aliasSyncTimeout budget:
+// a BindChannelAlias that doesn't return inside the budget must
+// surface as a write-failed reply (not block past Slack's 3-second
+// ack window). Shortens aliasSyncTimeout for the duration of the
+// test so the suite doesn't pay a 2.5s real-time tax.
+func TestSetAlias_SyncTimeoutExceeded(t *testing.T) {
+	orig := aliasSyncTimeout
+	aliasSyncTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { aliasSyncTimeout = orig })
+
+	h, store := newAliasTestHandler(t)
+	store.blockBind = true
+
+	body, sign := aliasSlashRequest(t, "setalias $staging https://example.com", testAliasTeamID, testAliasChannelID)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, "Failed to update alias") {
+		t.Errorf("response = %q, want update-failed copy (ctx deadline exceeded)", got)
 	}
 }
 
@@ -476,7 +550,7 @@ func TestClearChannelAlias_OneOfManyLeavesOthers(t *testing.T) {
 	}
 }
 
-func TestClearChannelAlias_NotPresentReturns404(t *testing.T) {
+func TestClearChannelAlias_NotPresentIsNoop(t *testing.T) {
 	// Clearing an alias that isn't bound surfaces the typed
 	// ErrAliasNotFound branch as "not bound; nothing to clear."
 	h, _ := newAliasTestHandler(t)

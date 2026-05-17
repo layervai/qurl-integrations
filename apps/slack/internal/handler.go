@@ -179,9 +179,12 @@ type Handler struct {
 
 // SetAliasStore wires the per-channel alias persistence surface into
 // the /qurl setalias / /qurl unsetalias verbs. Must be called before
-// srv.Serve — the field is read on the request hot path without
+// `srv.Serve` — the field is read on the request hot path without
 // synchronization, and the only safe write window is before any
-// goroutine can observe it.
+// goroutine can observe it. The panic-on-double-wiring below catches
+// accidental double-`SetAliasStore(realStore)` in init code; it is
+// NOT a synchronization primitive, and calling this from a running
+// handler is undefined regardless of the panic.
 //
 // Calling with nil is a no-op for the field (the verbs will reply
 // with a "not configured" ephemeral) so cmd/main.go can omit the
