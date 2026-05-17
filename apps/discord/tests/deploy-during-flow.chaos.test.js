@@ -43,6 +43,14 @@
 //      ~6s longer (waiting for TTL lapse vs immediate DDB Delete). The
 //      no-peer case below asserts the DDB DeleteCommand lands on the
 //      lock table within the SIGTERM window.
+//
+// Out of chaos scope (covered by unit tests, intentionally not duplicated):
+//   - pushHandoff throwing synchronously (handoffThrew path → forcedExitCode):
+//     runPushHandoffShutdown's unit tests pin the exit-code semantics;
+//     test #3 below covers the symmetric hung-controlClient timeout path.
+//   - exact backoff-ladder timing (200/400/800/1600 ms): the watchdog's
+//     unit test pins the cadence; chaos tests stub sleep to a no-op.
+//   - per-attempt log shape: also in unit tests.
 
 const { createGatewayLock } = require('../src/gateway-lock');
 const { createPeerHeartbeat } = require('../src/gateway-peer-heartbeat');
@@ -250,6 +258,17 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     // mocked-DDB pushHandoff runs at (single-digit ms); call-order is
     // the right signal.
     //
+    // Brittleness note: this spy works because runPushHandoffShutdown
+    // calls `gatewayLeader.pushHandoff()` through the object property
+    // (`createGatewayLeader` returns an object literal of closures).
+    // If a future refactor destructures or caches the method elsewhere
+    // (e.g. `const { pushHandoff } = gatewayLeader`), this spy would
+    // silently bypass and the ordering assertion would mysteriously
+    // fail. If that lands, switch the spy target to `lock.transferLock`
+    // (the seam between real primitives that pushHandoff awaits
+    // internally) — same call-order signal, decoupled from the
+    // leader's surface shape.
+    //
     // Timeline-based check (in addition to "both called within one
     // tick"): record both `stop()` invoke and `pushHandoff()` resolve
     // as ordered events, then assert stop-invoke landed BEFORE
@@ -278,13 +297,27 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       code: 0, gatewayLeader: leader, eventPublisher, logger,
       exit, scheduleHardExit: schedule, clearHardExit,
     });
-    // Yield once so runPushHandoffShutdown enters its body. The
-    // parallel call to eventPublisher.stop() lands synchronously
-    // inside that body — regardless of whether pushHandoff has
-    // resolved yet — IF they're issued in parallel. If they were
-    // serialized (stop() awaited AFTER pushHandoff returns), the
-    // spy would not yet be called at this observation point.
-    await new Promise((r) => { setImmediate(r); });
+    // Wait for pushHandoff to fully resolve. A single setImmediate
+    // yield is enough today (the body's awaits drain in microtasks
+    // ahead of setImmediate), but bounding by a yield counter
+    // mirrors test #3's MAX_YIELDS_FOR_TRANSFER pattern — robust if
+    // a future refactor adds another await inside pushHandoff (e.g.
+    // a metric flush or extra DDB round-trip). The diagnostic throw
+    // turns a future flake into a clear failure message.
+    const MAX_YIELDS_FOR_PUSH_RESOLVE = 50;
+    let yields = 0;
+    while (!timeline.includes('pushHandoff-resolved')) {
+      if (yields++ >= MAX_YIELDS_FOR_PUSH_RESOLVE) {
+        throw new Error(
+          `chaos: pushHandoff did not resolve within ${MAX_YIELDS_FOR_PUSH_RESOLVE} setImmediate yields; ` +
+          `timeline: ${JSON.stringify(timeline)}. ` +
+          `If pushHandoff grew an extra await hop, raise the bound; if it now hangs, ` +
+          `that's a real regression (test #3 covers the timeout path).`
+        );
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => { setImmediate(r); });
+    }
 
     expect(pushHandoffSpy).toHaveBeenCalled();
     expect(eventPublisher.stop).toHaveBeenCalledTimes(1);
@@ -423,6 +456,13 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       code: 0, gatewayLeader: leader, eventPublisher, logger,
       exit, scheduleHardExit: schedule, clearHardExit,
     });
+    // Park the orphan shutdown promise immediately — it stays pending
+    // forever in prod (process.exit kills it), but in jest a failure
+    // in any later assertion would early-return without attaching this
+    // handler and the pending promise could surface as an unhandled
+    // rejection that masks the real failure. Attach now so any
+    // assertion failure below has clean output.
+    shutdownPromise.catch(() => {});
 
     // Wait until transferLock has landed (state.lockRow.instance_id
     // flipped to B). This indicates the pushHandoff body has cleared
@@ -454,11 +494,6 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     expect(state.lockRow.instance_id).toBe(INSTANCE_B);
     expect(state.lockRow.version).toBe(8);
     assertNoUnexpectedTableCalls(ddbMock);
-
-    // Park the orphan shutdown promise — it stays pending forever in
-    // prod (process.exit kills it), but in jest it'd surface as an
-    // unhandled rejection if pushHandoff ever rejects (it can't, since
-    // it's the new Promise(() => {}) hang — but defense in depth).
-    shutdownPromise.catch(() => {});
+    // (shutdownPromise.catch was attached up front; see above.)
   });
 });
