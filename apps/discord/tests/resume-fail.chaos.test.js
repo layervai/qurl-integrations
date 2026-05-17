@@ -123,10 +123,9 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     //     immediately because the row is gone, not just expired.
     expect(state.lockRow).toBeNull();
     // Confirm via DDB call inspection: a DeleteCommand against the
-    // lock table landed exactly once.
-    const lockDeletes = ddbMock.commandCalls(DeleteCommand).filter(
-      (c) => c.args[0].input.TableName === LOCK_TABLE,
-    );
+    // lock table landed exactly once. `commandCalls`' second arg is
+    // a per-input filter — the same shape mockClient uses for routing.
+    const lockDeletes = ddbMock.commandCalls(DeleteCommand, { TableName: LOCK_TABLE });
     expect(lockDeletes).toHaveLength(1);
     // CAS guard MUST be present — without it, a peer that already
     // cold-acquired would have its row clobbered.
@@ -198,6 +197,11 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
       isConnecting: () => false,
       releaseLock: () => lock.releaseLock(),
       deleteOwnRow: () => heartbeat.deleteOwnRow(),
+      // maxAttempts=3 (vs 5 in test #1) because this test pins the
+      // exhaustion-branch outcome under CAS-failure, not the ladder
+      // depth. The 200/400/800/1600 ms ladder is covered by the
+      // watchdog's unit test; 3 attempts is enough to enter the
+      // exhaustion exit and faster than the 5-attempt setup.
       logger, maxAttempts: 3,
       sleep: jest.fn(async () => {}),
       exit,

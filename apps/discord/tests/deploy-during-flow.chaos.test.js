@@ -67,7 +67,9 @@ function tableNamesTargeted(cmdInput) {
   if (Array.isArray(cmdInput.TransactItems)) {
     return cmdInput.TransactItems
       .map((entry) => {
-        const op = entry.Put || entry.Update || entry.Delete || entry.ConditionCheck;
+        // Includes Get for TransactGet (read-side) so the allowlist
+        // gate doesn't miss it if a future read-side refactor lands.
+        const op = entry.Put || entry.Update || entry.Delete || entry.ConditionCheck || entry.Get;
         return op?.TableName;
       })
       .filter(Boolean);
@@ -247,8 +249,28 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
     // can't distinguish parallel from serialized at the timescales
     // mocked-DDB pushHandoff runs at (single-digit ms); call-order is
     // the right signal.
-    const pushHandoffSpy = jest.spyOn(leader, 'pushHandoff');
-    const eventPublisher = makeControllableEventPublisher();
+    //
+    // Timeline-based check (in addition to "both called within one
+    // tick"): record both `stop()` invoke and `pushHandoff()` resolve
+    // as ordered events, then assert stop-invoke landed BEFORE
+    // pushHandoff-resolve. A regression that serializes the drain
+    // (`await pushHandoff(); then stop()`) would resolve pushHandoff
+    // first, then invoke stop — failing the ordering check.
+    const timeline = [];
+    const origPushHandoff = leader.pushHandoff.bind(leader);
+    const pushHandoffSpy = jest.spyOn(leader, 'pushHandoff').mockImplementation(async (...args) => {
+      const result = await origPushHandoff(...args);
+      timeline.push('pushHandoff-resolved');
+      return result;
+    });
+    const baseEventPublisher = makeControllableEventPublisher();
+    const eventPublisher = {
+      stop: jest.fn(() => {
+        timeline.push('stop-invoked');
+        return baseEventPublisher.stop();
+      }),
+      releaseStop: baseEventPublisher.releaseStop,
+    };
     const exit = jest.fn();
     const { schedule, clearHardExit, timers } = makeScheduleHardExit();
 
@@ -266,6 +288,16 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
 
     expect(pushHandoffSpy).toHaveBeenCalled();
     expect(eventPublisher.stop).toHaveBeenCalledTimes(1);
+
+    // Ordering check: stop-invoke must come before pushHandoff-resolve.
+    // Tighter than "both called within one tick" — a serialized
+    // `await pushHandoff(); then stop()` would resolve pushHandoff
+    // first, then invoke stop, flipping the order.
+    const stopIdx = timeline.indexOf('stop-invoked');
+    const pushResolvedIdx = timeline.indexOf('pushHandoff-resolved');
+    expect(stopIdx).toBeGreaterThanOrEqual(0);
+    expect(pushResolvedIdx).toBeGreaterThanOrEqual(0);
+    expect(stopIdx).toBeLessThan(pushResolvedIdx);
 
     // Release the pending stop() so runPushHandoffShutdown's
     // `await drainPromise` resolves and exit() fires.
