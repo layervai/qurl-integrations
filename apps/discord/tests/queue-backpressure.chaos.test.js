@@ -83,6 +83,11 @@ beforeEach(() => {
   sqsMock.on(DeleteMessageCommand).resolves({});
   eventConsumer._test._resetStateForTest();
   eventConsumer._test._setSqsClientForTest(new SQSClient({}));
+  // _setStopControllerForTest is needed by tests #1 and #3 which
+  // drive pollOnce directly and read stopController.signal without
+  // going through start() (start() re-creates the controller, so
+  // test #2 overwrites this seed harmlessly). Run unconditionally
+  // here so all three tests get a fresh AbortController.
   eventConsumer._test._setStopControllerForTest();
   logger.info.mockClear();
   logger.warn.mockClear();

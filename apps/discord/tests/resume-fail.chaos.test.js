@@ -224,6 +224,12 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     // exit(1) and heartbeat-cleanup both fired despite the lock
     // delete CAS failure.
     expect(state.lockRow).not.toBeNull();
+    // Pin the row's instance_id — recovery story is "TTL reaps the
+    // row inside 6 s" (the lock is still held by A in DDB; only the
+    // TTL lapse will free it). A future refactor that succeeds the
+    // delete via a different path (without throwing) would set
+    // state.lockRow=null and silently pass the .not.toBeNull check.
+    expect(state.lockRow.instance_id).toBe(INSTANCE_A);
     // Heartbeat row for A is gone. Mirror test #1's map+not.toContain
     // shape so both heartbeat-row assertions read identically.
     const remainingHeartbeats = state.peerRows.map((r) => r.instance_id);

@@ -248,16 +248,24 @@ describe('Pillar 3 chaos — deploy-during-flow (SIGTERM mid-handoff)', () => {
       code: 0, gatewayLeader: leader, eventPublisher, logger,
       exit, scheduleHardExit: schedule, clearHardExit,
     });
+    // Pin the exact stop() call count BEFORE releasing — runPushHandoffShutdown's
+    // synchronous prefix calls eventPublisher.stop() once. If a future
+    // refactor re-entered stop() (e.g. a retry on the drain), the
+    // makeControllableEventPublisher fake would coalesce both calls
+    // into the same settled promise and a `toHaveBeenCalledTimes(1)`
+    // at end-of-test wouldn't catch it. Asserting here pins the
+    // single-invocation contract at the right moment.
+    expect(eventPublisher.stop).toHaveBeenCalledTimes(1);
     // Release the pending stop() so runPushHandoffShutdown's
     // `await drainPromise` can resolve once it's reached. Order doesn't
-    // matter — the timeline observes both events regardless.
+    // matter for the timeline observation — both events are recorded
+    // regardless.
     eventPublisher.releaseStop();
     // Drive the full shutdown to completion (pushHandoff body runs,
     // transferLock resolves, drainPromise resolves, exit fires). With
     // mocked DDB this is a few microtask hops; no polling needed.
     await shutdownPromise;
 
-    expect(eventPublisher.stop).toHaveBeenCalledTimes(1);
     expect(lock.transferLock).toHaveBeenCalledTimes(1);
 
     // Ordering check: stop-invoke must come before transferLock-resolve.
