@@ -14,40 +14,47 @@ import (
 
 // AliasStore is the persistence surface the alias verbs depend on.
 //
-// One alias is bound per (slack_team_id, slack_channel_id) row by
-// design — this matches the post-pivot channel_policies table shape
-// owned by qurl-bot-slack-side terraform (modules/qurl-slack-ddb,
-// SLACK_QURL_ROLLOUT.md 2026-05-12 architectural update). A small
-// interface here rather than a direct dep on the slackdata package
-// keeps this PR shippable against main even while #231/#233's
-// slackdata pivot rework is in flight; the eventual store satisfies
-// the same shape.
+// Many aliases may be bound to a single (slack_team_id,
+// slack_channel_id) row concurrently — the channel_policies table
+// carries an app-managed `alias_bindings: Map<alias_name,
+// resource_id>` attribute so a channel can host `$grafana`,
+// `$staging-db`, `$logs` etc. simultaneously, each pointing at a
+// distinct resource. A small interface here rather than a direct dep
+// on the slackdata package keeps this PR shippable against main even
+// while #231/#233's slackdata pivot rework is in flight; the eventual
+// store satisfies the same shape.
 //
-// **Schema gap (out-of-scope here):** the pre-pivot UX promised
-// multiple aliases per channel, but the post-pivot row carries a
-// single alias attribute per (team, channel). The right fix is a
-// schema reshape (per-alias SK, or an `aliases` SS attribute) tracked
-// separately — see qurl-integrations #233's comment thread. The
-// verbs here intentionally enforce one-alias-per-channel and surface
-// the existing-different-alias case with a refusal message asking
-// the operator to `unsetalias` first, so the remediation lands at
-// the schema layer rather than papered over in the handler.
+// Schema decision locked 2026-05-17: app-managed Map attribute on the
+// existing PK/SK; no GSI, no SK reshape, no data migration (the table
+// is empty pending Slack bot sandbox deploy).
 type AliasStore interface {
-	// LookupChannelAlias returns the (alias, resourceID) pair bound to
-	// (teamID, channelID), or ErrAliasNotFound if no alias is set.
-	LookupChannelAlias(ctx context.Context, teamID, channelID string) (alias, resourceID string, err error)
-	// SetChannelAlias upserts the alias→resourceID binding on
-	// (teamID, channelID). Replaces any prior alias on the row.
-	SetChannelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) error
-	// ClearChannelAlias removes the alias binding on (teamID, channelID).
-	// Returns ErrAliasNotFound if there was no alias to clear.
-	ClearChannelAlias(ctx context.Context, teamID, channelID string) error
+	// BindChannelAlias atomically binds aliasName→resourceID on
+	// (teamID, channelID). Implementations issue a DynamoDB UpdateItem
+	// `SET alias_bindings.#a = :rid` with
+	// `ConditionExpression: attribute_not_exists(alias_bindings.#a)` so
+	// a duplicate alias name in the same channel returns
+	// ErrAliasAlreadyBound rather than overwriting a teammate's
+	// binding. Other aliases on the same channel are untouched.
+	BindChannelAlias(ctx context.Context, teamID, channelID, aliasName, resourceID string) error
+	// UnbindChannelAlias removes aliasName from (teamID, channelID).
+	// Implementations issue `REMOVE alias_bindings.#a` with
+	// `ConditionExpression: attribute_exists(alias_bindings.#a)`.
+	// Returns ErrAliasNotFound when aliasName is not bound in the
+	// channel. Other aliases on the same channel are untouched.
+	UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error
 }
 
-// ErrAliasNotFound is returned by AliasStore implementations when the
-// requested (team, channel) row has no alias bound. Handlers use
-// errors.Is to map to the "no alias set" friendly copy.
-var ErrAliasNotFound = errors.New("no alias bound to this channel")
+// ErrAliasAlreadyBound is returned by AliasStore implementations when
+// BindChannelAlias is called for an aliasName that already has a
+// binding in (teamID, channelID). Handlers use errors.Is to map this
+// to the 409 / "alias already bound" friendly copy.
+var ErrAliasAlreadyBound = errors.New("alias already bound in this channel")
+
+// ErrAliasNotFound is returned by AliasStore implementations when
+// UnbindChannelAlias is called for an aliasName that has no binding
+// in (teamID, channelID). Handlers use errors.Is to map this to the
+// 404 / "alias not bound" friendly copy.
+var ErrAliasNotFound = errors.New("alias not bound in this channel")
 
 // resourceIDPrefix is the wire prefix on every qurl-service resource
 // id. setalias discriminates URL targets from resource-id targets on
@@ -268,35 +275,19 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	}
 	defer cancel()
 
-	existingAlias, existingRID, err := h.aliasStore.LookupChannelAlias(ctx, teamID, channelID)
-	if err != nil && !errors.Is(err, ErrAliasNotFound) {
-		slog.Error("setalias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel IDs are Slack-controlled but log-injection-safe.
-		respondSlack(w, "Failed to look up the current alias for this channel. Please try again.")
+	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
+	// on alias_bindings.#a with attribute_not_exists. A second alias
+	// name on the same channel succeeds (different map key); a
+	// duplicate alias name surfaces as ErrAliasAlreadyBound and is
+	// rendered as a refusal. The refusal copy names only the alias
+	// (not its bound target) to keep the info-disclosure surface
+	// narrow — claude-bot review #5 on the prior single-alias version.
+	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.Alias, args.Target)
+	if errors.Is(err, ErrAliasAlreadyBound) {
+		respondSlack(w, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or pick a different alias.", args.Alias, args.Alias))
 		return
 	}
-
-	// Same-target no-op: alias is already bound to this exact target
-	// in this exact channel. Surface the no-op explicitly rather than
-	// re-writing the row.
-	if existingAlias == args.Alias && existingRID == args.Target {
-		respondSlack(w, fmt.Sprintf("Alias `$%s` already points to `%s` in this channel. No change.", args.Alias, args.Target))
-		return
-	}
-
-	// Different-existing-alias path: per the schema gap, we can't
-	// hold multiple aliases per channel. Surface this to the admin
-	// rather than silently overwriting — overwriting a teammate's
-	// alias is a footgun. The refusal names the bound alias only
-	// (not its target) — narrows the info-disclosure surface if
-	// the Slack-manifest admin gate slips. The admin can run
-	// `/qurl unsetalias` to inspect the target if they actually
-	// need it.
-	if existingAlias != "" && existingAlias != args.Alias {
-		respondSlack(w, fmt.Sprintf("This channel already has alias `$%s` bound. Run `/qurl unsetalias $%s` first, or pick a different channel.", existingAlias, existingAlias))
-		return
-	}
-
-	if err := h.aliasStore.SetChannelAlias(ctx, teamID, channelID, args.Alias, args.Target); err != nil {
+	if err != nil {
 		slog.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
 		respondSlack(w, "Failed to update alias. Please try again.")
 		return
@@ -311,13 +302,11 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 // "info-disclosure" concern (a non-admin probing alias existence via
 // the response delta) is closed structurally by the manifest gate.
 //
-// **Alias-mismatch posture:** the user names the alias they want to
-// clear. If the channel actually has a different alias bound, the
-// handler surfaces the mismatch rather than silently clearing the
-// wrong binding. This is the principle-of-least-surprise path — an
-// admin running `/qurl unsetalias $foo` while the channel actually
-// has `$bar` bound should learn about the mismatch, not have `$bar`
-// silently disappear.
+// **Not-bound posture:** UnbindChannelAlias is conditional on
+// attribute_exists(alias_bindings.#a) — clearing an alias that
+// isn't bound surfaces as ErrAliasNotFound and is rendered as
+// "no such alias on this channel." Other aliases on the same channel
+// are untouched.
 func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := strings.TrimSpace(strings.TrimPrefix(text, "unsetalias"))
@@ -334,29 +323,12 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	}
 	defer cancel()
 
-	existingAlias, _, err := h.aliasStore.LookupChannelAlias(ctx, teamID, channelID)
-	switch {
-	case errors.Is(err, ErrAliasNotFound):
-		respondSlack(w, "No alias is set on this channel. Nothing to clear.")
-		return
-	case err != nil:
-		slog.Error("unsetalias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel IDs are Slack-controlled but log-injection-safe.
-		respondSlack(w, "Failed to look up the current alias for this channel. Please try again.")
-		return
-	case existingAlias != args.Alias:
-		respondSlack(w, fmt.Sprintf("This channel has alias `$%s` bound, not `$%s`. Refusing to clear a different alias.", existingAlias, args.Alias))
+	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
+	if errors.Is(err, ErrAliasNotFound) {
+		respondSlack(w, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", args.Alias))
 		return
 	}
-
-	if err := h.aliasStore.ClearChannelAlias(ctx, teamID, channelID); err != nil {
-		if errors.Is(err, ErrAliasNotFound) {
-			// TOCTOU window: another admin cleared the alias between
-			// the lookup and the clear. The user's intent is
-			// satisfied either way; render the success copy so they
-			// don't retry on a transient race.
-			respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
-			return
-		}
+	if err != nil {
 		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
 		respondSlack(w, "Failed to clear alias. Please try again.")
 		return
