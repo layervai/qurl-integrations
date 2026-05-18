@@ -122,6 +122,14 @@ var ErrUnknownSubcommand = errors.New("unknown subcommand")
 // not in the recognized [AdminAction] set.
 var ErrUnknownAdminAction = errors.New("unknown admin action")
 
+// ErrMissingAdminAction is returned when bare `admin` is invoked with
+// no verb at all. Separate from [ErrUnknownAdminAction] so an
+// `errors.Is` caller can distinguish "user forgot to type a verb"
+// from "user typed something we don't recognize" — the right
+// user-facing message differs ("which admin command?" vs "frobnicate
+// isn't a thing, try `admin policies` / `admin status` / …").
+var ErrMissingAdminAction = errors.New("missing admin action")
+
 // ErrMissingChannel is returned when `admin allow` / `admin disallow` are
 // invoked without a `<#C…|…>` channel reference.
 var ErrMissingChannel = errors.New("missing #channel argument")
@@ -328,7 +336,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// applyFlag would otherwise report "invalid flag: \"junk\"
 		// (expected key:value)" — accurate to applyFlag but confusing
 		// to a user who didn't intend to type a flag at all.
-		if !strings.ContainsRune(tok, ':') {
+		if !looksLikeFlag(tok) {
 			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
 		}
 		if err := applyFlag(cmd, tok); err != nil {
@@ -388,7 +396,7 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 // `admin policies extra` early instead of silently routing it.
 func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
-		return nil, fmt.Errorf("%w: admin requires a verb", ErrUnknownAdminAction)
+		return nil, ErrMissingAdminAction
 	}
 	verb := rest[0]
 	action := AdminAction(strings.ToLower(verb))
@@ -515,6 +523,39 @@ func matchChannel(tok string) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+// looksLikeFlag reports whether `tok` is shaped like a `key:value`
+// flag rather than a stray positional. We can't just check for `:`
+// because a fat-fingered URL (`get $alias https://example.com:8080`)
+// would otherwise route to applyFlag and surface as the confusing
+// `unknown flag: "https"`. The flag-key half is documented in
+// [flagPattern] as starting with `[a-z]` and matching `[a-z0-9_]*`
+// before the `:`; treat anything else as a positional so the user
+// sees `unexpected argument` — which is what they actually got wrong.
+//
+// Also bails out for `http://` / `https://` specifically: those would
+// match the lowercase-key shape (key = "http"/"https") but are
+// overwhelmingly a typo-class URL paste, not a real flag attempt.
+func looksLikeFlag(tok string) bool {
+	if strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://") {
+		return false
+	}
+	colonIdx := strings.IndexByte(tok, ':')
+	if colonIdx <= 0 {
+		return false
+	}
+	key := tok[:colonIdx]
+	if (key[0] < 'a' || key[0] > 'z') && (key[0] < 'A' || key[0] > 'Z') {
+		return false
+	}
+	for i := 1; i < len(key); i++ {
+		c := key[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only

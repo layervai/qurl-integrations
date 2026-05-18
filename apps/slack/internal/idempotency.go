@@ -2,6 +2,7 @@ package internal
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 )
 
@@ -26,20 +27,29 @@ import (
 // chars (verified at qurl-service/internal/api/handlers/apikey_handlers.go:151).
 // 64 hex chars from sha256 satisfies that floor with margin.
 func IdempotencyKey(teamID, channelID, userID, triggerOrViewID string) string {
-	// The separator (NUL) keeps adjacent fields unambiguous —
-	// `("ab", "c")` and `("a", "bc")` would otherwise hash equally.
-	// Slack-issued IDs (team/channel/user/trigger/view) are
-	// alphanumeric and never contain NUL, so concatenation around
-	// the separator is guaranteed unambiguous regardless of what
-	// future ID shape Slack ships.
-	const sep = "\x00"
+	// Length-prefix each field with a fixed-width 4-byte big-endian
+	// uint32 before its bytes. This makes the encoding unambiguous
+	// regardless of what character set the fields use: `("ab", "c")`
+	// and `("a", "bc")` produce different prefix bytes
+	// (`\x00\x00\x00\x02ab` vs `\x00\x00\x00\x01a`) before either
+	// field's content matters, so the collision is structurally
+	// impossible — no NUL-separator-style invariant ("Slack IDs
+	// remain alphanumeric forever") to maintain.
 	h := sha256.New()
-	h.Write([]byte(teamID))
-	h.Write([]byte(sep))
-	h.Write([]byte(channelID))
-	h.Write([]byte(sep))
-	h.Write([]byte(userID))
-	h.Write([]byte(sep))
-	h.Write([]byte(triggerOrViewID))
+	writeLengthPrefixed(h, teamID)
+	writeLengthPrefixed(h, channelID)
+	writeLengthPrefixed(h, userID)
+	writeLengthPrefixed(h, triggerOrViewID)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// writeLengthPrefixed writes `len(s)` as a 4-byte big-endian uint32
+// followed by `s`'s bytes. A field longer than 2^32-1 bytes is not
+// representable, but Slack IDs are bounded well below that — no
+// runtime guard needed.
+func writeLengthPrefixed(h interface{ Write([]byte) (int, error) }, s string) {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], uint32(len(s)))
+	_, _ = h.Write(buf[:])
+	_, _ = h.Write([]byte(s))
 }

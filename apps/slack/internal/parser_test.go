@@ -112,7 +112,7 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "setalias without target", text: "setalias $prod-db", wantErr: ErrMissingTarget},
 		{name: "unsetalias without alias", text: "unsetalias", wantErr: ErrEmptyResource},
 		{name: "unsetalias without sigil", text: "unsetalias prod-db", wantErr: ErrMissingSigil},
-		{name: "admin no verb", text: "admin", wantErr: ErrUnknownAdminAction},
+		{name: "admin no verb", text: "admin", wantErr: ErrMissingAdminAction},
 		{name: "admin unknown verb", text: "admin frobnicate", wantErr: ErrUnknownAdminAction},
 		{name: "admin allow without channel", text: "admin allow $prod-db", wantErr: ErrMissingChannel},
 		{name: "admin allow without alias", text: "admin allow <#C123|ops>", wantErr: ErrEmptyResource},
@@ -159,6 +159,13 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// ErrUnexpectedArgument rather than the misleading
 		// "invalid flag" message applyFlag would otherwise return.
 		{name: "get with non-flag trailing positional rejected", text: "get $prod-db junk", wantErr: ErrUnexpectedArgument},
+		// A typo-class URL paste (`get $alias https://x.example:8080`)
+		// contains `:` but is plainly not a flag; the
+		// http://-and-https://-aware looksLikeFlag check routes it to
+		// ErrUnexpectedArgument rather than the misleading
+		// `unknown flag: "https"` applyFlag would otherwise produce.
+		{name: "get with URL-shaped trailing positional rejected", text: "get $prod-db https://x.example:8080", wantErr: ErrUnexpectedArgument},
+		{name: "get with http URL-shaped trailing positional rejected", text: "get $prod-db http://x.example:8080", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
@@ -214,6 +221,34 @@ func TestParse_GetFlagErrors(t *testing.T) {
 	}
 }
 
+// TestTokenize_UnbalancedQuoteBleedsAcrossBoundary pins the
+// multi-token unbalanced-quote tolerance contract. With an opening
+// quote that never closes, every subsequent space-separated token
+// should fold into the same in-quotes run rather than producing
+// separate tokens. This is the parity-toggle semantic documented in
+// [tokenize]; a future refactor that switched to a balanced-pair
+// matcher would silently change this behavior, so the test pins it.
+//
+// The example mirrors the doc comment's "stray-quote inputs vanishingly
+// rare in practice" claim: `get $alias "reason without closing` would
+// otherwise tokenize to `[get, $alias, "reason, without, closing]`
+// (five tokens) and the user would see a confusing
+// `unexpected argument: "without"` instead of the bleed-into-one-token
+// the doc promises.
+func TestTokenize_UnbalancedQuoteBleedsAcrossBoundary(t *testing.T) {
+	t.Parallel()
+	got := tokenize(`get $alias "reason without closing`)
+	want := []string{"get", "$alias", `"reason without closing`}
+	if len(got) != len(want) {
+		t.Fatalf("tokenize: got %d tokens (%v), want %d (%v)", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("tokenize[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // TestCommand_DM exercises the DM helper with all the shapes the parser
 // can produce, plus the nil-receiver path.
 func TestCommand_DM(t *testing.T) {
@@ -237,6 +272,84 @@ func TestCommand_DM(t *testing.T) {
 			}
 		})
 	}
+}
+
+// FuzzParse is a panic-on-input regression fence. The grammar is
+// small enough that any input either yields a non-nil [Command] with
+// nil error, or an error that wraps one of the documented sentinels.
+// A future refactor of [tokenize] or [Parse] that panics on
+// pathological input — multi-byte runes mid-quote, deep nesting of
+// `<#…|…>`, surrogate pairs in flag values — gets caught here.
+//
+// Seeds cover the happy-path shape (verb + alias), a flag pair, an
+// admin two-positional form, a quoted target, the unbalanced-quote
+// tolerance path, and a few adversarial bytes (NUL, CR, multi-byte).
+// The body never asserts on `cmd` shape — only that the
+// `(*Command, error)` contract holds: exactly one of the two is nil.
+func FuzzParse(f *testing.F) {
+	seeds := []string{
+		"",
+		"help",
+		"get $prod-db",
+		"get $prod-db dm:true reason:\"on call\"",
+		"setalias $alias https://x.example",
+		"setalias $alias \"https://x.example with space\"",
+		"setalias $alias \"unbalanced",
+		"unsetalias $alias",
+		"admin allow <#C12345|ops> $alias",
+		"admin disallow $alias <#C99999|qa>",
+		"admin claim",
+		"admin revoke $alias",
+		"create https://example.com",
+		"list",
+		"aliases",
+		"\x00",
+		"get $\x00",
+		"get $alias \r reason:foo",
+		"setalias $alias 世界",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	knownSentinels := []error{
+		ErrEmptyResource,
+		ErrMissingSigil,
+		ErrUnknownSubcommand,
+		ErrUnknownAdminAction,
+		ErrMissingAdminAction,
+		ErrMissingChannel,
+		ErrMissingTarget,
+		ErrInvalidAlias,
+		ErrUnexpectedArgument,
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		cmd, err := Parse(in)
+		if (cmd == nil) == (err == nil) {
+			t.Fatalf("Parse(%q): exactly one of (cmd, err) must be non-nil; got cmd=%v err=%v", in, cmd, err)
+		}
+		if err != nil {
+			// Every parse error must wrap one of the documented
+			// sentinels — that's the contract the handler in
+			// PR-3c.3+ depends on to render the right user-facing
+			// `:warning:` message. An applyFlag-shaped error
+			// (`unknown flag: …`, `invalid flag: …`) is also
+			// acceptable since the parser surfaces those directly
+			// from applyFlag, and they're carried by the
+			// fmt.Errorf wrapping — accept those too via substring
+			// match on the well-known prefixes.
+			matched := false
+			for _, sentinel := range knownSentinels {
+				if errors.Is(err, sentinel) {
+					matched = true
+					break
+				}
+			}
+			msg := err.Error()
+			if !matched && !strings.Contains(msg, "unknown flag") && !strings.Contains(msg, "invalid flag") {
+				t.Fatalf("Parse(%q) = unrecognized error %v (must wrap a documented sentinel)", in, err)
+			}
+		}
+	})
 }
 
 // TestCommand_Reason fences the reason flag accessor including the

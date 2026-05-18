@@ -72,6 +72,14 @@ var redactedSubmissionBlockIDs = map[string]struct{}{
 // before serializing any `view_submission` payload for diagnostics.
 // Exported so the (separate) handler package can consume it without
 // reaching into an unexported map.
+//
+// TODO(PR-3c.3+): wire this into the view-submission logging
+// middleware so the bootstrap code never reaches diagnostics. Until
+// that lands, [AdminClaimModal] ships without the matching
+// redaction at the logging boundary — the bot must NOT log
+// `view_submission` payloads in the interim. Tracking: this PR
+// (#228) provides the query surface; the consumer is part of the
+// PR-3c.3+ command-implementation stack.
 func IsRedactedSubmissionBlock(blockID string) bool {
 	_, ok := redactedSubmissionBlockIDs[blockID]
 	return ok
@@ -121,9 +129,18 @@ func HelpResponse() ([]byte, error) {
 // in `private_metadata`. JSON-encoded so the view-submission handler
 // (PR-3c.3+) can `json.Unmarshal` into a known struct rather than
 // parsing an ad-hoc query-string. Slack caps `private_metadata` at
-// 3000 chars; a JSON object with a single alias name fits comfortably.
+// 3000 chars; a JSON object with an alias name and a target URL
+// (typically <100 chars combined) fits comfortably.
+//
+// NewTarget rides along so the submission handler can apply the
+// rebind without re-reading from the submission state — `state`
+// belongs to whichever input blocks the modal renders, and the
+// rebind modal has none (it's a confirm-only flow). Putting the
+// target on `private_metadata` keeps the contract stable from day
+// one rather than requiring a Slack `views.update` roundtrip.
 type SetAliasRebindMetadata struct {
-	Alias string `json:"alias"`
+	Alias     string `json:"alias"`
+	NewTarget string `json:"new_target"`
 }
 
 // SetAliasRebindModal renders the confirmation modal shown when a user
@@ -146,7 +163,7 @@ type SetAliasRebindMetadata struct {
 // [escapeMrkdwnCode] neutralizes the only character that matters
 // for the code-span surface.
 func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error) {
-	meta, err := json.Marshal(SetAliasRebindMetadata{Alias: aliasName})
+	meta, err := json.Marshal(SetAliasRebindMetadata{Alias: aliasName, NewTarget: newTarget})
 	if err != nil {
 		return nil, fmt.Errorf("marshal private_metadata: %w", err)
 	}
@@ -167,18 +184,21 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 	return json.Marshal(payload)
 }
 
-// escapeMrkdwnCode neutralizes the two characters that can break out
-// of a mrkdwn code span: backtick (closes the span) and newline
-// (Slack's renderer ends the span at a hard newline). Without
-// escaping, a value containing either would let the remainder
-// render as mrkdwn — opening an injection vector for user-supplied
-// targets (admin-set DDB rows). Backtick is replaced with U+02CA
-// (MODIFIER LETTER ACUTE ACCENT) which keeps a close visual
-// approximation; newline becomes a single space so the rebind
-// modal stays one-line per target.
+// escapeMrkdwnCode neutralizes the characters that can break out of
+// a mrkdwn code span: backtick (closes the span) and any line break
+// — \n, \r, or the \r\n pair (Slack's renderer ends the span at a
+// hard newline, and on CRLF input the bare \r reaches the renderer
+// first). Without escaping, a value containing any of these would
+// let the remainder render as mrkdwn — opening an injection vector
+// for user-supplied targets (admin-set DDB rows). Backtick is
+// replaced with U+02CA (MODIFIER LETTER ACUTE ACCENT) which keeps
+// a close visual approximation; line breaks become a single space
+// so the rebind modal stays one-line per target.
 func escapeMrkdwnCode(s string) string {
 	s = strings.ReplaceAll(s, "`", "ˊ")
+	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
 	return s
 }
 
