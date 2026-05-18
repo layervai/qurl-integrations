@@ -162,13 +162,31 @@ var ErrInvalidFlag = errors.New("invalid flag")
 // always includes it but the wire shape allows omission).
 var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
 
+// flagKeyCharset is the shared key-shape contract for flag-style
+// tokens. Used by both [flagPattern] (full key:value parse) and
+// [looksLikeFlag] (pre-applyFlag gate, case-insensitive on the input
+// because the case-fold happens later in applyFlag). Keeping the two
+// in lockstep prevents a future change to the key charset from
+// landing in only one place and silently drifting the two checks
+// apart.
+const flagKeyCharset = `[a-z][a-z0-9_]*`
+
 // flagPattern matches `key:value` and `key:"quoted value"` shapes.
 //
 // The pattern is intentionally permissive on the value side — Slack's
 // slash-command form-encoding has already done one round of decoding by
 // the time we see the body, so we don't try to handle further escapes
 // here. Quoted values let users put spaces in `reason:"…"`.
-var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
+var flagPattern = regexp.MustCompile(`^(` + flagKeyCharset + `):(?:"([^"]*)"|(\S+))$`)
+
+// flagKeyShape is the key-only counterpart to [flagPattern], used by
+// [looksLikeFlag] to gate on key shape BEFORE applyFlag's case-fold
+// runs. Case-insensitive on the input via the `(?i)` flag so callers
+// can type `DM:true` on a mobile client and have applyFlag's
+// post-fold regex match accept it. Stays anchored to
+// [flagKeyCharset] so any future expansion of the key charset
+// (e.g., adding `-`) lands in one source.
+var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
 
 // The shared alias contract — `aliasCharsetPattern` (regex) and
 // `aliasMaxLen` (length cap) — lives in
@@ -581,35 +599,38 @@ func matchChannel(tok string) (string, bool) {
 // revisit if the validator there ever accepts non-HTTP schemes.
 func looksLikeFlag(tok string) bool {
 	// Case-insensitive http(s):// match — clipboard pastes sometimes
-	// uppercase the scheme. `strings.HasPrefix` on a `ToLower` copy
-	// keeps this readable; the scheme prefix is at most 8 chars so
-	// the allocation is negligible.
-	lower := strings.ToLower(tok)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+	// uppercase the scheme. `strings.EqualFold` on a length-bounded
+	// prefix avoids allocating a full-token lowercase copy (a 2KB URL
+	// token would otherwise allocate 2KB just to compare 7-8 bytes).
+	if hasASCIIPrefixFold(tok, "https://") || hasASCIIPrefixFold(tok, "http://") {
 		return false
 	}
+	// Empty `tok` is handled by accident here: strings.IndexByte("",
+	// ':') returns -1, which fails the `colonIdx <= 0` guard. Pinned
+	// in TestLooksLikeFlag_EmptyString below so a refactor can't
+	// silently regress that path.
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx <= 0 {
 		return false
 	}
-	key := tok[:colonIdx]
-	// Match flagPattern's `[a-z][a-z0-9_]*` exactly. applyFlag
-	// case-folds the key half before regex-matching, so callers can
-	// type `DM:true` and have it work — but `looksLikeFlag` is the
-	// gate BEFORE that case-fold runs, so we accept ASCII upper too
-	// and let applyFlag's lowercasing produce the canonical key.
-	// (Stays in sync with flagPattern by allowing the same charset
-	// plus the case-insensitive variant.)
-	if (key[0] < 'a' || key[0] > 'z') && (key[0] < 'A' || key[0] > 'Z') {
+	// Single source of truth for key shape: [flagKeyShape] is the
+	// case-insensitive form of [flagKeyCharset], the same charset
+	// [flagPattern] uses post-case-fold. The two stay in lockstep so
+	// a future change to the key charset lands in one place rather
+	// than drifting between this gate and applyFlag's regex match.
+	return flagKeyShape.MatchString(tok[:colonIdx])
+}
+
+// hasASCIIPrefixFold reports whether `s` starts with `prefix` under
+// ASCII case-fold, without allocating. `strings.EqualFold` on
+// `s[:len(prefix)]` would index out-of-bounds when `s` is shorter
+// than `prefix`; this helper handles the short-string case
+// explicitly. Used by [looksLikeFlag] for the http(s):// carve-out.
+func hasASCIIPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
 		return false
 	}
-	for i := 1; i < len(key); i++ {
-		c := key[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
-			return false
-		}
-	}
-	return true
+	return strings.EqualFold(s[:len(prefix)], prefix)
 }
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
@@ -621,6 +642,16 @@ func looksLikeFlag(tok string) bool {
 // empty value (either `key:` or `key:""`) is rejected — the handler
 // in PR-3c.3+ should be able to distinguish "flag unset" from "flag
 // set to empty" by absence in [Command.Flags] alone.
+//
+// Per-key validation is strict-posture: `dm` accepts only the
+// boolean strings `true` / `false` (case-folded), so a user typing
+// `dm:yes` or `dm:1` sees a friendly error rather than the
+// silent-falsey behavior the unvalidated form would have produced
+// ([Command.DM] case-equals against "true", so any non-"true" value
+// silently returns false — exactly the typo class the rest of the
+// parser rejects). `reason` accepts any non-empty prose because the
+// handler in PR-3c.3+ uses it for audit text where the user's exact
+// wording is the point.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
@@ -654,7 +685,21 @@ func applyFlag(cmd *Command, tok string) error {
 		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
 	}
 	switch key {
-	case "dm", "reason":
+	case "dm":
+		// Strict-posture boolean: only `true` / `false` (case-folded)
+		// accepted. Without this gate, `dm:yes` / `dm:1` / `dm:please`
+		// would parse fine and then silently no-op because
+		// [Command.DM] case-equals against "true". That silent-falsey
+		// behavior is the same UX failure mode the rest of the
+		// parser carefully rejects for typo'd flag keys
+		// (`whatever:true` → ErrInvalidFlag), so we reject typo'd
+		// values too.
+		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
+			return fmt.Errorf("%w: dm:%q (use dm:true or omit the flag)", ErrInvalidFlag, val)
+		}
+		cmd.Flags[key] = val
+		return nil
+	case "reason":
 		cmd.Flags[key] = val
 		return nil
 	default:

@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+// dmRejectSubstr is the load-bearing substring in `applyFlag`'s
+// non-boolean-dm rejection message. Pinned as a const so the three
+// rejection-row test cases share one source of truth — if the user-
+// facing wording changes, this is the single edit point.
+const dmRejectSubstr = "use dm:true"
+
 // TestParse_HappyPaths fences the recognized grammar of every subcommand.
 // One row per verb so a regression that drops or relabels a verb is the
 // failure that reaches review, not a behavioral diff in PR-3c.3+.
@@ -51,6 +57,14 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "setalias with unbalanced opening quote tolerated", text: `setalias $prod-db "https://x.example`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: `"https://x.example`, wantFlags: map[string]string{}},
 		{name: "uppercase flag key normalized", text: "get $prod-db DM:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
+		// dm:false is explicitly accepted (the strict-boolean gate
+		// allows both `true` and `false`). Command.DM() returns
+		// false for any non-"true" value, so dm:false has the same
+		// runtime effect as omitting the flag — but accepting it
+		// here lets users opt out explicitly without seeing an
+		// "unknown flag" error.
+		{name: "dm:false accepted", text: "get $prod-db dm:false", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "false"}},
+		{name: "dm:FALSE case-folded", text: "get $prod-db dm:FALSE", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "FALSE"}},
 		// Admin verb is lowercased before the AdminAction switch. Pinned
 		// so a future refactor that drops `strings.ToLower(verb)` can't
 		// silently regress mobile-client / auto-capitalize inputs.
@@ -227,6 +241,17 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "malformed flag (no colon) surfaces as unexpected arg", text: "get $prod-db reasontruly", wantSentnl: ErrUnexpectedArgument, wantSubstr: "unexpected argument"},
 		{name: "empty bare value", text: "get $prod-db reason:", wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		// Strict-posture on dm: only `true` / `false` (case-folded)
+		// accepted. Without these rejections, `dm:yes` / `dm:1`
+		// would parse fine and then silently return false on
+		// Command.DM() — the same silent-no-op failure mode the
+		// parser rejects for typo'd flag keys. Pin each truthy-
+		// looking-but-rejected value individually so a future
+		// loosening (e.g., accepting `1`/`yes`/`on`) requires
+		// touching this test deliberately.
+		{name: "dm:1 rejected (not true/false)", text: "get $prod-db dm:1", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
+		{name: "dm:yes rejected (not true/false)", text: "get $prod-db dm:yes", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
+		{name: "dm:please rejected (not true/false)", text: "get $prod-db dm:please", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -348,6 +373,20 @@ func TestApplyFlag_MissingKeyBeforeColon(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "missing key before colon") {
 		t.Errorf("applyFlag(\":true\") error = %q, want substring %q", err.Error(), "missing key before colon")
+	}
+}
+
+// TestLooksLikeFlag_EmptyString pins the empty-input path so a
+// refactor of [looksLikeFlag] (e.g., adding an early `len(tok) > N`
+// shortcut) can't silently break the empty case. `strings.IndexByte("",
+// ':')` returns -1, which the `colonIdx <= 0` guard turns into false
+// — but the contract is "empty input is not a flag," and a future
+// rewrite that uses a different empty-handling approach should fail
+// here rather than silently change behavior.
+func TestLooksLikeFlag_EmptyString(t *testing.T) {
+	t.Parallel()
+	if looksLikeFlag("") {
+		t.Error("looksLikeFlag(\"\") = true, want false")
 	}
 }
 
