@@ -202,13 +202,37 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // The asymmetry is correct (raw bytes in storage, escaped bytes
 // in view); the rule for callers is "only run this on the way to
 // a mrkdwn code span in Block Kit JSON."
+//
+// Note on `aliasName`: the parser's `aliasCharsetPattern` rejects
+// backticks and line breaks at the slash-command grammar layer, so
+// running this on an alias name from `Command.Alias` is pure
+// defense-in-depth (the escape is a no-op for any input that
+// reaches the modal via the supported `setalias` path). Kept
+// applied to all three string args so a future code path that
+// fabricates a Command (tests, admin overrides) can't bypass the
+// code-span fence by handing a hand-built alias through.
+//
+// `strings.NewReplacer` builds the substitution table once at call
+// time and runs all four replacements in a single pass — strictly
+// fewer allocations than chained `strings.ReplaceAll` and the
+// substitution table reads as a single block at the security-fence
+// boundary, which is the right shape for a mitigation primitive.
 func escapeMrkdwnCode(s string) string {
-	s = strings.ReplaceAll(s, "`", "ˊ")
-	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", " ")
-	return s
+	return mrkdwnCodeEscaper.Replace(s)
 }
+
+// mrkdwnCodeEscaper is the single-pass substitution table used by
+// `escapeMrkdwnCode`. Defined at package scope so the replacer is
+// constructed once at init rather than per-call. Order matters in
+// `strings.NewReplacer` only for prefix overlap; `\r\n` is listed
+// before `\r` so the CRLF pair collapses to one space rather than
+// two. (`\n` and `\r` standalone are handled by their own entries.)
+var mrkdwnCodeEscaper = strings.NewReplacer(
+	"`", "ˊ",
+	"\r\n", " ",
+	"\n", " ",
+	"\r", " ",
+)
 
 // AdminClaimModal renders the modal shown when a user runs
 // `/qurl admin claim`. The bootstrap code is collected via a regular

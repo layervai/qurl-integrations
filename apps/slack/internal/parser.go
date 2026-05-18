@@ -443,6 +443,19 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 // both slots are filled, any further positional surfaces as
 // [ErrUnexpectedArgument] too — `admin allow <#C1|a> $alias junk`
 // is a typo, not a missing-sigil error.
+//
+// Three guards work in tandem:
+//   - The top-of-loop "both slots full" check catches the third+
+//     token case (`allow <#C1|a> $alias <#C2|b>` — third token).
+//   - The per-slot "duplicate <kind>" branches catch the second-
+//     token case where only one slot is filled and the new token
+//     would overfill that same slot (`allow <#C1|a> <#C2|b>` —
+//     second token, ChannelID set, Alias empty).
+//   - The bottom-of-loop "missing-sigil" branch catches a token
+//     that's neither a channel ref nor a `$`-prefixed alias.
+//
+// Each guard exists because the others don't cover its case — the
+// branches look overlapping but are non-overlapping in practice.
 func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 	for _, tok := range rest {
 		if cmd.ChannelID != "" && cmd.Alias != "" {
@@ -454,6 +467,10 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 		}
 		if id, ok := matchChannel(tok); ok {
 			if cmd.ChannelID != "" {
+				// Duplicate-channel before both slots are full —
+				// the top-of-loop guard hasn't fired yet (Alias is
+				// still empty). Without this branch the second
+				// channel would silently overwrite the first.
 				return nil, fmt.Errorf("%w: duplicate #channel %q", ErrUnexpectedArgument, tok)
 			}
 			cmd.ChannelID = id
@@ -465,6 +482,8 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 				return nil, err
 			}
 			if cmd.Alias != "" {
+				// Duplicate-alias before both slots are full — same
+				// rationale as the duplicate-channel branch above.
 				return nil, fmt.Errorf("%w: duplicate $alias %q", ErrUnexpectedArgument, tok)
 			}
 			cmd.Alias = alias
@@ -543,13 +562,15 @@ func matchChannel(tok string) (string, bool) {
 // flag rather than a stray positional. We can't just check for `:`
 // because a fat-fingered URL (`get $alias https://example.com:8080`)
 // would otherwise route to applyFlag and surface as the confusing
-// `unknown flag: "https"`. The flag-key half is documented in
-// [flagPattern] as starting with `[a-z]` and matching `[a-z0-9_]*`
-// before the `:`; treat anything else as a positional so the user
-// sees `unexpected argument` — which is what they actually got wrong.
+// `unknown flag: "https"`. The flag-key half is matched against
+// [flagPattern]'s `[a-z][a-z0-9_]*` shape here too — the two checks
+// stay in lockstep so a key shape that survives `looksLikeFlag`
+// always survives `applyFlag`'s regex match (after key-half
+// lowercasing in applyFlag) and vice versa.
 //
-// Also bails out for `http://` / `https://` specifically: those would
-// match the lowercase-key shape (key = "http"/"https") but are
+// Also bails out for `http://` / `https://` specifically (matched
+// case-insensitively so a `HTTPS://x:8080` clipboard paste routes
+// the same way): those would match the lowercase-key shape but are
 // overwhelmingly a typo-class URL paste, not a real flag attempt.
 //
 // Coverage is intentionally http(s) only. Other URI schemes
@@ -559,7 +580,12 @@ func matchChannel(tok string) (string, bool) {
 // practice (see qurl-service's URL validator). PR-3c.3+ should
 // revisit if the validator there ever accepts non-HTTP schemes.
 func looksLikeFlag(tok string) bool {
-	if strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://") {
+	// Case-insensitive http(s):// match — clipboard pastes sometimes
+	// uppercase the scheme. `strings.HasPrefix` on a `ToLower` copy
+	// keeps this readable; the scheme prefix is at most 8 chars so
+	// the allocation is negligible.
+	lower := strings.ToLower(tok)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
 		return false
 	}
 	colonIdx := strings.IndexByte(tok, ':')
@@ -567,6 +593,13 @@ func looksLikeFlag(tok string) bool {
 		return false
 	}
 	key := tok[:colonIdx]
+	// Match flagPattern's `[a-z][a-z0-9_]*` exactly. applyFlag
+	// case-folds the key half before regex-matching, so callers can
+	// type `DM:true` and have it work — but `looksLikeFlag` is the
+	// gate BEFORE that case-fold runs, so we accept ASCII upper too
+	// and let applyFlag's lowercasing produce the canonical key.
+	// (Stays in sync with flagPattern by allowing the same charset
+	// plus the case-insensitive variant.)
 	if (key[0] < 'a' || key[0] > 'z') && (key[0] < 'A' || key[0] > 'Z') {
 		return false
 	}

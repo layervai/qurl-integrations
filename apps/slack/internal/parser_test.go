@@ -51,6 +51,11 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "setalias with unbalanced opening quote tolerated", text: `setalias $prod-db "https://x.example`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: `"https://x.example`, wantFlags: map[string]string{}},
 		{name: "uppercase flag key normalized", text: "get $prod-db DM:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
+		// Admin verb is lowercased before the AdminAction switch. Pinned
+		// so a future refactor that drops `strings.ToLower(verb)` can't
+		// silently regress mobile-client / auto-capitalize inputs.
+		{name: "uppercase admin verb normalized", text: "admin CLAIM", wantSub: SubcmdAdmin, wantAdmin: AdminClaim, wantFlags: map[string]string{}},
+		{name: "mixed-case admin verb normalized", text: "admin Policies", wantSub: SubcmdAdmin, wantAdmin: AdminPolicies, wantFlags: map[string]string{}},
 		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
 		{name: "single-digit alias accepted", text: "get $1", wantSub: SubcmdGet, wantAlias: "1", wantFlags: map[string]string{}},
 		// Internal `--` runs are intentionally accepted — qurl-service
@@ -171,6 +176,12 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// `unknown flag: "https"` applyFlag would otherwise produce.
 		{name: "get with URL-shaped trailing positional rejected", text: "get $prod-db https://x.example:8080", wantErr: ErrUnexpectedArgument},
 		{name: "get with http URL-shaped trailing positional rejected", text: "get $prod-db http://x.example:8080", wantErr: ErrUnexpectedArgument},
+		// Case-insensitive scheme match: `HTTPS://` paste from a
+		// clipboard that uppercased the scheme should still route
+		// through the URL-typo carve-out (ErrUnexpectedArgument)
+		// rather than applyFlag's misleading `unknown flag: "HTTPS"`.
+		{name: "get with HTTPS-uppercase URL-shaped trailing positional rejected", text: "get $prod-db HTTPS://x.example:8080", wantErr: ErrUnexpectedArgument},
+		{name: "get with HTTP-uppercase URL-shaped trailing positional rejected", text: "get $prod-db HTTP://x.example:8080", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
