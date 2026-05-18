@@ -47,7 +47,7 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 }
 
 func newStore(f *fakeDDB) *Store {
-	return &Store{Client: f, TableName: testTable}
+	return &Store{client: f, tableName: testTable}
 }
 
 func ccf() error {
@@ -182,10 +182,50 @@ func TestUnbindChannelAlias_NonCCFErrorBubbles(t *testing.T) {
 	}
 }
 
-func TestNew_ReturnsErrorWhenEnvVarUnset(t *testing.T) {
-	t.Setenv(EnvChannelPoliciesTable, "")
-	_, err := New(context.Background())
-	if err == nil || !strings.Contains(err.Error(), EnvChannelPoliciesTable) {
-		t.Fatalf("want error naming %s, got %v", EnvChannelPoliciesTable, err)
+// TestBindChannelAlias_TwoAliasesSameChannelCoexist pins the
+// multi-alias promise from the schema-decision recap: a second alias
+// name on the same channel succeeds against the same row, without
+// disturbing the first binding. The fence is on the call sequence
+// (two Binds → four UpdateItems total, all targeting the same key)
+// rather than on observable DDB state, since the fake is stateless;
+// see `handler_alias_test.go::TestSetChannelAlias_SecondAliasOnSameChannelSucceeds`
+// for the end-to-end stateful counterpart.
+func TestBindChannelAlias_TwoAliasesSameChannelCoexist(t *testing.T) {
+	f := &fakeDDB{}
+	s := newStore(f)
+
+	if err := s.BindChannelAlias(context.Background(), testTeamID, testChannelID, "grafana", "r_abc"); err != nil {
+		t.Fatalf("first BindChannelAlias: %v", err)
+	}
+	if err := s.BindChannelAlias(context.Background(), testTeamID, testChannelID, "logs", "r_def"); err != nil {
+		t.Fatalf("second BindChannelAlias: %v", err)
+	}
+	if len(f.calls) != 4 {
+		t.Fatalf("expected 4 UpdateItem calls (seed+write × 2), got %d", len(f.calls))
+	}
+	// All four calls share the same (team, channel) key — confirms
+	// both Binds target the same DDB row rather than splitting.
+	for i, in := range f.calls {
+		teamAttr, ok := in.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
+		if !ok || teamAttr.Value != testTeamID {
+			t.Errorf("call %d: team key = %#v, want S(%q)", i, in.Key[attrSlackTeamID], testTeamID)
+		}
+		chanAttr, ok := in.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS)
+		if !ok || chanAttr.Value != testChannelID {
+			t.Errorf("call %d: channel key = %#v, want S(%q)", i, in.Key[attrSlackChannelID], testChannelID)
+		}
+	}
+	// Confirm the two writes targeted different alias names.
+	w1 := f.calls[1].ExpressionAttributeNames["#a"]
+	w2 := f.calls[3].ExpressionAttributeNames["#a"]
+	if w1 != "grafana" || w2 != "logs" {
+		t.Errorf("write #a substitutions = (%q, %q), want (grafana, logs)", w1, w2)
+	}
+}
+
+func TestNew_RejectsEmptyTableName(t *testing.T) {
+	_, err := New(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "tableName is required") {
+		t.Fatalf("want tableName-required error, got %v", err)
 	}
 }

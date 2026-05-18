@@ -14,13 +14,12 @@
 // the migration is mechanical (move two methods + delete package +
 // update one import).
 //
-// Schema (decided 2026-05-17, recorded in SLACK_QURL_ROLLOUT.md):
-// the row is keyed on (slack_team_id, slack_channel_id); aliases live
-// as an app-managed Map attribute `alias_bindings` with alias name as
-// key and resource id as value. Many aliases coexist on one channel
-// (each is a Map entry). Coexists with the legacy
-// `allowed_resource_ids` String Set used by /qurl admin allow/disallow
-// (orthogonal surface, untouched here).
+// Schema: the row is keyed on (slack_team_id, slack_channel_id);
+// aliases live as an app-managed Map attribute `alias_bindings`
+// with alias name as key and resource id as value. Many aliases
+// coexist on one channel (each is a Map entry). Coexists with the
+// legacy `allowed_resource_ids` String Set used by /qurl admin
+// allow/disallow (orthogonal surface, untouched here).
 //
 // Why two UpdateItem calls per Bind: DynamoDB rejects an
 // UpdateExpression that references both a Map and a sub-path of that
@@ -30,14 +29,37 @@
 // real, race-sensitive write — `SET alias_bindings.#a = :rid`
 // conditional on `attribute_not_exists(alias_bindings.#a)`. Concurrent
 // binds of different alias names succeed; concurrent binds of the same
-// alias name collapse to one success + one ErrAliasAlreadyBound.
+// alias name collapse to one success + one ErrAliasAlreadyBound. The
+// seed call is the steady-state cost (one extra round-trip per Bind),
+// not a one-time setup — the alternatives (try-write-first or a
+// GetItem cache) trade clean CCF semantics or write-races for the
+// extra call, neither worth it for an admin-volume verb.
+//
+// Partial-failure footprint: if the seed succeeds but the write fails
+// with a non-CCF error (throttling, network), the empty
+// `alias_bindings` map is left on the row. Harmless — the next Bind
+// observes it as already-seeded and the seed becomes a no-op. Within
+// a single Bind, readers see no partial state; across attempts, an
+// empty Map can briefly persist.
+//
+// Retry semantics: if a Bind write succeeds but the response is lost
+// (network drop), the caller's retry surfaces as ErrAliasAlreadyBound
+// (→ 409 user copy). That's the correct posture for admin verbs —
+// "you already did this, don't worry about the duplicate" — and the
+// idempotency cost is zero because the Map entry is set to the same
+// resource_id.
+//
+// Alias-name validation is the caller's responsibility — this
+// package writes whatever string it receives as a DDB Map key.
+// `handler_alias.go::aliasCharsetPattern` is the upstream chokepoint
+// for /qurl setalias; a future direct caller (CLI, migration script)
+// MUST pre-validate before calling BindChannelAlias.
 package aliasstore
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -76,28 +98,28 @@ type DynamoDBClient interface {
 }
 
 // Store is the DDB-backed AliasStore. Zero value is not usable; use
-// New. Field exported so the slackdata fold can copy it verbatim.
+// New.
 type Store struct {
-	Client    DynamoDBClient
-	TableName string
+	client    DynamoDBClient
+	tableName string
 }
 
-// New constructs a Store from the ambient AWS config and the
-// QURL_CHANNEL_POLICIES_TABLE env var. Returns a configuration error
-// when the env var is unset — callers should treat that as "alias
-// verbs disabled" and continue, not fatal startup.
-func New(ctx context.Context) (*Store, error) {
-	table := os.Getenv(EnvChannelPoliciesTable)
-	if table == "" {
-		return nil, fmt.Errorf("%s is unset", EnvChannelPoliciesTable)
+// New constructs a Store against the named DDB table from the
+// ambient AWS config. Caller owns the env-var read — keeping it in
+// cmd/main.go next to its sibling wirings (OAuth, DDB provider) means
+// this package stays decoupled from the deployment shape, and the
+// slackdata fold doesn't need a config seam.
+func New(ctx context.Context, tableName string) (*Store, error) {
+	if tableName == "" {
+		return nil, errors.New("aliasstore: tableName is required")
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("aws config: %w", err)
 	}
 	return &Store{
-		Client:    dynamodb.NewFromConfig(cfg),
-		TableName: table,
+		client:    dynamodb.NewFromConfig(cfg),
+		tableName: tableName,
 	}, nil
 }
 
@@ -117,8 +139,8 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 		return fmt.Errorf("ensure alias_bindings map: %w", err)
 	}
 
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.TableName),
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    &ddbtypes.AttributeValueMemberS{Value: teamID},
 			attrSlackChannelID: &ddbtypes.AttributeValueMemberS{Value: channelID},
@@ -149,8 +171,8 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 // to the same ConditionalCheckFailedException via the
 // `attribute_exists(alias_bindings.#a)` guard.
 func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error {
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.TableName),
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    &ddbtypes.AttributeValueMemberS{Value: teamID},
 			attrSlackChannelID: &ddbtypes.AttributeValueMemberS{Value: channelID},
@@ -182,8 +204,8 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 // reader (readers see either no row, the empty Map, or the Map with
 // the alias).
 func (s *Store) ensureAliasBindingsMap(ctx context.Context, teamID, channelID string) error {
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.TableName),
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    &ddbtypes.AttributeValueMemberS{Value: teamID},
 			attrSlackChannelID: &ddbtypes.AttributeValueMemberS{Value: channelID},

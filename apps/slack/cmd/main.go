@@ -182,9 +182,9 @@ func run() error {
 	// aliasPreamble guard, which is more debuggable than a startup
 	// crash on a sandbox without the DDB tables provisioned.
 	if table := os.Getenv(aliasstore.EnvChannelPoliciesTable); table != "" {
-		store, aerr := aliasstore.New(signalCtx)
-		if aerr != nil {
-			slog.Warn("aliasstore init failed; /qurl setalias and /qurl unsetalias will be disabled", "error", aerr)
+		store, err := aliasstore.New(signalCtx, table)
+		if err != nil {
+			slog.Warn("aliasstore init failed; /qurl setalias and /qurl unsetalias will be disabled", "error", err)
 		} else {
 			handler.SetAliasStore(store)
 			// Table name omitted from the log line on purpose: the
