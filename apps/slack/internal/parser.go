@@ -170,13 +170,16 @@ var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
 // here. Quoted values let users put spaces in `reason:"…"`.
 var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
 
-// Alias-name shape rules (`aliasCharsetPattern`) and the friendlier
-// "leading/trailing hyphen rejected here, internal `--` deferred to
-// qurl-service" rationale live in [apps/slack/internal/handler_alias.go]
-// alongside the other alias verbs added by PR #347 — this parser
-// reuses that same package-level regex so the contract stays in one
-// place. (The two were duplicates pre-merge; the dedup lives here.)
-// See [aliasCharsetPattern] in handler_alias.go for the full doc.
+// The shared alias contract — `aliasCharsetPattern` (regex) and
+// `aliasMaxLen` (length cap) — lives in
+// [apps/slack/internal/handler_alias.go] alongside the other alias
+// verbs added by PR #347. This parser reuses both halves so the
+// `setalias` HTTP path and the slash-command grammar reject the
+// same alias shapes with the same wording. (Pre-merge the regex
+// was duplicated in both files; the dedup lives here.) See
+// [aliasCharsetPattern] / [aliasMaxLen] in handler_alias.go for the
+// full doc on internal-`--` deference to qurl-service and the nhp
+// #1825 GSI-key sizing.
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -496,9 +499,19 @@ func parseCreate(cmd *Command, rest []string) (*Command, error) {
 }
 
 // parseAliasToken enforces the `$` sigil, strips it, and validates the
-// remaining alias against [aliasCharsetPattern]. Empty after the
-// sigil (`$`) is treated as an empty-resource error; out-of-charset
-// runs as an invalid-alias error.
+// remaining alias against the shared alias contract — both halves of
+// it: the [aliasMaxLen] length cap and the [aliasCharsetPattern]
+// regex declared in handler_alias.go. Empty after the sigil (`$`)
+// is treated as an empty-resource error; over-cap as an invalid-alias
+// error with a length-specific message; out-of-charset as an
+// invalid-alias error with a charset-specific message.
+//
+// Order matters: length is checked before the regex because a
+// 200-char alias matches the charset but blows the upstream GSI key
+// length. Surfacing it as "too long" gives the user a friendlier
+// error than the generic regex rejection — and matches the wording
+// pattern handler_alias.go uses for its `setalias` path so the two
+// entry points produce parallel copy.
 func parseAliasToken(tok string) (string, error) {
 	if !strings.HasPrefix(tok, "$") {
 		return "", fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
@@ -506,6 +519,9 @@ func parseAliasToken(tok string) (string, error) {
 	alias := strings.TrimPrefix(tok, "$")
 	if alias == "" {
 		return "", ErrEmptyResource
+	}
+	if len(alias) > aliasMaxLen {
+		return "", fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, alias, aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
 		return "", fmt.Errorf("%w: %q (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, alias)

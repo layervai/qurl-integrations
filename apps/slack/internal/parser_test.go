@@ -132,6 +132,11 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "alias with trailing hyphen rejected", text: "get $prod-", wantErr: ErrInvalidAlias},
 		{name: "alias single hyphen rejected", text: "get $-", wantErr: ErrInvalidAlias},
 		{name: "alias with double trailing hyphens rejected", text: "get $foo--", wantErr: ErrInvalidAlias},
+		// Length cap: parseAliasToken mirrors handler_alias.go's
+		// aliasMaxLen=64. A 65-char alias rejects with a length-specific
+		// message (substring-checked below); the 64-char boundary is
+		// covered by the happy-path TestParse_AliasLengthBoundary.
+		{name: "alias over 64 chars rejected", text: "get $" + strings.Repeat("a", 65), wantErr: ErrInvalidAlias},
 		// Strict-posture: once channel + alias slots are both taken,
 		// any further positional is an ErrUnexpectedArgument (matches
 		// the posture parseAdmin takes for verbs like `admin policies`).
@@ -226,6 +231,38 @@ func TestParse_GetFlagErrors(t *testing.T) {
 				t.Errorf("Parse(%q) error = %q, want substring %q", tc.text, err.Error(), tc.wantSubstr)
 			}
 		})
+	}
+}
+
+// TestParse_AliasLengthBoundary pins the off-by-one boundary on the
+// shared 64-char alias cap. 64 chars must accept (qurl-service's
+// nhp #1825 GSI key is exactly 64); 65 must reject with the
+// length-specific message so the user sees "$… is longer than 64
+// characters" rather than the generic invalid-alias message — that
+// wording mirrors handler_alias.go's `setalias` path so the two
+// entry points produce parallel copy.
+func TestParse_AliasLengthBoundary(t *testing.T) {
+	t.Parallel()
+	at64 := strings.Repeat("a", 64)
+	at65 := strings.Repeat("a", 65)
+
+	cmd, err := Parse("get $" + at64)
+	if err != nil {
+		t.Fatalf("Parse(get $<64 chars>): unexpected error %v", err)
+	}
+	if cmd.Alias != at64 {
+		t.Errorf("Alias = %q (len=%d), want %q (len=64)", cmd.Alias, len(cmd.Alias), at64)
+	}
+
+	_, err = Parse("get $" + at65)
+	if err == nil {
+		t.Fatal("Parse(get $<65 chars>) returned nil error, want ErrInvalidAlias")
+	}
+	if !errors.Is(err, ErrInvalidAlias) {
+		t.Errorf("Parse(get $<65 chars>) error = %v, want errors.Is(_, ErrInvalidAlias)", err)
+	}
+	if !strings.Contains(err.Error(), "longer than 64 characters") {
+		t.Errorf("Parse(get $<65 chars>) error = %q, want substring %q", err.Error(), "longer than 64 characters")
 	}
 }
 
