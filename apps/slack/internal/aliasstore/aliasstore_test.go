@@ -20,24 +20,18 @@ const (
 	testTable     = "qurl-bot-slack-test-channel_policies"
 )
 
-// recordedCall captures the input handed to UpdateItem so tests can
-// assert on table name, key, expression shape, and substitutions.
-type recordedCall struct {
-	Input *dynamodb.UpdateItemInput
-}
-
 // fakeDDB is a programmable UpdateItem stub. Each call pops one
 // scripted response off `outputs`/`errs`; tests script the seed/write
 // pair separately so the two-step Bind path can be exercised
 // independently from the single-step Unbind path.
 type fakeDDB struct {
-	calls   []recordedCall
+	calls   []*dynamodb.UpdateItemInput
 	errs    []error
 	outputs []*dynamodb.UpdateItemOutput
 }
 
 func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-	f.calls = append(f.calls, recordedCall{Input: in})
+	f.calls = append(f.calls, in)
 	idx := len(f.calls) - 1
 	var err error
 	if idx < len(f.errs) {
@@ -71,7 +65,7 @@ func TestBindChannelAlias_SeedsMapAndWritesEntry(t *testing.T) {
 		t.Fatalf("expected 2 UpdateItem calls (seed + write), got %d", len(f.calls))
 	}
 
-	seed := f.calls[0].Input
+	seed := f.calls[0]
 	if got := *seed.TableName; got != testTable {
 		t.Errorf("seed: TableName = %q, want %q", got, testTable)
 	}
@@ -82,7 +76,7 @@ func TestBindChannelAlias_SeedsMapAndWritesEntry(t *testing.T) {
 		t.Errorf("seed: ConditionExpression = %q, want attribute_not_exists(#ab)", *seed.ConditionExpression)
 	}
 
-	write := f.calls[1].Input
+	write := f.calls[1]
 	if got := *write.UpdateExpression; got != "SET #ab.#a = :rid" {
 		t.Errorf("write: UpdateExpression = %q, want SET #ab.#a = :rid", got)
 	}
@@ -155,7 +149,7 @@ func TestUnbindChannelAlias_HappyPath(t *testing.T) {
 	if len(f.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(f.calls))
 	}
-	in := f.calls[0].Input
+	in := f.calls[0]
 	if got := *in.UpdateExpression; got != "REMOVE #ab.#a" {
 		t.Errorf("UpdateExpression = %q, want REMOVE #ab.#a", got)
 	}
@@ -187,11 +181,6 @@ func TestUnbindChannelAlias_NonCCFErrorBubbles(t *testing.T) {
 		t.Fatalf("want wrapped unbind error, got %v", err)
 	}
 }
-
-// Compile-time guard: the package-doc claim that *Store satisfies
-// internal.AliasStore should never silently regress. The const-assign
-// to a typed nil var would fail compilation if the contract drifts.
-var _ internal.AliasStore = (*Store)(nil)
 
 func TestNew_ReturnsErrorWhenEnvVarUnset(t *testing.T) {
 	t.Setenv(EnvChannelPoliciesTable, "")

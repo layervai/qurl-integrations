@@ -196,7 +196,7 @@ func run() error {
 			slog.Info("aliasstore wired")
 		}
 	} else {
-		slog.Info("aliasstore disabled — " + aliasstore.EnvChannelPoliciesTable + " is unset")
+		slog.Info("aliasstore disabled", "env_var", aliasstore.EnvChannelPoliciesTable, "reason", "unset")
 	}
 
 	// Compose the top-level mux: existing Slack-bot routes (handled
