@@ -122,6 +122,14 @@ var ErrUnknownSubcommand = errors.New("unknown subcommand")
 // not in the recognized [AdminAction] set.
 var ErrUnknownAdminAction = errors.New("unknown admin action")
 
+// ErrMissingAdminAction is returned when bare `admin` is invoked with
+// no verb at all. Separate from [ErrUnknownAdminAction] so an
+// `errors.Is` caller can distinguish "user forgot to type a verb"
+// from "user typed something we don't recognize" — the right
+// user-facing message differs ("which admin command?" vs "frobnicate
+// isn't a thing, try `admin policies` / `admin status` / …").
+var ErrMissingAdminAction = errors.New("missing admin action")
+
 // ErrMissingChannel is returned when `admin allow` / `admin disallow` are
 // invoked without a `<#C…|…>` channel reference.
 var ErrMissingChannel = errors.New("missing #channel argument")
@@ -141,10 +149,27 @@ var ErrInvalidAlias = errors.New("invalid alias")
 // Catches user-facing typos earlier than the handler dispatch.
 var ErrUnexpectedArgument = errors.New("unexpected argument")
 
+// ErrInvalidFlag is the sentinel wrapped by every [applyFlag] error
+// path (unknown key, missing-key-before-colon, empty value,
+// expected-key:value). Tests in [TestParse_GetFlagErrors] match on
+// this sentinel via `errors.Is` rather than on the formatted
+// message substring, so the user-visible copy can evolve without
+// churning the test surface.
+var ErrInvalidFlag = errors.New("invalid flag")
+
 // channelRefPattern matches Slack's encoded channel-mention form
 // `<#C12345|channel-name>`. The trailing `|name` is optional (Slack's UI
 // always includes it but the wire shape allows omission).
 var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
+
+// flagKeyCharset is the shared key-shape contract for flag-style
+// tokens. Used by both [flagPattern] (full key:value parse) and
+// [looksLikeFlag] (pre-applyFlag gate, case-insensitive on the input
+// because the case-fold happens later in applyFlag). Keeping the two
+// in lockstep prevents a future change to the key charset from
+// landing in only one place and silently drifting the two checks
+// apart.
+const flagKeyCharset = `[a-z][a-z0-9_]*`
 
 // flagPattern matches `key:value` and `key:"quoted value"` shapes.
 //
@@ -152,25 +177,27 @@ var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
 // slash-command form-encoding has already done one round of decoding by
 // the time we see the body, so we don't try to handle further escapes
 // here. Quoted values let users put spaces in `reason:"…"`.
-var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
+var flagPattern = regexp.MustCompile(`^(` + flagKeyCharset + `):(?:"([^"]*)"|(\S+))$`)
 
-// aliasCharsetPattern is the alias-name shape qurl-service accepts:
-// lowercase alphanumeric with hyphens, no leading or trailing hyphen.
-// Surfacing the rejection here gives a friendlier slash-command error
-// than punting an obviously-bogus alias all the way to the API.
-//
-// The pattern is anchored both ends and uses a non-capturing group
-// to require a trailing alnum: `[a-z0-9]` (start) then optionally
-// `[a-z0-9-]*[a-z0-9]` (middle plus required trailing alnum). A
-// single-character alias (`$a`, `$1`) is allowed by the optional
-// non-capturing group.
-//
-// Internal `--` runs (e.g. `foo--bar`) are intentionally permitted —
-// qurl-service's own alias validator is the authoritative gate and
-// accepts them. The parser only enforces the leading/trailing rule
-// because that's what surfaces with a friendlier error than punting
-// to the service.
-var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+// flagKeyShape is the key-only counterpart to [flagPattern], used by
+// [looksLikeFlag] to gate on key shape BEFORE applyFlag's case-fold
+// runs. Case-insensitive on the input via the `(?i)` flag so callers
+// can type `DM:true` on a mobile client and have applyFlag's
+// post-fold regex match accept it. Stays anchored to
+// [flagKeyCharset] so any future expansion of the key charset
+// (e.g., adding `-`) lands in one source.
+var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
+
+// The shared alias contract — `aliasCharsetPattern` (regex) and
+// `aliasMaxLen` (length cap) — lives in
+// [apps/slack/internal/handler_alias.go] alongside the other alias
+// verbs added by PR #347. This parser reuses both halves so the
+// `setalias` HTTP path and the slash-command grammar reject the
+// same alias shapes with the same wording. (Pre-merge the regex
+// was duplicated in both files; the dedup lives here.) See
+// [aliasCharsetPattern] / [aliasMaxLen] in handler_alias.go for the
+// full doc on internal-`--` deference to qurl-service and the nhp
+// #1825 GSI-key sizing.
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -316,7 +343,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := requireAlias(rest[0])
+	alias, err := parseAliasToken(rest[0])
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +355,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// applyFlag would otherwise report "invalid flag: \"junk\"
 		// (expected key:value)" — accurate to applyFlag but confusing
 		// to a user who didn't intend to type a flag at all.
-		if !strings.ContainsRune(tok, ':') {
+		if !looksLikeFlag(tok) {
 			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
 		}
 		if err := applyFlag(cmd, tok); err != nil {
@@ -350,7 +377,7 @@ func parseSetAlias(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := requireAlias(rest[0])
+	alias, err := parseAliasToken(rest[0])
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +398,7 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := requireAlias(rest[0])
+	alias, err := parseAliasToken(rest[0])
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +415,7 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 // `admin policies extra` early instead of silently routing it.
 func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
-		return nil, fmt.Errorf("%w: admin requires a verb", ErrUnknownAdminAction)
+		return nil, ErrMissingAdminAction
 	}
 	verb := rest[0]
 	action := AdminAction(strings.ToLower(verb))
@@ -412,7 +439,7 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 		if len(tail) == 0 {
 			return nil, ErrEmptyResource
 		}
-		alias, err := requireAlias(tail[0])
+		alias, err := parseAliasToken(tail[0])
 		if err != nil {
 			return nil, err
 		}
@@ -434,6 +461,19 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 // both slots are filled, any further positional surfaces as
 // [ErrUnexpectedArgument] too — `admin allow <#C1|a> $alias junk`
 // is a typo, not a missing-sigil error.
+//
+// Three guards work in tandem:
+//   - The top-of-loop "both slots full" check catches the third+
+//     token case (`allow <#C1|a> $alias <#C2|b>` — third token).
+//   - The per-slot "duplicate <kind>" branches catch the second-
+//     token case where only one slot is filled and the new token
+//     would overfill that same slot (`allow <#C1|a> <#C2|b>` —
+//     second token, ChannelID set, Alias empty).
+//   - The bottom-of-loop "missing-sigil" branch catches a token
+//     that's neither a channel ref nor a `$`-prefixed alias.
+//
+// Each guard exists because the others don't cover its case — the
+// branches look overlapping but are non-overlapping in practice.
 func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 	for _, tok := range rest {
 		if cmd.ChannelID != "" && cmd.Alias != "" {
@@ -445,17 +485,23 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 		}
 		if id, ok := matchChannel(tok); ok {
 			if cmd.ChannelID != "" {
+				// Duplicate-channel before both slots are full —
+				// the top-of-loop guard hasn't fired yet (Alias is
+				// still empty). Without this branch the second
+				// channel would silently overwrite the first.
 				return nil, fmt.Errorf("%w: duplicate #channel %q", ErrUnexpectedArgument, tok)
 			}
 			cmd.ChannelID = id
 			continue
 		}
 		if strings.HasPrefix(tok, "$") {
-			alias, err := requireAlias(tok)
+			alias, err := parseAliasToken(tok)
 			if err != nil {
 				return nil, err
 			}
 			if cmd.Alias != "" {
+				// Duplicate-alias before both slots are full — same
+				// rationale as the duplicate-channel branch above.
 				return nil, fmt.Errorf("%w: duplicate $alias %q", ErrUnexpectedArgument, tok)
 			}
 			cmd.Alias = alias
@@ -489,17 +535,30 @@ func parseCreate(cmd *Command, rest []string) (*Command, error) {
 	return cmd, nil
 }
 
-// requireAlias enforces the `$` sigil, strips it, and validates the
-// remaining alias against [aliasCharsetPattern]. Empty after the
-// sigil (`$`) is treated as an empty-resource error; out-of-charset
-// runs as an invalid-alias error.
-func requireAlias(tok string) (string, error) {
+// parseAliasToken enforces the `$` sigil, strips it, and validates the
+// remaining alias against the shared alias contract — both halves of
+// it: the [aliasMaxLen] length cap and the [aliasCharsetPattern]
+// regex declared in handler_alias.go. Empty after the sigil (`$`)
+// is treated as an empty-resource error; over-cap as an invalid-alias
+// error with a length-specific message; out-of-charset as an
+// invalid-alias error with a charset-specific message.
+//
+// Order matters: length is checked before the regex because a
+// 200-char alias matches the charset but blows the upstream GSI key
+// length. Surfacing it as "too long" gives the user a friendlier
+// error than the generic regex rejection — and matches the wording
+// pattern handler_alias.go uses for its `setalias` path so the two
+// entry points produce parallel copy.
+func parseAliasToken(tok string) (string, error) {
 	if !strings.HasPrefix(tok, "$") {
 		return "", fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
 	}
 	alias := strings.TrimPrefix(tok, "$")
 	if alias == "" {
 		return "", ErrEmptyResource
+	}
+	if len(alias) > aliasMaxLen {
+		return "", fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, alias, aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
 		return "", fmt.Errorf("%w: %q (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, alias)
@@ -517,6 +576,63 @@ func matchChannel(tok string) (string, bool) {
 	return m[1], true
 }
 
+// looksLikeFlag reports whether `tok` is shaped like a `key:value`
+// flag rather than a stray positional. We can't just check for `:`
+// because a fat-fingered URL (`get $alias https://example.com:8080`)
+// would otherwise route to applyFlag and surface as the confusing
+// `unknown flag: "https"`. The flag-key half is matched against
+// [flagPattern]'s `[a-z][a-z0-9_]*` shape here too — the two checks
+// stay in lockstep so a key shape that survives `looksLikeFlag`
+// always survives `applyFlag`'s regex match (after key-half
+// lowercasing in applyFlag) and vice versa.
+//
+// Also bails out for `http://` / `https://` specifically (matched
+// case-insensitively so a `HTTPS://x:8080` clipboard paste routes
+// the same way): those would match the lowercase-key shape but are
+// overwhelmingly a typo-class URL paste, not a real flag attempt.
+//
+// Coverage is intentionally http(s) only. Other URI schemes
+// (`ssh://`, `s3://`, `git://`, `mailto:`) would still surface
+// `unknown flag: "<scheme>"` via applyFlag — that's acceptable
+// because DDB-bound resources in this codebase are HTTP/HTTPS in
+// practice (see qurl-service's URL validator). PR-3c.3+ should
+// revisit if the validator there ever accepts non-HTTP schemes.
+func looksLikeFlag(tok string) bool {
+	// Case-insensitive http(s):// match — clipboard pastes sometimes
+	// uppercase the scheme. `strings.EqualFold` on a length-bounded
+	// prefix avoids allocating a full-token lowercase copy (a 2KB URL
+	// token would otherwise allocate 2KB just to compare 7-8 bytes).
+	if hasASCIIPrefixFold(tok, "https://") || hasASCIIPrefixFold(tok, "http://") {
+		return false
+	}
+	// Empty `tok` is handled by accident here: strings.IndexByte("",
+	// ':') returns -1, which fails the `colonIdx <= 0` guard. Pinned
+	// in TestLooksLikeFlag_EmptyString below so a refactor can't
+	// silently regress that path.
+	colonIdx := strings.IndexByte(tok, ':')
+	if colonIdx <= 0 {
+		return false
+	}
+	// Single source of truth for key shape: [flagKeyShape] is the
+	// case-insensitive form of [flagKeyCharset], the same charset
+	// [flagPattern] uses post-case-fold. The two stay in lockstep so
+	// a future change to the key charset lands in one place rather
+	// than drifting between this gate and applyFlag's regex match.
+	return flagKeyShape.MatchString(tok[:colonIdx])
+}
+
+// hasASCIIPrefixFold reports whether `s` starts with `prefix` under
+// ASCII case-fold, without allocating. `strings.EqualFold` on
+// `s[:len(prefix)]` would index out-of-bounds when `s` is shorter
+// than `prefix`; this helper handles the short-string case
+// explicitly. Used by [looksLikeFlag] for the http(s):// carve-out.
+func hasASCIIPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(s[:len(prefix)], prefix)
+}
+
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
 // the recognized keys (`dm`, `reason`) survive — unknown keys are an
 // error so a typo doesn't silently no-op. The key half is
@@ -526,13 +642,23 @@ func matchChannel(tok string) (string, bool) {
 // empty value (either `key:` or `key:""`) is rejected — the handler
 // in PR-3c.3+ should be able to distinguish "flag unset" from "flag
 // set to empty" by absence in [Command.Flags] alone.
+//
+// Per-key validation is strict-posture: `dm` accepts only the
+// boolean strings `true` / `false` (case-folded), so a user typing
+// `dm:yes` or `dm:1` sees a friendly error rather than the
+// silent-falsey behavior the unvalidated form would have produced
+// ([Command.DM] case-equals against "true", so any non-"true" value
+// silently returns false — exactly the typo class the rest of the
+// parser rejects). `reason` accepts any non-empty prose because the
+// handler in PR-3c.3+ uses it for audit text where the user's exact
+// wording is the point.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
-		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
 	}
 	if colonIdx == 0 {
-		return fmt.Errorf("invalid flag: %q (missing key before colon)", tok)
+		return fmt.Errorf("%w: %q (missing key before colon)", ErrInvalidFlag, tok)
 	}
 	// Lowercase only the key portion so `Reason:"On Call"` keeps
 	// its mixed-case value intact.
@@ -544,11 +670,11 @@ func applyFlag(cmd *Command, tok string) error {
 	// quoted-empty (`reason:""`) both report the same "empty value"
 	// reason.
 	if colonIdx == len(tok)-1 {
-		return fmt.Errorf("invalid flag: %q (empty value — use a non-empty value or omit the flag)", tok)
+		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
 	}
 	m := flagPattern.FindStringSubmatch(normalized)
 	if len(m) == 0 {
-		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
 	}
 	key := m[1]
 	val := m[2]
@@ -556,13 +682,27 @@ func applyFlag(cmd *Command, tok string) error {
 		val = m[3]
 	}
 	if val == "" {
-		return fmt.Errorf("invalid flag: %q (empty value — use a non-empty value or omit the flag)", tok)
+		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
 	}
 	switch key {
-	case "dm", "reason":
+	case "dm":
+		// Strict-posture boolean: only `true` / `false` (case-folded)
+		// accepted. Without this gate, `dm:yes` / `dm:1` / `dm:please`
+		// would parse fine and then silently no-op because
+		// [Command.DM] case-equals against "true". That silent-falsey
+		// behavior is the same UX failure mode the rest of the
+		// parser carefully rejects for typo'd flag keys
+		// (`whatever:true` → ErrInvalidFlag), so we reject typo'd
+		// values too.
+		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
+			return fmt.Errorf("%w: dm:%q (use dm:true or omit the flag)", ErrInvalidFlag, val)
+		}
+		cmd.Flags[key] = val
+		return nil
+	case "reason":
 		cmd.Flags[key] = val
 		return nil
 	default:
-		return fmt.Errorf("unknown flag: %q", key)
+		return fmt.Errorf("%w: unknown flag %q", ErrInvalidFlag, key)
 	}
 }

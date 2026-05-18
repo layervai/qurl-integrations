@@ -162,6 +162,13 @@ type Handler struct {
 	// missing env vars) — /qurl setup returns a "not configured"
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
+	// aliasStore persists per-channel alias bindings for the
+	// `/qurl setalias` / `/qurl unsetalias` verbs. nil when not
+	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
+	// fast with an operator-visible ephemeral rather than silently
+	// dropping the write. See handler_alias.go for the interface
+	// shape and the schema-gap rationale.
+	aliasStore AliasStore
 	// baseCtx is captured at NewHandler time from cfg.BaseContext (or
 	// context.Background()). Each async goroutine derives a
 	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
@@ -192,6 +199,35 @@ type Handler struct {
 	// returned value, which is the SSRF-sanitization pattern CodeQL's
 	// taint analysis recognizes.
 	validateResponseURLFn func(string) (*url.URL, error)
+}
+
+// SetAliasStore wires the per-channel alias persistence surface into
+// the /qurl setalias / /qurl unsetalias verbs. Must be called before
+// `srv.Serve` — the field is read on the request hot path without
+// synchronization, and the only safe write window is before any
+// goroutine can observe it. The panic-on-double-wiring below catches
+// accidental double-`SetAliasStore(realStore)` in init code; it is
+// NOT a synchronization primitive, and calling this from a running
+// handler is undefined regardless of the panic.
+//
+// Calling with nil is a no-op for the field (the verbs will reply
+// with a "not configured" ephemeral) so cmd/main.go can omit the
+// call on sandbox deploys that haven't onboarded the slackdata
+// package yet. Both directions of the nil/non-nil sequence are
+// allowed: a defensive `SetAliasStore(nil)` followed by a real
+// wiring later is fine, and a real wiring followed by a defensive
+// `SetAliasStore(nil)` is also a no-op (the real store stays wired).
+// Calling with a non-nil store after the field is already non-nil
+// panics, so the real store can't be silently swapped under a
+// running handler.
+func (h *Handler) SetAliasStore(store AliasStore) {
+	if store == nil {
+		return
+	}
+	if h.aliasStore != nil {
+		panic("SetAliasStore called twice with a non-nil store — must be wired once before Serve")
+	}
+	h.aliasStore = store
 }
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
@@ -339,6 +375,13 @@ func defaultResponseURLClient() *http.Client {
 	}
 }
 
+// PR-3c.3+ wiring TODO (grep-able marker — `redaction-todo`):
+// when this handler grows a view-submission router (pathSlackInteractions),
+// any logging middleware that serializes `view_submission` payloads MUST
+// consult [IsRedactedSubmissionBlock] before emitting `state.values` —
+// otherwise the bootstrap-code modal leaks its plaintext input to logs.
+// See views.go::IsRedactedSubmissionBlock for the contract and the
+// Blocker #3 background.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks are silent: ALB target-group probes hit this every
 	// 15-30s per task and would otherwise dominate log volume.
@@ -516,6 +559,13 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// the trigger_id rotates after one use. Sync dispatch via
 		// views.open is the only correct shape.
 		h.handleAdminClaim(w, values)
+	case text == "setalias" || strings.HasPrefix(text, "setalias "):
+		// Bare `setalias` falls through too — parseAliasArgs renders
+		// the usage hint, so the user gets the right grammar without
+		// a separate "missing args" branch here.
+		h.handleSetAlias(w, values)
+	case text == "unsetalias" || strings.HasPrefix(text, "unsetalias "):
+		h.handleUnsetAlias(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -623,6 +673,8 @@ func helpMessage() string {
 • ` + "`/qurl get $alias reason:\"…\"`" + ` — Annotate the audit log with a reason
 • ` + "`/qurl aliases`" + ` — List the aliases allowed in this channel
 • ` + "`/qurl admin claim`" + ` — Open the bootstrap-code modal to claim this workspace
+• ` + "`/qurl setalias $<alias> <url-or-resource-id>`" + ` — Bind an alias to this channel (admin only)
+• ` + "`/qurl unsetalias $<alias>`" + ` — Clear this channel's alias (admin only)
 • ` + "`/qurl help`" + ` — Show this help message`
 }
 

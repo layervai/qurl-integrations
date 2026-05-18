@@ -8,13 +8,21 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 )
 
-const testDescription = "updated"
+const (
+	testDescription   = "updated"
+	testAlias         = "dev-dashboard"
+	testAliasAlt      = "prod-grafana"
+	testResourceID    = "r_existing01"
+	testResourceIDAlt = "r_dev_dash01"
+	testTargetURL     = "https://internal.example.com"
+)
 
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
@@ -822,4 +830,1268 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 			t.Errorf("header drift: got %q, want %q", gotKey, want)
 		}
 	})
+}
+
+// TestCreatePathIsPlural pins the canonical /v1/qurls path as a named
+// regression assertion. TestCreate already asserts the path generically
+// at line 57; the value of this test is the explicit name — any future
+// "let me just rename it back" change surfaces by the regression-pin
+// test name, not by an unrelated TestCreate failure. PR #176 fixed the
+// original singular `/v1/qurl` bug in production.
+func TestCreatePathIsPlural(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_path_test",
+			"qurl_link":   "https://qurl.link/path",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if gotPath != "/v1/qurls" {
+		t.Errorf("expected /v1/qurls (plural), got %q", gotPath)
+	}
+}
+
+func TestCreateResourceIDFlow(t *testing.T) {
+	// When ResourceID is set and TargetURL is empty, the wire payload
+	// must contain `resource_id` and must NOT contain `target_url`.
+	// Server-side `mutually_exclusive_fields` rejects bodies that
+	// serialize an empty `target_url` alongside a `resource_id`.
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+			"qurl_link":   "https://qurl.link/at_existing",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{ResourceID: testResourceID}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Decode into a generic map so omitempty behavior is observable.
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v (body=%s)", err, gotBody)
+	}
+	if got := raw["resource_id"]; got != testResourceID {
+		t.Errorf("resource_id: got %v, want %q", got, testResourceID)
+	}
+	if _, hasTargetURL := raw["target_url"]; hasTargetURL {
+		t.Errorf("target_url must be omitted when empty (server-side mutually_exclusive_fields rule); body=%s", gotBody)
+	}
+}
+
+func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {
+	// Mirror of the ResourceID-only test: a TargetURL-only call must
+	// not emit `resource_id` on the wire. Pin the omitempty contract
+	// in both directions so a future `,omitempty` removal trips here.
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_url_only"})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got, ok := raw["target_url"]; !ok || got != "https://example.com" {
+		t.Errorf("target_url should be present and set; got %v", got)
+	}
+	if _, ok := raw["resource_id"]; ok {
+		t.Errorf("resource_id must be omitted when empty; body=%s", gotBody)
+	}
+}
+
+// TestCreateTargetURLAndResourceIDMutuallyExclusive pins the client-side
+// fail-fast for the both-populated case. Mirror of the symmetric guard in
+// UpdateResource for (Alias, ClearAlias). Closes the third leg of the
+// omitempty + exclusivity contract — the two valid shapes are pinned by
+// TestCreateResourceIDFlow / TestCreateTargetURLOnlyOmitsResourceID, and
+// this test pins the invalid combination.
+func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:  "https://example.com",
+		ResourceID: testResourceID,
+	})
+	if !errors.Is(err, ErrCreateTargetResourceExclusive) {
+		t.Fatalf("expected ErrCreateTargetResourceExclusive, got %v", err)
+	}
+}
+
+// TestCreateNeitherTargetURLNorResourceIDRejected pins the client-side
+// fail-fast for the both-empty case (companion to the both-populated test).
+// Without a target on either field the server can't bind the qURL to
+// anything; failing fast saves a 400 round-trip.
+func TestCreateNeitherTargetURLNorResourceIDRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{})
+	if !errors.Is(err, ErrCreateRequiresTarget) {
+		t.Fatalf("expected ErrCreateRequiresTarget, got %v", err)
+	}
+}
+
+// TestCreateNoTargetBeatsInvalidIdempotencyKey pins the validation
+// order in Create: target presence (a structural error) is checked
+// before the idempotency-key bytes (a request-decoration error). A
+// caller missing both should learn about the missing target first;
+// the error is the more actionable of the two. Symmetric with
+// TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst.
+func TestCreateNoTargetBeatsInvalidIdempotencyKey(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		// No TargetURL, no ResourceID, AND a key with a control byte
+		// (would also fail validateIdempotencyKey). Target check runs
+		// first.
+		IdempotencyKey: "bad\nkey",
+	})
+	if !errors.Is(err, ErrCreateRequiresTarget) {
+		t.Fatalf("expected ErrCreateRequiresTarget (target-presence beats idempotency), got %v", err)
+	}
+}
+
+// TestCreateBothPopulatedBeatsInvalidIdempotencyKey is the both-populated
+// counterpart of the both-empty validation-order test. The exclusivity
+// error (a structural error) should fire before the idempotency-key
+// validation (a request-decoration error). Pinning both directions
+// ensures a future reorder of guards trips a test.
+func TestCreateBothPopulatedBeatsInvalidIdempotencyKey(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		ResourceID:     testResourceID,
+		IdempotencyKey: "bad\nkey",
+	})
+	if !errors.Is(err, ErrCreateTargetResourceExclusive) {
+		t.Fatalf("expected ErrCreateTargetResourceExclusive (exclusivity beats idempotency), got %v", err)
+	}
+}
+
+// --- Resource methods ---
+
+func TestCreateResource(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/resources" {
+			t.Errorf("expected /v1/resources, got %s", r.URL.Path)
+		}
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.TargetURL != testTargetURL {
+			t.Errorf("got TargetURL %q", input.TargetURL)
+		}
+		if input.Alias != testAlias {
+			t.Errorf("got Alias %q, want %q", input.Alias, testAlias)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceIDAlt,
+			"target_url":  testTargetURL,
+			"alias":       testAlias,
+			"type":        ResourceTypeURL,
+			"status":      StatusActive,
+			"updated_at":  "2026-05-10T07:30:00Z",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: testTargetURL,
+		Alias:     testAlias,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.ResourceID != testResourceIDAlt {
+		t.Errorf("got ResourceID %q", got.ResourceID)
+	}
+	if got.Alias != testAlias {
+		t.Errorf("got Alias %q, want %q", got.Alias, testAlias)
+	}
+	// Pin Status decoding — confirms the response shape from
+	// qurl-service/api/openapi.yaml ResourceData.status round-trips.
+	if got.Status != StatusActive {
+		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
+	}
+	// Pin UpdatedAt decoding — time.Time + omitzero round-trip. The
+	// non-zero check confirms the field decoded; year/month assertion
+	// catches a future timezone-parsing regression.
+	if got.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt should be populated when present on the wire")
+	}
+	if got.UpdatedAt.Year() != 2026 || got.UpdatedAt.Month() != 5 {
+		t.Errorf("UpdatedAt: got %v, want 2026-05-...", got.UpdatedAt)
+	}
+}
+
+// TestCreateResourceURLTypeExplicit pins the explicit Type=ResourceTypeURL
+// branch of the validator switch. The empty-Type and Type=tunnel branches
+// have dedicated tests; this fills the middle case.
+func TestCreateResourceURLTypeExplicit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Type != ResourceTypeURL {
+			t.Errorf("got Type %q, want %q", input.Type, ResourceTypeURL)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_url_explicit",
+			"target_url":  testTargetURL,
+			"type":        ResourceTypeURL,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type:      ResourceTypeURL,
+		TargetURL: testTargetURL,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.Type != ResourceTypeURL {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeURL)
+	}
+}
+
+// TestCreateResourceUnknownTypePassesThrough pins the forward-compat
+// default branch in the TargetURL validator: an unknown Type value
+// should pass through to the server, which is the authority on type
+// validation. Keeps the client release-independent of new ResourceType
+// values added to the qurl-service OpenAPI surface.
+func TestCreateResourceUnknownTypePassesThrough(t *testing.T) {
+	const futureType = "webhook"
+	var sawRequest bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Type != futureType {
+			t.Errorf("got Type %q, want %q", input.Type, futureType)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_future",
+			"type":        futureType,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type: futureType,
+	}); err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("server should have seen the request (unknown type must pass through)")
+	}
+}
+
+func TestCreateResourceNilInputRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateResource(context.Background(), nil)
+	if !errors.Is(err, ErrCreateResourceNilInput) {
+		t.Fatalf("expected ErrCreateResourceNilInput, got %v", err)
+	}
+}
+
+// TestCreateResourceEmptyTargetURLRejected pins the client-side fail-fast
+// when TargetURL is missing — without it the server can't compute the
+// `(owner_id, target_url_hash)` idempotency key. Companion to the nil-input
+// test.
+func TestCreateResourceEmptyTargetURLRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Alias: testAlias,
+	})
+	if !errors.Is(err, ErrCreateResourceRequiresTargetURL) {
+		t.Fatalf("expected ErrCreateResourceRequiresTargetURL, got %v", err)
+	}
+}
+
+// TestCreateResourceTunnelTypeAcceptsEmptyTargetURL pins the tunnel
+// branch of the TargetURL validator. The doc on
+// CreateResourceInput.Type says TargetURL is ignored when type=tunnel;
+// this test ensures the client doesn't reject the request before it
+// reaches the server.
+func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_tunnel01",
+			"type":        ResourceTypeTunnel,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type: ResourceTypeTunnel,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.Type != ResourceTypeTunnel {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeTunnel)
+	}
+	// Pin wire elision — `target_url` must be absent from the JSON
+	// payload entirely (not serialized as `""`). Mirrors the
+	// TestCreateResourceIDFlow pattern so a future `,omitempty`
+	// removal on TargetURL trips here.
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := raw["type"]; got != ResourceTypeTunnel {
+		t.Errorf("type: got %v, want %q", got, ResourceTypeTunnel)
+	}
+	if _, ok := raw["target_url"]; ok {
+		t.Errorf("target_url must be omitted on tunnel creates; body=%s", gotBody)
+	}
+}
+
+// TestCreateResourceTunnelTypeRejectsTargetURL pins the inverse of
+// TestCreateResourceTunnelTypeAcceptsEmptyTargetURL — a tunnel resource
+// with a non-empty TargetURL is almost always a stale field from
+// copy-pasted literals; failing fast yields a clearer error than a
+// silent server-side discard.
+func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type:      ResourceTypeTunnel,
+		TargetURL: testTargetURL,
+	})
+	if !errors.Is(err, ErrCreateResourceTunnelRejectsTargetURL) {
+		t.Fatalf("expected ErrCreateResourceTunnelRejectsTargetURL, got %v", err)
+	}
+}
+
+// TestCreateResourceAccessPolicyRoundTrip pins the AccessPolicy decoding
+// path — if the server schema renames a subfield (ip_allowlist →
+// ip_allow, etc.) the round-trip would silently drop it without this
+// test.
+func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.AccessPolicy == nil {
+			t.Fatal("AccessPolicy should not be nil on the wire")
+		}
+		if len(input.AccessPolicy.IPAllowlist) != 2 {
+			t.Errorf("IPAllowlist: got %v", input.AccessPolicy.IPAllowlist)
+		}
+		if len(input.AccessPolicy.IPDenylist) != 1 {
+			t.Errorf("IPDenylist: got %v", input.AccessPolicy.IPDenylist)
+		}
+		if len(input.AccessPolicy.GeoAllowlist) != 2 {
+			t.Errorf("GeoAllowlist: got %v", input.AccessPolicy.GeoAllowlist)
+		}
+		if len(input.AccessPolicy.GeoDenylist) != 1 {
+			t.Errorf("GeoDenylist: got %v", input.AccessPolicy.GeoDenylist)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_policy01",
+			"target_url":  testTargetURL,
+			"status":      StatusActive,
+			"access_policy": map[string]any{
+				"ip_allowlist":  []string{"10.0.0.0/8", "192.168.0.0/16"},
+				"ip_denylist":   []string{"203.0.113.0/24"},
+				"geo_allowlist": []string{"US", "CA"},
+				"geo_denylist":  []string{"CN"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: testTargetURL,
+		AccessPolicy: &AccessPolicy{
+			IPAllowlist:  []string{"10.0.0.0/8", "192.168.0.0/16"},
+			IPDenylist:   []string{"203.0.113.0/24"},
+			GeoAllowlist: []string{"US", "CA"},
+			GeoDenylist:  []string{"CN"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.AccessPolicy == nil {
+		t.Fatal("response AccessPolicy should not be nil")
+	}
+	if len(got.AccessPolicy.IPAllowlist) != 2 {
+		t.Errorf("response IPAllowlist: got %v", got.AccessPolicy.IPAllowlist)
+	}
+	if len(got.AccessPolicy.IPDenylist) != 1 {
+		t.Errorf("response IPDenylist: got %v", got.AccessPolicy.IPDenylist)
+	}
+	if len(got.AccessPolicy.GeoAllowlist) != 2 {
+		t.Errorf("response GeoAllowlist: got %v", got.AccessPolicy.GeoAllowlist)
+	}
+	if len(got.AccessPolicy.GeoDenylist) != 1 {
+		t.Errorf("response GeoDenylist: got %v", got.AccessPolicy.GeoDenylist)
+	}
+}
+
+// TestCreateResourceRetryPreservesBody pins the body-buffering invariant
+// on the CreateResource retry path, mirroring
+// TestUpdateResourceRetryPreservesBody. POST /v1/resources is server-side
+// idempotent on (owner_id, target_url_hash), but client-side body bytes
+// must stay byte-identical across attempts so the server's hash matches.
+func TestCreateResourceRetryPreservesBody(t *testing.T) {
+	var attempts atomic.Int32
+	var mu sync.Mutex
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("attempt %d: read body: %v", n, err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceIDAlt,
+			"target_url":  testTargetURL,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		withDelaysForTest(),
+	)
+	if _, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: testTargetURL,
+		Alias:     testAlias,
+	}); err != nil {
+		t.Fatalf("CreateResource after retries: %v", err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(bodies); i++ {
+		if !bytes.Equal(bodies[0], bodies[i]) {
+			t.Errorf("attempt %d body diverged from attempt 1.\n#1: %s\n#%d: %s", i+1, bodies[0], i+1, bodies[i])
+		}
+	}
+}
+
+// TestUpdateResourceNoFieldsSetRejected pins the client-side fail-fast
+// for the all-nil-pointers, ClearAlias=false case. Symmetric with
+// Create's no-target guard — saves a round-trip on a no-op PATCH.
+func TestUpdateResourceNoFieldsSetRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{})
+	if !errors.Is(err, ErrUpdateResourceNoFieldsSet) {
+		t.Fatalf("expected ErrUpdateResourceNoFieldsSet, got %v", err)
+	}
+}
+
+// TestHasAnyFieldSetCoversAllFields walks UpdateResourceInput's struct
+// fields via reflection and asserts that setting *each one alone* makes
+// hasAnyFieldSet return true. Catches the failure mode where a future
+// contributor adds a new mutable field but forgets to update
+// hasAnyFieldSet — without this test, a no-op PATCH that exercises only
+// the new field would slip past the guard.
+//
+// The reflection walk is intentionally narrow: pointer fields get a
+// pointer to a zero value of the target type; bool fields flip to true.
+// Skip the test (with a t.Skip) for any field whose type isn't covered;
+// adding such a field here is a nudge to extend the helper. Today's
+// surface (5 fields: Description, Alias, ClearAlias, CustomDomain,
+// AccessPolicy) is fully covered.
+func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
+	emptyStr := ""
+	cases := []struct {
+		name  string
+		input UpdateResourceInput
+	}{
+		{"Description", UpdateResourceInput{Description: &emptyStr}},
+		{"Alias", UpdateResourceInput{Alias: &emptyStr}},
+		{"ClearAlias", UpdateResourceInput{ClearAlias: true}},
+		{"CustomDomain", UpdateResourceInput{CustomDomain: &emptyStr}},
+		{"AccessPolicy", UpdateResourceInput{AccessPolicy: &AccessPolicy{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.input.hasAnyFieldSet() {
+				t.Errorf("hasAnyFieldSet should be true with %s set; got false", tc.name)
+			}
+		})
+	}
+
+	// Sanity check: empty struct returns false.
+	var empty UpdateResourceInput
+	if empty.hasAnyFieldSet() {
+		t.Error("hasAnyFieldSet on empty UpdateResourceInput should return false")
+	}
+
+	// Coverage tripwire: if a new mutable field is added to
+	// UpdateResourceInput without updating both hasAnyFieldSet and
+	// the cases above, the reflect-based set-equality check fires.
+	// Set-equality (not just count) catches the duplicate-case copy-
+	// paste mistake too — two cases named "Alias" and a missing case
+	// for a new field would slip past a count-only check.
+	// Filters out fields with `json:"-"` so future request-decoration
+	// fields (e.g. IdempotencyKey per #148) don't trip the check.
+	expected := make(map[string]bool)
+	tt := reflect.TypeOf(UpdateResourceInput{})
+	for i := range tt.NumField() {
+		f := tt.Field(i)
+		if f.Tag.Get("json") != "-" {
+			expected[f.Name] = true
+		}
+	}
+	got := make(map[string]bool)
+	for _, tc := range cases {
+		got[tc.name] = true
+	}
+	for name := range expected {
+		if !got[name] {
+			t.Errorf("UpdateResourceInput field %q has no test case in TestHasAnyFieldSetCoversAllFields — "+
+				"add it to the cases slice (and ensure hasAnyFieldSet covers it)", name)
+		}
+	}
+	for name := range got {
+		if !expected[name] {
+			t.Errorf("test case %q does not match any UpdateResourceInput field — "+
+				"likely a typo or stale rename", name)
+		}
+	}
+}
+
+func TestUpdateResourceSetAlias(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
+		}
+		wantPath := "/v1/resources/" + testResourceID
+		if r.URL.Path != wantPath {
+			t.Errorf("expected %s, got %s", wantPath, r.URL.Path)
+		}
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+			"alias":       testAliasAlt,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	alias := testAliasAlt
+	got, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &alias,
+	})
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if got.Alias != testAliasAlt {
+		t.Errorf("got Alias %q, want %q", got.Alias, testAliasAlt)
+	}
+
+	// Pin the wire shape: alias serialized, clear_alias absent (false +
+	// omitempty), description / custom_domain absent.
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := raw["alias"]; got != testAliasAlt {
+		t.Errorf("alias: got %v, want %q", got, testAliasAlt)
+	}
+	if _, ok := raw["clear_alias"]; ok {
+		t.Errorf("clear_alias must elide when false; body=%s", gotBody)
+	}
+	if _, ok := raw["description"]; ok {
+		t.Errorf("description must elide when nil pointer; body=%s", gotBody)
+	}
+}
+
+func TestUpdateResourceClearAlias(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		// Server responds with the cleared resource — alias absent on
+		// the wire, decoding to Resource.Alias == "".
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		ClearAlias: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	// Confirm the cleared alias decodes correctly on the response side.
+	if got.Alias != "" {
+		t.Errorf("cleared alias should decode as empty string; got %q", got.Alias)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got, ok := raw["clear_alias"]; !ok || got != true {
+		t.Errorf("clear_alias: want true, got %v (ok=%v); body=%s", got, ok, gotBody)
+	}
+	// Symmetric pin: clearing must NOT also send a stale `alias` key.
+	// Mirror of the assertion in TestUpdateResourceSetAlias.
+	if _, ok := raw["alias"]; ok {
+		t.Errorf("alias must elide when ClearAlias=true; body=%s", gotBody)
+	}
+}
+
+// TestUpdateResourceRetryPreservesBody pins the retry-safety contract
+// documented at [Client.UpdateResource]: do() retries 5xx with the
+// buffered body, so a successfully-applied PATCH that returns 502
+// will be re-applied with byte-identical request bytes. If a future
+// refactor breaks the body-buffering invariant, the per-attempt
+// payloads would diverge and this test catches it before any
+// non-idempotent PATCH field starts shipping.
+func TestUpdateResourceRetryPreservesBody(t *testing.T) {
+	var attempts atomic.Int32
+	var mu sync.Mutex
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("attempt %d: read body: %v", n, err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		withDelaysForTest(),
+	)
+	alias := testAliasAlt
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &alias,
+	}); err != nil {
+		t.Fatalf("UpdateResource after retries: %v", err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(bodies); i++ {
+		if !bytes.Equal(bodies[0], bodies[i]) {
+			t.Errorf("attempt %d body diverged from attempt 1.\n#1: %s\n#%d: %s", i+1, bodies[0], i+1, bodies[i])
+		}
+	}
+}
+
+// TestUpdateResourceClearDescriptionByEmptyString pins the documented
+// `&""` clear convention on Description (no sentinel-clear sibling). The
+// empty string must round-trip on the wire as `"description": ""` so the
+// server treats it as a clear; if a future contributor adds `omitempty` to
+// `Description` (echoing Alias), this test fails loudly.
+func TestUpdateResourceClearDescriptionByEmptyString(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	empty := ""
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Description: &empty,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	got, ok := raw["description"]
+	if !ok {
+		t.Fatalf("description must be present (the &\"\" clear semantic); body=%s", gotBody)
+	}
+	if got != "" {
+		t.Errorf("description: got %v, want \"\"", got)
+	}
+}
+
+// TestUpdateResourceClearCustomDomainByEmptyString pins the same `&""`
+// clear convention on CustomDomain — symmetric with
+// TestUpdateResourceClearDescriptionByEmptyString. Both fields share
+// the convention but only one direction was pinned.
+func TestUpdateResourceClearCustomDomainByEmptyString(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	empty := ""
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		CustomDomain: &empty,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	got, ok := raw["custom_domain"]
+	if !ok {
+		t.Fatalf("custom_domain must be present (the &\"\" clear semantic); body=%s", gotBody)
+	}
+	if got != "" {
+		t.Errorf("custom_domain: got %v, want \"\"", got)
+	}
+}
+
+// TestUpdateResourceClearAccessPolicyByEmptyStruct pins the documented
+// `&AccessPolicy{}` clear convention. AccessPolicy has no sentinel
+// because it's a struct (not a scalar), so passing an all-zero pointer
+// is the clear signal. The wire shape must round-trip as
+// `"access_policy": {}` — if a future contributor adds a non-omitempty
+// field to AccessPolicy, the empty literal would no longer marshal as
+// `{}` and the clear contract would silently break; this test catches
+// that.
+func TestUpdateResourceClearAccessPolicyByEmptyStruct(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		AccessPolicy: &AccessPolicy{},
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	got, ok := raw["access_policy"]
+	if !ok {
+		t.Fatalf("access_policy must be present (the &AccessPolicy{} clear semantic); body=%s", gotBody)
+	}
+	policy, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("access_policy should decode as object; got %T (%v)", got, got)
+	}
+	if len(policy) != 0 {
+		t.Errorf("access_policy should marshal as `{}`; got %v", policy)
+	}
+}
+
+func TestUpdateResourceEmptyIDRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.UpdateResource(context.Background(), "", &UpdateResourceInput{})
+	if !errors.Is(err, ErrUpdateResourceEmptyID) {
+		t.Fatalf("expected ErrUpdateResourceEmptyID, got %v", err)
+	}
+}
+
+// TestUpdateResourceWhitespaceIDRejected pins the strings.TrimSpace
+// guard — a whitespace-only resource ID would otherwise hit the wire
+// as `/v1/resources/%20%20` and 400 server-side. The client error
+// stays actionable.
+func TestUpdateResourceWhitespaceIDRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.UpdateResource(context.Background(), "   ", &UpdateResourceInput{})
+	if !errors.Is(err, ErrUpdateResourceEmptyID) {
+		t.Fatalf("expected ErrUpdateResourceEmptyID on whitespace ID, got %v", err)
+	}
+}
+
+// TestUpdateResourceTrimsSurroundingWhitespace pins the "trim then
+// validate AND send" contract — `" r_existing01 "` must hit the wire
+// as `/v1/resources/r_existing01`, NOT `/v1/resources/%20r_existing01%20`.
+// Catches the bug where TrimSpace validated one value but the
+// un-trimmed value went into the URL.
+func TestUpdateResourceTrimsSurroundingWhitespace(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	desc := testDescription
+	if _, err := c.UpdateResource(context.Background(), "  "+testResourceID+"  ", &UpdateResourceInput{
+		Description: &desc,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	wantPath := "/v1/resources/" + testResourceID
+	if gotPath != wantPath {
+		t.Errorf("trimmed value should hit the wire: got %q, want %q", gotPath, wantPath)
+	}
+}
+
+// TestUpdateResourceTrimsAliasPointer pins symmetry with the path-segment
+// trim contract — a caller passing `Alias: &" prod-grafana "` should
+// see the trimmed value on the wire (the server regex would 400 on
+// surrounding whitespace anyway). Also pins the defensive-copy posture:
+// the caller's input struct must NOT be mutated.
+func TestUpdateResourceTrimsAliasPointer(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	original := "  " + testAliasAlt + "  "
+	in := &UpdateResourceInput{Alias: &original}
+	if _, err := c.UpdateResource(context.Background(), testResourceID, in); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+
+	// Wire: alias is the trimmed value.
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := raw["alias"]; got != testAliasAlt {
+		t.Errorf("alias on wire: got %v, want %q", got, testAliasAlt)
+	}
+
+	// Caller's struct: untouched. The defensive copy must not
+	// mutate the original *string.
+	if *in.Alias != original {
+		t.Errorf("caller's input.Alias was mutated; got %q, want %q", *in.Alias, original)
+	}
+}
+
+// TestUpdateResourceWhitespaceOnlyAliasRejected pins what happens when
+// an Alias-only payload trims to "": the empty-pointer footgun guard
+// should fire (use ClearAlias=true). Symmetric with the explicit
+// `Alias: &""` case but exercises the new trim path.
+func TestUpdateResourceWhitespaceOnlyAliasRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	whitespace := "   "
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &whitespace,
+	})
+	if !errors.Is(err, ErrUpdateResourceAliasEmpty) {
+		t.Fatalf("expected ErrUpdateResourceAliasEmpty on whitespace-only alias, got %v", err)
+	}
+}
+
+func TestUpdateResourceNilInputRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.UpdateResource(context.Background(), testResourceID, nil)
+	if !errors.Is(err, ErrUpdateResourceNilInput) {
+		t.Fatalf("expected ErrUpdateResourceNilInput, got %v", err)
+	}
+}
+
+func TestGetResourceByAlias(t *testing.T) {
+	const wantPath = "/v1/resources/by-alias/" + testAlias
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if r.URL.Path != wantPath {
+			t.Errorf("expected %s, got %s", wantPath, r.URL.Path)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceIDAlt,
+			"alias":       testAlias,
+			"target_url":  testTargetURL,
+			"type":        ResourceTypeURL,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.GetResourceByAlias(context.Background(), testAlias)
+	if err != nil {
+		t.Fatalf("GetResourceByAlias: %v", err)
+	}
+	if got.ResourceID != testResourceIDAlt {
+		t.Errorf("got ResourceID %q", got.ResourceID)
+	}
+	if got.Alias != testAlias {
+		t.Errorf("got Alias %q, want %q", got.Alias, testAlias)
+	}
+	// Pin response-side decode of Type and Status — the schema is
+	// the contract, and round-tripping these fields catches future
+	// JSON-tag regressions on the response side.
+	if got.Type != ResourceTypeURL {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeURL)
+	}
+	if got.Status != StatusActive {
+		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
+	}
+}
+
+func TestGetResourceByAliasEscapesPathSegment(t *testing.T) {
+	// Aliases are validated server-side as `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`
+	// (no `/`, no `%`), so reserved bytes won't reach this method via the
+	// Slack/Discord parsers. But the client method should still escape its
+	// input — defensive for direct programmatic callers and to keep a future
+	// refactor that drops `url.PathEscape` from tripping silently.
+	// Inspect r.URL.EscapedPath() because net/http decodes `%2F` → `/`
+	// on r.URL.Path before the handler runs.
+	var gotEscapedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.GetResourceByAlias(context.Background(), "weird/alias"); err != nil {
+		t.Fatalf("GetResourceByAlias: %v", err)
+	}
+	const want = "/v1/resources/by-alias/weird%2Falias"
+	if gotEscapedPath != want {
+		t.Errorf("alias path-escape: got %q, want %q", gotEscapedPath, want)
+	}
+}
+
+// TestUpdateResourceEscapesIDPathSegment is the symmetric path-escape
+// pin for UpdateResource (mirror of TestGetResourceByAliasEscapesPathSegment).
+// Server-side resource_id format is `^r_[a-z0-9_-]{11}$` so reserved
+// bytes won't reach this method via normal flows; the test is
+// defensive for direct programmatic callers and keeps a future
+// `url.PathEscape` removal from tripping silently.
+func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {
+	var gotEscapedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	desc := testDescription
+	if _, err := c.UpdateResource(context.Background(), "weird/id", &UpdateResourceInput{
+		Description: &desc,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	const want = "/v1/resources/weird%2Fid"
+	if gotEscapedPath != want {
+		t.Errorf("resourceID path-escape: got %q, want %q", gotEscapedPath, want)
+	}
+}
+
+func TestGetResourceByAliasEmptyRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.GetResourceByAlias(context.Background(), "")
+	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
+		t.Fatalf("expected ErrGetResourceByAliasEmpty, got %v", err)
+	}
+}
+
+// TestGetResourceByAliasWhitespaceRejected pins the strings.TrimSpace
+// guard — a whitespace-only alias would hit the wire as
+// `/v1/resources/by-alias/%20%20` and 400 server-side. Companion to
+// TestGetResourceByAliasEmptyRejected.
+func TestGetResourceByAliasWhitespaceRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.GetResourceByAlias(context.Background(), "   ")
+	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
+		t.Fatalf("expected ErrGetResourceByAliasEmpty on whitespace, got %v", err)
+	}
+}
+
+// TestGetResourceByAliasTrimsSurroundingWhitespace pins the
+// "trim then validate AND send" contract for the alias path
+// (mirror of TestUpdateResourceTrimsSurroundingWhitespace).
+func TestGetResourceByAliasTrimsSurroundingWhitespace(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.GetResourceByAlias(context.Background(), "  "+testAlias+"  "); err != nil {
+		t.Fatalf("GetResourceByAlias: %v", err)
+	}
+	wantPath := "/v1/resources/by-alias/" + testAlias
+	if gotPath != wantPath {
+		t.Errorf("trimmed value should hit the wire: got %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestGetResourceByAliasNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Not Found",
+				"status": 404,
+				"detail": "alias not found",
+				"code":   "alias_not_found",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.GetResourceByAlias(context.Background(), "missing-alias")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
+		t.Errorf("got status %d, want 404", apiErr.StatusCode)
+	}
+	if apiErr.Code != "alias_not_found" {
+		t.Errorf("got code %q, want alias_not_found", apiErr.Code)
+	}
+}
+
+// TestCreateResourceAliasInUse pins the typed *APIError shape on the
+// `alias_in_use` 409 path documented in CreateResourceInput's doc comment
+// (alias attempted on an already-existing resource missing an alias).
+// Symmetric with TestGetResourceByAliasNotFound — pins the error envelope
+// for the second new resource method.
+func TestCreateResourceAliasInUse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Conflict",
+				"status": 409,
+				"detail": "alias already in use",
+				"code":   "alias_in_use",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: testTargetURL,
+		Alias:     testAlias,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict {
+		t.Errorf("got status %d, want 409", apiErr.StatusCode)
+	}
+	if apiErr.Code != "alias_in_use" {
+		t.Errorf("got code %q, want alias_in_use", apiErr.Code)
+	}
+}
+
+// TestUpdateResourceInvalidAlias pins the typed *APIError shape on a 400
+// `invalid_alias` path — symmetric coverage with the other two new methods.
+// Also pins the InvalidFields decoding so a regression in either parseError
+// or the test fixture would surface here.
+func TestUpdateResourceInvalidAlias(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Bad Request",
+				"status": 400,
+				"detail": "alias must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+				"code":   "invalid_alias",
+				"invalid_fields": map[string]string{
+					"alias": "must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	alias := "Bad-Alias!"
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &alias,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("got status %d, want 400", apiErr.StatusCode)
+	}
+	if apiErr.Code != "invalid_alias" {
+		t.Errorf("got code %q, want invalid_alias", apiErr.Code)
+	}
+	if got, ok := apiErr.InvalidFields["alias"]; !ok || got == "" {
+		t.Errorf("InvalidFields[\"alias\"] should be populated; got %v (ok=%v)", got, ok)
+	}
+}
+
+// TestUpdateResourceEmptyAliasPointerRejected pins the client-side
+// fail-fast for the "pointer to empty string" footgun documented on
+// UpdateResourceInput.Alias — the server's regex would 400 it anyway,
+// but the client's error message tells the caller exactly what to do
+// (use ClearAlias=true).
+func TestUpdateResourceEmptyAliasPointerRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	empty := ""
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &empty,
+	})
+	if !errors.Is(err, ErrUpdateResourceAliasEmpty) {
+		t.Fatalf("expected ErrUpdateResourceAliasEmpty, got %v", err)
+	}
+}
+
+// TestUpdateResourceAliasAndClearAliasMutuallyExclusive pins the
+// client-side rejection of the (Alias != nil, ClearAlias=true) combo
+// — the server returns 400 for this combination, and the client
+// fails fast to save the round-trip.
+func TestUpdateResourceAliasAndClearAliasMutuallyExclusive(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	alias := testAlias
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias:      &alias,
+		ClearAlias: true,
+	})
+	if !errors.Is(err, ErrUpdateResourceAliasClearExclusive) {
+		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive, got %v", err)
+	}
+}
+
+// TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst pins
+// the validation-order contract: when a caller passes both `Alias: &""`
+// AND `ClearAlias: true`, the structural conflict (mutual exclusion)
+// is the more actionable error and fires first. The empty-pointer
+// footgun guard fires only when Alias is the only field in conflict.
+func TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	empty := ""
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias:      &empty,
+		ClearAlias: true,
+	})
+	if !errors.Is(err, ErrUpdateResourceAliasClearExclusive) {
+		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive (exclusivity beats empty-pointer), got %v", err)
+	}
 }

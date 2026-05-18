@@ -148,46 +148,77 @@ func TestSetAliasRebindModal_BacktickInjectionEscaped(t *testing.T) {
 
 // TestSetAliasRebindModal_NewlineInjectionEscaped fences the second
 // code-span breakout: Slack's mrkdwn renderer ends a code span at
-// a hard newline. A target containing \n would otherwise let
-// subsequent mrkdwn render outside the span. escapeMrkdwnCode
-// substitutes a single space.
+// a hard newline. A target containing \n, \r, or the \r\n pair
+// would otherwise let subsequent mrkdwn render outside the span.
+// escapeMrkdwnCode substitutes a single space. Each line-break
+// shape is exercised separately so a future refactor that drops
+// (e.g.) the bare \r substitution can't slip past silently — Slack
+// normalizes most clients to \n, but the escape boundary must be
+// tight since it's a stated security mitigation.
 func TestSetAliasRebindModal_NewlineInjectionEscaped(t *testing.T) {
 	t.Parallel()
-	raw, err := SetAliasRebindModal("prod-db", "old\n<!channel>\nx", "new")
-	if err != nil {
-		t.Fatalf("SetAliasRebindModal: %v", err)
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"LF", "old\n<!channel>\nx"},
+		{"CR", "old\r<!channel>\rx"},
+		{"CRLF", "old\r\n<!channel>\r\nx"},
 	}
-	body := string(raw)
-	if strings.Contains(body, "<!channel>") {
-		// The mention-syntax is JSON-encoded so `<` becomes `<`
-		// in the marshaled body; the actual leak vector is the
-		// literal mention text reaching Slack's mrkdwn renderer.
-		// Either form means escape didn't apply.
-		t.Errorf("newline-injected payload leaked into body: %s", body)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := SetAliasRebindModal("prod-db", tc.target, "new")
+			if err != nil {
+				t.Fatalf("SetAliasRebindModal: %v", err)
+			}
+			body := string(raw)
+			if strings.Contains(body, "<!channel>") {
+				// The mention-syntax is JSON-encoded so `<` becomes
+				// `<` in the marshaled body; the actual leak vector
+				// is the literal mention text reaching Slack's
+				// mrkdwn renderer. Either form means escape didn't
+				// apply.
+				t.Errorf("line-break-injected payload leaked into body: %s", body)
+			}
+			// None of \n, \r, or the CRLF pair should survive into
+			// the marshaled JSON for the target spans (JSON encodes
+			// them as `\n` / `\r` escape sequences, which is the
+			// same wire shape Slack treats as a hard newline). The
+			// escape replaces them with a literal space pre-marshal.
+			for _, want := range []string{`\n`, `\r`} {
+				if strings.Contains(body, want) {
+					t.Errorf("line-break escape sequence %q survived into body: %s", want, body)
+				}
+			}
+		})
 	}
 }
 
 // TestSetAliasRebindModal_PrivateMetadataIsJSON fences the
 // `private_metadata` encoding contract. The value must round-trip
 // through `json.Unmarshal` into a [SetAliasRebindMetadata] — the
-// view-submission handler in PR-3c.3+ depends on this shape. An
+// view-submission handler in PR-3c.3+ depends on this shape for
+// both the alias name and the new target it applies on submit. An
 // alias name containing `=` (allowed by qurl-service) would have
 // broken the previous `key=value` ad-hoc encoding.
 func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
-		alias string
+		name      string
+		alias     string
+		newTarget string
 	}{
-		{"plain alias", "prod-db"},
-		{"alias with equals (would have broken k=v)", "key=val"},
-		{"alias with ampersand", "a&b"},
-		{"alias with quote", `q"db`},
+		{"plain alias", "prod-db", "https://internal.example.com"},
+		{"alias with equals (would have broken k=v)", "key=val", "https://x.example"},
+		{"alias with ampersand", "a&b", "https://x.example?q=1&r=2"},
+		{"alias with quote", `q"db`, `https://example.com/path?q="hi"`},
+		{"resource_id target", "prod-db", "r_abc123"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			raw, err := SetAliasRebindModal(tc.alias, "old", "new")
+			raw, err := SetAliasRebindModal(tc.alias, "old", tc.newTarget)
 			if err != nil {
 				t.Fatalf("SetAliasRebindModal: %v", err)
 			}
@@ -205,6 +236,9 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 			}
 			if meta.Alias != tc.alias {
 				t.Errorf("alias = %q, want %q", meta.Alias, tc.alias)
+			}
+			if meta.NewTarget != tc.newTarget {
+				t.Errorf("new_target = %q, want %q", meta.NewTarget, tc.newTarget)
 			}
 		})
 	}
