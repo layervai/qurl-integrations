@@ -162,23 +162,13 @@ var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
 // here. Quoted values let users put spaces in `reason:"…"`.
 var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
 
-// aliasCharsetPattern is the alias-name shape qurl-service accepts:
-// lowercase alphanumeric with hyphens, no leading or trailing hyphen.
-// Surfacing the rejection here gives a friendlier slash-command error
-// than punting an obviously-bogus alias all the way to the API.
-//
-// The pattern is anchored both ends and uses a non-capturing group
-// to require a trailing alnum: `[a-z0-9]` (start) then optionally
-// `[a-z0-9-]*[a-z0-9]` (middle plus required trailing alnum). A
-// single-character alias (`$a`, `$1`) is allowed by the optional
-// non-capturing group.
-//
-// Internal `--` runs (e.g. `foo--bar`) are intentionally permitted —
-// qurl-service's own alias validator is the authoritative gate and
-// accepts them. The parser only enforces the leading/trailing rule
-// because that's what surfaces with a friendlier error than punting
-// to the service.
-var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+// Alias-name shape rules (`aliasCharsetPattern`) and the friendlier
+// "leading/trailing hyphen rejected here, internal `--` deferred to
+// qurl-service" rationale live in [apps/slack/internal/handler_alias.go]
+// alongside the other alias verbs added by PR #347 — this parser
+// reuses that same package-level regex so the contract stays in one
+// place. (The two were duplicates pre-merge; the dedup lives here.)
+// See [aliasCharsetPattern] in handler_alias.go for the full doc.
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -324,7 +314,7 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := requireAlias(rest[0])
+	alias, err := parseAliasToken(rest[0])
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +348,7 @@ func parseSetAlias(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := requireAlias(rest[0])
+	alias, err := parseAliasToken(rest[0])
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +369,7 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := requireAlias(rest[0])
+	alias, err := parseAliasToken(rest[0])
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +410,7 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 		if len(tail) == 0 {
 			return nil, ErrEmptyResource
 		}
-		alias, err := requireAlias(tail[0])
+		alias, err := parseAliasToken(tail[0])
 		if err != nil {
 			return nil, err
 		}
@@ -459,7 +449,7 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 			continue
 		}
 		if strings.HasPrefix(tok, "$") {
-			alias, err := requireAlias(tok)
+			alias, err := parseAliasToken(tok)
 			if err != nil {
 				return nil, err
 			}
@@ -497,11 +487,11 @@ func parseCreate(cmd *Command, rest []string) (*Command, error) {
 	return cmd, nil
 }
 
-// requireAlias enforces the `$` sigil, strips it, and validates the
+// parseAliasToken enforces the `$` sigil, strips it, and validates the
 // remaining alias against [aliasCharsetPattern]. Empty after the
 // sigil (`$`) is treated as an empty-resource error; out-of-charset
 // runs as an invalid-alias error.
-func requireAlias(tok string) (string, error) {
+func parseAliasToken(tok string) (string, error) {
 	if !strings.HasPrefix(tok, "$") {
 		return "", fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
 	}
