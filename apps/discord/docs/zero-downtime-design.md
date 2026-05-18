@@ -2,11 +2,14 @@
 
 **Status:** front-half analysis superseded by PR 7b.3 — see banner; full
 rewrite tracked in [#314](https://github.com/layervai/qurl-integrations/issues/314). Gateway-tier RESUME design (PR 10–15) still applies.
-> ⚠️ This doc still references `/qurl send` and the legacy `await*Component` /
-> `awaitMessages` patterns. As of PR 7b.3 those are gone — `/qurl file` and
-> `/qurl map` are the live entry points and the flow is flow_state-backed
-> (no in-process Promise-on-Gateway-event coupling). The MESSAGE_CREATE-on-DM
-> constraint cited below is no longer load-bearing.
+> ⚠️ This doc still references the legacy multi-step `/qurl send` wizard and
+> the `await*Component` / `awaitMessages` patterns. As of PR 7b.3 those are
+> gone — the live entry points are `/qurl send` (renamed from `/qurl file`)
+> and `/qurl map`, and the flow is flow_state-backed (no in-process
+> Promise-on-Gateway-event coupling). The MESSAGE_CREATE-on-DM constraint
+> cited below is no longer load-bearing. NOTE: the live `/qurl send` is
+> distinct from the legacy `/qurl send` wizard — same name, different
+> implementation.
 
 **Tracking:** `qurl-integrations-infra#122` (deploy outage), `qurl-integrations#TBD` (this PR)
 **Owners:** posey + reviewers
@@ -221,6 +224,35 @@ inflection (~2,500 guilds), `s` alone will collide across shards and
 the LRU will incorrectly drop legitimate events from sibling shards.
 Migrate the producer-side `event_id` to `${shard_id}:${s}` in the
 sharding PR; the worker-side LRU shape doesn't change.
+
+#### Trust boundary — SQS queue policy + envelope authenticity
+
+The worker tier treats every SQS message body as trusted input to
+`client.actions.InteractionCreate.handle`. Anyone who can
+`sqs:SendMessage` on `qurl-bot-events` can spoof an interaction
+payload (including `user.id`, `member.permissions`, etc.) and route
+it through the same dispatcher path as a real Discord-originated
+event. This is acceptable ONLY because the queue is locked down at
+the IAM layer:
+
+- The queue policy on `qurl-bot-events` (defined in the infra PR B
+  module) grants `sqs:SendMessage` exclusively to the gateway task
+  role's principal. No human IAM users have publish rights, and no
+  cross-account access is granted.
+- The gateway task role is itself locked to the gateway service's
+  ECS task definition; it can't be assumed from outside that
+  execution context.
+- `sqs:ReceiveMessage` + `sqs:DeleteMessage` are granted to the
+  worker task role only.
+
+If any of those constraints loosen (e.g., adding a queue publisher
+to a sibling service for shared event-shipping), the worker MUST
+gain envelope-shape validation + signature verification before the
+new publisher's messages reach `handle()`. Today's "trust the
+queue" shape is contingent on the closed publisher set.
+
+Tracked in the infra-side `qurl-bot-events` module README; this
+section is the consumer-side reminder of the contract.
 
 ### Pillar 2 — Cross-process Gateway session resume
 
@@ -630,22 +662,35 @@ Each phase has an independent rollback path:
 | Phase | Rollback |
 |---|---|
 | Flow state | Revert command-file PRs. DDB flow rows expire on their TTL. |
-| Event shipper | App-side feature flag `ENABLE_EVENT_SHIPPER=false` falls back to in-process dispatch on the gateway role. **Valid only through PR 10** — see cliff note below. |
+| Event shipper | App-side feature flag `ENABLE_EVENT_SHIPPER=false` falls back to in-process dispatch on the gateway role. **Valid through the gated phase** — see cliff note below. |
 | Cross-process RESUME | App-side feature flag `ENABLE_GATEWAY_RESUME=false` falls back to in-memory session state (Discord IDENTIFY-only every boot). |
 | Hot-standby | Set `gateway_desired_count = 1` in tfvars. The standby-discovery path sees no peer and the active becomes a single-replica gateway. |
 
-**Rollback cliff: `ENABLE_EVENT_SHIPPER`.** The flag-based rollback works
-only while PR 10 (gateway strip-down) is gated — i.e., the gateway role
-still has in-process command handlers wired to fall back to. The moment
-PR 10 lands without the flag (the dual-path scaffolding is removed),
-flipping `ENABLE_EVENT_SHIPPER=false` has nothing to fall back to and
-the gateway boots into a partially-wired state. After that point,
-rollback is `git revert` on PR 10 + emergency redeploy, not a flag flip.
-The cliff is a deliberate trade-off: keeping the dual-path scaffolding
-forever bloats the gateway image and obscures whose code path is live.
-PR 10's description must explicitly call out the soak window before
-removing the flag (recommendation: 1 week of clean prod traffic on the
-event-shipper path before deleting the in-process fallback).
+**Rollback cliff: `ENABLE_EVENT_SHIPPER`.** PR 10 ships the producer +
+worker-side dispatch path under the `ENABLE_EVENT_SHIPPER` flag,
+keeping the legacy in-process gateway dispatch as fall-back. While
+both code paths coexist, `ENABLE_EVENT_SHIPPER=false` is a valid
+flag-flip rollback. A later cleanup PR will delete the legacy
+in-process gateway listener gate `(isGateway && !config.ENABLE_EVENT_SHIPPER)`
+and make the producer unconditional. After that cleanup lands,
+flipping the flag false has nothing to fall back to and rollback is
+`git revert` + emergency redeploy. The cliff is a deliberate trade-off:
+keeping the dual-path scaffolding forever bloats the gateway image
+and obscures whose code path is live. The cleanup PR's description
+must explicitly call out the soak window before removing the flag
+(recommendation: 1 week of clean prod traffic on the event-shipper
+path before deleting the in-process fallback).
+
+**Unsupported combination:** `PROCESS_ROLE=combined` paired with
+`ENABLE_EVENT_SHIPPER=true` is rejected at boot
+(`unsupportedRoleShipperCombo` in `src/boot-requirements.js`). In
+combined mode the gateway publish hook AND the worker consumer
+would arm in one process, double-dispatching every interaction
+(in-process WS frame + SQS round-trip). The supported flag-on
+shape is the two-process split: `PROCESS_ROLE=gateway` (singleton,
+publishes) + `PROCESS_ROLE=http` (consumes, can scale horizontally).
+For local dev / sandbox in one process, leave `ENABLE_EVENT_SHIPPER`
+unset.
 
 ## SLI / SLO definitions
 

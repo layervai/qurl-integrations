@@ -64,6 +64,7 @@ const {
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
+const { DM_STATUS } = require('../constants');
 
 // Badge taxonomy — same values as SqliteStore so callers that
 // compare across envs see identical enum values.
@@ -1026,6 +1027,17 @@ async function updateSendDMStatus(sendId, recipientDiscordId, status) {
   }));
 }
 
+// Coalesces dm_status + DM channel/message refs into one Update so the
+// hot dispatch path stays at one DDB write per successful recipient.
+async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messageId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_sends,
+    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+    UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
+    ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
+  }));
+}
+
 async function getRecentSends(senderDiscordId, limit = 10) {
   // SQL did a LEFT JOIN on qurl_send_configs + GROUP BY send_id to
   // produce one row per send with per-send metadata. DDB: query the
@@ -1295,6 +1307,14 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipients can exceed the 1MB Query page cap. Without queryAll,
 // resource_ids on later pages would silently drop and the revoke
 // path would skip them.
+//
+// RETURN SHAPE: { resource_id, recipient_discord_id, dm_channel_id?,
+// dm_message_id?, dm_status? }. The dm_* fields are written by
+// markSendDMDelivered after a successful sendDM and consumed by the
+// revoke loop's editTargets builder (commands.js) to PATCH the
+// recipient's DM to "closed the door". Legacy rows predating the
+// ref-capture wire-up have those fields unset — the revoke loop's
+// missing-refs guard skips the edit naturally.
 async function getSendItems(sendId, senderDiscordId) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
@@ -1305,6 +1325,14 @@ async function getSendItems(sendId, senderDiscordId) {
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,
+    // dm_channel_id / dm_message_id are written by markSendDMDelivered
+    // after a successful sendDM; legacy rows predating that wire-up
+    // have them unset, in which case the revoke path skips the DM
+    // edit. dm_status gates the same skip — failed deliveries have
+    // nothing to edit.
+    dm_channel_id: item.dm_channel_id,
+    dm_message_id: item.dm_message_id,
+    dm_status: item.dm_status,
   }));
 }
 
@@ -1515,7 +1543,8 @@ module.exports = {
   // Weekly digest
   getWeeklyDigestData,
   // QURL sends
-  recordQURLSend, recordQURLSendBatch, updateSendDMStatus, getRecentSends, markSendRevoked,
+  recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
+  getRecentSends, markSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   // Guild configs
   getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,

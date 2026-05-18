@@ -29,7 +29,7 @@ function bootRequired(isOpenNHPActive) {
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is the
-// global-fallback for /qurl file + /qurl map; single-guild-plain and
+// global-fallback for /qurl send + /qurl map; single-guild-plain and
 // multi-tenant deployments both rely on per-guild /qurl setup, so it's
 // optional outside the OpenNHP community server.
 //
@@ -63,6 +63,262 @@ function missingProdKeys(env, isOpenNHPActive) {
 function missingKekRequiredKeys(env) {
   if (!env.GITHUB_CLIENT_SECRET) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
+}
+
+// QURL_BOT_EVENTS_QUEUE_URL is the load-bearing piece of the event-
+// shipper path: producer publishes to it, consumer polls from it. When
+// ENABLE_EVENT_SHIPPER=true and the queue URL isn't set, the producer
+// silently drops every dispatch and the consumer sits dormant — both
+// failure modes are silent enough that they wouldn't surface in
+// monitoring until /qurl interactions start timing out from the user's
+// end. Fail-closed at boot is preferable.
+//
+// API asymmetry: this takes the PARSED `cfg` while the siblings
+// (missingBootKeys, missingProdKeys, missingKekRequiredKeys) take
+// raw `env`. The reason is that ENABLE_EVENT_SHIPPER is parsed in
+// config.js (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean)
+// and consumers should not re-implement that parsing. Reading from
+// cfg keeps the literal-'true' contract in one place.
+function missingEventShipperKeys(cfg) {
+  if (!cfg.ENABLE_EVENT_SHIPPER) return [];
+  return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
+}
+
+// PROCESS_ROLE=combined paired with ENABLE_EVENT_SHIPPER=true is
+// unsupported and rejected at boot. In combined mode both `isGateway`
+// and `isHttp` evaluate true, which derives `isWorker=true`, which
+// would arm both the gateway-side publish hook AND the worker-side
+// consumer in one process. Every interaction would land twice: once
+// via the in-process gateway WS frame, once via the SQS round-trip.
+// Side effects (DM fan-out, flow-state writes) double; telemetry
+// reports two dispatches per real interaction. The listener gate
+// alone can't close this — discord.js's InteractionCreate action
+// fires synchronously on the gateway WS frame regardless of whether
+// the local listener is registered, so even gating the worker-side
+// dispatcher leaves the gateway publish path firing alongside the
+// consumer.
+//
+// The supported flag-on shape is the two-process split: a separate
+// PROCESS_ROLE=gateway (singleton) publishing to SQS, and one or
+// more PROCESS_ROLE=http replicas consuming. Combined mode stays
+// supported for sandbox / local-dev / pre-split deployments —
+// just with the flag off, running the legacy in-process path.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Kept as a string-or-null rather than throwing so the
+// caller in index.js logs the message + exits via the same pattern
+// as missingBootKeys (one log + process.exit) rather than handling
+// a thrown error specially.
+function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
+  if (role === 'combined' && eventShipperEnabled) {
+    return (
+      'PROCESS_ROLE=combined with ENABLE_EVENT_SHIPPER=true is not supported ' +
+      '(would dispatch every interaction twice — once via the in-process gateway ' +
+      'WS frame, once via the SQS round-trip). Run two processes: ' +
+      'PROCESS_ROLE=gateway (singleton, publishes) + PROCESS_ROLE=http (consumes). ' +
+      'For local dev / sandbox in one process, leave ENABLE_EVENT_SHIPPER unset.'
+    );
+  }
+  return null;
+}
+
+// Parallel to unsupportedRoleShipperCombo for ENABLE_GATEWAY_RESUME.
+// Three unsupported shapes:
+//
+//   1. resume=true with role=combined — combined mode runs both
+//      tiers in one process, which the legacy discord.js Client
+//      owns end-to-end. The resume shim would conflict with the
+//      Client's WS ownership.
+//   2. resume=true with shipper=false — the resume shim
+//      (@discordjs/ws WebSocketManager) replaces discord.js's Client
+//      entirely, so the in-process interaction dispatcher has no
+//      `client.on('interactionCreate')` emitter to attach to. The
+//      flag-on path is only coherent when the shipper has already
+//      moved dispatch to SQS.
+//   3. resume=true with storeType!=ddb — the resume guarantee only
+//      holds when session state is persisted across processes.
+//      The default sqlite backend writes a local file that the
+//      next ECS task won't see; a resume against the previous
+//      sequence would fail every restart. Rejecting at boot is
+//      preferable to a silent IDENTIFY-every-restart degradation
+//      that mimics flag-off behavior.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Same string-or-null shape as unsupportedRoleShipperCombo.
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, storeType) {
+  if (!resumeEnabled) return null;
+  if (role === 'combined') {
+    return (
+      'PROCESS_ROLE=combined with ENABLE_GATEWAY_RESUME=true is not supported ' +
+      '(the resume shim owns the WebSocket and conflicts with the legacy ' +
+      'discord.js Client that combined mode runs). Run two processes: ' +
+      'PROCESS_ROLE=gateway (singleton, owns the resume shim) + ' +
+      'PROCESS_ROLE=http (consumes from SQS). For local dev / sandbox in ' +
+      'one process, leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  if (!eventShipperEnabled) {
+    // Role-neutral framing: the same env may be applied uniformly
+    // across gateway + http task defs, and an http operator reading
+    // this message shouldn't see gateway-tier-specific language
+    // (the shim is never constructed on http; the rejection here
+    // is a consistency canary, not a description of what http does).
+    return (
+      'ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true. ' +
+      'The two flags co-design: the gateway tier forwards every Discord ' +
+      'frame to SQS while the worker tier consumes it, so a resume path ' +
+      'without the shipper-shape split has nowhere to dispatch. Enable ' +
+      'the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  if (storeType !== 'ddb') {
+    return (
+      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +
+      'Cross-process RESUME persists session state to the gateway-session DDB ' +
+      'table; sqlite would write a local file the next process never sees. Set ' +
+      'STORE_TYPE=ddb in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  return null;
+}
+
+// Parallel to unsupportedRoleResumeCombo for ENABLE_GATEWAY_HOT_STANDBY.
+// Caller guarantees the upstream resume combo check has already run
+// (resumeEnabled=true → shipper+ddb already validated upstream), so
+// the 3-arg signature here is sufficient — no need to re-check
+// shipper/storeType.
+//
+// Two unsupported shapes:
+//
+//   1. hotStandby=true with role!=gateway — the leader coordinator
+//      drives the gateway-ws-shim's manager handle; only the gateway
+//      tier constructs the shim, so http/combined have nothing to
+//      hand off. Rejecting at boot avoids a deploy where the hot-
+//      standby flag is set in a uniform env block but the role isn't
+//      gateway — which would silently no-op the leader path and
+//      mask the misconfig as "the lock never gets acquired."
+//   2. hotStandby=true with resume=false — pushHandoff hands the
+//      incoming task a snapshot of session_id + sequence so it can
+//      RESUME without dropping events. Without the cross-process
+//      RESUME path, "handoff" degenerates to "both replicas
+//      IDENTIFY against the same token" — Discord rejects the
+//      second IDENTIFY and the second replica flaps the session.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Same string-or-null shape as unsupportedRoleResumeCombo.
+function unsupportedRoleHotStandbyCombo(role, hotStandbyEnabled, resumeEnabled) {
+  if (!hotStandbyEnabled) return null;
+  if (role !== 'gateway') {
+    return (
+      `ENABLE_GATEWAY_HOT_STANDBY=true requires PROCESS_ROLE=gateway (got '${role}'). ` +
+      'The hot-standby control plane (leader election + push handoff) drives the ' +
+      'gateway-ws-shim manager, which only the gateway tier constructs. http and ' +
+      'combined roles have no manager to hand off. Set PROCESS_ROLE=gateway on the ' +
+      'gateway task def, or leave ENABLE_GATEWAY_HOT_STANDBY unset on http/combined.'
+    );
+  }
+  if (!resumeEnabled) {
+    return (
+      'ENABLE_GATEWAY_HOT_STANDBY=true requires ENABLE_GATEWAY_RESUME=true. ' +
+      'Push handoff transfers session_id + sequence from the outgoing task to the ' +
+      'incoming task; without cross-process RESUME the incoming task would IDENTIFY ' +
+      'against the same bot token and Discord would flap the session. Enable RESUME ' +
+      'first, or leave ENABLE_GATEWAY_HOT_STANDBY unset.'
+    );
+  }
+  return null;
+}
+
+// Required env vars when ENABLE_GATEWAY_HOT_STANDBY=true on a gateway
+// replica. Returns the array of missing keys (parallel shape to
+// missingMapCommandKeys / missingEventShipperKeys). Each value is
+// load-bearing: INSTANCE_ID keys the lock row + peer-heartbeat row;
+// INSTANCE_IP is the address peers reach this replica on; the HMAC
+// secret authenticates every control-channel envelope. A boot with
+// any of these unset would either crash at first use or — worse —
+// run with a zero-knowledge HMAC that fails every verify silently.
+function missingHotStandbyKeys(cfg) {
+  if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
+  const missing = [];
+  if (!cfg.INSTANCE_ID) missing.push('INSTANCE_ID');
+  if (!cfg.INSTANCE_IP) missing.push('INSTANCE_IP');
+  // GATEWAY_HANDOFF_HMAC presence is surfaced via `hasGatewayHandoffHmac`
+  // (boolean flag) rather than the raw value — the secret string is
+  // never exposed as a config-object property to keep it unreachable
+  // through heap-dump-accessible references. See config.js's
+  // `takeGatewayHandoffHmac` for the security rationale.
+  if (!cfg.hasGatewayHandoffHmac) missing.push('GATEWAY_HANDOFF_HMAC');
+  return missing;
+}
+
+// Shape checks for INSTANCE_ID + INSTANCE_IP (run AFTER missing-keys
+// passes). Matches the secret-loader's "fail at boot, not at first
+// use" posture: an env override like `INSTANCE_ID=${ECS_TASK_ARN}`
+// (unsubstituted shell expansion an operator pasted by mistake) or
+// `INSTANCE_IP=10.0.0.999` (non-IPv4) would pass the presence gate
+// and surface as a baffling DDB-lock-can't-acquire or peer-
+// unreachable error at runtime. A cheap regex catches both.
+//
+// INSTANCE_ID: rejects the `${...}` template-literal pattern (the
+// classic env-override substitution-failure footgun). Otherwise
+// permissive — the downstream lock/heartbeat code does not require
+// a specific format.
+//
+// INSTANCE_IP: must parse as an IPv4 dotted-quad. The hot-standby
+// awsvpc deployment puts each task on a unique ENI with a v4
+// address; v6 is not in scope for Pillar 3 today (the control
+// channel binds to the v4 ENI, peers reach each other over v4 SG
+// rules). If v6 ever lands, this check loosens.
+//
+// Leading-zero octets are rejected (`01.02.03.04` would parse as
+// octal under some resolvers); each octet is `0` alone, `1-9`, or
+// `1[0-9]-25[0-5]` with no leading zero. ECS task-def injection
+// produces canonical no-leading-zero v4 strings; this just closes
+// the operator-typo door.
+//
+// Returns an array of operator-facing message strings (one per
+// problem) or [] when all values are well-shaped. Hot-standby off
+// → skip entirely.
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/;
+function invalidHotStandbyValues(cfg) {
+  if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
+  const problems = [];
+  if (cfg.INSTANCE_ID && cfg.INSTANCE_ID.includes('${')) {
+    problems.push(
+      `INSTANCE_ID looks like an unsubstituted template literal ('${cfg.INSTANCE_ID}'). ` +
+      'INSTANCE_ID is derived from os.hostname() by default; an env override here was set to an unresolved placeholder.'
+    );
+  }
+  if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {
+    problems.push(
+      `INSTANCE_IP must be a valid IPv4 address (got '${cfg.INSTANCE_IP}'). ` +
+      'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today. ' +
+      'If you set INSTANCE_IP as an env override, unset it to fall back to the derivation from os.networkInterfaces().'
+    );
+  }
+  return problems;
+}
+
+// PLACEHOLDER is treated as missing because the SSM parameter
+// ships with that literal sentinel value; remediation ("seed a
+// real key") is identical to the empty-key case.
+//
+// TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also
+// the seed value for `aws_ssm_parameter.bot` in
+// qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// (search that repo for `value = "PLACEHOLDER"`). If infra ever
+// renames the sentinel (e.g., "REPLACE_ME"), update here in
+// lockstep — otherwise the boot check silently regresses to
+// "non-empty value passes" and the original incident class
+// returns. `git grep TODO(infra-sentinel-sync)` finds the marker.
+const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
+function missingMapCommandKeys(cfg) {
+  if (!cfg.MAP_COMMAND_ENABLED) return [];
+  const key = cfg.GOOGLE_MAPS_API_KEY;
+  if (!key || key === GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL) {
+    return ['GOOGLE_MAPS_API_KEY'];
+  }
+  return [];
 }
 
 // Process-role parsing for the gateway/HTTP split. Lifted out of
@@ -100,12 +356,53 @@ function resolveProcessRole(rawValue) {
   };
 }
 
+// Whether the local `interactionCreate` listener should be registered
+// in this process. Lifted out of index.js so the gate logic is pure +
+// unit-testable across every role × flag permutation (combined + flag-on
+// is unreachable here — `unsupportedRoleShipperCombo` rejects it at
+// boot — but the predicate must remain coherent for any caller that
+// somehow reaches it post-bypass, so it's defined for all inputs).
+//
+// Three intended shapes:
+//   - Gateway tier + flag-off  → register (legacy in-process dispatch)
+//   - Gateway tier + flag-on   → DO NOT register (publishes to SQS;
+//                                local listener would dispatch the
+//                                same payload a second time after the
+//                                worker tier's consumer re-emits)
+//   - Worker tier (HTTP + flag-on) → register (SQS consumer
+//                                reconstructs the interaction and
+//                                re-emits locally; the listener
+//                                routes via handleCommand /
+//                                handleFlowInteraction)
+//   - HTTP-only + flag-off     → DO NOT register (no gateway WS,
+//                                no SQS consumer, so the listener
+//                                would never fire and registering it
+//                                would just leak handler references)
+//
+// The predicate `(isGateway && !flag) || (isHttp && flag)` collapses
+// these four cases. Combined mode (isGateway=true, isHttp=true) with
+// flag-off reduces to the first disjunct (register); with flag-on it
+// would reduce to "register" via BOTH disjuncts (the false-positive
+// the boot rejection guards against — see unsupportedRoleShipperCombo).
+function shouldRegisterInteractionListener({ isGateway, isHttp, eventShipperEnabled }) {
+  return (isGateway && !eventShipperEnabled) || (isHttp && eventShipperEnabled);
+}
+
 module.exports = {
   bootRequired,
   prodRequired,
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  missingEventShipperKeys,
+  unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
+  unsupportedRoleHotStandbyCombo,
+  missingHotStandbyKeys,
+  invalidHotStandbyValues,
+  shouldRegisterInteractionListener,
+  missingMapCommandKeys,
+  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };

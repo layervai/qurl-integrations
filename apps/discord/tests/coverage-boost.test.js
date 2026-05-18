@@ -1,6 +1,6 @@
 /**
  * Residual coverage tests for commands.js — narrow branches that aren't
- * covered by the focused specs (qurl-file-map, send-pipeline-back-half,
+ * covered by the focused specs (qurl-send-map, send-pipeline-back-half,
  * commands-comprehensive, send-pipeline-helpers).
  *
  * Covers:
@@ -128,6 +128,8 @@ jest.mock('discord.js', () => {
     setPlaceholder: jest.fn().mockReturnThis(),
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
+    setDefaultValues: jest.fn().mockReturnThis(),
+    addDefaultUsers: jest.fn().mockReturnThis(),
   })),
   MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
   ModalBuilder: jest.fn().mockImplementation(() => ({
@@ -217,9 +219,9 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-jest.mock('../src/places', () => ({
-  searchPlaces: jest.fn().mockResolvedValue([]),
-}));
+// Shared places-mock — see tests/helpers/places-mock.js.
+const { mockPlacesModule } = require('./helpers/places-mock');
+jest.mock('../src/places', () => mockPlacesModule);
 
 // ---------------------------------------------------------------------------
 // Require modules under test
@@ -246,7 +248,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'file'),
+      getSubcommand: jest.fn(() => 'send'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),
@@ -330,16 +332,26 @@ describe('/bulklink — error paths', () => {
 });
 
 describe('handleCommand — autocomplete edge cases', () => {
-  it('returns early for all autocomplete interactions without responding', async () => {
+  it('routes autocomplete to the /qurl map location handler (which gates on /qurl + map + location)', async () => {
+    // Contract changed in the qurl-map-autocomplete rollout: handleCommand
+    // now routes autocomplete interactions to handleAutocomplete instead
+    // of dropping them. The handler responds with [] for non-location
+    // focused options — see handleAutocomplete in src/commands.js. This
+    // smoke pins the routing: with a non-map subcommand the response is
+    // still []  (so the picker UI doesn't render stale data), but the
+    // respond() call DOES fire.
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
-      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'query' })) },
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'send'),
+        getFocused: jest.fn(() => ({ name: 'location', value: 'query' })),
+      },
     });
     await handleCommand(interaction);
-    // Autocomplete handler was removed; returns early
-    expect(interaction.respond).not.toHaveBeenCalled();
+    expect(interaction.respond).toHaveBeenCalledWith([]);
   });
 });
 

@@ -2,54 +2,270 @@ const config = require('./config');
 const logger = require('./logger');
 
 const PLACES_AUTOCOMPLETE_URL = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
+const PLACES_FINDPLACE_URL = 'https://maps.googleapis.com/maps/api/place/findplacefromtext/json';
+const PLACES_DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
 
-async function searchPlaces(query) {
-  if (!config.GOOGLE_MAPS_API_KEY) {
-    logger.warn('GOOGLE_MAPS_API_KEY not set, skipping places autocomplete');
-    return [];
-  }
+// Wire literal that round-trips a chosen place_id through the Discord
+// slash-option `location:` value (autocomplete encodes → submit decodes).
+// The vulnerable window is autocomplete-pick → slash-submit (seconds);
+// DDB flow_state rows always carry the resolved place_id-pinned URL,
+// not the sentinel. A rename still wants a coordinated deploy so an
+// already-rendered dropdown choice doesn't 404 the resolver, but it's
+// not a multi-minute drain.
+const PLACE_ID_SENTINEL_PREFIX = 'qurl_place:';
 
-  // Cap user-supplied input before it reaches Google's URL. Google's own
-  // limit is generous but a defensive 500-char guard bounds our request
-  // size and log line length regardless. Also strip ASCII control chars
-  // so header-injection-style payloads can't smuggle newlines or NULs
-  // into the outgoing request URL.
+function encodePlaceIdSentinel(placeId) {
+  return `${PLACE_ID_SENTINEL_PREFIX}${placeId}`;
+}
+
+// Documented place_id char class: ASCII alphanumeric + `_-`. Length is
+// not officially capped, but real place_ids are ~27 chars and have
+// never been observed <16. Require >=16 + the char class so a user
+// who types `qurl_place:foo` as free text falls through to the text
+// branch (and gets a "couldn't find X" message echoing their input)
+// rather than the misleading "place no longer available" branch.
+// TODO(upstream-place-id-shape): the 16-char floor is our invariant
+// — if Google ever ships a shorter place_id, autocomplete entries
+// for it would be silently dropped and stale picks would refuse to
+// decode. Same drift-marker convention as TODO(upstream-rebrand).
+const PLACE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{16,}$/;
+
+function decodePlaceIdSentinel(value) {
+  if (typeof value !== 'string' || !value.startsWith(PLACE_ID_SENTINEL_PREFIX)) return null;
+  const placeId = value.slice(PLACE_ID_SENTINEL_PREFIX.length);
+  if (!PLACE_ID_SHAPE_RE.test(placeId)) return null;
+  return placeId;
+}
+
+// Single timeout for every Places call. Both autocomplete (per
+// keystroke) and resolveLocation (slash submit) share Discord's 3 s
+// ACK window; 1500 ms is well above Places p99 for all three endpoints
+// while leaving budget for the rest of each handler.
+const PLACES_REQUEST_TIMEOUT_MS = 1500;
+
+function sanitizeQueryParam(value) {
   // eslint-disable-next-line no-control-regex
-  const safeQuery = String(query || '').replace(/[\x00-\x1f\x7f]/g, '').slice(0, 500);
-  const params = new URLSearchParams({
-    input: safeQuery,
-    key: config.GOOGLE_MAPS_API_KEY,
-    types: 'establishment|geocode',
-  });
+  return String(value || '').replace(/[\x00-\x1f\x7f]/g, '').slice(0, 500);
+}
 
-  // SECURITY: The request URL contains GOOGLE_MAPS_API_KEY as a query param
-  // (Google Places doesn't support header auth). DO NOT log the URL, the
-  // params, or the Request object anywhere — the logger's substring redact
-  // list only catches top-level meta keys, not values embedded inside
-  // strings. Any future error handler that touches `response.url` or the
-  // full request needs to strip the `key` param first.
-  const response = await fetch(`${PLACES_AUTOCOMPLETE_URL}?${params}`, { signal: AbortSignal.timeout(5000) });
+// SECURITY: every Places request URL embeds GOOGLE_MAPS_API_KEY as a
+// query param (Google Places doesn't support header auth). DO NOT log
+// the URL, the params, or the Request object anywhere — the logger's
+// substring redact list only catches top-level meta keys, not values
+// embedded inside strings. Any future error handler that touches
+// `response.url` or the full request needs to strip the `key` param
+// first.
+async function placesFetch(url, params) {
+  const qs = new URLSearchParams({ ...params, key: config.GOOGLE_MAPS_API_KEY });
+  const response = await fetch(`${url}?${qs}`, { signal: AbortSignal.timeout(PLACES_REQUEST_TIMEOUT_MS) });
   if (!response.ok) {
     throw new Error(`Places API error: ${response.status}`);
   }
-
-  // The Places API occasionally returns an HTML error page during outages;
-  // `.json()` on that throws a SyntaxError with no context.
+  // Places occasionally returns an HTML error page during outages;
+  // .json() on that throws a SyntaxError with no context.
   let data;
   try {
     data = await response.json();
   } catch (err) {
     throw new Error(`Places API returned non-JSON response (${response.status}): ${err.message}`);
   }
+  return data;
+}
+
+// Bounded TTL cache for autocomplete results. Discord fires
+// `searchPlaces` per keystroke; a 60 s TTL collapses a typing session
+// to one Places call per distinct prefix. Cap keeps memory bounded —
+// when full, drop the oldest entry (FIFO; Map preserves insertion
+// order).
+const AUTOCOMPLETE_CACHE_TTL_MS = 60_000;
+const AUTOCOMPLETE_CACHE_MAX = 500;
+const autocompleteCache = new Map();
+
+// In-flight request dedup. Fast typists can fire multiple keystrokes
+// for the same prefix before the first Places response settles; this
+// returns the same in-flight promise for duplicate concurrent calls
+// (single-flight) rather than paying twice.
+const autocompleteInflight = new Map();
+
+// Cache + single-flight key. Normalize to lowercase + collapsed
+// whitespace so "Whitehouse", "whitehouse", and " White House "
+// share the same entry — Places Autocomplete is case-insensitive,
+// so the cache should be too.
+//
+// NOTE: the key has no per-sender / per-geo dimension, so a cache hit
+// returns whoever-primed-the-cache's geo-biased predictions. End
+// behavior is still correct (the picked place_id is canonical), but
+// the dropdown UX may briefly surprise a second sender in a different
+// region. Acceptable for autocomplete (the picked destination is
+// always pinned); revisit if telemetry shows user confusion.
+function cacheKey(query) {
+  return query.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function cacheGet(key) {
+  const entry = autocompleteCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt < Date.now()) {
+    autocompleteCache.delete(key);
+    return null;
+  }
+  // Note: TTL is from initial insert — a hot entry still expires at
+  // exactly 60 s. Intentional for autocomplete (refresh-after-60s lets
+  // upstream-changed places propagate), not a window-extending LRU.
+  // Defensive copy on read so a caller's mutation can't poison the
+  // next hit. Paired with the copy-on-write in cacheSet — together
+  // they isolate the cached array from both writer and reader.
+  return entry.results.slice();
+}
+
+function cacheSet(key, results) {
+  // Only evict when actually growing the map. Setting an existing key
+  // updates in place, so evicting first would needlessly drop an
+  // unrelated entry — only matters at saturation but cheap to guard.
+  if (autocompleteCache.size >= AUTOCOMPLETE_CACHE_MAX && !autocompleteCache.has(key)) {
+    const oldest = autocompleteCache.keys().next().value;
+    if (oldest !== undefined) autocompleteCache.delete(oldest);
+  }
+  // Copy on write: searchPlaces returns the same `results` reference
+  // it hands us. Without this copy, a downstream mutation of the
+  // returned array would also mutate the stored entry.
+  autocompleteCache.set(key, { results: results.slice(), expiresAt: Date.now() + AUTOCOMPLETE_CACHE_TTL_MS });
+}
+
+async function searchPlaces(query) {
+  if (!config.GOOGLE_MAPS_API_KEY) {
+    // Debug, not warn: fires per keystroke on a misconfigured deploy.
+    // The send-time path surfaces RESOLVE_REASON.NO_API_KEY as a single
+    // visible ephemeral, which is the load-bearing operator signal.
+    logger.debug('GOOGLE_MAPS_API_KEY not set, skipping places autocomplete');
+    return [];
+  }
+  const safeQuery = sanitizeQueryParam(query);
+  const key = cacheKey(safeQuery);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  const inflight = autocompleteInflight.get(key);
+  if (inflight) return inflight;
+  const promise = (async () => {
+    const data = await placesFetch(PLACES_AUTOCOMPLETE_URL, {
+      input: safeQuery,
+      types: 'establishment|geocode',
+    });
+    if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+      throw new Error(`Places API status: ${data.status}`);
+    }
+    const results = (data.predictions || []).map(p => ({
+      placeId: p.place_id,
+      name: p.structured_formatting?.main_text || p.description,
+      address: p.structured_formatting?.secondary_text || '',
+    }));
+    // Cache ZERO_RESULTS too — a typo prefix like "asfasdf" otherwise
+    // hits Places on every keystroke. The 60 s TTL bounds staleness.
+    cacheSet(key, results);
+    // Defensive copy so concurrent single-flight callers each get their
+    // own array (cacheGet already returns a copy on cache-hit; without
+    // this, the in-flight path's callers would share a mutable
+    // reference and one caller's sort/splice would poison the others).
+    return results.slice();
+  })().finally(() => autocompleteInflight.delete(key));
+  autocompleteInflight.set(key, promise);
+  return promise;
+}
+
+// Returns null when Find Place returns zero candidates; the caller
+// surfaces this as a "no match" error to the sender.
+async function findPlaceFromText(query) {
+  if (!config.GOOGLE_MAPS_API_KEY) {
+    throw new Error('GOOGLE_MAPS_API_KEY not set');
+  }
+  const data = await placesFetch(PLACES_FINDPLACE_URL, {
+    input: sanitizeQueryParam(query),
+    inputtype: 'textquery',
+    fields: 'place_id,name,formatted_address',
+  });
   if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
     throw new Error(`Places API status: ${data.status}`);
   }
-
-  return (data.predictions || []).map(p => ({
-    placeId: p.place_id,
-    name: p.structured_formatting?.main_text || p.description,
-    address: p.structured_formatting?.secondary_text || '',
-  }));
+  const candidate = (data.candidates || [])[0];
+  if (!candidate || !candidate.place_id) return null;
+  return {
+    placeId: candidate.place_id,
+    name: candidate.name || candidate.formatted_address || '',
+    address: candidate.formatted_address || '',
+  };
 }
 
-module.exports = { searchPlaces };
+async function getPlaceDetails(placeId) {
+  if (!config.GOOGLE_MAPS_API_KEY) {
+    throw new Error('GOOGLE_MAPS_API_KEY not set');
+  }
+  const data = await placesFetch(PLACES_DETAILS_URL, {
+    // sanitizeQueryParam is a no-op when called from resolveLocation
+    // (the placeId already passed PLACE_ID_SHAPE_RE at decode time),
+    // but kept as defense-in-depth for any future caller that
+    // bypasses decode.
+    place_id: sanitizeQueryParam(placeId),
+    fields: 'place_id,name,formatted_address',
+  });
+  if (data.status !== 'OK') {
+    if (data.status === 'NOT_FOUND') return null;
+    if (data.status === 'INVALID_REQUEST') {
+      // For a shape-validated sentinel place_id, INVALID_REQUEST
+      // signals key/scope misconfig or upstream-shape drift — NOT
+      // "deleted upstream." Surface so a misconfigured deploy doesn't
+      // hide behind the recipient-facing "place no longer available"
+      // message. (The caller still maps this to NOT_FOUND so the
+      // sender sees a graceful failure.)
+      logger.warn('getPlaceDetails: INVALID_REQUEST for shape-validated place_id (check API key scopes)', {
+        place_id: placeId,
+      });
+      return null;
+    }
+    throw new Error(`Places API status: ${data.status}`);
+  }
+  const r = data.result;
+  if (!r) return null;
+  // Fall back to the caller's placeId if the response omits it. Reject
+  // entirely if both are empty so buildPlaceUrl downstream can't ship
+  // a URL with `query_place_id=` (which Google renders as a broken
+  // search).
+  const resolvedId = r.place_id || placeId;
+  if (!resolvedId) return null;
+  return {
+    placeId: resolvedId,
+    name: r.name || r.formatted_address || '',
+    address: r.formatted_address || '',
+  };
+}
+
+// Per Google's URL spec the `query` param is required even when
+// `query_place_id` is set; we pass the canonical place name there.
+// query_place_id pins the result so every recipient opens the same
+// destination regardless of viewer geo.
+function buildPlaceUrl(placeName, placeId) {
+  const url = new URL('https://www.google.com/maps/search/');
+  url.searchParams.set('api', '1');
+  url.searchParams.set('query', placeName || placeId);
+  url.searchParams.set('query_place_id', placeId);
+  return url.toString();
+}
+
+module.exports = {
+  searchPlaces,
+  findPlaceFromText,
+  getPlaceDetails,
+  buildPlaceUrl,
+  PLACE_ID_SENTINEL_PREFIX,
+  PLACE_ID_SHAPE_RE,
+  encodePlaceIdSentinel,
+  decodePlaceIdSentinel,
+  // Test-only reset hook. Exported unconditionally — a NODE_ENV gate
+  // would silently ship to any container without NODE_ENV=production
+  // set (common default-empty case). Calling it in production is a
+  // harmless no-op (cache rebuilds in ≤60s); the underscore-prefixed
+  // name signals it's not part of the public API.
+  _resetAutocompleteCache: () => {
+    autocompleteCache.clear();
+    autocompleteInflight.clear();
+  },
+};

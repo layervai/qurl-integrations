@@ -34,7 +34,7 @@
  *      Discord server."
  *   7. Verify DDB row exists: `aws dynamodb get-item --table-name
  *      <table_prefix>guild-configs --key '{"guild_id":{"S":"<id>"}}'`.
- *   8. Run `/qurl file` (or `/qurl map`) with a test recipient — confirm
+ *   8. Run `/qurl send` (or `/qurl map`) with a test recipient — confirm
  *      it succeeds (proves the persisted key works through the connector
  *      + mint).
  *   9. Run `/qurl status` — confirm it shows the key prefix.

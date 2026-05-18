@@ -59,7 +59,7 @@ function renderNotConfigured(res) {
 // if attacker pre-runs Discord install in their browser then forwards
 // the chained Auth0-redirect URL to a victim, the readout shows
 // (attacker's guild + victim's qURL email) so the victim can spot the
-// mismatch before /qurl file or /qurl map usage starts. PR #177 follow-up C.5 —
+// mismatch before /qurl send or /qurl map usage starts. PR #177 follow-up C.5 —
 // upgraded from the prior grey-prose subtext for visual prominence.
 function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   const details = [];
@@ -75,7 +75,7 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
     // CTA folded into message so the "confirm before closing" cue
     // always rides next to the binding readout, including when the
     // qURL-account-email line is missing (JWKS verify failure).
-    message: 'Confirm the binding below matches your server, then close this tab and return to Discord. /qurl file and /qurl map are ready.',
+    message: 'Confirm the binding below matches your server, then close this tab and return to Discord. /qurl send and /qurl map are ready.',
     details,
     type: 'success',
   }));
@@ -441,7 +441,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    `/qurl status` and against the layerv.ai dashboard, which
   //    matters for spotting binding mismatches in the rare confused-
   //    deputy edge case (see PR #177 review item 3).
-  const dmLines = ['✅ **qURL is connected to your Discord server.** Your team can now use `/qurl file` and `/qurl map`. All usage will be billed to your qURL account.'];
+  const dmLines = ['✅ **qURL is connected to your Discord server.** Your team can now use `/qurl send` and `/qurl map`. All usage will be billed to your qURL account.'];
   if (keyPrefix) dmLines.push(`Key prefix: \`${keyPrefix}\``);
   sendDM(discordUserId, dmLines.join('\n'))
     .catch((err) => logger.warn('Failed to DM admin after qURL setup', { error: err?.message, discordUserId }));

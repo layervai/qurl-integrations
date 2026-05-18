@@ -19,6 +19,34 @@ const RESOURCE_TYPES = {
   MAPS: 'maps',
 };
 
+// Trust signals surfaced on the per-recipient DM embed (sender provenance
+// + "is this real?" verify path). The destination domain in the footer
+// mirrors the host of the minted qURL — keep in lockstep with whatever
+// host qurl-service returns from POST /v1/qurls. The landing URL is the
+// public brand page first-time recipients can hit to verify qURL is a
+// real service before clicking Step Through.
+//
+// LANDING_URL is intentionally brand-canonical — it stays pinned to
+// the layerv.ai/qurl page even when a tenant brands their minted-link
+// host via `branded_domain`. The verify path is "is qURL itself
+// real?", not "is this tenant real?"; routing through the canonical
+// brand page is the correct trust signal regardless of which host
+// served the link.
+//
+// TODO(branded-domain) — tracked: layervai/qurl-integrations#383
+// DESTINATION_DOMAIN is a brand-default literal. qurl-service already
+// supports a `branded_domain` concept (tenant-custom hosts on minted
+// links — see qurl-service api.gen.go). Discord doesn't consume that
+// field today, but the moment it does, the footer "opens qurl.link"
+// becomes factually wrong while Step Through opens e.g.
+// `door.acme.com`. When qurl-integrations starts honoring
+// branded_domain in the minted-link response, derive the footer text
+// from link.qurlLink's host rather than this literal.
+const TRUST = {
+  LANDING_URL: 'https://layerv.ai/qurl/',
+  DESTINATION_DOMAIN: 'qurl.link',
+};
+
 // DM delivery status values
 const DM_STATUS = {
   SENT: 'sent',
@@ -39,6 +67,13 @@ const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
   QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
+  // Bound for `guild.members.fetch()` pre-warm before @everyone / role
+  // expansion. discord.js *rejects* on timeout (not "returns partial"),
+  // but chunks update `guild.members.cache` as they arrive — so the
+  // pre-warm helper's catch lands partial state in the cache before the
+  // rejection fires, and the parser proceeds against whatever arrived.
+  // Degraded expansion beats a stuck slash command.
+  MEMBER_PREFETCH: 8000,
 };
 
 // Limits
@@ -121,13 +156,28 @@ const AUDIT_EVENTS = {
   // both file and location prep paths. The meta `kind` field carries
   // the composition: 'file' | 'location' | 'mixed'. Collapsing to one
   // event prevents UploadCount from double-counting mixed sends if the
-  // CloudWatch filter doesn't dimension on kind. /qurl file and
+  // CloudWatch filter doesn't dimension on kind. /qurl send and
   // /qurl map are mutually exclusive so 'mixed' only ever shows up
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
   UPLOAD_SUCCESS: 'upload_success',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
+  // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the
+  // channelId / messageId came back missing — the audit-vs-DDB
+  // divergence persistDispatchResult records as `failed`. Distinct
+  // from DISPATCH_SENT so the dashboard can reconcile CloudWatch
+  // `dispatch_sent` count with DDB `count(dm_status='sent')` without
+  // a mystery gap. Should always read zero — if it lights up, the
+  // discord.js user.send() response shape has changed.
+  DISPATCH_SENT_NO_REFS: 'dispatch_sent_no_refs',
+  // DISPATCH_PERSIST_FAILED fires when sendDM succeeded but the
+  // bookkeeping write to qurl_sends threw (DDB outage, throttle,
+  // ValidationException, etc.). The DM is real; the dispatch loop
+  // continues to report the recipient as delivered. This event is
+  // a canary for an oncall-relevant DDB issue separate from the
+  // dispatch-success-rate signal — should always read zero.
+  DISPATCH_PERSIST_FAILED: 'dispatch_persist_failed',
   // REVOKE_SUCCESS fires when at least one per-link delete succeeded;
   // REVOKE_FAILED fires when every per-link delete threw (success === 0
   // && total > 0). When total === 0 (nothing to revoke — already-revoked
@@ -364,6 +414,41 @@ const AUDIT_EVENTS = {
 // only one whose mutation is undetectable by tests.
 Object.freeze(AUDIT_EVENTS);
 
+// Discord gateway dispatch event names (the `t` field on op=0 frames).
+// Today only INTERACTION_CREATE is published to the worker tier;
+// MESSAGE_CREATE etc. are reserved for future event-class expansion.
+// Centralized here so the publisher (event-publisher.js, filters on
+// publish) and the consumer (event-consumer.js, validates the
+// envelope's eventType) can't drift — Discord's wire-protocol string
+// is the only value either side ever uses, and a typo on one side
+// would silently drop every dispatch.
+//
+// Frozen for the same reason AUDIT_EVENTS is: a runtime mutation
+// would leave the literal string in transit unaffected but break
+// the other tier's check.
+const GATEWAY_DISPATCH_TYPES = Object.freeze({
+  INTERACTION_CREATE: 'INTERACTION_CREATE',
+});
+
+// Structured-log `kind` tags used to correlate failures across the
+// async-boundary trio: the gateway-WS-driven unhandledRejection
+// handler in index.js, the worker-tier dispatch handler rejection
+// path in event-consumer.js (trackDispatch's .catch), and the
+// publish-failure path in event-publisher.js. All three emit the
+// same `kind: 'unhandledRejection'` tag so a single CloudWatch
+// query — filtering on the structured field — finds every site
+// without grepping message text or maintaining per-site filter
+// rules. Centralizing the literal here makes the contract
+// explicit and lets a future tag addition (LOG_KIND_AUDIT, etc.)
+// follow the same pattern.
+//
+// Frozen — see AUDIT_EVENTS for the rationale. A mutation here
+// would silently make one site stop matching the CloudWatch
+// alarm filter the other two sites still emit.
+const LOG_KINDS = Object.freeze({
+  UNHANDLED_REJECTION: 'unhandledRejection',
+});
+
 module.exports = {
   COLORS,
   RESOURCE_TYPES,
@@ -376,4 +461,7 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  TRUST,
+  GATEWAY_DISPATCH_TYPES,
+  LOG_KINDS,
 };

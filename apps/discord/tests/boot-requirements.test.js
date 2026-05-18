@@ -16,6 +16,15 @@ const {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  missingEventShipperKeys,
+  unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
+  unsupportedRoleHotStandbyCombo,
+  missingHotStandbyKeys,
+  invalidHotStandbyValues,
+  shouldRegisterInteractionListener,
+  missingMapCommandKeys,
+  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -135,6 +144,213 @@ describe('missingKekRequiredKeys', () => {
   });
 });
 
+describe('missingEventShipperKeys', () => {
+  it('returns empty when the flag is unset (event-shipper path inactive)', () => {
+    expect(missingEventShipperKeys({})).toEqual([]);
+    expect(missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: false })).toEqual([]);
+    // Even with a missing queue URL — the flag is the gate, not the URL.
+    expect(
+      missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: false, QURL_BOT_EVENTS_QUEUE_URL: undefined })
+    ).toEqual([]);
+  });
+
+  it('flags QURL_BOT_EVENTS_QUEUE_URL when flag is on without a URL', () => {
+    expect(
+      missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: true })
+    ).toEqual(['QURL_BOT_EVENTS_QUEUE_URL']);
+    // Empty string counts as missing — matches the `!env[k]` falsy
+    // treatment elsewhere in this module.
+    expect(
+      missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: true, QURL_BOT_EVENTS_QUEUE_URL: '' })
+    ).toEqual(['QURL_BOT_EVENTS_QUEUE_URL']);
+  });
+
+  it('returns empty when both are set', () => {
+    expect(
+      missingEventShipperKeys({
+        ENABLE_EVENT_SHIPPER: true,
+        QURL_BOT_EVENTS_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events',
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('unsupportedRoleShipperCombo', () => {
+  it('rejects combined + flag-on with operator-facing remediation', () => {
+    const msg = unsupportedRoleShipperCombo('combined', true);
+    expect(msg).not.toBeNull();
+    // Pin the message contract so a wording drift can't silently
+    // strip the remediation hint operators rely on to fix the deploy.
+    expect(msg).toMatch(/PROCESS_ROLE=combined/);
+    expect(msg).toMatch(/ENABLE_EVENT_SHIPPER=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).toMatch(/PROCESS_ROLE=http/);
+  });
+
+  it.each([
+    ['gateway', true],
+    ['http', true],
+    ['combined', false],
+    ['gateway', false],
+    ['http', false],
+  ])('returns null for supported combination role=%s shipper=%s', (role, shipperEnabled) => {
+    expect(unsupportedRoleShipperCombo(role, shipperEnabled)).toBeNull();
+  });
+});
+
+describe('unsupportedRoleResumeCombo', () => {
+  it('returns null when resume=false regardless of other inputs', () => {
+    // Flag-off is the legacy path — every (role, shipper, storeType)
+    // combination is supported (or rejected by
+    // unsupportedRoleShipperCombo). Pin every input as null so a
+    // future shape change can't accidentally start rejecting legacy
+    // deploys.
+    for (const role of ['combined', 'gateway', 'http']) {
+      for (const shipper of [true, false]) {
+        for (const storeType of ['sqlite', 'ddb']) {
+          expect(unsupportedRoleResumeCombo(role, false, shipper, storeType)).toBeNull();
+        }
+      }
+    }
+  });
+
+  it('rejects resume=true with combined role and surfaces shim/Client conflict', () => {
+    // combined+resume is rejected ahead of every other check because
+    // combined mode is the higher-order failure. Pin the message
+    // contract so a future wording drift can't strip the operator
+    // remediation hint.
+    const msg = unsupportedRoleResumeCombo('combined', true, true, 'ddb');
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/PROCESS_ROLE=combined/);
+    expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).toMatch(/PROCESS_ROLE=http/);
+    // combined-mode check is sequenced first so it dominates the
+    // shipper/store-type rejections.
+    expect(unsupportedRoleResumeCombo('combined', true, false, 'sqlite')).toBe(msg);
+  });
+
+  it('rejects resume=true with shipper=false on supported roles', () => {
+    for (const role of ['gateway', 'http']) {
+      const msg = unsupportedRoleResumeCombo(role, true, false, 'ddb');
+      expect(msg).not.toBeNull();
+      expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true/);
+      // Role-neutral framing: the rejection should not mention
+      // gateway-tier-specific implementation details (the shim is
+      // never constructed on http, so an http operator reading the
+      // message wouldn't see "the shim replaces Client" verbiage).
+      expect(msg).not.toMatch(/replaces discord\.js Client/);
+      expect(msg).not.toMatch(/@discordjs\/ws/);
+    }
+  });
+
+  it('rejects resume=true with storeType=sqlite (would lose state across processes)', () => {
+    // Default sqlite backend writes a local file that the next ECS
+    // task can't see. Without rejecting at boot, the bot would
+    // silently IDENTIFY on every restart — mimicking flag-off
+    // behavior and burning Discord's per-bot IDENTIFY budget.
+    // config.STORE_TYPE always coerces unset to 'sqlite' so we
+    // only test the resolved string (not undefined/empty).
+    const msg = unsupportedRoleResumeCombo('gateway', true, true, 'sqlite');
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/STORE_TYPE=ddb/);
+    expect(msg).toMatch(/gateway-session/);
+    expect(msg).toMatch(/'sqlite'/);
+  });
+
+  it('returns null for the production-shape path (gateway + shipper + ddb)', () => {
+    expect(unsupportedRoleResumeCombo('gateway', true, true, 'ddb')).toBeNull();
+    // http tier accepts resume=true as a no-op so the operator can
+    // ship one task-def with uniform env across both tiers.
+    expect(unsupportedRoleResumeCombo('http', true, true, 'ddb')).toBeNull();
+  });
+});
+
+describe('shouldRegisterInteractionListener', () => {
+  // The full 3 roles × 2 flag states truth table. Combined + flag-on
+  // is rejected at boot (unsupportedRoleShipperCombo), so its
+  // intended-behavior is "unreachable in production." We still pin
+  // the predicate's output for that input so a future caller that
+  // bypasses the boot guard sees a coherent value.
+  //
+  // The mapping is derived via resolveProcessRole semantics:
+  //   combined → isGateway=true, isHttp=true
+  //   gateway  → isGateway=true, isHttp=false
+  //   http     → isGateway=false, isHttp=true
+  test.each([
+    // [role,       flag,  expected, rationale]
+    ['combined',   false, true,  'legacy in-process; local listener handles dispatch'],
+    ['combined',   true,  true,  'unreachable in prod (boot reject); predicate output coherent'],
+    ['gateway',    false, true,  'legacy in-process gateway tier (single-process deploy)'],
+    ['gateway',    true,  false, 'gateway tier publishes to SQS; local listener disconnected'],
+    ['http',       false, false, 'no gateway WS + no SQS consumer; listener would never fire'],
+    ['http',       true,  true,  'worker tier; SQS consumer re-emits, listener routes'],
+  ])('role=%s flag=%s → %s (%s)', (role, eventShipperEnabled, expected) => {
+    const { isGateway, isHttp } = resolveProcessRole(role);
+    expect(shouldRegisterInteractionListener({ isGateway, isHttp, eventShipperEnabled })).toBe(expected);
+  });
+
+  it('is a pure function (no side effects, same input → same output)', () => {
+    // Predicate must be referentially transparent — a side effect
+    // would couple boot to non-determinism and undermine the
+    // unit-testability that motivated the lift.
+    const args = { isGateway: true, isHttp: false, eventShipperEnabled: true };
+    const first = shouldRegisterInteractionListener(args);
+    const second = shouldRegisterInteractionListener(args);
+    expect(first).toBe(second);
+  });
+});
+
+describe('missingMapCommandKeys', () => {
+  it('returns empty when the flag is off — Maps key state is irrelevant', () => {
+    expect(missingMapCommandKeys({})).toEqual([]);
+    expect(missingMapCommandKeys({ MAP_COMMAND_ENABLED: false })).toEqual([]);
+    // Even with a missing or PLACEHOLDER key — the toggle is the gate.
+    // No /qurl map registration means no Places call possible.
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: false, GOOGLE_MAPS_API_KEY: '' }),
+    ).toEqual([]);
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: false,
+        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+      }),
+    ).toEqual([]);
+  });
+
+  it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is missing', () => {
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true, GOOGLE_MAPS_API_KEY: '' }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
+  });
+
+  it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is still the PLACEHOLDER sentinel', () => {
+    // The exact regression that triggered the toggle PR: the SSM
+    // parameter shipped as the literal "PLACEHOLDER" value in both
+    // sandbox + prod accounts. Without this branch, an operator
+    // flipping the toggle without seeding the SSM secret would boot
+    // successfully and fail at the first /qurl map invocation.
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: true,
+        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+      }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
+  });
+
+  it('returns empty when toggle is on AND the key is a real value', () => {
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: true,
+        GOOGLE_MAPS_API_KEY: 'AIzaSyA-real-looking-key-1234567890',
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe('resolveProcessRole', () => {
   it('VALID_PROCESS_ROLES is the canonical set in stable order (combined first as the default)', () => {
     expect(VALID_PROCESS_ROLES).toEqual(['combined', 'gateway', 'http']);
@@ -184,5 +400,204 @@ describe('resolveProcessRole', () => {
     // 'GATEWAY' should fail loud, not silently coerce.
     expect(() => resolveProcessRole('GATEWAY')).toThrow(/GATEWAY/);
     expect(() => resolveProcessRole('Combined')).toThrow(/Combined/);
+  });
+});
+
+describe('unsupportedRoleHotStandbyCombo', () => {
+  it('returns null when hot-standby=false regardless of other inputs', () => {
+    for (const role of ['combined', 'gateway', 'http']) {
+      for (const resume of [true, false]) {
+        expect(unsupportedRoleHotStandbyCombo(role, false, resume)).toBeNull();
+      }
+    }
+  });
+
+  it('rejects hot-standby=true on combined role with operator-facing remediation', () => {
+    const msg = unsupportedRoleHotStandbyCombo('combined', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/ENABLE_GATEWAY_HOT_STANDBY=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    // Names the actual role so an operator pasting the log line into
+    // a ticket sees their misconfiguration immediately.
+    expect(msg).toMatch(/'combined'/);
+  });
+
+  it('rejects hot-standby=true on http role', () => {
+    const msg = unsupportedRoleHotStandbyCombo('http', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/'http'/);
+    expect(msg).toMatch(/no manager to hand off/);
+  });
+
+  it('rejects hot-standby=true with resume=false (would session-flap)', () => {
+    // The push-handoff path adopts the outgoing leader's
+    // session_id+sequence on the standby — without RESUME, the
+    // standby would IDENTIFY against the same token and Discord
+    // would flap the session identity.
+    const msg = unsupportedRoleHotStandbyCombo('gateway', true, false);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/requires ENABLE_GATEWAY_RESUME=true/);
+    expect(msg).toMatch(/flap the session/);
+  });
+
+  it('returns null on the supported combo (gateway + resume + hot-standby)', () => {
+    expect(unsupportedRoleHotStandbyCombo('gateway', true, true)).toBeNull();
+  });
+
+  it('sequences role check before resume check (operator sees the dominant fix first)', () => {
+    // combined+hot-standby+resume-off is doubly broken. The role
+    // check fires first because PROCESS_ROLE is the higher-order
+    // misconfig — fixing the role + leaving resume off would leave
+    // the second rejection still firing; fixing resume + leaving
+    // combined would re-fire the role rejection. Sequencing the
+    // role check first means the first redeploy lands the higher-
+    // order fix.
+    const msg = unsupportedRoleHotStandbyCombo('combined', true, false);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).not.toMatch(/ENABLE_GATEWAY_RESUME=true/);
+  });
+});
+
+describe('missingHotStandbyKeys', () => {
+  function cfg(overrides = {}) {
+    return {
+      ENABLE_GATEWAY_HOT_STANDBY: true,
+      INSTANCE_ID: 'task-abc-123',
+      INSTANCE_IP: '10.0.1.42',
+      hasGatewayHandoffHmac: true,
+      ...overrides,
+    };
+  }
+
+  it('returns empty when the flag is off (no requirements)', () => {
+    expect(missingHotStandbyKeys({
+      ENABLE_GATEWAY_HOT_STANDBY: false,
+      // Everything else unset — must still be empty.
+    })).toEqual([]);
+  });
+
+  it('returns empty when every required key is present', () => {
+    expect(missingHotStandbyKeys(cfg())).toEqual([]);
+  });
+
+  it('surfaces missing INSTANCE_ID', () => {
+    expect(missingHotStandbyKeys(cfg({ INSTANCE_ID: undefined }))).toEqual(['INSTANCE_ID']);
+  });
+
+  it('surfaces missing INSTANCE_IP', () => {
+    expect(missingHotStandbyKeys(cfg({ INSTANCE_IP: null }))).toEqual(['INSTANCE_IP']);
+  });
+
+  it('surfaces missing GATEWAY_HANDOFF_HMAC (via hasGatewayHandoffHmac flag)', () => {
+    // The presence check reads `hasGatewayHandoffHmac` (boolean) rather
+    // than the raw secret string — see config.js's
+    // `takeGatewayHandoffHmac` for the heap-dump security rationale.
+    expect(missingHotStandbyKeys(cfg({ hasGatewayHandoffHmac: false })))
+      .toEqual(['GATEWAY_HANDOFF_HMAC']);
+  });
+
+  it('returns every missing key (not just the first) for one-shot remediation', () => {
+    // Order is the function's natural push order (INSTANCE_ID,
+    // INSTANCE_IP, GATEWAY_HANDOFF_HMAC); pinning it documents that
+    // contract so a refactor that reorders the pushes flags the
+    // operator-facing log-message ordering as a change.
+    const missing = missingHotStandbyKeys(cfg({
+      INSTANCE_ID: undefined,
+      INSTANCE_IP: undefined,
+      hasGatewayHandoffHmac: false,
+    }));
+    expect(missing).toEqual(['INSTANCE_ID', 'INSTANCE_IP', 'GATEWAY_HANDOFF_HMAC']);
+  });
+});
+
+describe('invalidHotStandbyValues', () => {
+  function cfg(overrides = {}) {
+    return {
+      ENABLE_GATEWAY_HOT_STANDBY: true,
+      INSTANCE_ID: 'task-abc-123',
+      INSTANCE_IP: '10.0.1.42',
+      ...overrides,
+    };
+  }
+
+  it('returns empty when the flag is off (no shape requirements)', () => {
+    expect(invalidHotStandbyValues({
+      ENABLE_GATEWAY_HOT_STANDBY: false,
+      INSTANCE_ID: '${LITERALLY_UNRESOLVED}',
+      INSTANCE_IP: 'not-an-ip',
+    })).toEqual([]);
+  });
+
+  it('returns empty when both values are well-shaped', () => {
+    expect(invalidHotStandbyValues(cfg())).toEqual([]);
+  });
+
+  it('flags unsubstituted template literal in INSTANCE_ID — env-override paste footgun', () => {
+    // The specific scenario: an operator sets
+    // `INSTANCE_ID=${ECS_TASK_ARN}` as an env override (e.g. pasted
+    // from a runbook) and the surrounding shell fails to expand it.
+    // Without this check the literal `${ECS_TASK_ARN}` would key the
+    // lock + heartbeat rows and every replica would think it owns
+    // the same identifier.
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_ID: '${ECS_TASK_ARN}' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/INSTANCE_ID looks like an unsubstituted template literal/);
+    expect(problems[0]).toContain('${ECS_TASK_ARN}');
+  });
+
+  it('flags non-IPv4 INSTANCE_IP (string)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: 'not-an-ip' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/INSTANCE_IP must be a valid IPv4 address/);
+    expect(problems[0]).toContain("'not-an-ip'");
+  });
+
+  it('flags out-of-range octets in INSTANCE_IP (10.0.0.999)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '10.0.0.999' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('10.0.0.999');
+  });
+
+  it('flags IPv6 INSTANCE_IP (out of scope for Pillar 3)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '::1' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/must be a valid IPv4/);
+  });
+
+  it('flags leading-zero IPv4 octets (octal-parse hazard under some resolvers)', () => {
+    // `01.02.03.04` parses as octal under glibc's `inet_aton` and a
+    // handful of resolvers — a typo'd "010.0.0.1" would resolve as
+    // 8.0.0.1, silently routing the control channel to a wrong host.
+    // The closed-door fix is to require canonical no-leading-zero
+    // octets, which the ECS task-def injection always produces.
+    for (const ip of ['01.0.0.1', '10.01.0.1', '10.0.01.1', '10.0.0.01']) {
+      const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }));
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/must be a valid IPv4/);
+    }
+  });
+
+  it('accepts every octet boundary (0, 9, 10, 99, 100, 199, 200, 249, 255)', () => {
+    const ips = ['0.0.0.0', '255.255.255.255', '10.99.100.249', '1.9.199.200'];
+    for (const ip of ips) {
+      expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }))).toEqual([]);
+    }
+  });
+
+  it('reports every problem on a single call (one-shot operator remediation)', () => {
+    const problems = invalidHotStandbyValues(cfg({
+      INSTANCE_ID: '${ECS_TASK_ARN}',
+      INSTANCE_IP: '999.999.999.999',
+    }));
+    expect(problems).toHaveLength(2);
+  });
+
+  it('does not trip on present-but-empty INSTANCE_IP (the missingHotStandbyKeys check catches that)', () => {
+    // Separation of concerns: missing-key checks are presence-only,
+    // shape checks only run on present values. An empty string is
+    // "missing" from the perspective of the upstream check and is
+    // skipped here to avoid duplicate operator-facing messages.
+    expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: '' }))).toEqual([]);
+    expect(invalidHotStandbyValues(cfg({ INSTANCE_ID: '' }))).toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ linking and auto Contributor-role assignment for community members.
 
 ## Features
 
-- **`/qurl file`** — share a file as a one-time qURL link, delivered to each
+- **`/qurl send`** — share a file as a one-time qURL link, delivered to each
   recipient via DM. Recipients picked via @mentions or a user-select menu.
 - **`/qurl map`** — share a Google Maps location as a one-time qURL link,
   delivered to each recipient via DM.
@@ -26,7 +26,7 @@ linking and auto Contributor-role assignment for community members.
 
 | Command | Description |
 |---------|-------------|
-| `/qurl file` | Send a file as one-time qURL links to picked recipients |
+| `/qurl send` | Send a file as one-time qURL links to picked recipients |
 | `/qurl map` | Send a Google Maps location as one-time qURL links to picked recipients |
 | `/qurl revoke` | Revoke links from a previous send |
 | `/qurl help` | Usage reference |
