@@ -114,8 +114,25 @@ func (h *Handler) handleAdminClaimSubmit(ctx context.Context, w http.ResponseWri
 		return
 	}
 
-	if _, err := h.cfg.AdminStore.RedeemBootstrap(ctx, code, teamID, userID); err != nil {
+	mapping, err := h.cfg.AdminStore.RedeemBootstrap(ctx, code, teamID, userID)
+	if err != nil {
 		h.surfaceClaimError(ctx, w, userID, err)
+		return
+	}
+	// Persist the workspace mapping so CheckAdmin returns true on
+	// subsequent /qurl admin commands. RedeemBootstrap atomically
+	// burns the one-time code but leaves the workspace_mappings row
+	// to the caller — without this Put the user is told they're an
+	// admin but every follow-up admin verb returns "you are not an
+	// admin." Bind seeds admin_slack_user_ids with the redeemer's
+	// userID.
+	if bindErr := h.cfg.AdminStore.BindWorkspace(ctx, mapping, userID); bindErr != nil {
+		// The bootstrap code is already burned. Surface the failure
+		// instead of lying about the outcome — surfaceClaimError maps
+		// 409 (workspace already bound to a different owner) to the
+		// right copy and falls everything else through the generic
+		// path so operators see the failure in slog.
+		h.surfaceClaimError(ctx, w, userID, bindErr)
 		return
 	}
 	slog.Info("admin claim redeemed", "team_id", teamID, "user_id", userID)

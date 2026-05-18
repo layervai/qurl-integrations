@@ -187,7 +187,8 @@ func buildClaimSubmission(teamID, userID, code string) string {
 
 // TestHandleAdminClaimSubmit_HappyPath fences the canonical
 // view_submission path: a valid code is consumed via RedeemBootstrap,
-// PostDM gets the success message, and the modal closes (empty 200).
+// the workspace_mappings row is persisted via BindWorkspace, PostDM
+// gets the success message, and the modal closes (empty 200).
 func TestHandleAdminClaimSubmit_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.ddb.seedItem(t, ts.tableNames.bootstrapCodes, seedBootstrapCode(t, "BOOT-VALID", testAdminOwnerID, "k_xxx", time.Now().Add(time.Hour), false))
@@ -217,6 +218,57 @@ func TestHandleAdminClaimSubmit_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(dmText, "admin for this workspace") {
 		t.Errorf("DM text missing success message: %q", dmText)
+	}
+	// Persistence fence — the regression we just fixed was that the
+	// success DM landed but workspace_mappings was never written, so
+	// the very next /qurl admin command returned "you are not an
+	// admin." Assert the row is present with the redeemer on the
+	// admin set.
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testAdminUserID) {
+		t.Errorf("workspace_mappings row missing or did not include %q on admin_slack_user_ids — admin-claim persistence regression", testAdminUserID)
+	}
+}
+
+// TestHandleAdminClaimSubmit_PersistsAdminMapping is a dedicated fence
+// for the persistence behavior: RedeemBootstrap burns the one-time
+// code and BindWorkspace writes the workspace_mappings row carrying
+// the redeemer on admin_slack_user_ids. Without the BindWorkspace
+// step, the bootstrap code is consumed but the workspace remains
+// unbound — the user gets the success DM and then `/qurl admin
+// allow` returns "you are not an admin." This test exists so a
+// refactor that drops the BindWorkspace call (or reverts to the
+// `_, err :=` discard shape) regresses loudly instead of silently.
+func TestHandleAdminClaimSubmit_PersistsAdminMapping(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.ddb.seedItem(t, ts.tableNames.bootstrapCodes, seedBootstrapCode(t, "BOOT-PERSIST", testAdminOwnerID, "k_persist", time.Now().Add(time.Hour), false))
+	h := newAdminTestHandler(t, ts)
+	// No PostDM wired — keeps the test focused on the persistence
+	// surface rather than the DM surface.
+
+	// Pre-state: no workspace row yet.
+	if ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testAdminUserID) {
+		t.Fatalf("pre-state: workspace_mappings row should not exist before claim")
+	}
+
+	status, _ := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-PERSIST"))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	// Post-state: row exists with redeemer on admin_slack_user_ids.
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testAdminUserID) {
+		t.Fatalf("workspace_mappings row missing or did not include %q after admin claim — bootstrap code was burned but workspace is not bound", testAdminUserID)
+	}
+
+	// And the slackdata-side CheckAdmin (the surface every other
+	// admin verb reads) agrees the user is an admin.
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	isAdmin, _, err := store.CheckAdmin(context.Background(), testAdminTeamID, testAdminUserID)
+	if err != nil {
+		t.Fatalf("CheckAdmin: %v", err)
+	}
+	if !isAdmin {
+		t.Errorf("CheckAdmin(%q, %q) = false, want true after successful claim", testAdminTeamID, testAdminUserID)
 	}
 }
 

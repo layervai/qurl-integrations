@@ -209,6 +209,42 @@ func parseSlackText(t *testing.T, body []byte) string {
 	return got["text"]
 }
 
+// workspaceMappingHasAdmin returns true iff the workspace_mappings
+// row for `teamID` exists AND carries `slackUserID` in its
+// admin_slack_user_ids SS (set). The post-pivot admin-claim flow
+// writes this row via BindWorkspace after RedeemBootstrap; without
+// it CheckAdmin returns (false, "", nil) on every subsequent admin
+// verb. This helper is the post-state fence for the persistence bug.
+func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID string) bool {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, tbl := range f.tables {
+		for _, item := range tbl {
+			team, _ := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
+			if team == nil || team.Value != teamID {
+				continue
+			}
+			// Skip channel_policies rows (they also carry slack_team_id
+			// in the same fake-table scan).
+			if _, isChannelRow := item[fAttrSlackChannelID]; isChannelRow {
+				continue
+			}
+			ss, ok := item[fAttrAdminSlackUserIDs].(*ddbtypes.AttributeValueMemberSS)
+			if !ok {
+				return false
+			}
+			for _, u := range ss.Value {
+				if u == slackUserID {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
 // policyHasResource returns true iff the channel_policies row for
 // (teamID, channelID) carries resourceID in its allowed_resource_ids
 // SS (set). The production AllowResource path stores resources in
