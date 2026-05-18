@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/aliasstore"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -169,6 +170,34 @@ func run() error {
 			)
 		},
 	})
+
+	// Wire the AliasStore for /qurl setalias and /qurl unsetalias.
+	// Bridging package — when #231's slackdata.Store lands with the
+	// same BindChannelAlias/UnbindChannelAlias methods, swap this for
+	// `handler.SetAliasStore(slackdata.NewStore(...))` and delete the
+	// aliasstore package. Env var name matches slackdata's intended
+	// wiring so the qurl-bot-slack TF (main.tf:245) already sets it.
+	// Missing env or constructor error is non-fatal: the verbs reply
+	// with a "not configured" ephemeral via handler_alias.go's
+	// aliasPreamble guard, which is more debuggable than a startup
+	// crash on a sandbox without the DDB tables provisioned.
+	if table := os.Getenv(aliasstore.EnvChannelPoliciesTable); table != "" {
+		store, err := aliasstore.New(signalCtx, table)
+		if err != nil {
+			slog.Warn("aliasstore init failed; /qurl setalias and /qurl unsetalias will be disabled", "error", err)
+		} else {
+			handler.SetAliasStore(store)
+			// Table name omitted from the log line on purpose: the
+			// value is tainted (os.Getenv) and even though slog's JSON
+			// handler escapes control bytes, the operator can read the
+			// configured value off the ECS task definition. The
+			// presence of this line is the only signal worth carrying
+			// here — "did the wire succeed at all".
+			slog.Info("aliasstore wired")
+		}
+	} else {
+		slog.Info("aliasstore disabled", "env_var", aliasstore.EnvChannelPoliciesTable, "reason", "unset")
+	}
 
 	// Compose the top-level mux: existing Slack-bot routes (handled
 	// by the internal.Handler.ServeHTTP fall-through) + new OAuth
