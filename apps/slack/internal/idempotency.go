@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"io"
 )
 
 // IdempotencyKey derives a deterministic 64-hex Idempotency-Key for a
@@ -47,9 +48,15 @@ func IdempotencyKey(teamID, channelID, userID, triggerOrViewID string) string {
 // followed by `s`'s bytes. A field longer than 2^32-1 bytes is not
 // representable, but Slack IDs are bounded well below that — no
 // runtime guard needed.
-func writeLengthPrefixed(h interface{ Write([]byte) (int, error) }, s string) {
+//
+// Takes an [io.Writer] so the encoding logic is decoupled from the
+// specific hash implementation. In practice the only caller passes
+// a [hash.Hash] (which embeds io.Writer), and hash.Hash.Write is
+// documented to never return an error — so the ignored returns are
+// safe by contract, not by hope.
+func writeLengthPrefixed(w io.Writer, s string) {
 	var buf [4]byte
 	binary.BigEndian.PutUint32(buf[:], uint32(len(s)))
-	_, _ = h.Write(buf[:])
-	_, _ = h.Write([]byte(s))
+	_, _ = w.Write(buf[:])
+	_, _ = w.Write([]byte(s))
 }

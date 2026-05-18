@@ -60,12 +60,14 @@ func TestIdempotencyKey_DifferentInputsDiffer(t *testing.T) {
 	}
 }
 
-// TestIdempotencyKey_FieldBoundary fences the field-separator
-// invariant. Without a separator between fields, ("ab","c") and
-// ("a","bc") would hash identically — both are "abc" concatenated —
-// and a request with a team_id that happened to be a prefix of
-// another team's would collide. NUL between fields makes that
-// collision impossible for any plausible Slack-issued ID set.
+// TestIdempotencyKey_FieldBoundary fences the field-boundary
+// invariant. Without an unambiguous boundary between fields,
+// ("ab","c") and ("a","bc") would hash identically — both are
+// "abc" concatenated — and a request with a team_id that happened
+// to be a prefix of another team's would collide. The hash
+// length-prefixes each field with a 4-byte BE uint32, so the
+// collision is structurally impossible regardless of what byte
+// shape Slack ships in future ID formats.
 func TestIdempotencyKey_FieldBoundary(t *testing.T) {
 	t.Parallel()
 	// Inputs mirror the ("ab","c") vs ("a","bc") shape from the

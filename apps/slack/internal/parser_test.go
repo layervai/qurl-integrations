@@ -187,25 +187,30 @@ func TestParse_ErrorPaths(t *testing.T) {
 // no-op into ephemeral-channel post. Empty values (`key:` or `key:""`)
 // reject so the handler in PR-3c.3+ can rely on absence-in-map to
 // mean "flag unset" (no third "set-to-empty" state to distinguish).
-// `wantSubstr` fences the user-visible message so both empty-value
-// shapes (`key:` and `key:""`) report a consistent "empty value"
-// reason instead of one of them landing in the generic
-// "expected key:value" bucket.
+//
+// Two checks per row: the sentinel ([ErrInvalidFlag] for applyFlag-side
+// rejections, [ErrUnexpectedArgument] for the parseGet strict-posture
+// branch) AND a user-visible substring. The sentinel pins the contract
+// PR-3c.3+ handler dispatch will rely on via `errors.Is`; the substring
+// fence keeps the user-visible reason consistent (e.g. both empty-value
+// shapes report "empty value" instead of one of them landing in the
+// generic "expected key:value" bucket).
 func TestParse_GetFlagErrors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name       string
 		text       string
+		wantSentnl error
 		wantSubstr string
 	}{
-		{name: "unknown flag key", text: "get $prod-db whatever:true", wantSubstr: "unknown flag"},
+		{name: "unknown flag key", text: "get $prod-db whatever:true", wantSentnl: ErrInvalidFlag, wantSubstr: "unknown flag"},
 		// A trailing token with no colon hits the parseGet
 		// strict-posture check before applyFlag; it surfaces as
 		// "unexpected argument" rather than "expected key:value"
 		// because the user almost certainly didn't intend a flag.
-		{name: "malformed flag (no colon) surfaces as unexpected arg", text: "get $prod-db reasontruly", wantSubstr: "unexpected argument"},
-		{name: "empty bare value", text: "get $prod-db reason:", wantSubstr: "empty value"},
-		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSubstr: "empty value"},
+		{name: "malformed flag (no colon) surfaces as unexpected arg", text: "get $prod-db reasontruly", wantSentnl: ErrUnexpectedArgument, wantSubstr: "unexpected argument"},
+		{name: "empty bare value", text: "get $prod-db reason:", wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,6 +218,9 @@ func TestParse_GetFlagErrors(t *testing.T) {
 			_, err := Parse(tc.text)
 			if err == nil {
 				t.Fatalf("Parse(%q) error = nil, want non-nil", tc.text)
+			}
+			if !errors.Is(err, tc.wantSentnl) {
+				t.Errorf("Parse(%q) error = %v, want errors.Is(_, %v)", tc.text, err, tc.wantSentnl)
 			}
 			if !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Errorf("Parse(%q) error = %q, want substring %q", tc.text, err.Error(), tc.wantSubstr)
@@ -274,6 +282,27 @@ func TestCommand_DM(t *testing.T) {
 	}
 }
 
+// TestApplyFlag_MissingKeyBeforeColon pins the colon-at-position-0
+// branch of [applyFlag]. With the round-9 [looksLikeFlag] gate in
+// parseGet, a `:value`-shaped token now surfaces as
+// [ErrUnexpectedArgument] from the dispatcher (looksLikeFlag
+// rejects `colonIdx <= 0`), but applyFlag still carries the
+// "missing key before colon" branch as defense-in-depth for any
+// future caller that hands it a `:value` token directly. Pin the
+// branch so the contract — "applyFlag rejects empty-key flags with
+// a specific user-facing reason" — doesn't silently regress.
+func TestApplyFlag_MissingKeyBeforeColon(t *testing.T) {
+	t.Parallel()
+	cmd := &Command{Flags: map[string]string{}}
+	err := applyFlag(cmd, ":true")
+	if err == nil {
+		t.Fatal("applyFlag(\":true\") returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "missing key before colon") {
+		t.Errorf("applyFlag(\":true\") error = %q, want substring %q", err.Error(), "missing key before colon")
+	}
+}
+
 // FuzzParse is a panic-on-input regression fence. The grammar is
 // small enough that any input either yields a non-nil [Command] with
 // nil error, or an error that wraps one of the documented sentinels.
@@ -321,6 +350,7 @@ func FuzzParse(f *testing.F) {
 		ErrMissingTarget,
 		ErrInvalidAlias,
 		ErrUnexpectedArgument,
+		ErrInvalidFlag,
 	}
 	f.Fuzz(func(t *testing.T, in string) {
 		cmd, err := Parse(in)
@@ -331,12 +361,7 @@ func FuzzParse(f *testing.F) {
 			// Every parse error must wrap one of the documented
 			// sentinels — that's the contract the handler in
 			// PR-3c.3+ depends on to render the right user-facing
-			// `:warning:` message. An applyFlag-shaped error
-			// (`unknown flag: …`, `invalid flag: …`) is also
-			// acceptable since the parser surfaces those directly
-			// from applyFlag, and they're carried by the
-			// fmt.Errorf wrapping — accept those too via substring
-			// match on the well-known prefixes.
+			// `:warning:` message.
 			matched := false
 			for _, sentinel := range knownSentinels {
 				if errors.Is(err, sentinel) {
@@ -344,8 +369,7 @@ func FuzzParse(f *testing.F) {
 					break
 				}
 			}
-			msg := err.Error()
-			if !matched && !strings.Contains(msg, "unknown flag") && !strings.Contains(msg, "invalid flag") {
+			if !matched {
 				t.Fatalf("Parse(%q) = unrecognized error %v (must wrap a documented sentinel)", in, err)
 			}
 		}

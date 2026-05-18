@@ -344,6 +344,13 @@ func defaultResponseURLClient() *http.Client {
 	}
 }
 
+// PR-3c.3+ wiring TODO (grep-able marker — `redaction-todo`):
+// when this handler grows a view-submission router (pathSlackInteractions),
+// any logging middleware that serializes `view_submission` payloads MUST
+// consult [IsRedactedSubmissionBlock] before emitting `state.values` —
+// otherwise the bootstrap-code modal leaks its plaintext input to logs.
+// See views.go::IsRedactedSubmissionBlock for the contract and the
+// Blocker #3 background.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks are silent: ALB target-group probes hit this every
 	// 15-30s per task and would otherwise dominate log volume.

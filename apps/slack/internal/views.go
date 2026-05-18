@@ -194,6 +194,14 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // replaced with U+02CA (MODIFIER LETTER ACUTE ACCENT) which keeps
 // a close visual approximation; line breaks become a single space
 // so the rebind modal stays one-line per target.
+//
+// **Scope is view rendering only.** This is NOT a general-purpose
+// sanitizer — the original target bytes still live in DDB intact,
+// and any code path that reads them for non-display purposes
+// (URL fetching, audit logging, comparison) sees the raw value.
+// The asymmetry is correct (raw bytes in storage, escaped bytes
+// in view); the rule for callers is "only run this on the way to
+// a mrkdwn code span in Block Kit JSON."
 func escapeMrkdwnCode(s string) string {
 	s = strings.ReplaceAll(s, "`", "ˊ")
 	s = strings.ReplaceAll(s, "\r\n", " ")

@@ -149,6 +149,14 @@ var ErrInvalidAlias = errors.New("invalid alias")
 // Catches user-facing typos earlier than the handler dispatch.
 var ErrUnexpectedArgument = errors.New("unexpected argument")
 
+// ErrInvalidFlag is the sentinel wrapped by every [applyFlag] error
+// path (unknown key, missing-key-before-colon, empty value,
+// expected-key:value). Tests in [TestParse_GetFlagErrors] match on
+// this sentinel via `errors.Is` rather than on the formatted
+// message substring, so the user-visible copy can evolve without
+// churning the test surface.
+var ErrInvalidFlag = errors.New("invalid flag")
+
 // channelRefPattern matches Slack's encoded channel-mention form
 // `<#C12345|channel-name>`. The trailing `|name` is optional (Slack's UI
 // always includes it but the wire shape allows omission).
@@ -527,6 +535,13 @@ func matchChannel(tok string) (string, bool) {
 // Also bails out for `http://` / `https://` specifically: those would
 // match the lowercase-key shape (key = "http"/"https") but are
 // overwhelmingly a typo-class URL paste, not a real flag attempt.
+//
+// Coverage is intentionally http(s) only. Other URI schemes
+// (`ssh://`, `s3://`, `git://`, `mailto:`) would still surface
+// `unknown flag: "<scheme>"` via applyFlag — that's acceptable
+// because DDB-bound resources in this codebase are HTTP/HTTPS in
+// practice (see qurl-service's URL validator). PR-3c.3+ should
+// revisit if the validator there ever accepts non-HTTP schemes.
 func looksLikeFlag(tok string) bool {
 	if strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://") {
 		return false
@@ -560,10 +575,10 @@ func looksLikeFlag(tok string) bool {
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
-		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
 	}
 	if colonIdx == 0 {
-		return fmt.Errorf("invalid flag: %q (missing key before colon)", tok)
+		return fmt.Errorf("%w: %q (missing key before colon)", ErrInvalidFlag, tok)
 	}
 	// Lowercase only the key portion so `Reason:"On Call"` keeps
 	// its mixed-case value intact.
@@ -575,11 +590,11 @@ func applyFlag(cmd *Command, tok string) error {
 	// quoted-empty (`reason:""`) both report the same "empty value"
 	// reason.
 	if colonIdx == len(tok)-1 {
-		return fmt.Errorf("invalid flag: %q (empty value — use a non-empty value or omit the flag)", tok)
+		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
 	}
 	m := flagPattern.FindStringSubmatch(normalized)
 	if len(m) == 0 {
-		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+		return fmt.Errorf("%w: %q (expected key:value)", ErrInvalidFlag, tok)
 	}
 	key := m[1]
 	val := m[2]
@@ -587,13 +602,13 @@ func applyFlag(cmd *Command, tok string) error {
 		val = m[3]
 	}
 	if val == "" {
-		return fmt.Errorf("invalid flag: %q (empty value — use a non-empty value or omit the flag)", tok)
+		return fmt.Errorf("%w: %q (empty value — use a non-empty value or omit the flag)", ErrInvalidFlag, tok)
 	}
 	switch key {
 	case "dm", "reason":
 		cmd.Flags[key] = val
 		return nil
 	default:
-		return fmt.Errorf("unknown flag: %q", key)
+		return fmt.Errorf("%w: unknown flag %q", ErrInvalidFlag, key)
 	}
 }
