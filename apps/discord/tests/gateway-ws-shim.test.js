@@ -22,6 +22,7 @@ const {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
+  VERIFIED_DJS_WS_MAJOR_MINOR,
 } = require('../src/gateway-ws-shim');
 const { WebSocketShardEvents } = require('@discordjs/ws');
 
@@ -233,27 +234,244 @@ describe('start — wiring + connect', () => {
   });
 });
 
-describe('getManager — Pillar 3 leader handle', () => {
+describe('_getManagerForTest — test introspection seam', () => {
   it('returns null before start()', () => {
     const { shim } = makeShim();
-    expect(shim.getManager()).toBeNull();
+    expect(shim._getManagerForTest()).toBeNull();
   });
 
   it('returns the WebSocketManager instance after start()', async () => {
     const { shim, managerInstances } = makeShim();
     await shim.start();
-    expect(shim.getManager()).toBe(managerInstances[0]);
+    expect(shim._getManagerForTest()).toBe(managerInstances[0]);
   });
 
   it('returns the manager after start({ connect: false }) too', async () => {
-    // Critical for the hot-standby wiring path: the leader needs the
-    // manager handle BEFORE driving connect(). If getManager() only
-    // returned non-null after a successful connect, the wiring chain
-    // would deadlock (leader needs manager → manager needs leader to
-    // call connect → loop).
+    // Critical for the hot-standby wiring path: the production
+    // boot guard (isStarted()) and other test assertions depend on
+    // the manager being constructed by the time start() resolves,
+    // regardless of whether connect was driven.
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    expect(shim.getManager()).toBe(managerInstances[0]);
+    expect(shim._getManagerForTest()).toBe(managerInstances[0]);
+  });
+});
+
+describe('Pillar 3 manager contract — connect() + isConnected()', () => {
+  // The leader (gateway-leader.js) and watchdog
+  // (gateway-connection-watchdog.js) require a manager handle whose
+  // typeof connect === 'function' && typeof isConnected === 'function'.
+  // The raw @discordjs/ws WebSocketManager has connect() but NOT
+  // isConnected() (only async fetchStatus()) — so the SHIM has to be
+  // the contract-conforming handle. These tests pin the surface
+  // shape so a future refactor that drops either method fails CI
+  // instead of crash-looping the gateway task on next deploy.
+
+  it('exposes connect() and isConnected() on the returned shim', () => {
+    const { shim } = makeShim();
+    expect(typeof shim.connect).toBe('function');
+    expect(typeof shim.isConnected).toBe('function');
+  });
+
+  it('connect() throws before start() (no manager yet)', async () => {
+    const { shim } = makeShim();
+    await expect(shim.connect()).rejects.toThrow(/connect\(\) called before start\(\)/);
+  });
+
+  it('connect() delegates to the underlying manager once start() has run', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    await shim.connect();
+    // start({connect:false}) skips the internal connect, so the
+    // count reflects ONLY the shim.connect() call we just made.
+    expect(managerInstances[0].connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('isConnected() is false before any READY/RESUMED', async () => {
+    const { shim } = makeShim();
+    expect(shim.isConnected()).toBe(false);
+    await shim.start({ connect: false });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('isConnected() flips true on shard Ready event', async () => {
+    // The shard-level Ready event fires BEFORE the Dispatch
+    // fan-out (see @discordjs/ws WebSocketShard.onMessage: it
+    // emits "ready" then "dispatch" on a READY frame). Mirroring
+    // wsConnected here lets it land before manager.connect()
+    // resolves on the Promise.race(once Ready) inside @discordjs/ws.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
+      shardId: 0,
+    });
+    expect(shim.isConnected()).toBe(true);
+  });
+
+  it('isConnected() flips true on shard Resumed event (Pillar 2 happy path)', async () => {
+    // @discordjs/ws v1.2.x emits Resumed with `(shardId: number)` —
+    // a bare number, not an object. Match upstream shape so the
+    // fixture documents the real contract.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Resumed, 0);
+    expect(shim.isConnected()).toBe(true);
+  });
+
+  it('isConnected() flips back to false on Closed', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
+      shardId: 0,
+    });
+    expect(shim.isConnected()).toBe(true);
+    // @discordjs/ws v1.2.x Closed payload is `{ code, shardId }` —
+    // no `reason`. Listener destructures `reason` defensively
+    // against a future minor adding it; the fallback logs null.
+    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('isConnected() is false after stop() regardless of prior Ready', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
+      shardId: 0,
+    });
+    await shim.stop({ flushFinal: false });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('connect() rejects after stop()', async () => {
+    const { shim } = makeShim();
+    await shim.start({ connect: false });
+    await shim.stop({ flushFinal: false });
+    await expect(shim.connect()).rejects.toThrow(/after stop\(\) or a failed start\(\)/);
+  });
+
+  // Drives a start({connect:true}) into the catch arm (stopped=true,
+  // manager still attached) — shared by the connect()-error and
+  // listener-guard tests below.
+  async function makeFailedStartShim() {
+    const { SlowFakeManager, instances } = makeSlowManagerCtor();
+    const { shim } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
+    await expect(shim.start({ timeoutMs: 5 })).rejects.toThrow(/timed out/);
+    return { shim, instances };
+  }
+
+  it('connect() rejects after a failed start() with the same terminal-state error', async () => {
+    // start({connect:true}) sets stopped=true on its failed-connect
+    // catch, but never calls stop(). The connect() error message
+    // must cover that state — without lying about which one happened.
+    const { shim } = await makeFailedStartShim();
+    await expect(shim.connect()).rejects.toThrow(/after stop\(\) or a failed start\(\)/);
+  });
+
+  it('concurrent shim.connect() calls both delegate to manager.connect()', async () => {
+    // The shim itself doesn't dedupe concurrent connect() calls —
+    // the upstream WebSocketManager isn't concurrency-safe and the
+    // serialization invariant lives in the leader's `connecting`
+    // latch + the watchdog's `isConnecting` observer. Pinning this
+    // test surfaces a future shim refactor that accidentally adds
+    // a dedup layer (which would break the contract those callers
+    // expect).
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    await Promise.all([shim.connect(), shim.connect()]);
+    expect(managerInstances[0].connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('connect() propagates the underlying manager rejection', async () => {
+    // The watchdog wraps shim.connect() in raceWithCeiling and
+    // surfaces rejections through its failure ladder — they must
+    // pass through verbatim, not be wrapped or swallowed.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].connect.mockRejectedValueOnce(new Error('discord 5xx'));
+    await expect(shim.connect()).rejects.toThrow('discord 5xx');
+  });
+
+  it('stop() removes every shim-installed shard listener (no leak across cycles)', async () => {
+    // Regression pin for the listener-leak hazard: a future
+    // `start()/stop()/start()` cycle would otherwise accumulate
+    // handlers on every new manager instance, each closing over
+    // the previous cycle's wsConnected/logger references.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(1);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(1);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(1);
+    await shim.stop({ flushFinal: false });
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(0);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(0);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(0);
+  });
+
+  it('shard event listeners no-op after a failed start() (stopped guard)', async () => {
+    // Listeners stay attached until gracefulShutdown → shim.stop()
+    // runs. A late shard event in that window must not mutate
+    // wsConnected on a teardown-bound shim.
+    const { shim, instances } = await makeFailedStartShim();
+    expect(shim.isConnected()).toBe(false);
+    instances[0].emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
+    instances[0].emit(WebSocketShardEvents.Resumed, 0);
+    expect(shim.isConnected()).toBe(false);
+    instances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('isStarted() reflects construction state (false → true → false)', async () => {
+    const { shim } = makeShim();
+    expect(shim.isStarted()).toBe(false);
+    await shim.start({ connect: false });
+    expect(shim.isStarted()).toBe(true);
+    await shim.stop({ flushFinal: false });
+    expect(shim.isStarted()).toBe(false);
+  });
+
+  it('satisfies the leader/watchdog factory contracts (no TypeError on construction)', () => {
+    // Regression guard: the prior wiring passed `shim.getManager()` —
+    // the raw @discordjs/ws WebSocketManager — to createGatewayLeader,
+    // which throws "manager with connect() and isConnected() is
+    // required" because WebSocketManager has no isConnected(). The
+    // production fix passes `gatewayShim` itself; this test asserts
+    // both factories accept it without throwing.
+    const { shim } = makeShim();
+    const { createGatewayLeader } = require('../src/gateway-leader');
+    const { createConnectionWatchdog } = require('../src/gateway-connection-watchdog');
+
+    const minimalDeps = {
+      lock: {
+        acquireLock: async () => ({}),
+        renewLock: async () => ({}),
+        transferLock: async () => ({}),
+        adoptLockFromHandoff: () => {},
+        releaseLock: async () => {},
+      },
+      peerHeartbeat: {
+        writeHeartbeat: async () => {},
+        listFreshPeers: async () => [],
+        deleteOwnRow: async () => {},
+      },
+      controlClient: { pushHandoff: async () => ({ ok: true }) },
+      selfInstanceId: 'i-test',
+      shardId: '0:1',
+      logger: makeFakeLogger(),
+    };
+
+    expect(() => createGatewayLeader({ ...minimalDeps, manager: shim })).not.toThrow();
+    expect(() => createConnectionWatchdog({
+      manager: shim,
+      isHoldingLock: () => false,
+      isConnecting: () => false,
+      releaseLock: async () => {},
+      deleteOwnRow: async () => {},
+      logger: minimalDeps.logger,
+    })).not.toThrow();
   });
 });
 
@@ -680,5 +898,33 @@ describe('constants are pinned', () => {
     // in this constant changes the boot-fail latency observably and
     // should require a deliberate test update.
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it('VERIFIED_DJS_WS_MAJOR_MINOR matches the installed @discordjs/ws major.minor', () => {
+    // The wsConnected mirror depends on @discordjs/ws's
+    // WebSocketShard.onMessage emitting Ready/Resumed BEFORE the
+    // Dispatch fan-out — verified against the version captured by
+    // VERIFIED_DJS_WS_MAJOR_MINOR. A node_modules bump past that
+    // range fails this test, forcing whoever bumps the dep to
+    // re-read the upstream dispatch handler before merging.
+    // @discordjs/ws's exports field blocks require('.../package.json'),
+    // so locate the install via require.resolve (works regardless of
+    // whether the dep landed in apps/discord/node_modules or got
+    // hoisted to a parent node_modules).
+    const path = require('node:path');
+    const fs = require('node:fs');
+    const wsEntry = require.resolve('@discordjs/ws');
+    const marker = `${path.sep}@discordjs${path.sep}ws${path.sep}`;
+    const markerIdx = wsEntry.indexOf(marker);
+    if (markerIdx < 0) {
+      throw new Error(
+        `Could not locate @discordjs/ws install from require.resolve('${wsEntry}'). ` +
+        'Update the path-extraction below to match the new install layout.',
+      );
+    }
+    const wsRoot = wsEntry.slice(0, markerIdx) + marker.slice(0, -1);
+    const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
+    const installedMajorMinor = djsWsVersion.split('.').slice(0, 2).join('.');
+    expect(installedMajorMinor).toBe(VERIFIED_DJS_WS_MAJOR_MINOR);
   });
 });

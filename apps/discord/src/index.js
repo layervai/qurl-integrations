@@ -858,8 +858,10 @@ process.on('SIGINT', () => {
 //
 //   1. Construct lock + peer-heartbeat (DDB-backed, no manager dep).
 //   2. Load + validate the HMAC secret (JSON shape + hex format).
-//   3. Construct hmac, controlClient, leader (leader needs the manager
-//      handle from shim.getManager()).
+//   3. Construct hmac, controlClient, leader (leader is wired against
+//      `gatewayShim` itself — the shim provides the connect() +
+//      isConnected() contract that @discordjs/ws's WebSocketManager
+//      lacks isConnected() for).
 //   4. Start the control-channel HTTP server. AWAIT `listening` event
 //      before continuing — if we start the leader first, the peer could
 //      acquire the lock and pushHandoff to us before our listener is
@@ -915,22 +917,31 @@ async function startHotStandby() {
 
   const controlClient = createControlClient({ hmac, logger });
 
-  const manager = gatewayShim.getManager();
-  if (!manager) {
-    // Belt-and-suspenders: shim.start({ connect: false }) constructs
-    // the manager synchronously inside its await, so by the time we
-    // get here it should always be non-null. If a future refactor
-    // moves construction later (e.g. lazy on first connect), this
-    // guard surfaces the wiring regression at boot rather than as a
-    // confusing leader-factory error.
-    throw new Error('startHotStandby: gatewayShim.getManager() returned null — shim.start() ordering regression');
+  // Belt-and-suspenders: shim.start({ connect: false }) constructs
+  // the manager synchronously inside its await, so by the time we
+  // get here isStarted() should always be true. If a future refactor
+  // moves construction later (e.g. lazy on first connect), this
+  // guard surfaces the wiring regression at boot rather than as a
+  // delayed leader/watchdog runtime error.
+  //
+  // Not redundant with the leader/watchdog factory typeof checks:
+  // those pass when called before start() too, because the shim
+  // exposes connect()/isConnected() unconditionally. This catches
+  // the wiring-order regression those checks would miss.
+  if (!gatewayShim.isStarted()) {
+    throw new Error('startHotStandby: gatewayShim.isStarted() is false — shim.start() ordering regression');
   }
 
+  // The shim itself satisfies the leader/watchdog `manager` contract
+  // (connect() + isConnected()). Passing the raw @discordjs/ws
+  // WebSocketManager would fail the factory's typeof check because
+  // upstream exposes only fetchStatus() (async) — see gateway-ws-shim
+  // module header "Pillar 3 manager contract".
   gatewayLeader = createGatewayLeader({
     lock,
     peerHeartbeat,
     controlClient,
-    manager,
+    manager: gatewayShim,
     selfInstanceId: config.INSTANCE_ID,
     shardId: config.SHARD_ID,
     logger,
@@ -1002,7 +1013,7 @@ async function startHotStandby() {
   // lock concurrently with an in-flight transferLock and the DDB
   // row would land in a state neither replica expects.
   connectionWatchdog = createConnectionWatchdog({
-    manager,
+    manager: gatewayShim,
     isHoldingLock: gatewayLeader.isHoldingLock,
     isConnecting: gatewayLeader.isConnecting,
     releaseLock: gatewayLeader.releaseLockForImmediateExit,

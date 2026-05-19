@@ -2,7 +2,12 @@
 //   - gateway-lock           (the DDB CAS lock primitive)
 //   - gateway-peer-heartbeat (standby discovery)
 //   - gateway-control-client (outbound push-handoff)
-//   - manager                (the @discordjs/ws shim — connect()/isConnected())
+//   - manager                (the gateway-ws-shim itself — connect()/isConnected();
+//                              the raw @discordjs/ws WebSocketManager
+//                              does NOT expose isConnected(), only
+//                              async fetchStatus(), which is why the
+//                              shim wraps it rather than the leader
+//                              consuming it directly)
 //
 // And exposes the four hooks the wiring layer (index.js, PR 13b.3)
 // plugs into the other Pillar 3 components:
@@ -83,6 +88,11 @@ const DEFAULT_TICK_INTERVAL_MS = 2_000;
 // than relying on the WS shim's wiring to enforce a timeout.
 const DEFAULT_INBOUND_CONNECT_TIMEOUT_MS = 5_000;
 
+// `manager` is conventionally the gateway-ws-shim instance (passed
+// from startHotStandby), but any object satisfying connect() +
+// sync isConnected() is accepted. The raw @discordjs/ws
+// WebSocketManager does NOT satisfy this contract — it exposes
+// only an async fetchStatus() — which is why the shim wraps it.
 function createGatewayLeader({
   lock,
   peerHeartbeat,

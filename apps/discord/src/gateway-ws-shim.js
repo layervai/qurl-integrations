@@ -49,6 +49,15 @@
 //                          registerCommands.
 //   - getRest()          — REST instance (constructed with the
 //                          token); exposed for registerCommands.
+//   - connect()          — drive a Pillar-3 connect from the leader
+//                          / watchdog (start({connect:false}) seam).
+//   - isConnected()      — sync mirror of the WS connection state
+//                          (Ready/Resumed → true, Closed → false);
+//                          read every tick by the watchdog and
+//                          once per inbound-handoff by the leader.
+//   - isStarted()        — true after start() resolves and before
+//                          stop() runs; used by the Pillar 3 wiring
+//                          for a boot-ordering belt-and-suspenders.
 //
 // ── SIGTERM contract: do NOT call manager.destroy() ──
 //
@@ -109,6 +118,14 @@ const MAX_IDENTIFY_ATTEMPTS = 1;
 // "Discord API unreachable" as a fast-fail rather than a hang.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 
+// The @discordjs/ws major.minor range whose WebSocketShard.onMessage
+// dispatch ordering (shard.emit(Ready) BEFORE shard.emit(Dispatch))
+// the Pillar 3 wsConnected mirror depends on. The version-contract
+// test asserts the installed range starts with this string — a
+// minor bump must re-verify the upstream dispatch handler before
+// updating this constant.
+const VERIFIED_DJS_WS_MAJOR_MINOR = '1.2';
+
 function createGatewayWsShim({
   token,
   intents,
@@ -131,6 +148,23 @@ function createGatewayWsShim({
   let manager = null;
   let restInstance = rest;
   let isReady = false;
+  // Distinct from `isReady`. `isReady` powers /health — stays true
+  // through transient reconnects so a momentary WS blip doesn't
+  // flap ECS into replacing the task. `wsConnected` is the Pillar 3
+  // leader/watchdog signal — "should I call connect()" — and flips
+  // false on Closed so the watchdog re-drives connect after a drop.
+  //
+  // Single-shard assumption: this is a module-level boolean, not
+  // a per-shardId map, because today's deployment has SHARD_ID=
+  // '0:1' (one shard total). A future horizontal scale-out would
+  // need to either (a) track wsConnected as a Map<shardId, boolean>
+  // and have isConnected() return some aggregate ("all-Ready" for
+  // the watchdog's purposes), or (b) split the shim into one
+  // instance per shard. As-is, any shard dropping would flip the
+  // flag false and the watchdog would re-call manager.connect()
+  // on the whole manager — upstream rejects "Tried to connect a
+  // shard that wasn't idle" for the still-Ready shards.
+  let wsConnected = false;
   let appId = null;
   let identifyAttempts = 0;
   // Two distinct flags:
@@ -252,6 +286,8 @@ function createGatewayWsShim({
           // commands or guild-commands endpoint.
           appId = data?.d?.application?.id ?? null;
           isReady = true;
+          // wsConnected is mirrored on the shard-level Ready/Resumed
+          // listeners installed below — not here.
           // Reset the IDENTIFY budget: every successful READY
           // restores a fresh allowance for the next reconnect.
           // See module header.
@@ -301,6 +337,40 @@ function createGatewayWsShim({
         logger.warn('gateway-ws-shim: shard error', {
           shardId,
           error: error?.message ?? String(error),
+        });
+      });
+
+      // Pillar 3 wsConnected mirror. Listen on shard-level
+      // Ready/Resumed (NOT the Dispatch fan-out) — @discordjs/ws's
+      // manager.connect() awaits `once(Ready)` / `once(Resumed)`
+      // and resolves immediately after the shard emits those, but
+      // BEFORE the Dispatch fan-out fires. Mirroring on Dispatch
+      // would leave a 1-tick window where connect() has resolved
+      // and the watchdog sees `!isConnected() && !isConnecting` —
+      // it would re-call connect() on a shard whose status is
+      // already Ready, throwing "Tried to connect a shard that
+      // wasn't idle" upstream as an unhandled rejection.
+      //
+      // Version contract: see VERIFIED_DJS_WS_MAJOR_MINOR above.
+      // `stopped` guard mirrors the Dispatch listener: drops late
+      // shard events between a failed-start catch and shim.stop().
+      manager.on(WebSocketShardEvents.Ready, () => {
+        if (stopped) return;
+        wsConnected = true;
+      });
+      manager.on(WebSocketShardEvents.Resumed, () => {
+        if (stopped) return;
+        wsConnected = true;
+      });
+      // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
+      // only. We destructure `reason` defensively against a future
+      // minor adding it (some Discord 4xxx close frames carry one);
+      // today it's always undefined, logged as null.
+      manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
+        if (stopped) return;
+        wsConnected = false;
+        logger.info('gateway-ws-shim: shard closed', {
+          shardId, code, reason: reason ?? null,
         });
       });
 
@@ -365,6 +435,11 @@ function createGatewayWsShim({
       // have already set this on a failed-connect path; the flip
       // here is idempotent.)
       stopped = true;
+      // Mirror state for invariant integrity: anything observing
+      // wsConnected post-stop() sees the closed state immediately
+      // rather than waiting on the Closed event from the eventual
+      // socket teardown.
+      wsConnected = false;
       // Drop dispatch handlers so any late dispatch arriving on
       // the way out doesn't trigger a downstream side effect.
       dispatchHandlers.clear();
@@ -382,9 +457,19 @@ function createGatewayWsShim({
       // RESUME. Detach only the listeners we installed; an
       // unscoped removeAllListeners() could strip @discordjs/ws's
       // own internal listeners on the same emitter.
+      //
+      // Strip-safety check: the @discordjs/ws-internal close
+      // handler attaches on the SHARD (the shim only sees events
+      // via the strategy's shard→manager fanout), and the
+      // strategy's own fanout listener attaches on shard.on(...),
+      // not manager.on(...). So the per-event removals below only
+      // strip listeners the shim itself installed.
       if (manager) {
         manager.removeAllListeners(WebSocketShardEvents.Dispatch);
         manager.removeAllListeners(WebSocketShardEvents.Error);
+        manager.removeAllListeners(WebSocketShardEvents.Closed);
+        manager.removeAllListeners(WebSocketShardEvents.Ready);
+        manager.removeAllListeners(WebSocketShardEvents.Resumed);
       }
       manager = null;
     },
@@ -414,12 +499,56 @@ function createGatewayWsShim({
       return restInstance;
     },
 
-    // Null until start() constructs the WebSocketManager. Pillar 3
-    // wiring (leader coordinator + connection watchdog) needs the
-    // manager handle to call .connect() / .isConnected() — exposed as
-    // a getter rather than a stored reference so callers always see
-    // the current value (the field is reassigned inside start()).
-    getManager() {
+    // ── Pillar 3 manager contract ──
+    // The leader (gateway-leader.js) and connection watchdog
+    // (gateway-connection-watchdog.js) require a manager handle
+    // with `connect()` + `isConnected()`. @discordjs/ws's
+    // WebSocketManager exposes connect() but NOT isConnected() —
+    // it has only async fetchStatus(). So the shim itself is the
+    // contract-conforming handle: callers pass `gatewayShim`
+    // directly into createGatewayLeader / createConnectionWatchdog.
+    //
+    // `connect()` delegates straight through. `isConnected()`
+    // returns a sync mirror flag tracked via shard events
+    // (Ready/Resumed/Closed listeners in start()) — both consumers
+    // call it synchronously every tick, so awaiting fetchStatus()
+    // there would be wrong.
+    connect() {
+      // `stopped` is set by both stop() AND start()'s failed-connect
+      // catch, so the message covers both terminal states. Check it
+      // before `!manager` since stop() nulls manager.
+      if (stopped) {
+        return Promise.reject(new Error(
+          'gateway-ws-shim: connect() called after stop() or a failed start()',
+        ));
+      }
+      if (!manager) {
+        return Promise.reject(new Error(
+          'gateway-ws-shim: connect() called before start() constructed the manager',
+        ));
+      }
+      return manager.connect();
+    },
+
+    isConnected() {
+      return wsConnected;
+    },
+
+    // True once start() has constructed the underlying manager and
+    // before stop() has nulled it. Pillar 3 wiring uses this as a
+    // belt-and-suspenders check at startHotStandby boot to surface
+    // a shim-ordering regression as a clear error rather than a
+    // delayed factory throw.
+    isStarted() {
+      return manager !== null;
+    },
+
+    // Null until start() constructs the WebSocketManager. Name
+    // prefix marks the boundary explicitly: production code uses
+    // connect()/isConnected()/isStarted() above; this exists for
+    // test introspection so suites can interrogate the underlying
+    // manager (e.g. assert listener counts, construction args).
+    _getManagerForTest() {
       return manager;
     },
 
@@ -434,4 +563,5 @@ module.exports = {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
+  VERIFIED_DJS_WS_MAJOR_MINOR,
 };
