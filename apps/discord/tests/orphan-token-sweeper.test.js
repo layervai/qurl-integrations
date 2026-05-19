@@ -1,10 +1,23 @@
 /**
  * Tests for src/orphan-token-sweeper.js — retry loop for OAuth tokens that
  * failed the initial `finally`-block revocation.
+ *
+ * Strategy: mock `../src/store` with a stateful in-memory backing Map so
+ * the sweeper exercises the real contract (list → decrypt → delete) and
+ * each test can assert on row counts after a sweep. An aws-sdk-client-mock
+ * setup against the real ddb-store would buy fidelity to the DDB shape
+ * but is overkill here — the sweeper only depends on the Store contract,
+ * which is unit-tested separately in `ddb-store.test.js` + `store-contract.test.js`.
  */
 
+// Stateful in-memory backing store, addressed by SHA-256 of plaintext to
+// match the real `recordOrphanedToken` dedup contract. The `mock` prefix
+// satisfies Jest's hoisted-factory variable-allowlist (the factory below
+// runs before the test file's top-level body, so any referenced symbol
+// has to be either Node-global or a `mock*`-prefixed name).
+const mockOrphanedTokens = new Map();
+
 jest.mock('../src/config', () => ({
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
   GITHUB_CLIENT_ID: 'client-id',
   GITHUB_CLIENT_SECRET: 'client-secret',
@@ -18,66 +31,80 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// recordOrphanedToken now uses encryptStrict, which fails closed when
-// KEY_ENCRYPTION_KEY is unset. The sweeper test fixture seeds rows
-// through the real database module, so a real key is required.
-const KEK_PRIOR = process.env.KEY_ENCRYPTION_KEY;
-process.env.KEY_ENCRYPTION_KEY = require('crypto').randomBytes(32).toString('base64');
+jest.mock('../src/store', () => {
+  // `require('crypto')` inside the factory rather than via a top-level
+  // import — the factory is hoisted, so top-level requires aren't in
+  // scope yet at evaluation time.
+  const cryptoMod = require('crypto');
+  return {
+    // Surface the Store contract surface the sweeper actually touches.
+    // Each method's behavior mirrors the ddb-store implementation closely
+    // enough to exercise the sweeper's branches without bringing in a
+    // real DDB endpoint.
+    recordOrphanedToken: jest.fn(async (token) => {
+      const id = cryptoMod.createHash('sha256').update(token).digest('hex');
+      // Idempotent on duplicate plaintext — matches the real CCFE-swallow
+      // path in ddb-store's recordOrphanedToken.
+      if (!mockOrphanedTokens.has(id)) mockOrphanedTokens.set(id, token);
+    }),
+    listOrphanedTokens: jest.fn(async (limit) => {
+      return Array.from(mockOrphanedTokens.entries())
+        .slice(0, limit)
+        .map(([id, plaintext]) => ({ id, encryptedAccessToken: plaintext }));
+    }),
+    countOrphanedTokens: jest.fn(async () => mockOrphanedTokens.size),
+    decryptOrphanedToken: jest.fn(async (ciphertext) => ciphertext),
+    deleteOrphanedToken: jest.fn(async (id) => { mockOrphanedTokens.delete(id); }),
+    close: jest.fn(),
+  };
+});
 
-const db = require('../src/database');
+const db = require('../src/store');
 const { sweepOnce } = require('../src/orphan-token-sweeper');
 
 const originalFetch = globalThis.fetch;
 afterAll(() => {
   globalThis.fetch = originalFetch;
-  db.close();
-  // Symmetric env restore — see database-module.test.js afterAll for rationale.
-  if (KEK_PRIOR === undefined) {
-    delete process.env.KEY_ENCRYPTION_KEY;
-  } else {
-    process.env.KEY_ENCRYPTION_KEY = KEK_PRIOR;
-  }
 });
 
 describe('orphan token sweeper', () => {
   beforeEach(() => {
-    // Wipe any prior rows from earlier tests.
-    for (const r of db.listOrphanedTokens(1000)) db.deleteOrphanedToken(r.id);
+    mockOrphanedTokens.clear();
   });
 
   it('deletes tokens that GitHub successfully revokes', async () => {
-    db.recordOrphanedToken('gho_ok_1');
-    db.recordOrphanedToken('gho_ok_2');
+    await db.recordOrphanedToken('gho_ok_1');
+    await db.recordOrphanedToken('gho_ok_2');
     globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
 
     await sweepOnce();
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
-    expect(db.countOrphanedTokens()).toBe(0);
+    expect(await db.countOrphanedTokens()).toBe(0);
   });
 
   it('treats 404 (already-revoked) as success', async () => {
-    db.recordOrphanedToken('gho_404');
+    await db.recordOrphanedToken('gho_404');
     globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 });
 
     await sweepOnce();
-    expect(db.countOrphanedTokens()).toBe(0);
+    expect(await db.countOrphanedTokens()).toBe(0);
   });
 
   it('leaves rows in place when GitHub is unhappy (retry next sweep)', async () => {
-    db.recordOrphanedToken('gho_500');
+    await db.recordOrphanedToken('gho_500');
     globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500 });
 
     await sweepOnce();
-    expect(db.countOrphanedTokens()).toBe(1);
+    expect(await db.countOrphanedTokens()).toBe(1);
   });
 
   it('catches fetch rejection and logs (row survives)', async () => {
-    db.recordOrphanedToken('gho_net');
+    await db.recordOrphanedToken('gho_net');
     globalThis.fetch = jest.fn().mockRejectedValue(new Error('network'));
 
     await sweepOnce();
-    expect(db.countOrphanedTokens()).toBe(1);
+    expect(await db.countOrphanedTokens()).toBe(1);
   });
 
   it('is a no-op when the queue is empty', async () => {

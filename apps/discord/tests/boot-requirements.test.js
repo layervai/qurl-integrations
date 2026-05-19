@@ -244,13 +244,16 @@ describe('unsupportedRoleResumeCombo', () => {
     }
   });
 
-  it('rejects resume=true with storeType=sqlite (would lose state across processes)', () => {
-    // Default sqlite backend writes a local file that the next ECS
-    // task can't see. Without rejecting at boot, the bot would
+  it('rejects resume=true with non-ddb storeType (would lose state across processes)', () => {
+    // A non-ddb backend (no such backend is supported today after the
+    // SQLite removal; this branch is defense-in-depth for a future
+    // backend addition) lacks the cross-process visibility the next
+    // ECS task needs. Without rejecting at boot, the bot would
     // silently IDENTIFY on every restart — mimicking flag-off
     // behavior and burning Discord's per-bot IDENTIFY budget.
-    // config.STORE_TYPE always coerces unset to 'sqlite' so we
-    // only test the resolved string (not undefined/empty).
+    // We pass the literal string 'sqlite' here because it surfaces
+    // the most realistic regression — an operator carrying over an
+    // env file from before the DDB-only world.
     const msg = unsupportedRoleResumeCombo('gateway', true, true, 'sqlite');
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/STORE_TYPE=ddb/);

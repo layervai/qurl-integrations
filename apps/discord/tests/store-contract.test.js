@@ -10,11 +10,10 @@
  *   - The default store singleton (store/index.js under the default
  *     STORE_TYPE) exercises every method + constant the contract
  *     lists — so adding an entry to the contract without implementing
- *     it in sqlite-store breaks this suite at PR time.
+ *     it in ddb-store breaks this suite at PR time.
  */
 
 jest.mock('../src/config', () => ({
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
 }));
 
@@ -68,8 +67,8 @@ describe('store/contract', () => {
     // Build a minimal "complete" backend for the positive test: every
     // contract method becomes a no-op function, every constant becomes
     // a sentinel non-undefined value. Using this here (instead of
-    // loading sqlite-store, which runs the real DB init) keeps this
-    // suite free of I/O side effects.
+    // loading ddb-store, which constructs the real DDB client at
+    // module-load) keeps this suite free of I/O side effects.
     const completeBackend = {};
     for (const m of STORE_METHODS) completeBackend[m] = () => undefined;
     for (const c of STORE_CONSTANTS) completeBackend[c] = {};
@@ -131,10 +130,14 @@ describe('store/contract', () => {
 describe('store/index (default backend)', () => {
   // Load the default-backend singleton. The top-of-file
   // `jest.mock(...)` calls for config + logger are hoisted and
-  // already in effect, so `:memory:` SQLite is used (no real file
-  // touch). `jest.resetModules()` ensures a fresh require of the
-  // singleton if a prior suite in the same worker already cached
-  // the store.
+  // already in effect; ddb-store's module-load env guards
+  // (DDB_TABLE_PREFIX + AWS_REGION) are satisfied by
+  // `tests/setup-env.js`, so requiring `../src/store` here
+  // constructs a real DDB client object but issues no network calls
+  // until a method is invoked (which this suite intentionally
+  // doesn't do). `jest.resetModules()` ensures a fresh require of
+  // the singleton if a prior suite in the same worker already
+  // cached the store.
   let store;
   beforeAll(() => {
     jest.resetModules();
@@ -165,25 +168,8 @@ describe('store/index (default backend)', () => {
 // non-jest boot that hits the real assertion path.
 describe('store/index boot-time assertions (via child_process)', () => {
   const { spawnSync } = require('child_process');
-  const fs = require('fs');
-  const os = require('os');
   const path = require('path');
   const appRoot = path.resolve(__dirname, '..');
-
-  // Per-suite tmp dir for child-process SQLite files. database.js
-  // `path.resolve(':memory:')` resolves to `{cwd}/:memory:` (a
-  // literal file), not an in-memory DB — using a real tmp path
-  // instead keeps the repo tree clean and avoids accidental
-  // commits of the stray file. Registered for cleanup in afterAll.
-  const tmpDbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-contract-test-'));
-
-  afterAll(() => {
-    try {
-      fs.rmSync(tmpDbDir, { recursive: true, force: true });
-    } catch {
-      // Non-fatal — ephemeral runner tmpdir will clean up anyway.
-    }
-  });
 
   // Helper: spawn a child `node -e` that requires the store module
   // with a specific STORE_TYPE env, forcing the real boot path
@@ -191,16 +177,24 @@ describe('store/index boot-time assertions (via child_process)', () => {
   // { status, stdout, stderr }. `JSON.stringify`-escaping the
   // require path so a workspace dir with a quote / backslash /
   // `${}` can't break out of the inline `node -e` script literal.
-  // Each child gets its own SQLite file in the per-suite tmpdir so
-  // concurrent boots (in a watch mode or a sharded test run) don't
-  // collide on the same file handle.
-  let spawnCounter = 0;
+  //
+  // Each child must carry DDB_TABLE_PREFIX + AWS_REGION because
+  // ddb-store's module-load guards refuse to boot without them —
+  // the test setup file (`tests/setup-env.js`) sets these for
+  // in-process jest workers, but child_processes inherit the
+  // parent env via `{...process.env}` which already includes them.
+  // Pinning the values here makes the spawn self-contained and
+  // independent of which sentinel `setup-env.js` happens to use.
   function spawnStoreBoot(storeTypeValue) {
     const requirePath = JSON.stringify(path.join(appRoot, 'src/store'));
-    const dbPath = path.join(tmpDbDir, `boot-${spawnCounter++}.db`);
-    const env = { ...process.env, JEST_WORKER_ID: '', DATABASE_PATH: dbPath };
+    const env = {
+      ...process.env,
+      JEST_WORKER_ID: '',
+      DDB_TABLE_PREFIX: 'jest-spawn-',
+      AWS_REGION: 'us-east-1',
+    };
     // Distinguish "not set at all" (`undefined`) from "set to
-    // empty/whitespace" (both should fall back to sqlite).
+    // empty/whitespace" (both should fall back to the default).
     if (storeTypeValue === undefined) {
       delete env.STORE_TYPE;
     } else {
@@ -210,27 +204,39 @@ describe('store/index boot-time assertions (via child_process)', () => {
   }
 
   it('rejects an unknown STORE_TYPE with a listing of valid backends', () => {
-    const result = spawnStoreBoot('sqlitte'); // typo — must NOT silently fall back
+    const result = spawnStoreBoot('ddbb'); // typo — must NOT silently fall back
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/Unknown STORE_TYPE/);
-    expect(result.stderr).toMatch(/sqlitte/);
+    expect(result.stderr).toMatch(/ddbb/);
     // Names the valid options so the operator knows how to fix.
-    expect(result.stderr).toMatch(/sqlite/);
+    expect(result.stderr).toMatch(/ddb/);
   });
 
-  it('falls back to sqlite when STORE_TYPE is unset', () => {
+  it('rejects a stale STORE_TYPE=sqlite from a pre-DDB-only env file', () => {
+    // Defense-in-depth: an operator carrying over an .env file from
+    // before SQLite was stripped would fail loud rather than fall
+    // back silently. The error message lists `ddb` as the only valid
+    // backend, pointing at the fix.
+    const result = spawnStoreBoot('sqlite');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Unknown STORE_TYPE/);
+    expect(result.stderr).toMatch(/sqlite/);
+    expect(result.stderr).toMatch(/ddb/);
+  });
+
+  it('falls back to ddb when STORE_TYPE is unset', () => {
     const result = spawnStoreBoot(undefined);
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
   });
 
-  it('falls back to sqlite when STORE_TYPE is empty-string (typical container-templating bug)', () => {
+  it('falls back to ddb when STORE_TYPE is empty-string (typical container-templating bug)', () => {
     const result = spawnStoreBoot('');
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
   });
 
-  it('falls back to sqlite when STORE_TYPE is whitespace-only (another container-templating bug)', () => {
+  it('falls back to ddb when STORE_TYPE is whitespace-only (another container-templating bug)', () => {
     const result = spawnStoreBoot('   ');
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');

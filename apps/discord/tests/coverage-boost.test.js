@@ -21,7 +21,6 @@ jest.mock('../src/config', () => ({
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
@@ -178,7 +177,7 @@ const mockDb = {
     first_pr: { emoji: 'e', name: 'First PR', description: 'desc' },
   },
 };
-jest.mock('../src/database', () => mockDb);
+jest.mock('../src/store', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
 jest.mock('../src/discord', () => ({

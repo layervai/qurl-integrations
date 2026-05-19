@@ -26,7 +26,6 @@ jest.mock('../src/config', () => ({
   MAP_COMMAND_ENABLED: true,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 25,
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
@@ -123,7 +122,7 @@ const mockDb = {
   getGuildApiKey: jest.fn(),
   getGuildConfig: jest.fn(),
 };
-jest.mock('../src/database', () => mockDb);
+jest.mock('../src/store', () => mockDb);
 
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),

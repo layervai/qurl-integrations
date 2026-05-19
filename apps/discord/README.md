@@ -91,8 +91,6 @@ without them, see `src/index.js`):
 **Optional operational knobs:**
 
 - `PORT` (default 3000)
-- `DATABASE_PATH` (default `./data/opennhp-bot.db`, kept for legacy EFS
-  mounts — override for new deployments)
 - `ADMIN_USER_IDS` — comma-separated Discord IDs with access to
   `/forcelink`, `/bulklink`, `/backfill-milestones`, `/unlinked`
 - `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS` — OAuth + webhook
@@ -114,17 +112,36 @@ On each repo you want to track:
 
 ### 5. Run
 
+Local dev needs a DynamoDB-Local container — the bot has no in-process
+data store, so the SDK has to reach a real DDB endpoint somewhere. The
+`docker-compose.yml` here spins up `amazon/dynamodb-local` on port 8000;
+the one-shot provisioner creates every table `ddb-store` expects.
+
 ```bash
+docker compose up -d dynamodb-local
+node scripts/provision-ddb-local.js   # idempotent, re-run after every `compose up`
 npm ci
-npm start
+DDB_TEST_ENDPOINT=http://localhost:8000 \
+  DDB_TABLE_PREFIX=qurl-bot-discord-local- \
+  AWS_REGION=us-east-1 \
+  AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
+  npm start
 ```
+
+(The fake AWS creds keep the SDK happy without provisioning real IAM.
+`DDB_TEST_ENDPOINT` is the env-var hook `ddb-store.js` already supports
+for re-pointing the SDK at a local endpoint.)
+
+`npm test` does NOT need DDB Local — every test mocks the AWS SDK via
+`aws-sdk-client-mock`. The local-dev workflow is only required for
+`npm start`.
 
 ## Architecture
 
 - `src/index.js` — boot validation + graceful shutdown
 - `src/commands.js` — all slash-command handlers (split tracked in #55)
 - `src/discord.js` — discord.js client + role/channel cache
-- `src/database.js` — SQLite (better-sqlite3, WAL) + encrypted guild keys
+- `src/store/` — DynamoDB-backed data layer (encrypted guild keys + per-table CRUD)
 - `src/connector.js` — qurl-s3-connector client (SSRF-guarded CDN fetch)
 - `src/qurl.js` — qURL API client (private-IP blocklist on target URLs)
 - `src/routes/oauth.js` — GitHub OAuth (atomic state consumption,

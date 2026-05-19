@@ -1,28 +1,29 @@
 // store — Store backend factory
 //
 // Every bot module reaches for the data layer via `require('./store')`
-// rather than `require('./database')` so swapping backends is a one-
-// location change, not a dozen-file sweep. Today the only supported
-// backend is `sqlite`; additional backends (e.g. DynamoDB) slot in
-// beside it by adding an entry to `VALID_BACKENDS` + the switch arm
-// below + a matching backend module that passes `assertStoreShape`.
+// so swapping backends is a one-location change, not a dozen-file
+// sweep. Today the only supported backend is `ddb` (DynamoDB);
+// additional backends slot in beside it by adding an entry to
+// `VALID_BACKENDS` + the switch arm below + a matching backend module
+// that passes `assertStoreShape`.
 //
 // Selection precedence:
 //   1. `process.env.STORE_TYPE` — explicit override, wins.
-//   2. Default: `sqlite` — preserves pre-indirection behavior for any
-//      env that hasn't opted in.
+//   2. Default: `ddb` — preserves ergonomic boot without forcing
+//      every env file to set STORE_TYPE explicitly.
 //
 // Boot-time invariants (all throw at module-load time so a mis-
 // configured bot refuses to start rather than erroring deep in a
 // request path):
-//   - Unset OR empty-string STORE_TYPE → default to `sqlite`
+//   - Unset OR empty-string STORE_TYPE → default to `ddb`
 //     silently. `STORE_TYPE=` (empty) is rare but happens under
 //     buggy container templating; treating it as "unset" matches
 //     operator intent. An explicit whitespace-only value is
 //     treated the same.
 //   - Non-empty unknown STORE_TYPE → throw, naming the bad value +
-//     the valid options. A typo like `STORE_TYPE=sqlitte` fails
-//     loud rather than falling back.
+//     the valid options. A typo like `STORE_TYPE=ddbb` (or a stale
+//     `STORE_TYPE=sqlite` from a pre-DDB-only env file) fails loud
+//     rather than falling back.
 //   - Backend missing a method → `assertStoreShape` throws with the
 //     offending method name (non-Jest boot only — see comment on
 //     the assertion call below for the Jest escape hatch).
@@ -30,31 +31,28 @@
 const logger = require('../logger');
 const { assertStoreShape } = require('./contract');
 
-const VALID_BACKENDS = Object.freeze(['sqlite', 'ddb']);
+const VALID_BACKENDS = Object.freeze(['ddb']);
 // Treat unset, empty, and whitespace-only STORE_TYPE as "not
-// configured" — falls back to the sqlite default. Any non-empty
+// configured" — falls back to the ddb default. Any non-empty
 // value is taken literally and must match VALID_BACKENDS.
 //
 // `configured` is derived once and reused for both the backend
 // selection AND the `source` log field below. Previously the two
 // were computed independently: `source: rawStoreType ? 'env' :
 // 'default'` treated a whitespace-only value as env-configured
-// while the trim fell back to sqlite — a real misreport that
+// while the trim fell back to the default — a real misreport that
 // defeated the field's purpose (diagnosing container-templating
 // bugs). Single derivation guarantees they can't drift.
 const rawStoreType = process.env.STORE_TYPE;
 const configured = rawStoreType && rawStoreType.trim();
-const BACKEND = configured || 'sqlite';
+const BACKEND = configured || 'ddb';
 
 if (!VALID_BACKENDS.includes(BACKEND)) {
-  throw new Error(`Unknown STORE_TYPE: '${BACKEND}'. Valid backends: ${VALID_BACKENDS.join(', ')}. Set STORE_TYPE to one of these (or leave unset to default to sqlite).`);
+  throw new Error(`Unknown STORE_TYPE: '${BACKEND}'. Valid backends: ${VALID_BACKENDS.join(', ')}. Set STORE_TYPE to one of these (or leave unset to default to ddb).`);
 }
 
 let store;
 switch (BACKEND) {
-  case 'sqlite':
-    store = require('./sqlite-store');
-    break;
   case 'ddb':
     store = require('./ddb-store');
     break;
@@ -67,7 +65,7 @@ switch (BACKEND) {
 }
 
 // Skip the contract assertion when running under Jest. Jest tests
-// routinely `jest.mock('../src/database', () => ({ ...partial... }))`
+// routinely `jest.mock('../src/store', () => ({ ...partial... }))`
 // to isolate the path under test; those partial mocks are legitimate
 // (the test isn't exercising the omitted methods) and should not
 // trip a boot-time shape check. `JEST_WORKER_ID` is injected into
@@ -91,7 +89,7 @@ if (!process.env.JEST_WORKER_ID) {
   logger.info('Store backend initialized', {
     backend: BACKEND,
     // `source` flags whether STORE_TYPE was explicitly set vs. fell
-    // through to the sqlite default. Useful for confirming a
+    // through to the ddb default. Useful for confirming a
     // backend-change rollout actually landed — "default" in prod
     // logs after an env-var switch means the env var didn't
     // propagate to the container (or landed as empty/whitespace-

@@ -1,18 +1,3 @@
-# Build stage — compile native modules (better-sqlite3)
-FROM node:22.21.0-alpine3.22@sha256:bd26af08779f746650d95a2e4d653b0fd3c8030c44284b6b98d701c9b5eb66b9 AS build
-
-RUN apk add --no-cache python3 make g++
-
-WORKDIR /app
-COPY package*.json ./
-# NOTE: --ignore-scripts would block supply-chain attacks via postinstall
-# hooks, but better-sqlite3 needs its build script to fall back to
-# compile-from-source when no prebuilt binary matches this arch. Kept
-# scripts enabled for now; the build stage isolates them from the
-# production image (see the FROM below).
-RUN npm ci --omit=dev
-
-# Production stage — minimal image without build tools
 FROM node:22.21.0-alpine3.22@sha256:bd26af08779f746650d95a2e4d653b0fd3c8030c44284b6b98d701c9b5eb66b9
 
 WORKDIR /app
@@ -22,15 +7,19 @@ WORKDIR /app
 # key off this value.
 ENV NODE_ENV=production
 
-COPY --from=build --chown=node:node /app/node_modules ./node_modules
-COPY --chown=node:node package*.json ./
+# Install deps as root so npm can write into /app/node_modules, then drop
+# to the non-root `node` user for the runtime stage. `--omit=dev` keeps
+# the production image free of jest + aws-sdk-client-mock; `--ignore-scripts`
+# is safe now that the last native-compile dep (better-sqlite3) is gone —
+# every remaining dependency is pure-JS with no postinstall steps.
+COPY package*.json ./
+RUN npm ci --omit=dev --ignore-scripts && chown -R node:node /app/node_modules
+
 # Copy only what the runtime needs. A bare `COPY . .` invalidates the
 # build cache on any repo file change (README, tests, CI config) even
 # though they're never needed in the runtime image. Enumerating src/
 # keeps layer caching effective across unrelated edits.
 COPY --chown=node:node src/ ./src/
-
-RUN mkdir -p /app/data && chown -R node:node /app/data
 
 EXPOSE 3000
 USER node

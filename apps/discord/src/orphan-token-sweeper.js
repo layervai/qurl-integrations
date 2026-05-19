@@ -1,9 +1,10 @@
 // Background job: retry revocation of GitHub OAuth tokens that failed their
 // initial `finally`-block revoke. Runs every hour. On success (or GitHub
 // 404 "already revoked"), the row is deleted; on failure, it's left for the
-// next sweep. cleanupOrphanedTokens in database.js purges anything older
-// than 7 days regardless, so a GitHub API outage doesn't leak tokens
-// forever — GitHub's own session TTL still applies on their side.
+// next sweep. The orphaned_oauth_tokens DDB table carries a TTL attribute
+// (set on insert by ddb-store), so a GitHub API outage doesn't leak tokens
+// forever — GitHub's own session TTL still applies on their side, and DDB
+// reaps the row 7 days after insert regardless of sweep outcome.
 
 const crypto = require('crypto');
 const config = require('./config');

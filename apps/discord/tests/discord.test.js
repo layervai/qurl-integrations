@@ -47,7 +47,7 @@ const mockDb = {
     byRepo: { 'OpenNHP/opennhp': [{ pr_number: 1 }] }, prs: [],
   })),
 };
-jest.mock('../src/database', () => mockDb);
+jest.mock('../src/store', () => mockDb);
 
 jest.mock('node-cron', () => ({ schedule: jest.fn(() => ({ stop: jest.fn() })) }));
 

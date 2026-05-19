@@ -137,11 +137,13 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 //      moved dispatch to SQS.
 //   3. resume=true with storeType!=ddb — the resume guarantee only
 //      holds when session state is persisted across processes.
-//      The default sqlite backend writes a local file that the
-//      next ECS task won't see; a resume against the previous
-//      sequence would fail every restart. Rejecting at boot is
-//      preferable to a silent IDENTIFY-every-restart degradation
-//      that mimics flag-off behavior.
+//      A non-ddb backend (none supported today; this branch is a
+//      defense-in-depth canary for a future backend addition)
+//      would lack the cross-process visibility the resume path
+//      needs, and a resume against the previous sequence would
+//      fail every restart. Rejecting at boot is preferable to a
+//      silent IDENTIFY-every-restart degradation that mimics
+//      flag-off behavior.
 //
 // Returns the operator-facing message on rejection or null on
 // success. Same string-or-null shape as unsupportedRoleShipperCombo.
@@ -175,8 +177,9 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
     return (
       `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +
       'Cross-process RESUME persists session state to the gateway-session DDB ' +
-      'table; sqlite would write a local file the next process never sees. Set ' +
-      'STORE_TYPE=ddb in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
+      'table; any non-ddb backend lacks the cross-process visibility the next ' +
+      'process needs. Set STORE_TYPE=ddb (or leave unset to take the default) ' +
+      'in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
     );
   }
   return null;

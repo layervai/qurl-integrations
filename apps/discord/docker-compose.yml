@@ -1,0 +1,40 @@
+# Local dev infra for the qURL Discord bot. Today the only service is
+# `dynamodb-local` — the bot has no in-process data store (SQLite was
+# stripped along with `database.js`), so the AWS SDK has to reach a
+# real DDB endpoint somewhere even when running `npm start` on a
+# laptop.
+#
+# After `docker compose up -d dynamodb-local`, run
+# `node scripts/provision-ddb-local.js` once to create the tables
+# `ddb-store` expects. The provisioner is idempotent — re-running
+# after a fresh `up` is fine and no-ops on existing tables.
+#
+# DDB-Local is in-memory only when `-inMemory` is set (no `-dbPath`),
+# so a `docker compose down` flushes every table. That matches
+# `:memory:` SQLite behavior the bot relied on previously; for sticky
+# local data, drop `-inMemory`, mount a volume, and add `-dbPath
+# ./data` to the command line.
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.4
+    container_name: qurl-bot-discord-ddb-local
+    # `-sharedDb` collapses every region/credential combo into one
+    # backing store so the bot can use any (or no) AWS_REGION /
+    # AWS_ACCESS_KEY_ID without the SDK silently picking a different
+    # in-process database file. Without it, an SDK request with
+    # AWS_ACCESS_KEY_ID=local lands in a different DB than one with
+    # AWS_ACCESS_KEY_ID=test, which is a classic local-dev confusion
+    # source.
+    command: -jar DynamoDBLocal.jar -inMemory -sharedDb
+    ports:
+      - "8000:8000"
+    # Healthcheck pings the DDB endpoint with a no-op ListTables —
+    # the service is "up" only when the JVM is accepting requests,
+    # not just when the container started. Lets `docker compose up
+    # --wait` block until DDB is actually reachable.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/ > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

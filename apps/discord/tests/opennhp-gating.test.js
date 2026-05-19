@@ -50,7 +50,7 @@ const mockDb = {
   getContributions: jest.fn().mockReturnValue([]),
   BADGE_INFO: {},
 };
-jest.mock('../src/database', () => mockDb);
+jest.mock('../src/store', () => mockDb);
 
 const mockCronSchedule = jest.fn(() => ({ stop: jest.fn() }));
 jest.mock('node-cron', () => ({

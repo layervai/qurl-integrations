@@ -18,7 +18,6 @@
 
 jest.mock('../src/config', () => ({
   PENDING_LINK_EXPIRY_MINUTES: 10,
-  DATABASE_PATH: ':memory:',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -967,10 +966,10 @@ describe('qurl sends', () => {
   });
 
   test('saveSendConfig: persists self_destruct_seconds across the preset range', async () => {
-    // Mirror of the sqlite roundtrip in database-module.test.js — pins
-    // the DDB writer for the same three cases (sub-second 0.5, integer
-    // 30, omitted-as-null) so a future refactor that drops the field
-    // from the Item silently regresses both stores in one signal.
+    // Pins the DDB writer for three cases — sub-second 0.5, integer
+    // 30, omitted-as-null — so a future refactor that drops the field
+    // from the Item silently regresses the bot's selfDestructSeconds
+    // contract with the connector.
     ddbMock.on(PutCommand).resolves({});
     const base = {
       senderDiscordId: 'sender', resourceType: 'file',

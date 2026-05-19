@@ -30,7 +30,6 @@ jest.mock('../src/config', () => ({
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
@@ -140,7 +139,7 @@ const mockDb = {
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
 };
-jest.mock('../src/database', () => mockDb);
+jest.mock('../src/store', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 const mockEditDM = jest.fn().mockResolvedValue({ ok: true });
