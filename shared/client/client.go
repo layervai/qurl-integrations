@@ -335,12 +335,18 @@ func validateIdempotencyKey(key string) error {
 
 // Create creates a new qURL.
 //
-// Exactly one of input.TargetURL or input.ResourceID must be set. The client
-// fails fast on both the both-empty and both-populated cases (saves a
-// round-trip and yields a Go-typed error rather than a deserialized
-// *APIError); the server-side `mutually_exclusive_fields` rule is the
-// enforcement of last resort. Empty fields elide from the wire payload via
-// `omitempty`, so a ResourceID-only call doesn't accidentally trip the rule.
+// Exactly one of input.TargetURL or input.ResourceID must be set. The
+// client routes to a different qURL service endpoint per case:
+//
+//   - TargetURL → POST /v1/qurls (CreateQurl). The handler accepts
+//     target_url in the request body and auto-creates the underlying
+//     resource if one doesn't already exist for that URL.
+//   - ResourceID → POST /v1/resources/{id}/qurls (CreateQurlForResource).
+//     The resource id rides in the URL path; the body is the policy
+//     subset (no target_url, no resource_id). The /v1/qurls handler
+//     does NOT accept resource_id in its body — a body-keyed call
+//     surfaces as 400 invalid_target_url because target_url is
+//     required for that endpoint.
 //
 // Note: Create takes a value receiver for backward-compat with the existing
 // callers in apps/slack and apps/cli; the new methods ([Client.CreateResource],
@@ -359,12 +365,38 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		return nil, err
 	}
 
-	body, err := json.Marshal(input)
+	var (
+		endpoint string
+		logLabel string
+		body     []byte
+		err      error
+	)
+	if input.ResourceID != "" {
+		// /v1/resources/{id}/qurls — id rides in the path; the body
+		// drops target_url + resource_id and ships the policy subset.
+		// Reason ships in the body too (silently dropped by the server
+		// if not in its schema; harmless either way and matches the
+		// URL-form posture).
+		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
+		logLabel = "POST /v1/resources/:id/qurls"
+		body, err = json.Marshal(createForResourceBody{
+			Description:  input.Description,
+			ExpiresIn:    input.ExpiresIn,
+			OneTimeUse:   input.OneTimeUse,
+			MaxSessions:  input.MaxSessions,
+			AccessPolicy: input.AccessPolicy,
+			Reason:       input.Reason,
+		})
+	} else {
+		endpoint = c.baseURL + "/v1/qurls"
+		logLabel = "POST /v1/qurls"
+		body, err = json.Marshal(input)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -377,10 +409,24 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	}
 
 	var out CreateOutput
-	if _, err := c.do(req, &out, "POST /v1/qurls"); err != nil {
+	if _, err := c.do(req, &out, logLabel); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// createForResourceBody is the wire shape for `POST
+// /v1/resources/{id}/qurls`. Mirrors the qURL service's
+// `CreateQurlForResourceRequest` schema (resource id rides in the URL
+// path, so it doesn't repeat in the body; target_url is absent for
+// the same reason — the resource already owns it).
+type createForResourceBody struct {
+	Description  string        `json:"description,omitempty"`
+	ExpiresIn    string        `json:"expires_in,omitempty"`
+	OneTimeUse   bool          `json:"one_time_use,omitempty"`
+	MaxSessions  int           `json:"max_sessions,omitempty"`
+	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	Reason       string        `json:"reason,omitempty"`
 }
 
 // Get retrieves a qURL by ID.

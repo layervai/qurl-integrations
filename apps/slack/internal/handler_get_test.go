@@ -50,7 +50,7 @@ func writeAPIError(t *testing.T, w http.ResponseWriter, status int, code, title 
 func TestHandleGet_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -102,7 +102,7 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(t, w, http.StatusForbidden, "tunnel_disabled", "Forbidden")
 	})
 	h := newAdminTestHandler(t, ts)
@@ -119,7 +119,7 @@ func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 func TestHandleGet_MintRateLimit(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "30")
 		writeAPIError(t, w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests")
 	})
@@ -141,7 +141,7 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 func TestHandleGet_MintTransportError(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "Bad Gateway")
 	})
 	h := newAdminTestHandler(t, ts)
@@ -293,7 +293,7 @@ func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		writeCreateFixture(t, w, "https://qurl.link/dm-secret", testResourceIDFix)
 	})
 
@@ -353,15 +353,16 @@ func TestHumanizeRetry(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_ResourceID fences the wire shape:
-// CreateInput{ResourceID: "r_x"} marshals without a target_url key
-// (mutually_exclusive_fields with the server). Captured by a
-// recording httptest server.
+// TestCreateInputJSON_ResourceID fences the wire shape for the
+// alias-form mint: the bot calls POST /v1/resources/{id}/qurls, the
+// resource id rides in the path, and the body carries neither
+// target_url nor resource_id (both repeat the path id and would
+// trip the server's exclusivity rules).
 func TestCreateInputJSON_ResourceID(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		capturedBody = b
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
@@ -376,21 +377,22 @@ func TestCreateInputJSON_ResourceID(t *testing.T) {
 		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
 	}
 	if _, ok := parsed["target_url"]; ok {
-		t.Errorf("target_url present on resource-id mint (mutually-exclusive): %v", parsed)
+		t.Errorf("target_url present on alias-form mint body (path-bound id, target_url is rejected): %v", parsed)
 	}
-	if got, _ := parsed["resource_id"].(string); got != testResourceIDFix {
-		t.Errorf("resource_id = %v, want r_prod_db", parsed["resource_id"])
+	if _, ok := parsed["resource_id"]; ok {
+		t.Errorf("resource_id present on alias-form mint body (rides in URL path): %v", parsed)
 	}
 }
 
 // TestCreateInputJSON_Reason fences the wire shape: reason flag
 // flows through to the JSON body when set, and is absent when
-// unset.
+// unset. Alias-form mint, so the path is the resource-scoped
+// endpoint.
 func TestCreateInputJSON_Reason(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		capturedBody = b
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
@@ -411,12 +413,13 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 
 // TestCreateInputJSON_IdempotencyKeyHeader fences that the
 // Idempotency-Key header lands on the wire (not in the JSON body)
-// and is the sha256(team\x00channel\x00user\x00trigger).
+// and is the sha256(team\x00channel\x00user\x00trigger). Alias-form,
+// so the request lands at the resource-scoped endpoint.
 func TestCreateInputJSON_IdempotencyKeyHeader(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedHeader string
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
 		capturedHeader = r.Header.Get("Idempotency-Key")
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
 	})
@@ -437,6 +440,8 @@ func TestCreateInputJSON_IdempotencyKeyHeader(t *testing.T) {
 // TestMapMintError_Unmapped5xx fences the catch-all transport-class
 // branch: 503 + 504 + bare network errors all surface
 // serviceUnreachableMessage and never the generic "Failed to mint".
+// Alias-form, so the upstream serves 5xx at the resource-scoped
+// endpoint.
 func TestMapMintError_Unmapped5xx(t *testing.T) {
 	statuses := []int{
 		http.StatusBadGateway,
@@ -446,7 +451,7 @@ func TestMapMintError_Unmapped5xx(t *testing.T) {
 	for _, s := range statuses {
 		ts := newAdminTestServers(t)
 		ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-		ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 			writeAPIError(t, w, s, "upstream_error", "Upstream Error")
 		})
 		h := newAdminTestHandler(t, ts)
