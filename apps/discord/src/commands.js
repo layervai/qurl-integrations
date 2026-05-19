@@ -4198,12 +4198,40 @@ function renderConfirmCardRows({
     // at the limit. Adding another button below would silently throw
     // at discord.js builder time. Re-evaluate the layout (e.g., a
     // second row for affordances vs. fixed buttons) before adding.
+    const everyoneDisabled = displayCount == null || displayCount === 0 || overCap;
+    if (everyoneDisabled) {
+      // Diagnostic: surface the exact state when the @everyone button
+      // renders disabled. Users see only a greyed-out button with no
+      // label hint, so reports like "why is @everyone disabled?"
+      // require digging into renderConfirmCardRows state — capturing
+      // it inline here makes those reports answerable from logs.
+      //
+      // Sampled at warn level (not info) because the disable is
+      // expected to be RARE — every fire is a signal worth seeing.
+      // If it turns out to be common in production we'll know to
+      // demote the level. Branch label disambiguates which of the
+      // three disable conditions fired without parsing the values.
+      const branch = displayCount == null
+        ? 'displayCount-null'
+        : displayCount === 0
+          ? 'displayCount-zero'
+          : 'over-cap';
+      logger.warn('@everyone button rendered disabled', {
+        branch,
+        guildId: interaction.guildId,
+        guildMemberCount: interaction.guild?.memberCount ?? null,
+        cacheSize: interaction.guild?.members?.cache?.size ?? null,
+        displayCount,
+        accurate: countIsAccurate,
+        cap: config.QURL_SEND_MAX_RECIPIENTS,
+      });
+    }
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
         .setLabel('\u{1F4E2} @everyone')
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(displayCount == null || displayCount === 0 || overCap),
+        .setDisabled(everyoneDisabled),
     );
   }
   bottomRow.addComponents(
