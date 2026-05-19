@@ -7788,6 +7788,11 @@ const commands = [
         // currently still surface "all linked" if cache is non-empty.
         const expectedMembers = effectiveGuildMemberCount(guild);
         const cacheSize = guild.members.cache?.size ?? 0;
+        // `cacheSize === 0` is a sound proxy for "prewarm produced
+        // nothing" because `GET /guilds/{id}/members` includes the bot
+        // itself — a real guild with the bot present can never
+        // legitimately return zero members. The check defends against
+        // degraded-API silence, not against zero-member guilds.
         const looksIncomplete = cacheSize === 0
           || (expectedMembers != null && cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD);
         if (looksIncomplete) {
