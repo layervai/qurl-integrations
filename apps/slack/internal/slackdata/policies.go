@@ -261,7 +261,7 @@ func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit i
 			// "next page is unreachable" via user reports.
 			slog.Warn("ListPolicies: encodeCursor failed; pagination disabled for this page",
 				"error", encErr, "team_id", teamID)
-			return list, nil //nolint:nilerr // intentional degrade: surface partial list with HasMore but no cursor
+			return list, nil
 		}
 		list.NextCursor = cur
 	}
