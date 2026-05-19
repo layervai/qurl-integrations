@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, AUDIT_EVENTS, TRUST } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -358,8 +358,13 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         after = nextAfter;
       }
       if (page === PREWARM_MAX_PAGES) {
+        // `pages: PREWARM_MAX_PAGES` (not `page`) for read-clarity —
+        // they're numerically equal here but the constant makes the
+        // intent obvious vs. the bail/null-cursor warns which use
+        // `page + 1` (the count of completed list() calls at the
+        // point of the break).
         logger.warn('members pre-warm hit safety cap; @everyone/role expansion may underresolve', {
-          ...logCtx, guild_id: guild.id, pages: page, cache_size: guild.members.cache?.size,
+          ...logCtx, guild_id: guild.id, pages: PREWARM_MAX_PAGES, cache_size: guild.members.cache?.size,
         });
       } else if (!bailed) {
         // Successful-completion observability. Captures cache footprint
@@ -7753,12 +7758,21 @@ const commands = [
         // against an incomplete member set is a silent false positive.
         // Mid-pagination failures (e.g. 429 on page 6 of 12) leave a
         // non-empty cache that's still missing members. Compare against
-        // the expected count with a generous tolerance to allow
-        // approximateMemberCount drift but catch substantive shortfalls.
+        // the expected count with `UNLINKED_CACHE_COMPLETENESS_THRESHOLD`
+        // tolerance to allow approximate-count drift but catch
+        // substantive shortfalls.
+        //
+        // Edge case: when both `memberCount` AND
+        // `approximateMemberCount` are absent (rare in practice — the
+        // guild loaded via REST `?with_counts=true` populates the
+        // latter), this falls back to a `size === 0` check only.
+        // Best-effort under that condition; a guild that fails
+        // mid-pagination with no count metadata available will
+        // currently still surface "all linked" if cache is non-empty.
         const expectedMembers = effectiveGuildMemberCount(guild);
         const cacheSize = guild.members.cache?.size ?? 0;
         const looksIncomplete = cacheSize === 0
-          || (expectedMembers != null && cacheSize < expectedMembers * 0.9);
+          || (expectedMembers != null && cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD);
         if (looksIncomplete) {
           return interaction.editReply({
             content: '⚠️ Could not load complete member list (Discord API may be degraded). Please retry.',

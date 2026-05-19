@@ -97,6 +97,15 @@ const DISCORD_MEMBERS_PAGE_SIZE = 1000;
 // steady-state full pages without advancing the `after` cursor.
 const PREWARM_MAX_PAGES = 1000;
 
+// Fraction of `effectiveGuildMemberCount` the cache must reach for
+// `/unlinked` to consider its member set complete. Below this we
+// surface a degraded-API message instead of reporting "all linked" —
+// mid-pagination failures (e.g. 429 on page 6 of 12) otherwise leave
+// a non-empty but incomplete cache that would silent-false-positive.
+// 0.9 absorbs `approximateMemberCount` drift in either direction
+// without letting a substantive shortfall through.
+const UNLINKED_CACHE_COMPLETENESS_THRESHOLD = 0.9;
+
 // GitHub event actions we care about
 const GITHUB_ACTIONS = {
   PR_MERGED: 'closed',  // with merged=true
@@ -461,6 +470,7 @@ module.exports = {
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
+  UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
