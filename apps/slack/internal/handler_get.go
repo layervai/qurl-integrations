@@ -110,6 +110,14 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 	userID := values.Get(fieldUserID)
 	triggerID := values.Get(fieldTriggerID)
 
+	if channelID == "" {
+		// Channel-scope guard; see [Handler.processAliases] for the
+		// full rationale (single source of truth).
+		log.Warn("get: empty channel_id; refusing channel-less invocation")
+		h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+		return
+	}
+
 	text, err := h.getWork(ctx, log, getWorkArgs{
 		cmd:       cmd,
 		teamID:    teamID,
@@ -330,6 +338,10 @@ func mapMintError(log *slog.Logger, err error) error {
 // [humanFallbackMoment] so a 0.4s server-side floor doesn't print as
 // the misleading "0s" — half-up rounding `int(0.4+0.5)` yields zero
 // and the user sees `Try again in 0s.`, which reads as a bug.
+//
+// `d <= 0` (e.g. from `time.Until(past)`) also takes this branch —
+// don't optimize the zero case to print "0s" or "now"; both read as
+// bugs to the user.
 func humanizeRetry(d time.Duration) string {
 	if d < time.Second {
 		return humanFallbackMoment

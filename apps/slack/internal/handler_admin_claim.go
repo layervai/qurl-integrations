@@ -231,6 +231,11 @@ func (h *Handler) surfaceBindError(ctx context.Context, w http.ResponseWriter, u
 	slog.Error("admin claim bind failed AFTER bootstrap-code consume — workspace is half-installed; needs operator follow-up", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
 
 	const supportCopy = "Code was redeemed but the workspace binding failed. Please contact LayerV support — your bootstrap code is now used; a fresh one will need to be minted."
+	// Surface decoration is asymmetric by design and mirrors
+	// surfaceClaimError. DMs / chat.postMessage render `:warning:` to
+	// the U+26A0 emoji; modal-error envelopes don't (block-kit needs
+	// an explicit accessory icon), so the bare `:` would leak to the
+	// user as literal text. Keep the modal-error branch un-prefixed.
 	if h.cfg.PostDM == nil {
 		respondModalError(w, blockIDClaimCode, supportCopy)
 		return
