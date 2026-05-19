@@ -620,6 +620,43 @@ async function processMessage(client, message) {
   // InteractionClass(client, data)`, and emits 'interactionCreate'.
   // The shared listener registered in src/index.js (gated on
   // isGateway || isWorker) handles routing.
+  // Pre-handle hook: pre-fetch the guild via REST so
+  // `interaction.guild` resolves on the http-only side. In gateway
+  // mode the WebSocketShard's GUILD_CREATE handler populates
+  // `client.guilds.cache`; in http-only mode no GUILD_CREATE fires,
+  // so the guild is missing from cache and `interaction.guild` returns
+  // null. Slash-command handlers guard on `interaction.guildId`
+  // (authoritative) for DM-vs-guild routing, but downstream code
+  // (role expansion, member fetches) reads `interaction.guild.X` and
+  // would null-deref. Pre-fetching populates the cache so both work.
+  //
+  // Best-effort: a REST failure here doesn't block dispatch — the
+  // handler's null-checks (`interaction.guild?.X`) still apply. We
+  // log the miss so an operator can spot a permission/REST issue
+  // without traffic going silent.
+  //
+  // Must happen BEFORE the FLAG-WRAP try/finally (the invariant
+  // forbids any `await` inside the wrap to keep the synchronous
+  // emit + flag-clear ordering intact).
+  // Defensive checks on `client.guilds` and `.cache` keep the
+  // contract narrow (only when the client surfaces a real
+  // GuildManager) — test mocks that pass a bare client shape
+  // shouldn't trip this path.
+  if (data?.guild_id
+    && client?.guilds?.cache
+    && typeof client.guilds.fetch === 'function'
+    && !client.guilds.cache.has(data.guild_id)) {
+    try {
+      await client.guilds.fetch(data.guild_id);
+    } catch (err) {
+      logger.warn('Event consumer: pre-handle guild fetch failed (downstream interaction.guild will be null)', {
+        guildId: data.guild_id,
+        eventId,
+        error: err.message,
+      });
+    }
+  }
+
   let dispatchOk = true;
   // Flag for trackDispatch (called by the listener in src/index.js).
   // EventEmitter.emit is synchronous, so the listener fires while

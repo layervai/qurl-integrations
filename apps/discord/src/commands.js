@@ -4202,7 +4202,14 @@ function renderConfirmCardRows({
 // is the durable check. The dispatcher's gate (API_KEY_GATED_SUBCOMMANDS
 // set) still runs to fail fast on the no-key-at-all case.
 async function handleQurlSlashSend(interaction, params) {
-  if (!interaction.guildId || !interaction.guild) {
+  // Guild check uses `interaction.guildId` only — that's the
+  // authoritative "in a guild?" signal from the interaction payload.
+  // `interaction.guild` is a derived property (`client.guilds.cache.get
+  // (guildId)`) that returns null in http-only mode where there's no
+  // gateway connection to populate the cache. Downstream `interaction
+  // .guild.X` paths get the guild pre-fetched by the event-consumer
+  // (see src/event-consumer.js pre-handle hook).
+  if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
       ephemeral: true,
@@ -4739,7 +4746,14 @@ async function handleQurlSlashSend(interaction, params) {
 async function handleQurlSend(interaction) {
   // DM rejection first — no cooldown burned on a guild-only invocation
   // attempted from DMs.
-  if (!interaction.guildId || !interaction.guild) {
+  // Guild check uses `interaction.guildId` only — that's the
+  // authoritative "in a guild?" signal from the interaction payload.
+  // `interaction.guild` is a derived property (`client.guilds.cache.get
+  // (guildId)`) that returns null in http-only mode where there's no
+  // gateway connection to populate the cache. Downstream `interaction
+  // .guild.X` paths get the guild pre-fetched by the event-consumer
+  // (see src/event-consumer.js pre-handle hook).
+  if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
       ephemeral: true,
@@ -4858,7 +4872,14 @@ async function handleQurlSend(interaction) {
 
 async function handleQurlMap(interaction) {
   // DM rejection first — no cooldown burned on a DM invocation.
-  if (!interaction.guildId || !interaction.guild) {
+  // Guild check uses `interaction.guildId` only — that's the
+  // authoritative "in a guild?" signal from the interaction payload.
+  // `interaction.guild` is a derived property (`client.guilds.cache.get
+  // (guildId)`) that returns null in http-only mode where there's no
+  // gateway connection to populate the cache. Downstream `interaction
+  // .guild.X` paths get the guild pre-fetched by the event-consumer
+  // (see src/event-consumer.js pre-handle hook).
+  if (!interaction.guildId) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
       ephemeral: true,
