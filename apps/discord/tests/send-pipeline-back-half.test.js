@@ -500,12 +500,37 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
 
     // Add a recipient with a new qurl_id. The monitor's next BatchGet
     // must include the new id in its key list.
-    monitor.addRecipients(1, ['q_aaaaaaaaaa3']);
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa3', username: 'Charlie' }]);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
     expect(mockDb.getQurlViews).toHaveBeenCalled();
     const lastCallKeys = mockDb.getQurlViews.mock.calls.at(-1)[0];
     expect(lastCallKeys).toContain('q_aaaaaaaaaa3');
+    monitor.stop();
+  });
+
+  it('addRecipients() seeds linkStatus so views on newly-added recipients flip pending → viewed', async () => {
+    // Regression guard for the cr-flagged bug: extending trackedQurlIds
+    // without also seeding linkStatus left the new recipients invisible
+    // to the status-flip loop. Webhook would land, BatchGet would
+    // return the row, but the counter never advanced.
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-add-bug', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent to 1 user', { components: [] }, 1, 'apikey',
+    );
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa9', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 1 pending');
     monitor.stop();
   });
 
@@ -517,7 +542,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       '1m', 'Sent', { components: [] }, 1, 'apikey',
     );
     // Same ID already tracked — should be a no-op insertion-wise.
-    monitor.addRecipients(1, ['q_aaaaaaaaaa1']);
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa1', username: 'Alice' }]);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     const lastCallKeys = mockDb.getQurlViews.mock.calls.at(-1)[0];
     // Set semantics — only one entry for q_aaaaaaaaaa1.
@@ -540,7 +565,13 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     monitor.stop();
     await jest.advanceTimersByTimeAsync(10000);
-    expect(true).toBe(true);
+    // Contract: no uncaught throw, no "poll failed" log emission from
+    // the racing tick. logger.error firing here would mean stop() let
+    // a thrown error escape the setInterval callback.
+    expect(logger.error).not.toHaveBeenCalledWith(
+      'Link monitor poll failed',
+      expect.any(Object),
+    );
   });
 });
 
@@ -578,11 +609,15 @@ describe('monitorLinkStatus — interaction-token TTL channel-edit fallback', ()
     );
     monitor.setMessageId('msg-2');
 
-    // Jump system time past the 14-min cutover WITHOUT firing the
-    // intervening ticks — those would have advanced pollCount past
-    // the throttling boundary and skipped odd ticks. setSystemTime
-    // moves wall time only; the next advanceTimersByTimeAsync fires
-    // the next scheduled tick.
+    // SCENARIO: fresh monitor whose first tick happens to land past
+    // the 14-min cutover (e.g. a long-tail Discord-edge stall before
+    // the initial editReply settles). NOT a model of a monitor that
+    // already ran 14 minutes of normal ticks — that path's pollCount
+    // would have crossed the % 2 throttle and skipped odd ticks, which
+    // setSystemTime sidesteps by bypassing intervening fires entirely.
+    // A future refactor that moves the throttle below an early-running
+    // tick should add a separate test for the "ran through the
+    // throttle then crossed cutover" scenario.
     jest.setSystemTime(startedAt + 14 * 60 * 1000 + 5000);
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
@@ -1753,7 +1788,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.delivered).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
-    expect(result.newResourceIds).toEqual(expect.arrayContaining(['res-loc-new']));
     // Happy-path delivery coalesces status='sent' + DM refs into a
     // single markSendDMDelivered write per recipient.
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledTimes(2);

@@ -1018,14 +1018,18 @@ describe('qurl views', () => {
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key).toEqual({ qurl_id: 'q_aaaaaaaaaa1' });
-    // The condition is the load-bearing safety net — pin it exactly so
-    // a refactor that drops either clause (replay OR out-of-order)
-    // fails CI rather than silently corrupting the view counter.
+    // Pin the condition exactly so a refactor that drops any clause
+    // (replay, out-of-order, OR the consumed false→true flip on equal
+    // access_count) fails CI rather than silently corrupting the
+    // counter.
     expect(input.ConditionExpression).toBe(
-      'attribute_not_exists(last_event_id) OR (last_event_id <> :eid AND access_count < :n)',
+      'attribute_not_exists(last_event_id) OR ('
+      + 'last_event_id <> :eid AND ('
+      + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
+      + '))',
     );
     expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
-      ':n': 3, ':c': false, ':eid': 'evt-1',
+      ':n': 3, ':c': false, ':eid': 'evt-1', ':false': false, ':true': true,
     }));
     // TTL refresh on every write — 30 days from now. The window must
     // be longer than the longest monitor lifetime (1h cap) + longest

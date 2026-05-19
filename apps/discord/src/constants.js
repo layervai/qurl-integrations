@@ -416,39 +416,15 @@ const AUDIT_EVENTS = {
   // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 
-  // ── qURL webhook receiver (POST /webhooks/qurl) ──
-  //
-  // The receiver writes view counts to the qurl_views DDB table; the
-  // monitor's setInterval reads them. These four events drive the
-  // CW metric filters + alarms in qurl-integrations-infra's
-  // monitoring.tf. Dimension shapes documented inline at each emit
-  // site (apps/discord/src/routes/qurl-webhook.js).
-  //
-  // Cardinality: all four are flat counters. Do NOT promote
-  // `qurl_id` or `resource_id` to dimensions — both are unbounded.
-
-  // Every accepted webhook, including dedup-on-replay. `result` field
-  // distinguishes `recorded` vs `dedup` for the dashboard. Absence
-  // for an extended window is the "subscription drift / qurl-service
-  // down" signal once a traffic floor is established.
+  // qURL webhook receiver — feeds CloudWatch metric filters +
+  // alarms in qurl-integrations-infra monitoring.tf. Flat counters
+  // only: do NOT promote qurl_id/resource_id to dimensions (unbounded).
   QURL_WEBHOOK_RECEIVED: 'qurl_webhook_received',
-
-  // Signature verification failed. Pairs with the per-IP rate limit
-  // — a sustained rate is either (a) qurl-service ↔ SSM secret drift
-  // (operator fix: re-set both in lockstep) or (b) an attacker
-  // hammering the endpoint after discovering it.
+  // Sustained rate = SSM secret drift OR attacker probing.
   QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',
-
-  // Per-IP rate limit kicked in after BAD_SIG_MAX failed-sig attempts.
-  // Different signal than SIGNATURE_INVALID: that one fires per-bad-sig;
-  // this one fires per-429 response. Volume of this event is bounded
-  // by the rate-limit threshold, so a sustained rate means a sustained
-  // attacker (legit traffic NEVER triggers this).
+  // Legit traffic NEVER triggers — sustained rate = sustained attacker.
   QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
-
-  // Store write threw (typically a DDB throttle). Returned 5xx to
-  // qurl-service so the delivery is retried. Sustained rate means
-  // qurl_views table is hot — provision tweak needed.
+  // Sustained rate = qurl_views table hot.
   QURL_WEBHOOK_STORE_ERROR: 'qurl_webhook_store_error',
 };
 
@@ -458,6 +434,14 @@ const AUDIT_EVENTS = {
 // constant objects in this file aren't frozen, but AUDIT_EVENTS is the
 // only one whose mutation is undetectable by tests.
 Object.freeze(AUDIT_EVENTS);
+
+// Wire-protocol event-type strings for qURL webhook payloads.
+// Pinned as constants so a typo in the receiver's type check (or in a
+// test asserting against the wire shape) fails to import rather than
+// silently matching nothing. Mirrors qurl-service WebhookEventType.
+const QURL_WEBHOOK_EVENTS = Object.freeze({
+  ACCESSED: 'qurl.accessed',
+});
 
 // Discord gateway dispatch event names (the `t` field on op=0 frames).
 // Today only INTERACTION_CREATE is published to the worker tier;
@@ -509,6 +493,7 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,
   LOG_KINDS,

@@ -1,21 +1,8 @@
-/**
- * Full webhook flow integration test
- *
- * Exercises every layer of the bot's qURL-webhook pipeline against the
- * actual Express app + actual monitor code, with the DDB store
- * replaced by an in-memory implementation that mirrors the conditional
- * MAX-merge + BatchGet semantics. The payload is signed with the same
- * algorithm qurl-service uses (HMAC-SHA256 bare hex over the raw body,
- * per qurl-service:internal/domain/webhook.go::SignPayload), and field
- * names match qurl-service's WebhookEvent JSON tags exactly.
- *
- * Why this test exists: my pre-merge unit tests in qurl-webhook.test.js
- * used the wrong field names (`event`/`event_id` instead of `type`/`id`)
- * — they passed because the same wrong names lived on both sides. This
- * flow test pins the contract by sending a payload that mirrors what
- * qurl-service actually emits and asserting downstream side effects
- * (monitor UI updates) through real bot code.
- */
+// End-to-end flow test: signed payload (qurl-service wire shape) → Express
+// route → store → monitor.getFullMsg(). Only the wire-shape + render flow
+// is covered here — dedup, out-of-order, and foreign-qurl isolation are
+// pinned at the store layer in ddb-store.test.js (they were duplicating
+// coverage when previously asserted against the in-memory mock).
 
 const crypto = require('crypto');
 
@@ -30,25 +17,13 @@ jest.mock('../src/discord', () => ({
   sendDM: jest.fn(),
 }));
 
-// In-memory store that mirrors the conditional MAX-merge semantics of
-// the real DDB-backed store. The flow test depends on these semantics
-// (replay protection, out-of-order rejection) being preserved end-to-
-// end — without them, the monitor would see regressed counts on
-// retry.
 function makeStore() {
-  const rows = new Map(); // qurl_id → {accessCount, consumed, lastEventId}
+  const rows = new Map();
   return {
     rows,
     async recordQurlView({ qurlId, accessCount, consumed, eventId }) {
       const existing = rows.get(qurlId);
-      if (!existing) {
-        rows.set(qurlId, { accessCount, consumed, lastEventId: eventId });
-        return 'recorded';
-      }
-      // Match the real DDB ConditionExpression:
-      //   attribute_not_exists(last_event_id) OR
-      //   (last_event_id <> :eid AND access_count < :n)
-      if (existing.lastEventId !== eventId && existing.accessCount < accessCount) {
+      if (!existing || (existing.lastEventId !== eventId && existing.accessCount < accessCount)) {
         rows.set(qurlId, { accessCount, consumed, lastEventId: eventId });
         return 'recorded';
       }
@@ -56,8 +31,7 @@ function makeStore() {
     },
     async getQurlViews(qurlIds) {
       const out = new Map();
-      const keys = [...new Set(qurlIds.filter(Boolean))];
-      for (const k of keys) {
+      for (const k of new Set(qurlIds.filter(Boolean))) {
         const r = rows.get(k);
         if (r) out.set(k, { accessCount: r.accessCount, consumed: r.consumed });
       }
@@ -81,30 +55,19 @@ const { app } = require('../src/server');
 const { _test } = require('../src/commands');
 const { monitorLinkStatus, activeMonitors } = _test;
 
-// Mirror qurl-service:internal/domain/webhook.go::SignPayload. Bare hex
-// HMAC-SHA256 over the raw body. Reproducing the algorithm verbatim
-// (rather than importing a shared lib) is intentional: this test is
-// the canonical place a wire-format regression in EITHER side would
-// surface, so the algorithm needs to live independently of whatever
-// shared crypto module the bot or qurl-service ship next.
+// Reproduced from qurl-service:internal/domain/webhook.go::SignPayload —
+// kept independent of any shared lib so a wire-format regression on
+// either side surfaces here, not via a coupled import.
 function qurlServiceSign(rawBody, secret) {
   return crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
 }
 
-// Mirror qurl-service:internal/domain/webhook.go::WebhookEvent exactly.
-// Field names + types must match WebhookEvent's `json:` tags. This is
-// the test-side contract pin — a mismatch with qurl-service's emit
-// shape fails CI loudly rather than going silent in prod.
+// Field shape pinned to qurl-service WebhookEvent JSON tags.
 function buildQurlAccessedPayload({ id, qurlId, resourceId, accessCount, consumed }) {
   return {
     id,
     type: 'qurl.accessed',
-    data: {
-      qurl_id: qurlId,
-      resource_id: resourceId,
-      access_count: accessCount,
-      consumed,
-    },
+    data: { qurl_id: qurlId, resource_id: resourceId, access_count: accessCount, consumed },
     owner_id: 'usr_flow_test',
     timestamp: new Date().toISOString(),
     api_version: '2024-01-01',
@@ -136,17 +99,12 @@ beforeEach(() => {
 });
 
 // Construction order matters: the receiver runs under real timers
-// (supertest needs setImmediate to flush); the monitor's setInterval
-// must be set up under fake timers. We populate the store first
-// (real timers, via the receiver), then switch to fakes and
-// construct + tick the monitor. This avoids the toggle-mid-monitor
-// trap where a setInterval registered under one timer mode is
-// abandoned when the other mode takes over.
+// (supertest needs setImmediate); the monitor's setInterval is
+// installed under fake timers. We populate the store first, then
+// switch to fakes for the monitor — never toggle modes once a
+// setInterval is registered.
 describe('full webhook flow: qurl-service shape → bot receiver → store → monitor UI', () => {
-  it('a single qurl.accessed delivery flips one recipient from pending → viewed', async () => {
-    // Stage 1: receiver under real timers. Webhook signed with qurl-
-    // service's exact algorithm + field shape — the wire-format
-    // regression class that pre-merge unit tests missed.
+  it('a single delivery flips pending → viewed', async () => {
     const res = await deliverWebhook(buildQurlAccessedPayload({
       id: 'evt_alice_1', qurlId: 'q_aaaaaaaaaa1', resourceId: 'res-1', accessCount: 1, consumed: false,
     }));
@@ -156,10 +114,6 @@ describe('full webhook flow: qurl-service shape → bot receiver → store → m
       accessCount: 1, consumed: false, lastEventId: 'evt_alice_1',
     });
 
-    // Stage 2: monitor under fake timers. Constructed AFTER the
-    // store is populated so a single 15s tick is enough to see the
-    // update; we never toggle timer modes once the setInterval is
-    // installed.
     jest.useFakeTimers();
     try {
       const interaction = makeInteraction();
@@ -174,7 +128,7 @@ describe('full webhook flow: qurl-service shape → bot receiver → store → m
       );
       expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 0 viewed / 2 pending');
 
-      await jest.advanceTimersByTimeAsync(15000); // 1m expiry → 15s pollInterval
+      await jest.advanceTimersByTimeAsync(15000);
 
       expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 1 viewed / 1 pending');
       expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
@@ -186,32 +140,7 @@ describe('full webhook flow: qurl-service shape → bot receiver → store → m
     }
   });
 
-  it('redelivery (same event_id) is deduped and the counter does not double-advance', async () => {
-    const p = buildQurlAccessedPayload({
-      id: 'evt_replay', qurlId: 'q_aaaaaaaaaa1', resourceId: 'res-1', accessCount: 1, consumed: false,
-    });
-    const first = await deliverWebhook(p);
-    const second = await deliverWebhook(p); // exact same payload + signature
-    expect(first.body).toEqual({ status: 'recorded' });
-    expect(second.body).toEqual({ status: 'dedup' });
-    expect(mockStore.rows.get('q_aaaaaaaaaa1').accessCount).toBe(1);
-  });
-
-  it('out-of-order delivery (lower count after higher count) is silently rejected', async () => {
-    // qurl-service docs explicitly warn that access_count is best-effort
-    // under concurrent load. The conditional MAX-merge guarantees a
-    // late-arriving lower-count event never regresses the row.
-    await deliverWebhook(buildQurlAccessedPayload({
-      id: 'evt_high', qurlId: 'q_aaaaaaaaaa1', resourceId: 'res-1', accessCount: 3, consumed: false,
-    }));
-    const stale = await deliverWebhook(buildQurlAccessedPayload({
-      id: 'evt_low', qurlId: 'q_aaaaaaaaaa1', resourceId: 'res-1', accessCount: 1, consumed: false,
-    }));
-    expect(stale.body).toEqual({ status: 'dedup' });
-    expect(mockStore.rows.get('q_aaaaaaaaaa1').accessCount).toBe(3);
-  });
-
-  it('multiple distinct qurls in the same send each advance independently', async () => {
+  it('multiple distinct qurls in one send advance independently', async () => {
     await deliverWebhook(buildQurlAccessedPayload({
       id: 'evt_a', qurlId: 'q_aaaaaaaaaa1', resourceId: 'res-1', accessCount: 1, consumed: false,
     }));
@@ -237,36 +166,7 @@ describe('full webhook flow: qurl-service shape → bot receiver → store → m
         '1m', 'Sent to 3 users', { components: [] }, 3,
       );
       await jest.advanceTimersByTimeAsync(15000);
-      // Two of three flipped to opened — Bob's still pending.
       expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 2 viewed / 1 pending');
-      monitor.stop();
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it('non-tracked qurl_id (foreign send) writes to the store but does not affect this monitor', async () => {
-    // Webhook for a qurl_id that belongs to a different send. The
-    // store accepts it (the receiver isn't send-aware); the monitor's
-    // BatchGet against its own qurlLinks set ignores it.
-    await deliverWebhook(buildQurlAccessedPayload({
-      id: 'evt_foreign', qurlId: 'q_zzzzzzzzzzz', resourceId: 'res-99', accessCount: 1, consumed: false,
-    }));
-    expect(mockStore.rows.has('q_zzzzzzzzzzz')).toBe(true);
-
-    jest.useFakeTimers();
-    try {
-      const interaction = makeInteraction();
-      const qurlLinks = [
-        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://qurl.site/#a', recipientId: 'r1' },
-      ];
-      const monitor = monitorLinkStatus(
-        'flow-send-4', interaction, qurlLinks,
-        [{ id: 'r1', username: 'Alice' }],
-        '1m', 'Sent to 1 user', { components: [] }, 1,
-      );
-      await jest.advanceTimersByTimeAsync(15000);
-      expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
       monitor.stop();
     } finally {
       jest.useRealTimers();

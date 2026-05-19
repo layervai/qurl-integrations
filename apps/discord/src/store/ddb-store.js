@@ -1025,110 +1025,90 @@ async function recordQURLSendBatch(sends) {
 
 // ── QURL views (webhook-fed view counter for /qurl send + /qurl map) ──
 
-// 30-day TTL window on qurl_views rows. Safely past the longest
-// monitor lifetime (1h cap) + the longest link expiry (7d), with
-// ~3 weeks of buffer for DDB's TTL precision (rows can survive
-// up to 48h past their stamp before the asynchronous reaper sweeps
-// them). A shorter window risks dropping a row a monitor is still
-// reading; a longer window leaves unbounded growth on the table.
+// 30d TTL refreshed on every write. Safely past the longest monitor
+// lifetime (1h cap) + longest link expiry (7d) + DDB's ~48h TTL
+// precision — no monitor will ever read a row about to reap.
 const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 
-// recordQurlView is the qurl.accessed webhook's persistence sink. The
-// conditional update implements MAX-merge semantics: a redelivery, a
-// stale (lower-count) replay, or an out-of-order arrival is silently
-// dropped. The monitor's setInterval polls this table (live view
-// counter); a webhook can land on a different bot instance than the
-// one running the originating monitor's setInterval, so the join is
-// always through DDB — never in-process pub/sub.
-//
-// Every successful write refreshes the `ttl` attribute to (now + 30d).
-// A qURL that keeps receiving views (e.g. a multi-use link) keeps its
-// row alive; once views stop, the row reaps 30d later.
+// `consumed` is persisted + returned by getQurlViews but not yet
+// rendered by the monitor (runTick only checks accessCount > 0).
+// Reserved for a future "🔥 N consumed" state on self-destruct sends —
+// see commands.js buildStatusMsg for the render site.
+
+// MAX-merge conditional update — first arrival ALWAYS wins; subsequent
+// arrivals must be a distinct event AND either advance access_count OR
+// flip consumed false → true at the same access_count. The trailing
+// false→true consumed clause covers a qurl-service emission shape
+// where a follow-on event records the burn without re-bumping the
+// counter; without it we'd silently drop that signal.
 async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
   if (!qurlId) throw new Error('recordQurlView: qurlId is required');
   if (typeof accessCount !== 'number' || accessCount < 0) {
     throw new Error(`recordQurlView: accessCount must be a non-negative number (got ${accessCount})`);
   }
   if (!eventId) throw new Error('recordQurlView: eventId is required for replay protection');
+  const nowMs = Date.now();
+  const consumedBool = Boolean(consumed);
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_views,
       Key: { qurl_id: qurlId },
-      // Two-clause condition: first arrival ALWAYS wins; subsequent
-      // arrivals must be a distinct event AND advance the count. The
-      // event-id clause is the replay guard (qurl-service's delivery
-      // retries reuse the same event_id); the count clause guards the
-      // "out-of-order arrival" case (event N+1 races event N, and N
-      // arrives second — we never want to regress access_count).
-      ConditionExpression: 'attribute_not_exists(last_event_id) OR (last_event_id <> :eid AND access_count < :n)',
+      ConditionExpression:
+        'attribute_not_exists(last_event_id) OR ('
+        + 'last_event_id <> :eid AND ('
+        + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
+        + '))',
       UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now, #ttl = :ttl',
       ExpressionAttributeNames: { '#ttl': 'ttl' },
       ExpressionAttributeValues: {
         ':n': accessCount,
-        ':c': Boolean(consumed),
+        ':c': consumedBool,
         ':eid': eventId,
-        ':now': nowIso(),
-        ':ttl': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
+        ':now': new Date(nowMs).toISOString(),
+        ':ttl': Math.floor(nowMs / 1000) + QURL_VIEW_TTL_SECONDS,
+        ':false': false,
+        ':true': true,
       },
     }));
     return 'recorded';
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException') {
-      // Either a redelivery (same event_id) or an out-of-order arrival
-      // (lower or equal count). Either way the row already reflects
-      // a >= state — silently drop. The caller can treat 'dedup' as
-      // success for the webhook's 200 response (drop ≠ failure).
+      // Replay (same event_id) OR out-of-order (lower-or-equal count
+      // with no consumed flip). Row already reflects a >= state.
       return 'dedup';
     }
     throw err;
   }
 }
 
-// getQurlViews BatchGets the view rows for an in-memory qurlLinks set.
-// DDB BatchGetItem caps at 100 keys per request; the monitor's tracked
-// set is bounded by QURL_SEND_MAX_RECIPIENTS (50 today), so a single
-// request handles every realistic call. Returns a Map keyed on qurl_id.
+// Returns a Map<qurl_id, {accessCount, consumed}>. BatchGet caps at 100
+// keys per request; today max recipients is 50 so chunking is defensive.
 async function getQurlViews(qurlIds) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
-  // De-dupe + drop empty strings defensively. An empty qurl_id reaching
-  // BatchGet would be a collision attractor (every empty-id row lands
-  // on the same key) — the boundary in commands.js' empty-id guard
-  // should already filter, but defense-in-depth at the store edge
-  // keeps the invariant local.
+  // Drop empties defensively — an empty qurl_id is a collision attractor.
   const keys = [...new Set(qurlIds.filter(Boolean))].map(id => ({ qurl_id: id }));
   if (keys.length === 0) return new Map();
-  // BatchGet caps at 100 keys/request. Today max recipients is 50, so
-  // chunking is purely defensive — if QURL_SEND_MAX_RECIPIENTS ever
-  // rises past 100 we degrade gracefully instead of returning a
-  // partial map silently.
   const CHUNK = 100;
   const out = new Map();
-  for (let i = 0; i < keys.length; i += CHUNK) {
-    const slice = keys.slice(i, i + CHUNK);
-    const res = await ddb.send(new BatchGetCommand({
-      RequestItems: { [TABLES.qurl_views]: { Keys: slice } },
-    }));
-    const items = (res.Responses && res.Responses[TABLES.qurl_views]) || [];
-    for (const item of items) {
+  const collect = (res) => {
+    for (const item of (res.Responses && res.Responses[TABLES.qurl_views]) || []) {
       out.set(item.qurl_id, {
         accessCount: item.access_count || 0,
         consumed: Boolean(item.consumed),
       });
     }
-    // UnprocessedKeys is populated under throttle. A single retry covers
-    // the realistic case (small fan-out); persistent unprocessed keys
-    // would mean a hot table — that's an oncall signal, not a per-call
-    // retry loop. Match recordQURLSendBatch's bounded-retry pattern.
+  };
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const slice = keys.slice(i, i + CHUNK);
+    const res = await ddb.send(new BatchGetCommand({
+      RequestItems: { [TABLES.qurl_views]: { Keys: slice } },
+    }));
+    collect(res);
+    // Single retry on UnprocessedKeys — persistent throttle is an oncall
+    // signal, not a per-call retry loop.
     const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
     if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
-      const retry = await ddb.send(new BatchGetCommand({ RequestItems: { [TABLES.qurl_views]: unprocessed } }));
-      const retryItems = (retry.Responses && retry.Responses[TABLES.qurl_views]) || [];
-      for (const item of retryItems) {
-        out.set(item.qurl_id, {
-          accessCount: item.access_count || 0,
-          consumed: Boolean(item.consumed),
-        });
-      }
+      collect(await ddb.send(new BatchGetCommand({ RequestItems: { [TABLES.qurl_views]: unprocessed } })));
     }
   }
   return out;

@@ -1,12 +1,12 @@
 // GitHub webhook routes
 const express = require('express');
-const crypto = require('crypto');
 const { EmbedBuilder } = require('discord.js');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
 const { COLORS, GOOD_FIRST_ISSUE_PATTERNS } = require('../constants');
 const { escapeDiscordMarkdown } = require('../utils/sanitize');
+const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
 // Short alias — GitHub webhook payloads put user-controlled text everywhere
 // (PR title, issue title, commit message, branch name, label). We render
 // those inside Discord embeds, which render markdown including [text](url)
@@ -33,49 +33,35 @@ const {
 
 const router = express.Router();
 
-// Verify GitHub webhook signature
+// `sha256=<64 lowercase hex>` is GitHub's canonical signature shape. We
+// validate the shape before calling verifyHmacSha256 so a malformed
+// header (wrong length, non-hex) is rejected before timingSafeEqual.
+const GITHUB_SIGNATURE_PATTERN = /^sha256=[0-9a-f]{64}$/;
+
 function verifySignature(req) {
   const signature = req.headers['x-hub-signature-256'];
-
   if (!config.GITHUB_WEBHOOK_SECRET) {
     logger.error('GITHUB_WEBHOOK_SECRET not configured - rejecting webhook');
     return false;
   }
-
   if (!signature) {
     logger.warn('Webhook request missing signature');
     return false;
   }
-  // Validate the header is exactly `sha256=<64 lowercase hex>` before it
-  // reaches timingSafeEqual. An attacker can't pick the digest, but a
-  // malformed header (wrong length, non-hex) should be rejected early
-  // rather than producing unequal-length buffers inside the try/catch.
-  if (typeof signature !== 'string' || !/^sha256=[0-9a-f]{64}$/.test(signature)) {
-    // Don't log the (attacker-controlled) signature prefix — only shape data.
+  if (typeof signature !== 'string' || !GITHUB_SIGNATURE_PATTERN.test(signature)) {
     logger.warn('Webhook signature has unexpected format', {
       length: typeof signature === 'string' ? signature.length : 0,
       hasPrefix: typeof signature === 'string' && signature.startsWith('sha256='),
     });
     return false;
   }
-  // Defensive: if middleware ordering ever changes or a request arrives with
-  // a non-JSON content type, rawBody may be absent. hmac.update(undefined)
-  // throws TypeError, which is outside the try/catch below. Logged at error
-  // level so oncall catches a silent misconfiguration quickly — legit GitHub
-  // traffic always has a JSON body and hits the /webhook express.json parser.
   if (!req.rawBody) {
     logger.error('Webhook middleware did not populate rawBody — check server.js middleware ordering. Signature verification is BLOCKED until fixed.');
     return false;
   }
-
-  const hmac = crypto.createHmac('sha256', config.GITHUB_WEBHOOK_SECRET);
-  const digest = 'sha256=' + hmac.update(req.rawBody).digest('hex');
-
-  try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
-  } catch {
-    return false;
-  }
+  // Strip the `sha256=` prefix before the constant-time compare — the
+  // shared helper compares bare hex.
+  return verifyHmacSha256(req.rawBody, config.GITHUB_WEBHOOK_SECRET, signature.slice('sha256='.length));
 }
 
 // Check if repo belongs to allowed organization
@@ -92,59 +78,17 @@ function isAutomatedBot(prUser) {
   return prUser.type === 'Bot' || botNames.some(bot => username.includes(bot));
 }
 
-// Per-IP counter of failed-signature attempts so an attacker can't burn CPU
-// by firing unlimited invalid webhooks. Legitimate GitHub traffic (valid
-// HMAC) is never throttled. Swept every 5 minutes.
-// SCALING: single-instance only. Move to Redis if the bot runs horizontally.
-const BAD_SIG_WINDOW_MS = 60_000;
-const BAD_SIG_MAX = 30;
-const badSigAttempts = new Map(); // ip -> number[]  (timestamps)
-setInterval(() => {
-  const cutoff = Date.now() - BAD_SIG_WINDOW_MS * 2;
-  for (const [ip, times] of badSigAttempts) {
-    const recent = times.filter(t => t > cutoff);
-    if (recent.length === 0) badSigAttempts.delete(ip);
-    else badSigAttempts.set(ip, recent);
-  }
-}, 5 * 60 * 1000).unref();
+const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 
-// Hard cap per-IP array to prevent a single abusive IP from growing its
-// timestamp list unboundedly between sweeps.
-const BAD_SIG_PER_IP_CAP = BAD_SIG_MAX * 4;
-
-function recordBadSig(ip) {
-  const now = Date.now();
-  let list = (badSigAttempts.get(ip) || []).filter(t => t > now - BAD_SIG_WINDOW_MS);
-  list.push(now);
-  if (list.length > BAD_SIG_PER_IP_CAP) {
-    list = list.slice(-BAD_SIG_PER_IP_CAP);
-  }
-  if (badSigAttempts.size > 10_000) {
-    // Same 10%-drop strategy as oauth.js rateLimitStore — single-entry
-    // eviction can't keep up with a distributed flood of unique IPs.
-    const dropCount = Math.max(1, Math.floor(badSigAttempts.size / 10));
-    const it = badSigAttempts.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      badSigAttempts.delete(k);
-    }
-  }
-  badSigAttempts.set(ip, list);
-  return list.length;
-}
-
-// Main webhook handler
 router.post('/github', async (req, res) => {
   const ip = req.ip || 'unknown';
-  const existing = (badSigAttempts.get(ip) || []).filter(t => t > Date.now() - BAD_SIG_WINDOW_MS);
-  if (existing.length >= BAD_SIG_MAX) {
-    logger.warn('Webhook rate limit exceeded (bad signatures)', { ip, recentFailures: existing.length });
+  if (badSigLimiter.shouldThrottle(ip)) {
+    logger.warn('Webhook rate limit exceeded (bad signatures)', { ip });
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
   if (!verifySignature(req)) {
-    const n = recordBadSig(ip);
+    const n = badSigLimiter.recordBadSig(ip);
     logger.warn('Invalid webhook signature', { ip, totalInWindow: n });
     return res.status(401).json({ error: 'Invalid signature' });
   }
@@ -440,4 +384,7 @@ async function handleActivityFeed(event, payload) {
   }
 }
 
+router.stopIntervals = function stopIntervals() {
+  badSigLimiter.stopSweep();
+};
 module.exports = router;

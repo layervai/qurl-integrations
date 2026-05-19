@@ -76,7 +76,12 @@ Each step blocks the next — do not skip ahead.
   All inbound webhooks return 401 (signature mismatch). The bot's
   per-IP `BAD_SIG_MAX=30` rate limit kicks in after 30 attempts and
   switches to 429. Recover by updating the subscription's `secret`
-  field (PATCH the subscription).
+  field (PATCH the subscription) — but if the lockout already
+  triggered, expect a **~1 min blackout** before legit traffic
+  unsticks (the rate-limit window is 60s from the last failed sig).
+  Operators rotating in production should pre-stage both the SSM
+  update and the subscription PATCH so the failed-sig window is as
+  narrow as possible.
 - **`qurl-views` table missing.** The bot's monitor `BatchGet` throws
   `ResourceNotFoundException`. The setInterval's try/catch swallows
   it and logs `Link monitor poll failed` — the counter sticks at

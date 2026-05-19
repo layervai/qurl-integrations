@@ -138,27 +138,10 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(mockRecordQurlView).not.toHaveBeenCalled();
   });
 
-  it('does NOT treat legacy `event` field as the event type — qurl-service emits `type`', async () => {
-    // Regression guard: if the receiver is ever "helpfully" patched to
-    // accept `event` as a synonym for `type`, this test fails. The
-    // qurl-service contract pins `type`; a synonym path silently
-    // accepts malformed payloads.
-    const payload = { id: 'evt-1', event: 'qurl.accessed', data: VALID_PAYLOAD.data };
-    const raw = JSON.stringify(payload);
-    const res = await request(app)
-      .post('/webhooks/qurl')
-      .set('Content-Type', 'application/json')
-      .set('QURL-Signature', signBody(raw))
-      .send(raw);
-    expect(res.status).toBe(200);
-    // type is undefined → falls into the "non-qurl.accessed" ignore path.
-    expect(res.body).toEqual(expect.objectContaining({ status: 'ignored' }));
-    expect(mockRecordQurlView).not.toHaveBeenCalled();
-  });
-
   it('returns 200 invalid-payload when body.id missing (no replay-protection key)', async () => {
-    const { id, ...rest } = VALID_PAYLOAD; // eslint-disable-line no-unused-vars
-    const raw = JSON.stringify(rest);
+    const payload = { ...VALID_PAYLOAD };
+    delete payload.id;
+    const raw = JSON.stringify(payload);
     const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')

@@ -1,69 +1,37 @@
-// qURL webhook receiver
+// qURL webhook receiver — POST /webhooks/qurl
 //
-// Inbound endpoint for qurl-service's `qurl.accessed` event. Writes the
-// view count + consumed flag to the qurl_views DDB table; the live
-// monitor's setInterval reads from that table (see commands.js
-// monitorLinkStatus). DDB is the multi-instance bridge — a webhook
-// can land on instance A while the originating monitor's setInterval
-// runs on instance B, so we never reach for an in-process EventEmitter.
-//
-// Wire contract pinned by qurl-service domain.WebhookEvent
-// (internal/domain/webhook.go) + domain.SignPayload:
-//   header  `QURL-Signature`   bare hex HMAC-SHA256 over raw body (no
-//                              `sha256=` prefix — different shape from
-//                              GitHub's signature scheme; do not copy
-//                              routes/webhooks.js' prefix-check verbatim)
-//   header  `QURL-Delivery`    per-delivery ID (`wd_…`). Different
-//                              across redeliveries of the same event,
-//                              so NOT a replay key — use body.id for that.
-//   body    `{id, type, data:{qurl_id, resource_id, access_count, consumed},
-//             owner_id, timestamp, api_version}`
-//
-// Field NAMES matter: qurl-service emits `type` (not `event`) and `id`
-// (not `event_id`). Receiver-side renames of either field silently
-// 200-ignore every inbound webhook because the type check fails first.
-// Pinning the qurl-service field names here so a future "let's normalize
-// to event_id" refactor in EITHER repo fails CI rather than going dark.
+// Wire contract (qurl-service/internal/domain/webhook.go::WebhookEvent +
+// SignPayload):
+//   header  `QURL-Signature`  bare hex HMAC-SHA256 (NO `sha256=` prefix —
+//                             that's GitHub's shape)
+//   body    {id, type, data:{qurl_id, resource_id, access_count, consumed},
+//            owner_id, timestamp, api_version}
 //
 // `src_ip` and `user_agent` are stripped server-side for type=transit
-// resources (the connector-owned privacy boundary). Discord bot sends
-// are always transit, so we don't even attempt to read those fields.
-//
-// Secret-unset behavior: route still mounts, but every request is
-// rejected with 503. A boot WARN surfaces the misconfig before traffic
-// arrives — operator sees "webhook receiver mounted in unconfigured
-// mode" in startup logs.
+// resources (connector-owned privacy boundary). Discord bot sends are
+// always transit.
 
 const express = require('express');
-const crypto = require('crypto');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { AUDIT_EVENTS } = require('../constants');
+const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS } = require('../constants');
+const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
 
 const router = express.Router();
 
-// Bare hex digest (no `sha256=` prefix). qurl-service sends raw hex —
-// peer is `internal/domain/webhook.go::HeaderSignature` (qurl-service
-// repo). Length is fixed at 64 lowercase hex chars; reject anything
-// else before timingSafeEqual so a malformed header can't produce
-// unequal-length buffers inside the try/catch.
+const SIGNATURE_HEADER = 'qurl-signature';
+const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/;
+
+const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
+
 function verifySignature(req) {
-  const signature = req.headers['qurl-signature'];
-
-  if (!config.QURL_WEBHOOK_SECRET) {
-    // Logged at error level so oncall catches the misconfig immediately.
-    // The boot-time WARN in server.js is the first signal; this is the
-    // per-request follow-up if traffic arrives before the secret is set.
-    logger.error('QURL_WEBHOOK_SECRET not configured — rejecting qURL webhook');
-    return false;
-  }
-
+  const signature = req.headers[SIGNATURE_HEADER];
   if (!signature) {
     logger.warn('qURL webhook missing QURL-Signature header');
     return false;
   }
-  if (typeof signature !== 'string' || !/^[0-9a-f]{64}$/.test(signature)) {
+  if (typeof signature !== 'string' || !SIGNATURE_PATTERN.test(signature)) {
     logger.warn('qURL webhook signature has unexpected format', {
       length: typeof signature === 'string' ? signature.length : 0,
     });
@@ -73,73 +41,25 @@ function verifySignature(req) {
     logger.error('qURL webhook middleware did not populate rawBody — check server.js middleware ordering. Signature verification is BLOCKED until fixed.');
     return false;
   }
-
-  const hmac = crypto.createHmac('sha256', config.QURL_WEBHOOK_SECRET);
-  const digest = hmac.update(req.rawBody).digest('hex');
-
-  try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
-  } catch {
-    return false;
-  }
-}
-
-// Per-IP failed-sig counter — mirrors routes/webhooks.js shape so the
-// two webhook surfaces have parallel hardening. SCALING: single-instance
-// only; move to Redis when the bot runs horizontally.
-const BAD_SIG_WINDOW_MS = 60_000;
-const BAD_SIG_MAX = 30;
-const BAD_SIG_PER_IP_CAP = BAD_SIG_MAX * 4;
-const badSigAttempts = new Map();
-
-const badSigSweep = setInterval(() => {
-  const cutoff = Date.now() - BAD_SIG_WINDOW_MS * 2;
-  for (const [ip, times] of badSigAttempts) {
-    const recent = times.filter(t => t > cutoff);
-    if (recent.length === 0) badSigAttempts.delete(ip);
-    else badSigAttempts.set(ip, recent);
-  }
-}, 5 * 60 * 1000);
-badSigSweep.unref();
-
-function recordBadSig(ip) {
-  const now = Date.now();
-  let list = (badSigAttempts.get(ip) || []).filter(t => t > now - BAD_SIG_WINDOW_MS);
-  list.push(now);
-  if (list.length > BAD_SIG_PER_IP_CAP) list = list.slice(-BAD_SIG_PER_IP_CAP);
-  if (badSigAttempts.size > 10_000) {
-    const dropCount = Math.max(1, Math.floor(badSigAttempts.size / 10));
-    const it = badSigAttempts.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      badSigAttempts.delete(k);
-    }
-  }
-  badSigAttempts.set(ip, list);
-  return list.length;
+  return verifyHmacSha256(req.rawBody, config.QURL_WEBHOOK_SECRET, signature);
 }
 
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
-  const existing = (badSigAttempts.get(ip) || []).filter(t => t > Date.now() - BAD_SIG_WINDOW_MS);
-  if (existing.length >= BAD_SIG_MAX) {
-    logger.warn('qURL webhook rate limit exceeded (bad signatures)', { ip, recentFailures: existing.length });
-    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, { recent_failures: existing.length });
+  if (badSigLimiter.shouldThrottle(ip)) {
+    logger.warn('qURL webhook rate limit exceeded (bad signatures)', { ip });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
-  // Secret-unset path returns 503 (not 401) — the discriminator matters
-  // for oncall: 503 says "receiver is up but unconfigured"; 401 says
-  // "real signature mismatch." Without it, an operator forgetting to
-  // set the SSM param after first deploy would see the same status as
-  // a genuine wire-shape regression.
+  // 503 vs 401: 503 says "receiver is up but unconfigured" (set
+  // QURL_WEBHOOK_SECRET in SSM); 401 says "real signature mismatch."
   if (!config.QURL_WEBHOOK_SECRET) {
     return res.status(503).json({ error: 'Webhook receiver not configured' });
   }
 
   if (!verifySignature(req)) {
-    const n = recordBadSig(ip);
+    const n = badSigLimiter.recordBadSig(ip);
     logger.warn('Invalid qURL webhook signature', { ip, totalInWindow: n });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID, { total_in_window: n });
     return res.status(401).json({ error: 'Invalid signature' });
@@ -147,36 +67,19 @@ router.post('/qurl', async (req, res) => {
 
   const eventType = req.body?.type;
   const data = req.body?.data;
-  // Replay-protection key. Peer is qurl-service's WebhookEvent.ID
-  // (json `id`) — stable across redeliveries of the same event, so
-  // `last_event_id <> :eid` actually catches redeliveries. The peer
-  // does NOT use `event_id` / `message_id`; those names were a
-  // pre-merge guess on this side that 200-ignored every inbound
-  // webhook before #465 review caught it.
   const eventId = req.body?.id;
   if (!eventId) {
-    // Defensive: a future qurl-service refactor that drops `id` from
-    // the payload would silently disable replay protection — log the
-    // gap and reject so the regression surfaces immediately rather
-    // than via "duplicate view counts" downstream.
     logger.warn('qURL webhook missing body.id (per-event replay key)');
     return res.status(200).json({ status: 'invalid-payload' });
   }
 
-  // Only qurl.accessed drives the view counter today. Other event types
-  // (e.g. qurl.created, qurl.revoked) may arrive if the subscription is
-  // broader than necessary — silently 200 them so qurl-service doesn't
-  // retry on the bot's account.
-  if (eventType !== 'qurl.accessed') {
+  if (eventType !== QURL_WEBHOOK_EVENTS.ACCESSED) {
     logger.debug('qURL webhook event ignored', { type: eventType });
     return res.status(200).json({ status: 'ignored', type: eventType });
   }
 
   if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
     logger.warn('qURL webhook qurl.accessed missing qurl_id', { data });
-    // 200 — the event was authentic, the payload was bad. Returning 4xx
-    // here would make qurl-service retry, but no amount of retry will
-    // fix a malformed payload. Log + drop.
     return res.status(200).json({ status: 'invalid-payload' });
   }
 
@@ -194,12 +97,6 @@ router.post('/qurl', async (req, res) => {
       eventId,
     });
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed: Boolean(data.consumed), result });
-    // Audit ALL accepted webhooks — including dedup — so the
-    // QurlWebhookReceivedTotal metric reflects "qurl-service is
-    // reaching us" continuously. A drop to zero across an extended
-    // window is the load-bearing alarm signal (subscription drift /
-    // qurl-service down). Result dimension lets the dashboard split
-    // recorded vs dedup without a second filter.
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result });
     return res.status(200).json({ status: result });
   } catch (err) {
@@ -211,9 +108,7 @@ router.post('/qurl', async (req, res) => {
   }
 });
 
-// Export sweep handle so server.js stopIntervals() can clear it on
-// graceful shutdown — symmetric with the metricsSweepInterval pattern.
-module.exports = router;
-module.exports.stopIntervals = function stopIntervals() {
-  clearInterval(badSigSweep);
+router.stopIntervals = function stopIntervals() {
+  badSigLimiter.stopSweep();
 };
+module.exports = router;

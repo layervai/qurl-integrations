@@ -64,38 +64,19 @@ app.use(helmet({
 
 // Parse JSON for webhooks with raw body for signature verification. MUST be
 // registered BEFORE the general app.use(express.json()) below so webhook
-// requests hit this parser first and get req.rawBody populated. Do not
-// reorder without also updating routes/webhooks.js + routes/qurl-webhook.js
-// verifySignature().
-//
-// Startup contract: each verifySignature() asserts req.rawBody exists at
-// request time and refuses the request with an error log if the middleware
-// chain drops it. See those files' guard comments for details.
-//
-// /webhook (GitHub): gated on isOpenNHPActive for symmetry with the router
-// mount below — when /webhook routes aren't mounted, Express would still
-// parse up to 1 MB of JSON per request before falling through to the 404
-// handler. Skipping the parser registration avoids that wasted work.
-if (config.isOpenNHPActive) {
-  app.use('/webhook', express.json({
-    limit: '1mb',
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    }
-  }));
-}
-
-// /webhooks (qURL): unconditional — the qurl-service-fed view counter
-// is part of the universal /qurl send + /qurl map surface, not gated on
-// GitHub-OpenNHP mode. The route itself refuses inbound traffic when
-// QURL_WEBHOOK_SECRET is unset (boot WARN + per-request 503), so the
-// parser running pre-config is a no-op cost on a tiny attack surface.
-app.use('/webhooks', express.json({
+// requests hit this parser first and get req.rawBody populated.
+const rawBodyJson = express.json({
   limit: '1mb',
-  verify: (req, _res, buf) => {
-    req.rawBody = buf;
-  }
-}));
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+});
+
+// /webhook (GitHub) gated on isOpenNHPActive so we don't parse 1MB of
+// JSON for routes that aren't mounted. /webhooks (qURL) is unconditional
+// — the receiver itself returns 503 when QURL_WEBHOOK_SECRET is unset.
+if (config.isOpenNHPActive) {
+  app.use('/webhook', rawBodyJson);
+}
+app.use('/webhooks', rawBodyJson);
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -209,12 +190,12 @@ if (config.isOpenNHPActive) {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
 }
 
-// qURL webhook receiver — unconditional mount. Powers the post-PR-#455
-// view counter UI for /qurl send + /qurl map. Refuses traffic with 503
-// until QURL_WEBHOOK_SECRET is set (boot WARN below surfaces the gap).
+// Unconditional mount — the route returns 503 until QURL_WEBHOOK_SECRET
+// is set, so a fresh deploy never accepts traffic without the secret.
 app.use('/webhooks', qurlWebhookRouter);
 if (!config.QURL_WEBHOOK_SECRET) {
-  logger.warn('QURL_WEBHOOK_SECRET unset — qURL webhook receiver mounted but will reject all inbound traffic with 503. The view counter on /qurl send + /qurl map will stay at the bare base message until the secret is configured (SSM /<project>/QURL_WEBHOOK_SECRET, then restart).');
+  logger.warn('QURL_WEBHOOK_SECRET unset — qURL webhook receiver returns 503 on all inbound');
+  logger.warn('To enable: set SSM /<project>/QURL_WEBHOOK_SECRET, then restart the task');
 }
 
 // Cache-Control: no-store on every response from the OAuth surfaces —
@@ -284,11 +265,10 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
-  // qurl-webhook owns its own per-IP bad-sig sweep; mirror the metrics
-  // pattern so graceful shutdown stops every router-owned interval.
-  if (typeof qurlWebhookRouter.stopIntervals === 'function') {
-    qurlWebhookRouter.stopIntervals();
-  }
+  // Each webhook router owns a per-IP bad-sig sweep; stop them all on
+  // graceful shutdown so the interval doesn't outlive the server.
+  if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
+  if (typeof webhooksRouter.stopIntervals === 'function') webhooksRouter.stopIntervals();
 }
 
 module.exports = { app, startServer, stopIntervals };
