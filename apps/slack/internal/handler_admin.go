@@ -65,7 +65,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// the check when an enumerated value is omitted). The body
 	// re-enters handleAdminClaim for defensive parity.
 	switch cmd.AdminAction {
-	case AdminClaim:
+	case AdminClaim: // unreachable in practice — short-circuited above
 		h.handleAdminClaim(w, values)
 	case AdminRevoke:
 		h.handleAdminRevoke(w, values, teamID, userID, cmd)
@@ -196,11 +196,18 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, _ url.Values, teamID, ca
 	if err := h.cfg.AdminStore.AddAdmin(ctx, teamID, target); err != nil {
 		var se *slackdata.Error
 		if errors.As(err, &se) {
-			switch se.StatusCode {
-			case http.StatusConflict:
+			// Discriminate on (StatusCode, Code) — mirrors RemoveAdmin
+			// so a future second 409/404 case in slackdata.AddAdmin
+			// (e.g. OAuth-state conflict) routes explicitly instead of
+			// silently misrouting on the existing arm.
+			switch {
+			case se.StatusCode == http.StatusConflict && se.Code == slackdata.ErrCodeAdminAlreadyExists:
 				respondSlack(w, fmt.Sprintf("<@%s> is already an admin — nothing to do.", target))
 				return
-			case http.StatusNotFound:
+			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
+				// Unreachable in practice: requireAdminSync short-
+				// circuits with "admin-only" on a missing workspace
+				// row. Kept for safety against gate refactors.
 				respondSlack(w, "Workspace isn't bound — run `/qurl setup` first.")
 				return
 			}
@@ -248,6 +255,10 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, _ url.Values, teamID,
 				respondSlack(w, fmt.Sprintf("Can't remove <@%s> — they're the workspace owner. Transfer ownership via OAuth re-install first.", target))
 				return
 			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
+				// Unreachable in practice: requireAdminSync short-
+				// circuits with "admin-only" on a missing workspace
+				// row (CheckAdmin returns isAdmin=false there). Kept
+				// for safety against gate refactors.
 				respondSlack(w, "Workspace isn't bound — run `/qurl setup` first.")
 				return
 			case se.StatusCode == http.StatusNotFound:
@@ -282,12 +293,22 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, _ url.Values, teamID, c
 	if err != nil {
 		var se *slackdata.Error
 		if errors.As(err, &se) && se.StatusCode == http.StatusNotFound {
+			// Unreachable in practice: requireAdminSync short-
+			// circuits with "admin-only" on a missing workspace row.
+			// Kept for safety against gate refactors.
 			respondSlack(w, "Workspace isn't bound — run `/qurl setup` first.")
 			return
 		}
 		slog.Error("list admins failed", "error", err, "team_id", teamID, "user_id", callerUserID)
 		respondSlack(w, ":warning: failed to list admins (upstream error; see logs).")
 		return
+	}
+	// Defensive: BindWorkspace stamps owner_id on first claim, so an
+	// empty value would only fire on storage corruption. Surface it
+	// explicitly instead of rendering a malformed `<@>` mrkdwn link.
+	ownerCopy := fmt.Sprintf("<@%s>", ownerID)
+	if ownerID == "" {
+		ownerCopy = "(unknown — workspace_mappings missing owner_id)"
 	}
 	// Filter the owner out of the admins line so it doesn't duplicate
 	// the owner line. The owner is on the admin set by construction
@@ -300,9 +321,13 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, _ url.Values, teamID, c
 		}
 		otherAdmins = append(otherAdmins, fmt.Sprintf("<@%s>", a))
 	}
-	body := fmt.Sprintf("Owner: <@%s>", ownerID)
+	body := "Owner: " + ownerCopy
 	if len(otherAdmins) > 0 {
 		body += "\nAdmins: " + strings.Join(otherAdmins, ", ")
 	}
+	// Audit list reads — operators audit-via-paste and need to know
+	// who pulled the admin roster when. Mirrors the success slog on
+	// add/remove/revoke.
+	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_count", len(admins))
 	respondSlack(w, body)
 }

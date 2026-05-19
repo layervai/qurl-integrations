@@ -87,7 +87,28 @@ func IsRedactedSubmissionBlock(blockID string) bool {
 
 // HelpResponse renders the JSON for `/qurl help`. Returned as the
 // slash-command HTTP response body (not a modal).
-func HelpResponse() ([]byte, error) {
+//
+// adminStoreConfigured mirrors the gate in [Handler.helpMessage]: on
+// sandbox deploys without the three `QURL_*_TABLE` env vars the
+// AdminStore is nil and `admin add/remove/list/revoke` reply
+// "Admin features are not configured", so the modal omits them too
+// rather than advertising verbs the user can't run.
+func HelpResponse(adminStoreConfigured bool) ([]byte, error) {
+	adminLines := []string{
+		"*Admin commands*",
+		"`/qurl admin claim` — open the bootstrap-code modal",
+		"`/qurl setalias $<alias> <url-or-resource-id>` — configure an alias in this channel",
+		"`/qurl unsetalias $<alias>` — remove a configured alias in this channel",
+		"`/qurl aliases` — list aliases configured in this channel",
+	}
+	if adminStoreConfigured {
+		adminLines = append(adminLines,
+			"`/qurl admin add @user` — promote a Slack user to bot admin",
+			"`/qurl admin remove @user` — demote a Slack user from bot admin",
+			"`/qurl admin list` — list the workspace owner and current bot admins",
+			"`/qurl admin revoke <qurl_id>` — revoke a single previously minted qURL",
+		)
+	}
 	payload := map[string]any{
 		respFieldResponseType: respTypeEphemeral,
 		"blocks": []any{
@@ -102,17 +123,7 @@ func HelpResponse() ([]byte, error) {
 				"`/qurl list` — show your 5 most recent qURLs",
 			}, "\n")),
 			dividerBlock(),
-			sectionBlock(strings.Join([]string{
-				"*Admin commands*",
-				"`/qurl admin claim` — open the bootstrap-code modal",
-				"`/qurl setalias $<alias> <url-or-resource-id>` — configure an alias in this channel",
-				"`/qurl unsetalias $<alias>` — remove a configured alias in this channel",
-				"`/qurl aliases` — list aliases configured in this channel",
-				"`/qurl admin add @user` — promote a Slack user to bot admin",
-				"`/qurl admin remove @user` — demote a Slack user from bot admin",
-				"`/qurl admin list` — list the workspace owner and current bot admins",
-				"`/qurl admin revoke <qurl_id>` — revoke a single previously minted qURL",
-			}, "\n")),
+			sectionBlock(strings.Join(adminLines, "\n")),
 			dividerBlock(),
 			sectionBlock("`/qurl help` — show this message"),
 		},

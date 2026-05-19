@@ -38,7 +38,7 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "unsetalias", text: "unsetalias $prod-db", wantSub: SubcmdUnsetAlias, wantAlias: "prod-db", wantFlags: map[string]string{}},
 		{name: "aliases", text: "aliases", wantSub: SubcmdAliases, wantFlags: map[string]string{}},
 		{name: "admin claim no args", text: "admin claim", wantSub: SubcmdAdmin, wantAdmin: AdminClaim, wantFlags: map[string]string{}},
-		{name: "admin revoke qurl_id", text: "admin revoke q_abc123def", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantTarget: "q_abc123def", wantFlags: map[string]string{}},
+		{name: "admin revoke qurl_id", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantTarget: "q_01HXYZ8ABCDEF0123456789AB", wantFlags: map[string]string{}},
 		{name: "admin add mention", text: "admin add <@U12345>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345", wantFlags: map[string]string{}},
 		{name: "admin add mention with display name", text: "admin add <@U12345|kevin>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345", wantFlags: map[string]string{}},
 		{name: "admin remove mention", text: "admin remove <@U67890>", wantSub: SubcmdAdmin, wantAdmin: AdminRemove, wantUserID: "U67890", wantFlags: map[string]string{}},
@@ -150,7 +150,7 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "alias with space (quoted) rejected", text: `get "$prod db"`, wantErr: ErrInvalidAlias},
 		{name: "alias with equals rejected", text: "setalias $a=b https://x.example", wantErr: ErrInvalidAlias},
 		{name: "admin claim with positional rejected", text: "admin claim boot-code", wantErr: ErrUnexpectedArgument},
-		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke q_abc123def extra", wantErr: ErrUnexpectedArgument},
+		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB extra", wantErr: ErrUnexpectedArgument},
 		{name: "alias with trailing hyphen rejected", text: "get $prod-", wantErr: ErrInvalidAlias},
 		{name: "alias single hyphen rejected", text: "get $-", wantErr: ErrInvalidAlias},
 		{name: "alias with double trailing hyphens rejected", text: "get $foo--", wantErr: ErrInvalidAlias},
@@ -282,6 +282,42 @@ func TestParse_GetFlagErrors(t *testing.T) {
 				t.Errorf("Parse(%q) error = %q, want substring %q", tc.text, err.Error(), tc.wantSubstr)
 			}
 		})
+	}
+}
+
+// TestParse_QURLIDLengthBoundary pins the {16,64} boundary on
+// qurlIDPattern. 16 and 64 accept; 15 and 65 reject with
+// ErrInvalidQURLID. The floor is the realistic shortest qurl-service
+// emits (ULID suffixes are 26 chars; 16 leaves a margin) — a 15-char
+// `q_abc` token is almost always a truncation paste, so failing at
+// parse time gives the user a hint instead of an opaque 404.
+func TestParse_QURLIDLengthBoundary(t *testing.T) {
+	t.Parallel()
+	at16 := strings.Repeat("A", 16)
+	at15 := strings.Repeat("A", 15)
+	at64 := strings.Repeat("A", 64)
+	at65 := strings.Repeat("A", 65)
+
+	for _, ok := range []string{at16, at64} {
+		cmd, err := Parse("admin revoke q_" + ok)
+		if err != nil {
+			t.Errorf("Parse(admin revoke q_<%d chars>): unexpected error %v", len(ok), err)
+			continue
+		}
+		if cmd.Target != "q_"+ok {
+			t.Errorf("Target = %q, want %q", cmd.Target, "q_"+ok)
+		}
+	}
+
+	for _, bad := range []string{at15, at65} {
+		_, err := Parse("admin revoke q_" + bad)
+		if err == nil {
+			t.Errorf("Parse(admin revoke q_<%d chars>) returned nil error, want ErrInvalidQURLID", len(bad))
+			continue
+		}
+		if !errors.Is(err, ErrInvalidQURLID) {
+			t.Errorf("Parse(admin revoke q_<%d chars>) error = %v, want errors.Is(_, ErrInvalidQURLID)", len(bad), err)
+		}
 	}
 }
 
@@ -472,7 +508,7 @@ func FuzzParse(f *testing.F) {
 		"setalias $alias \"unbalanced",
 		"unsetalias $alias",
 		"admin claim",
-		"admin revoke q_abc123def",
+		"admin revoke q_01HXYZ8ABCDEF0123456789AB",
 		"admin add <@U12345>",
 		"admin remove <@U12345|kevin>",
 		testAdminListCmd,

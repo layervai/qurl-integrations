@@ -216,7 +216,9 @@ var ErrInvalidFlag = errors.New("invalid flag")
 // userMentionPattern matches Slack's encoded user-mention form
 // `<@U12345>` (and `<@U12345|display-name>` when the client includes
 // the optional pipe-delimited display label). Slack user IDs are
-// uppercase alphanumeric — the same charset as channel IDs.
+// uppercase alphanumeric — the same charset as channel IDs. The
+// `[A-Z0-9]+` accepts both `U…` (workspace user) and `W…`
+// (Enterprise Grid org-level user) prefixes.
 var userMentionPattern = regexp.MustCompile(`^<@([A-Z0-9]+)(?:\|[^>]*)?>$`)
 
 // flagKeyCharset is the shared key-shape contract for flag-style
@@ -276,24 +278,27 @@ var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
 var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
 
 // qurlIDPattern is the shape of a qurl_id passed to `admin revoke`.
-// qurl-service emits `q_<alphanumeric>` (a ULID-style suffix); the
-// regex is conservative — anything that doesn't match this gets
+// qurl-service emits `q_<alphanumeric>` (a ULID-style 26-char suffix);
+// the regex is conservative — anything that doesn't match this gets
 // surfaced as a parser error rather than letting `client.Delete`
 // produce an opaque 404 from the backend. Operators paste these
 // IDs out of an audit trail or a previous mint reply, so a
 // fat-fingered space or an injected character is the most common
 // failure mode this catches.
 //
-// The {1,64} length cap fails a fat-paste at parse time rather than
-// shipping a kilobyte URL path to qurl-service. Current qurl-service
-// IDs are well under that bound (ULID suffix = 26 chars), so the cap
-// is conservative; if the suffix shape ever changes, bump here.
+// The {16,64} length floor rejects obviously-truncated IDs (`q_abc`
+// can't reach a real qURL) at parse time so the user gets a parser
+// hint instead of an opaque 404. The ceiling fails a fat-paste at
+// parse time rather than shipping a kilobyte URL path to qurl-service.
+// Current qurl-service IDs are 26-char ULIDs so the {16,64} range is
+// generous enough to absorb a one-off shape change without an SDK
+// pin; widen further if the suffix grammar shifts.
 //
 // TODO(upstream-rebrand): the [A-Za-z0-9]-only character class will
 // refuse legitimate IDs if qurl-service ever emits suffixes with
 // hyphens/underscores. The qurl-service ID grammar lives in the
 // resource-mint path; widen this set in lockstep with that contract.
-var qurlIDPattern = regexp.MustCompile(`^q_[A-Za-z0-9]{1,64}$`)
+var qurlIDPattern = regexp.MustCompile(`^q_[A-Za-z0-9]{16,64}$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -579,7 +584,7 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 		}
 		uid, ok := matchUserMention(tail[0])
 		if !ok {
-			return nil, fmt.Errorf("%w: %q (expected `<@U12345>`)", ErrInvalidUserMention, tail[0])
+			return nil, fmt.Errorf("%w: %q (expected a Slack @user mention like `<@U12345>`)", ErrInvalidUserMention, tail[0])
 		}
 		cmd.UserID = uid
 		if len(tail) > 1 {

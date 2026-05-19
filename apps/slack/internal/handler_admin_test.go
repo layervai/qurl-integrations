@@ -17,12 +17,16 @@ import (
 // literals that would otherwise repeat across cases. Slack user IDs
 // are uppercase alphanumeric (no underscore), so the fixtures here
 // use that shape — the parser's userMentionPattern rejects the
-// `U_admin`-style IDs the older test fixtures used.
+// `U_admin`-style IDs the older test fixtures used. qurl_id fixtures
+// are ULID-style 26-char suffixes so the parser's {16,64} length
+// gate accepts them.
 const (
 	testTargetUserID  = "UTARGET01"
 	testTargetMention = "<@UTARGET01>"
 	testOtherAdminID  = "UOTHER01"
 	testAdminListCmd  = "admin list"
+	testRevokeQURLID  = "q_01HXYZ8ABCDEF0123456789AB"
+	testMissingQURLID = "q_01HXYZ8MISS123456789ABCDE"
 )
 
 // --- Revoke (single qurl_id, sync) ---
@@ -32,7 +36,7 @@ func TestHandleAdminRevoke_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	var deleteHits atomic.Int32
-	ts.addCustomer("DELETE", "/v1/qurls/q_aaa123", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
 		deleteHits.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -40,8 +44,8 @@ func TestHandleAdminRevoke_HappyPath(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin revoke q_aaa123", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "Revoked `q_aaa123`") {
+	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "Revoked `"+testRevokeQURLID+"`") {
 		t.Errorf("reply missing success line: %q", reply)
 	}
 	if deleteHits.Load() != 1 {
@@ -55,7 +59,7 @@ func TestHandleAdminRevoke_HappyPath(t *testing.T) {
 func TestHandleAdminRevoke_404IsGraceful(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	ts.addCustomer("DELETE", "/v1/qurls/q_missing", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("DELETE", "/v1/qurls/"+testMissingQURLID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","status":404}}`))
 	})
@@ -63,7 +67,7 @@ func TestHandleAdminRevoke_404IsGraceful(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin revoke q_missing", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("admin revoke "+testMissingQURLID, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "already revoked") {
 		t.Errorf("reply missing graceful 404 surface: %q", reply)
 	}
@@ -98,7 +102,7 @@ func TestHandleAdminRevoke_NonAdmin(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin revoke q_aaa123", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Errorf("reply missing admin-only fence: %q", reply)
 	}
@@ -151,8 +155,19 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleAdminAdd_WorkspaceNotBound fences the 404 surface: a
-// pre-claim workspace renders the "run /qurl setup first" nudge.
+// TestHandleAdminAdd_WorkspaceNotBound fences the 404 surface at the
+// slackdata layer: a pre-claim workspace returns ErrCodeWorkspaceNotBound.
+//
+// Coverage gap (known, not fixed): the handler-layer mapping of that
+// store error to the user-visible "Workspace isn't bound — run
+// `/qurl setup` first" copy isn't fenced end-to-end here, because
+// requireAdminSync short-circuits on the same missing row (CheckAdmin
+// returns isAdmin=false → "admin-only" reply). The handler arm IS
+// marked "unreachable in practice; kept for safety against gate
+// refactors" — if a future refactor flips the gate to allow non-admins
+// through, this test would still pin the store contract but the user
+// copy could drift. Acceptable trade for not introducing an AdminStore
+// interface just for this fence.
 func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	// No seedAdmin — the workspace_mappings row doesn't exist.

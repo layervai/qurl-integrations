@@ -58,21 +58,12 @@ func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.Attribute
 	}
 }
 
-// seedChannelPolicySingle returns a channel_policies row with a
-// single alias→resource_id binding. Writes both the post-pivot
-// shape (`alias_bindings` Map + `allowed_resource_ids` SS) AND the
-// legacy single-row scalar (`alias` + `resource_id`) so the same
-// fixture exercises:
-//
-//   - `/qurl admin policies` ListPolicies flatten path (reads
-//     alias_bindings Map then aliasless SS members).
-//   - ResolvePolicy gate (`/qurl get`) which checks both the
-//     allowed_resource_ids SS and the legacy resource_id scalar.
-//
-// A row built by this helper resolves at /qurl get AND lists at
-// /qurl admin policies — the consistency seam between the two
-// pinned by TestResolvePolicy_LegacySingleRowShape and the
-// TestHandleAdminPolicies_* fixtures.
+// seedChannelPolicySingle returns a channel_policies row that writes
+// both the post-pivot shape (`alias_bindings` Map +
+// `allowed_resource_ids` SS) AND the legacy single-row scalar
+// (`alias` + `resource_id`) so the fixture exercises ResolvePolicy's
+// gate against both shapes in one row. Pinned by
+// TestResolvePolicy_LegacySingleRowShape.
 func seedChannelPolicySingle(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(teamID),

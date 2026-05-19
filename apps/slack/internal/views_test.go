@@ -13,7 +13,7 @@ import (
 // blocks so an accidentally-empty payload is caught.
 func TestHelpResponse_ValidJSON(t *testing.T) {
 	t.Parallel()
-	raw, err := HelpResponse()
+	raw, err := HelpResponse(true)
 	if err != nil {
 		t.Fatalf("HelpResponse: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestHelpResponse_ValidJSON(t *testing.T) {
 // full parse) so reformatting the help doesn't churn the test.
 func TestHelpResponse_MentionsSubcommands(t *testing.T) {
 	t.Parallel()
-	raw, err := HelpResponse()
+	raw, err := HelpResponse(true)
 	if err != nil {
 		t.Fatalf("HelpResponse: %v", err)
 	}
@@ -79,6 +79,29 @@ func TestHelpResponse_MentionsSubcommands(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("help body missing %q", want)
 		}
+	}
+}
+
+// TestHelpResponse_GatesAdminStoreVerbs fences the parity between
+// HelpResponse(false) and [Handler.helpMessage] on a sandbox deploy:
+// the four AdminStore-gated verbs disappear from the modal so users
+// don't see commands the bot replies "Admin features are not
+// configured" to.
+func TestHelpResponse_GatesAdminStoreVerbs(t *testing.T) {
+	t.Parallel()
+	raw, err := HelpResponse(false)
+	if err != nil {
+		t.Fatalf("HelpResponse(false): %v", err)
+	}
+	body := string(raw)
+	for _, gated := range []string{"qurl admin add", "qurl admin remove", "qurl admin list", "qurl admin revoke"} {
+		if strings.Contains(body, gated) {
+			t.Errorf("sandbox help body unexpectedly mentions %q", gated)
+		}
+	}
+	// Claim still surfaces (modal-only, no AdminStore dependency).
+	if !strings.Contains(body, "qurl admin claim") {
+		t.Error("sandbox help body missing `qurl admin claim`")
 	}
 }
 

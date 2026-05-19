@@ -863,9 +863,10 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		return !ok, nil
 	case strings.HasPrefix(term, "NOT contains("):
 		// `NOT contains(<attr>, :val)` — true iff the SS attribute
-		// at <attr> does NOT contain :val. Used by AllowResource's
-		// "is :rid already in the set?" guard to fold the membership
-		// check into the conditional UpdateItem.
+		// at <attr> does NOT contain :val. Used by AddAdmin's
+		// "is :uid already on the admin set?" guard to fold the
+		// membership check into the conditional UpdateItem
+		// (alongside `attribute_exists(slack_team_id)`).
 		inner := strings.TrimSuffix(strings.TrimPrefix(term, "NOT contains("), ")")
 		comma := strings.Index(inner, ",")
 		if comma < 0 {
@@ -900,10 +901,10 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		return true, nil
 	case strings.HasPrefix(term, "contains("):
 		// `contains(<attr>, :val)` — true iff the SS attribute at
-		// <attr> contains :val. Used by DisallowResource's guard
-		// (membership-required-for-removal) and any future verb
-		// that needs a positive membership check inside the
-		// conditional UpdateItem.
+		// <attr> contains :val. Used by RemoveAdmin's guard
+		// (membership-required-for-removal) combined with
+		// `attribute_exists(slack_team_id)` via the AND-splitter
+		// above.
 		inner := strings.TrimSuffix(strings.TrimPrefix(term, "contains("), ")")
 		comma := strings.Index(inner, ",")
 		if comma < 0 {
