@@ -1060,12 +1060,15 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_views,
       Key: { qurl_id: qurlId },
+      // `consumed` is a DDB reserved keyword — must be aliased via
+      // ExpressionAttributeNames or DDB returns ValidationException.
       ConditionExpression:
         'attribute_not_exists(last_event_id) OR ('
         + 'last_event_id <> :eid AND ('
-        + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
+        + 'access_count < :n OR (access_count = :n AND #consumed = :false AND :c = :true)'
         + '))',
-      UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now, expires_at = :exp',
+      UpdateExpression: 'SET access_count = :n, #consumed = :c, last_event_id = :eid, last_updated = :now, expires_at = :exp',
+      ExpressionAttributeNames: { '#consumed': 'consumed' },
       ExpressionAttributeValues: {
         ':n': accessCount,
         ':c': consumedBool,
