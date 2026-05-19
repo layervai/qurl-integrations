@@ -919,12 +919,12 @@ async function startHotStandby() {
 
   // Belt-and-suspenders: shim.start({ connect: false }) constructs
   // the manager synchronously inside its await, so by the time we
-  // get here getManager() should always be non-null. If a future
-  // refactor moves construction later (e.g. lazy on first connect),
-  // this guard surfaces the wiring regression at boot rather than
-  // as a confusing leader-factory error.
-  if (!gatewayShim.getManager()) {
-    throw new Error('startHotStandby: gatewayShim.getManager() returned null — shim.start() ordering regression');
+  // get here isStarted() should always be true. If a future refactor
+  // moves construction later (e.g. lazy on first connect), this
+  // guard surfaces the wiring regression at boot rather than as a
+  // delayed leader/watchdog runtime error.
+  if (!gatewayShim.isStarted()) {
+    throw new Error('startHotStandby: gatewayShim.isStarted() is false — shim.start() ordering regression');
   }
 
   // The shim itself satisfies the leader/watchdog `manager` contract

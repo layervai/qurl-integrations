@@ -294,43 +294,45 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     expect(shim.isConnected()).toBe(false);
   });
 
-  it('isConnected() flips true on READY dispatch', async () => {
+  it('isConnected() flips true on shard Ready event', async () => {
+    // The shard-level Ready event fires BEFORE the Dispatch
+    // fan-out (see @discordjs/ws WebSocketShard.onMessage: it
+    // emits "ready" then "dispatch" on a READY frame). Mirroring
+    // wsConnected here lets it land before manager.connect()
+    // resolves on the Promise.race(once Ready) inside @discordjs/ws.
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
-      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+    managerInstances[0].emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
       shardId: 0,
     });
     expect(shim.isConnected()).toBe(true);
   });
 
-  it('isConnected() flips true on RESUMED dispatch (Pillar 2 happy path)', async () => {
+  it('isConnected() flips true on shard Resumed event (Pillar 2 happy path)', async () => {
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
-      data: { t: 'RESUMED' },
-      shardId: 0,
-    });
+    managerInstances[0].emit(WebSocketShardEvents.Resumed, { shardId: 0 });
     expect(shim.isConnected()).toBe(true);
   });
 
   it('isConnected() flips back to false on Closed', async () => {
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
-      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+    managerInstances[0].emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
       shardId: 0,
     });
     expect(shim.isConnected()).toBe(true);
-    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, reason: 'unit-test', shardId: 0 });
     expect(shim.isConnected()).toBe(false);
   });
 
-  it('isConnected() is false after stop() regardless of prior READY', async () => {
+  it('isConnected() is false after stop() regardless of prior Ready', async () => {
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
-      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+    managerInstances[0].emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
       shardId: 0,
     });
     await shim.stop({ flushFinal: false });
@@ -344,16 +346,29 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     await expect(shim.connect()).rejects.toThrow(/connect\(\) called after stop\(\)/);
   });
 
-  it('stop() removes the Closed listener too (no listener leak across cycles)', async () => {
+  it('stop() removes every shim-installed shard listener (no leak across cycles)', async () => {
     // Regression pin for the listener-leak hazard: a future
     // `start()/stop()/start()` cycle would otherwise accumulate
-    // Closed handlers on every new manager instance, each closing
-    // over the previous cycle's wsConnected/logger references.
+    // handlers on every new manager instance, each closing over
+    // the previous cycle's wsConnected/logger references.
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(1);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(1);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(1);
     await shim.stop({ flushFinal: false });
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(0);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(0);
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(0);
+  });
+
+  it('isStarted() reflects construction state (false → true → false)', async () => {
+    const { shim } = makeShim();
+    expect(shim.isStarted()).toBe(false);
+    await shim.start({ connect: false });
+    expect(shim.isStarted()).toBe(true);
+    await shim.stop({ flushFinal: false });
+    expect(shim.isStarted()).toBe(false);
   });
 
   it('satisfies the leader/watchdog factory contracts (no TypeError on construction)', () => {

@@ -55,6 +55,9 @@
 //                          (Ready/Resumed → true, Closed → false);
 //                          read every tick by the watchdog and
 //                          once per inbound-handoff by the leader.
+//   - isStarted()        — true after start() resolves and before
+//                          stop() runs; used by the Pillar 3 wiring
+//                          for a boot-ordering belt-and-suspenders.
 //
 // ── SIGTERM contract: do NOT call manager.destroy() ──
 //
@@ -264,7 +267,8 @@ function createGatewayWsShim({
           // commands or guild-commands endpoint.
           appId = data?.d?.application?.id ?? null;
           isReady = true;
-          wsConnected = true;
+          // wsConnected is mirrored on the shard-level Ready/Resumed
+          // listeners installed below — not here.
           // Reset the IDENTIFY budget: every successful READY
           // restores a fresh allowance for the next reconnect.
           // See module header.
@@ -289,7 +293,6 @@ function createGatewayWsShim({
           // reconnect path gets a fresh allowance the same way
           // READY would.
           isReady = true;
-          wsConnected = true;
           identifyAttempts = 0;
           logger.info('gateway-ws-shim: RESUMED received', { shardId });
         }
@@ -318,13 +321,23 @@ function createGatewayWsShim({
         });
       });
 
-      // Pillar 3 wsConnected mirror. Flipping false on Closed lets
-      // the leader's inbound-handoff and the watchdog's tick observe
-      // "connection dropped" synchronously and re-drive connect().
-      // The next successful Ready/Resumed dispatch flips it back.
-      manager.on(WebSocketShardEvents.Closed, ({ code, shardId }) => {
+      // Pillar 3 wsConnected mirror. Listen on shard-level
+      // Ready/Resumed (NOT the Dispatch fan-out) — @discordjs/ws's
+      // manager.connect() awaits `once(Ready)` / `once(Resumed)`
+      // and resolves immediately after the shard emits those, but
+      // BEFORE the Dispatch fan-out fires. Mirroring on Dispatch
+      // would leave a 1-tick window where connect() has resolved
+      // and the watchdog sees `!isConnected() && !isConnecting` —
+      // it would re-call connect() on a shard whose status is
+      // already Ready, throwing "Tried to connect a shard that
+      // wasn't idle" upstream as an unhandled rejection.
+      manager.on(WebSocketShardEvents.Ready, () => { wsConnected = true; });
+      manager.on(WebSocketShardEvents.Resumed, () => { wsConnected = true; });
+      manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
         wsConnected = false;
-        logger.info('gateway-ws-shim: shard closed', { shardId, code });
+        logger.info('gateway-ws-shim: shard closed', {
+          shardId, code, reason: reason ?? null,
+        });
       });
 
       if (!connect) {
@@ -410,10 +423,19 @@ function createGatewayWsShim({
       // RESUME. Detach only the listeners we installed; an
       // unscoped removeAllListeners() could strip @discordjs/ws's
       // own internal listeners on the same emitter.
+      //
+      // Strip-safety check: the @discordjs/ws-internal close
+      // handler attaches on the SHARD (the shim only sees events
+      // via the strategy's shard→manager fanout), and the
+      // strategy's own fanout listener attaches on shard.on(...),
+      // not manager.on(...). So the per-event removals below only
+      // strip listeners the shim itself installed.
       if (manager) {
         manager.removeAllListeners(WebSocketShardEvents.Dispatch);
         manager.removeAllListeners(WebSocketShardEvents.Error);
         manager.removeAllListeners(WebSocketShardEvents.Closed);
+        manager.removeAllListeners(WebSocketShardEvents.Ready);
+        manager.removeAllListeners(WebSocketShardEvents.Resumed);
       }
       manager = null;
     },
@@ -475,11 +497,20 @@ function createGatewayWsShim({
       return wsConnected;
     },
 
+    // True once start() has constructed the underlying manager and
+    // before stop() has nulled it. Pillar 3 wiring uses this as a
+    // belt-and-suspenders check at startHotStandby boot to surface
+    // a shim-ordering regression as a clear error rather than a
+    // delayed factory throw.
+    isStarted() {
+      return manager !== null;
+    },
+
     // Null until start() constructs the WebSocketManager. Kept for
     // test introspection only — production callers should use the
-    // shim's connect()/isConnected() above. Exposed as a getter
-    // rather than a stored reference so callers always see the
-    // current value (the field is reassigned inside start()/stop()).
+    // shim's connect()/isConnected()/isStarted() above. Exposed as
+    // a getter rather than a stored reference so callers always see
+    // the current value (the field is reassigned inside start()/stop()).
     getManager() {
       return manager;
     },
