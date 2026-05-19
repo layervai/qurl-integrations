@@ -92,17 +92,16 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	// list-side gate. If a channel-policy filter is re-added, this
 	// test fails — surfacing the disclosure-narrowing explicitly.
 	ts.seedNonAdmin(t)
-	// Seed an alias_bindings row for a DIFFERENT channel — proves
-	// the list isn't filtering by caller's channel.
-	ts.seedPolicySet(t, testAdminTeamID, "C_other", testListAliasProdDB, []string{testListResIDProdDB})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, fAttrAlias: testListAliasProdDB, testKeyTargetURL: "https://prod.example.com"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
-	// Invoke from C_no_bindings — a channel with zero
-	// channel_policies rows — to fence the cross-channel disclosure.
+	// Invoke from a channel with no channel_policies row — the
+	// list renderer reads `alias` straight off the upstream payload,
+	// so the row surfaces regardless of any per-channel binding
+	// state. A reintroduced list-side filter would change that.
 	inv := newAdminSlashInvokerOnChannel(t, h, "C_no_bindings")
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)

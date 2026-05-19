@@ -35,22 +35,24 @@ const (
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
-// (teamID, channelID) channel_policies row exposes to non-admin
-// `/qurl list`. The set is the union of two orthogonal surfaces on
-// the same row:
+// (teamID, channelID) channel_policies row exposes as mintable for
+// non-admins on the `$r_<id>` get path (`handler_get.go`
+// `authorizeResourceIDForGet`). The set is the union of two
+// orthogonal surfaces on the same row:
 //
 //   - `allowed_resource_ids` SS — the multi-resource gate
 //     `/qurl admin allow/disallow` mutates; `/qurl get $r_<id>`
-//     checks via [ResolvePolicy].
+//     checks membership here.
 //   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl setalias` / `/qurl unsetalias` mutate;
-//     `/qurl get $alias` checks via [ResolveAlias].
+//     surface `/qurl setalias` / `/qurl unsetalias` mutate; the
+//     binding's resource_id is also accepted on the `$r_<id>` path
+//     so an aliased resource is mintable by its raw ID too.
 //
-// Either surface allows the row to mint, so `/qurl list` must show
-// resources visible via EITHER — surfacing only the alias-bindings
-// values (the bug closed here) hides allow-listed-but-unaliased
-// resources from non-admin listings even though `/qurl get $r_<id>`
-// would mint them. Single-row GetItem; no pagination needed.
+// Either surface allows the row to mint. The `/qurl list` consumer
+// of this set was removed in #459 (post-revert of #234) — the list
+// is now workspace-wide and unfiltered. This function survives as
+// the mint-time channel gate. Single-row GetItem; no pagination
+// needed.
 //
 // Missing row → empty set (no policy = no access, fail-closed).
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
