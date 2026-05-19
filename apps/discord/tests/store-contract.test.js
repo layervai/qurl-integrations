@@ -145,6 +145,13 @@ describe('store/index (default backend)', () => {
   });
 
   afterAll(() => {
+    // `close` is in STORE_METHODS and validated above, so this
+    // conditional is belt-and-suspenders — kept because beforeAll's
+    // `jest.resetModules()` + require() can fail to populate `store`
+    // under a future regression that breaks store/index.js's
+    // require-time validation; the close-call would then crash with
+    // "Cannot read property 'close' of undefined" and obscure the
+    // real failure.
     if (store && typeof store.close === 'function') store.close();
   });
 

@@ -23,7 +23,7 @@
 // SCOPE: this provisioner covers the Store-contract tables only (those
 // in `src/store/ddb-store.js`'s TABLES map). Other modules use their
 // own dedicated tables that this script does NOT create:
-//   - `src/flow-state.js` → `${DDB_TABLE_PREFIX}flow_state`
+//   - `src/flow-state.js` → `${DDB_TABLE_PREFIX}flow-state`
 //   - `src/gateway-session-store.js` → `${DDB_TABLE_PREFIX}gateway-session`
 //   - `src/gateway-lock.js` → `${DDB_TABLE_PREFIX}gateway-lock`
 //   - `src/gateway-peer-heartbeat.js` → `${DDB_TABLE_PREFIX}gateway-peer-heartbeat`
@@ -59,85 +59,66 @@ const {
   UpdateTimeToLiveCommand,
 } = require('@aws-sdk/client-dynamodb');
 
-const endpoint = process.env.DDB_TEST_ENDPOINT || 'http://localhost:8000';
-const prefix = (process.env.DDB_TABLE_PREFIX ?? '').trim() || 'qurl-bot-discord-local-';
-const region = process.env.AWS_REGION || 'us-east-1';
+// Allowlist-only set of hostnames the local-endpoint guard accepts.
+// Exact-match rather than `.local` / `.internal` suffix matching: an
+// attacker who controls mDNS or hosts-file resolution could otherwise
+// route `attacker.local` through the guard. `host.docker.internal`
+// covers the bot-in-container reaching a docker-compose service on the
+// host case; the AKIA/ASIA secondary check below closes the residual
+// blast-radius (real creds + container with host route).
+//
+// 0.0.0.0 intentionally NOT in this list: on macOS some kernel /
+// network configurations route `0.0.0.0` to the default route's
+// destination rather than loopback, which would defeat the
+// local-only intent. Operators wanting that endpoint can use
+// `127.0.0.1` instead.
+const LOCAL_HOSTNAMES = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  'host.docker.internal',
+]);
 
-// Tighter than `endsWith('-')`: also rejects a bare `'-'` (which
-// would produce table names like `-github-links`). Matches the
-// pattern terraform's `qurl-bot-ddb` module uses for `local.table_prefix`.
-// 64-char cap catches a copy-paste accident before any
-// `CreateTable` call surfaces DDB's 255-char `TableName` limit
-// (prefix + the longest suffix `orphaned-oauth-tokens` = ~85 chars
-// of headroom).
-if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
-  console.error(`DDB_TABLE_PREFIX must match /^[a-z0-9][a-z0-9-]*-$/ and be at most 64 chars (got '${prefix}').`);
-  process.exit(1);
-}
+// Validate env at function-call time, not module-load time. Required
+// so `require('./scripts/provision-ddb-local')` from
+// `tests/provisioner-schema-parity.test.js` doesn't trigger
+// `process.exit(1)` inside a jest worker if a developer happens to
+// have real AWS creds in env locally.
+function validateEnv({ endpoint, prefix }) {
+  // Prefix shape — tighter than `endsWith('-')`: also rejects a bare
+  // `'-'` (which would produce table names like `-github-links`).
+  // 64-char cap catches a copy-paste accident before any `CreateTable`
+  // call surfaces DDB's 255-char `TableName` limit (prefix + the
+  // longest suffix `orphaned-oauth-tokens` = ~85 chars of headroom).
+  if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
+    console.error(`DDB_TABLE_PREFIX must match /^[a-z0-9][a-z0-9-]*-$/ and be at most 64 chars (got '${prefix}').`);
+    process.exit(1);
+  }
 
-// Defense-in-depth refusal: this script is a local-dev tool only.
-// `AWS_ACCESS_KEY_ID || 'local'` below means an operator with real AWS
-// creds in their shell who runs the script with `DDB_TEST_ENDPOINT`
-// pointed at a real AWS endpoint would otherwise happily provision
-// 10 tables in real DDB (with `PAY_PER_REQUEST` billing — small but
-// nonzero blast radius). Refuse anything that doesn't look like a
-// local loopback or in-VPC test endpoint.
-{
+  // Defense-in-depth refusal: this script is a local-dev tool only.
+  // An operator with real AWS creds in their shell who runs the
+  // script with `DDB_TEST_ENDPOINT` pointed at a real AWS endpoint
+  // would otherwise happily provision 10 tables in real DDB.
   let parsed;
   try { parsed = new URL(endpoint); } catch {
     console.error(`Invalid DDB_TEST_ENDPOINT URL: '${endpoint}'.`);
     process.exit(1);
   }
-  // Exact-match allowlist rather than `.local` / `.internal` suffix
-  // matching: an attacker who controls mDNS or hosts-file resolution
-  // could otherwise route `attacker.local` through the guard.
-  // Realistic local-dev hostnames beyond loopback are `0.0.0.0`
-  // (some operators set `DDB_TEST_ENDPOINT=http://0.0.0.0:8000`
-  // since docker-compose binds 0.0.0.0:8000 by default — clients
-  // technically connect to 127.0.0.1, but the OS accepts the
-  // literal 0.0.0.0 as the destination and routes locally) and
-  // `host.docker.internal` (bot-in-container reaching a docker-
-  // compose service on the host). If a new hostname becomes
-  // legitimate, add it here explicitly.
-  //
-  // Acknowledged thin attack surface on `host.docker.internal`:
-  // unlike the loopback addresses, this resolves to the host's
-  // routable IP. An operator running this script INSIDE a
-  // container that (a) has real AWS creds in env, (b) has a host
-  // route to actual AWS DDB, and (c) somehow has DDB_TEST_ENDPOINT
-  // pointed at `host.docker.internal` with a working AWS port
-  // could in principle provision tables in real AWS. Mitigated by
-  // (1) the explicit `local` credential fallback for DDB-Local
-  // typical usage, (2) DDB-Local's AWS-incompatible HTTP shape
-  // surfacing as a fast-fail on real-AWS reach. If this combo ever
-  // looks plausible in practice, add a secondary guard that
-  // refuses when `AWS_ACCESS_KEY_ID` looks like a real key (e.g.
-  // starts with `AKIA` / `ASIA`).
-  const LOCAL_HOSTNAMES = new Set([
-    'localhost',
-    '127.0.0.1',
-    '::1',
-    '0.0.0.0',
-    'host.docker.internal',
-  ]);
-  const isLocal = LOCAL_HOSTNAMES.has(parsed.hostname);
-  if (!isLocal) {
+  if (!LOCAL_HOSTNAMES.has(parsed.hostname)) {
     console.error(`Refusing to run: DDB_TEST_ENDPOINT='${endpoint}' does not look like a local DDB endpoint.`);
     console.error('This script is for `amazon/dynamodb-local` only — never point it at a real AWS account.');
     console.error(`Allowed hostnames: ${[...LOCAL_HOSTNAMES].join(', ')}.`);
     process.exit(1);
   }
-}
 
-// Secondary credential-shape guard: refuse when AWS_ACCESS_KEY_ID
-// looks like a real AWS key (starts with `AKIA` for IAM users or
-// `ASIA` for STS sessions). Closes the residual `host.docker.internal`
-// blast-radius described above — even if an operator's container has
-// a route to real AWS DDB, real-shaped creds in env cause this
-// script to refuse before any CreateTable lands in a real account.
-// `local`, `test`, or any non-AKIA/ASIA value passes (DDB-Local
-// accepts any non-empty credential pair).
-{
+  // Secondary credential-shape guard: refuse when AWS_ACCESS_KEY_ID
+  // looks like a real AWS key (starts with `AKIA` for IAM users or
+  // `ASIA` for STS sessions). Closes the residual `host.docker.internal`
+  // blast-radius — even if an operator's container has a route to real
+  // AWS DDB, real-shaped creds in env cause this script to refuse
+  // before any CreateTable lands in a real account. `local`, `test`,
+  // or any non-AKIA/ASIA value passes (DDB-Local accepts any non-empty
+  // credential pair).
   const akid = process.env.AWS_ACCESS_KEY_ID || '';
   if (/^(AKIA|ASIA)/.test(akid)) {
     console.error(`Refusing to run: AWS_ACCESS_KEY_ID='${akid.slice(0, 4)}…' looks like a real AWS key prefix.`);
@@ -146,17 +127,19 @@ if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
   }
 }
 
-const client = new DynamoDBClient({
-  region,
-  endpoint,
-  // DDB-Local rejects requests with no credentials. The values aren't
-  // checked — any non-empty pair works. The Docker README documents
-  // the same workaround.
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'local',
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'local',
-  },
-});
+function makeClient({ region, endpoint }) {
+  return new DynamoDBClient({
+    region,
+    endpoint,
+    // DDB-Local rejects requests with no credentials. The values aren't
+    // checked — any non-empty pair works. The Docker README documents
+    // the same workaround.
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'local',
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'local',
+    },
+  });
+}
 
 // Schemas mirror what `ddb-store.js` expects at runtime. KeySchema is
 // PK (HASH) + optional SK (RANGE); GSIs project ALL by default unless
@@ -264,7 +247,7 @@ const tables = [
   // moves together.
 ];
 
-async function ensureTable(spec) {
+async function ensureTable(client, prefix, spec) {
   const TableName = `${prefix}${spec.name}`;
   try {
     await client.send(new CreateTableCommand({
@@ -303,6 +286,14 @@ async function ensureTable(spec) {
 }
 
 async function main() {
+  // Read env at call time, not module load — keeps `require()` from
+  // tests side-effect-free.
+  const endpoint = process.env.DDB_TEST_ENDPOINT || 'http://localhost:8000';
+  const prefix = (process.env.DDB_TABLE_PREFIX ?? '').trim() || 'qurl-bot-discord-local-';
+  const region = process.env.AWS_REGION || 'us-east-1';
+  validateEnv({ endpoint, prefix });
+  const client = makeClient({ region, endpoint });
+
   console.log(`Provisioning ${tables.length} tables on ${endpoint} (prefix='${prefix}')…`);
   // Verify DDB-Local is reachable up front — a typo on DDB_TEST_ENDPOINT
   // otherwise surfaces as a generic per-table CreateTable network error.
@@ -318,7 +309,7 @@ async function main() {
       process.exit(1);
     }
   }
-  for (const spec of tables) await ensureTable(spec);
+  for (const spec of tables) await ensureTable(client, prefix, spec);
   console.log('Done.');
 }
 
