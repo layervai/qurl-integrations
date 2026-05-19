@@ -73,8 +73,14 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		// Warn (not Error) so a synthetic test or a misroute is
 		// visible in CloudWatch without paging on-call. Operators
 		// want to see this; they don't need to be woken up for it.
+		// The arm intentionally does NOT re-dispatch to
+		// handleAdminClaim — the short-circuit above already returned
+		// for the in-practice case, and re-dispatching here would
+		// risk a double-write if a future refactor changed the
+		// short-circuit. Render a generic error so a misrouted
+		// caller still gets a Slack reply rather than a timeout.
 		slog.Warn("admin claim reached dispatcher switch — defensive misroute (short-circuit above should have caught it)", "team_id", teamID, "user_id", userID)
-		h.handleAdminClaim(w, values)
+		respondSlack(w, ":warning: unexpected admin-claim routing — try `/qurl admin claim` again, or see logs.")
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:
