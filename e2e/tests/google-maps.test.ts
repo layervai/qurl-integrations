@@ -8,14 +8,21 @@
  * Prior shape (pre-qurl-integrations-infra#726): the fileviewer carried
  * a GOOGLE_MAPS_API_KEY in its .env and rendered an inline Maps Embed
  * API iframe. #726 removed the API key entirely — the iframe path is
- * dormant code and the fallback card (handler.go mapFallbackTmpl) is
- * the steady-state render. mapsURL construction (handler.go:2451-2509)
- * is identical on both paths, so all URL-shape regressions
- * (e.g. the "Erbil restaurant" /maps/place vs /maps/search bug fixed
- * in infra#155) remain testable via the fallback link's href.
+ * dormant code and the fallback card is the steady-state render.
+ * mapsURL construction is identical on both paths, so all URL-shape
+ * regressions (e.g. the "Erbil restaurant" /maps/place vs /maps/search
+ * bug fixed in infra#155) remain testable via the fallback link's href.
  *
  * Also tests edge cases: short URL resolution, coordinates, plain text
  * queries, and non-Maps JSON that should NOT trigger the Maps path.
+ *
+ * TODO(upstream-line-refs): the comments below cite line numbers in
+ * `qurl-s3-connector/internal/handler/handler.go` (a different repo).
+ * The line refs will rot as that file churns — when a test fails in
+ * a way that no longer matches the cited line, search for the symbol
+ * (`mapFallbackTmpl`, `mapEmbedTmpl`, `QueryEscape`, `isGoogleMapsURL`)
+ * rather than trusting the line number. Same convention as the
+ * `TODO(upstream-rebrand)` marker on the qURL error-string match.
  */
 
 // TODO: Add afterAll cleanup to revoke/delete test resources
@@ -206,13 +213,19 @@ describe('Google Maps: Fallback card render', () => {
 
     const html = await fetchViewerPage(upload.viewerUrl);
     // Anchored URL form: the NAME segment must pin the original query
-    // ("Erbil restaurant", with space as %20 or +) followed by the
+    // ("Erbil restaurant", with space as %20) followed by the
     // @lat,lng,17z anchor. Pinning the name — not just `[^/]*` — is
     // what catches a regression that returns the right coords but the
     // wrong place identity. `%.7f` formatting on the server side
     // produces the trailing zeros.
+    //
+    // Strict %20 (not tolerant `(?:%20|\+)`): handler.go normalizes
+    // url.QueryEscape's default '+' to '%20' via
+    // `strings.ReplaceAll(url.QueryEscape(s), "+", "%20")` — so the
+    // contract is firm and matches the strict-`%20` Eiffel + Revoke
+    // assertions below. cr cycle 1 on infra#726 follow-up.
     expect(html).toMatch(
-      /https:\/\/www\.google\.com\/maps\/place\/Erbil(?:%20|\+)restaurant\/@36\.1911000,44\.0094000,17z/,
+      /https:\/\/www\.google\.com\/maps\/place\/Erbil%20restaurant\/@36\.1911000,44\.0094000,17z/,
     );
     // Negative pin: /maps/search/Erbil must appear NOWHERE in the
     // rendered HTML. It's only emitted by the pre-fix fallback path,
@@ -229,15 +242,18 @@ describe('Google Maps: Fallback card render', () => {
     });
 
     const html = await fetchViewerPage(upload.viewerUrl);
-    // mapFallbackTmpl markers (handler.go:1513-1532):
+    // mapFallbackTmpl markers:
     // - Centered card layout via `.card` class
     // - "Shared Location" heading
     // - "Open in Google Maps to view this location." body copy
-    // - body CSS still uses `100vh` (min-height) for full-viewport
+    //
+    // Deliberately NOT asserting CSS details (e.g. `100vh`) — viewport
+    // unit refactors (e.g. `100vh` → `100dvh`) would fail the test for
+    // no functional reason. The three markers above pin the template
+    // firmly enough.
     expect(html).toContain('class="card"');
     expect(html).toContain('Shared Location');
     expect(html).toContain('Open in Google Maps to view this location.');
-    expect(html).toContain('100vh');
     // Negative: the iframe-embed template's `map-container` class
     // and `Shared securely by` footer were specific to mapEmbedTmpl
     // (which doesn't fire without an API key). Assert they're absent
@@ -249,15 +265,17 @@ describe('Google Maps: Fallback card render', () => {
 });
 
 describe('Google Maps: Non-Maps JSON', () => {
-  test('regular JSON does NOT render Maps iframe', async () => {
+  test('regular JSON does NOT trigger Maps render path', async () => {
     const upload = await uploadMapLocation(
       { name: 'config.json', version: 1 },
       'config.json',
     );
 
     const html = await fetchViewerPage(upload.viewerUrl);
-    // Should use the canvas/template path, not the Maps iframe
+    // Should use the canvas/template path, not the Maps render (neither
+    // iframe nor fallback card).
     expect(html).not.toContain('google.com/maps/embed');
+    expect(html).not.toContain('Open in Google Maps to view this location.');
     expect(html).toContain('canvas');
   });
 
@@ -268,8 +286,10 @@ describe('Google Maps: Non-Maps JSON', () => {
     });
 
     const html = await fetchViewerPage(upload.viewerUrl);
-    // No valid location data → falls through to template renderer
+    // No valid location data → falls through to template renderer.
+    // Neither Maps render path (iframe nor fallback card) fires.
     expect(html).not.toContain('google.com/maps/embed');
+    expect(html).not.toContain('Open in Google Maps to view this location.');
   });
 });
 
