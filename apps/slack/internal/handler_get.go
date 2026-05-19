@@ -31,6 +31,50 @@ const tunnelDisabledMessage = "Tunnel resources are not yet enabled for this wor
 // the user knows a retry is the right next move.
 const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
+// serviceUnreachableMessageWith builds the retry-friendly message
+// augmented with the upstream's bounded Title and the opaque
+// RequestID for support correlation. Detail is suppressed — it can
+// carry internal hostnames / DB error strings. Mirrors the
+// pre-consolidation /qurl create behavior (sanitizeAPIError) so
+// users keep the reference handle they previously had for support
+// tickets; on-call can paste the RequestID directly into
+// qurl-service CloudWatch to find the failed request server-side.
+// Falls back to [serviceUnreachableMessage] when neither field is
+// present.
+func serviceUnreachableMessageWith(apiErr *client.APIError) string {
+	if apiErr == nil || (apiErr.Title == "" && apiErr.RequestID == "") {
+		return serviceUnreachableMessage
+	}
+	msg := "Could not reach qURL"
+	if apiErr.Title != "" {
+		msg += ": " + strings.TrimRight(apiErr.Title, ".")
+	}
+	if apiErr.RequestID != "" {
+		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
+	}
+	return msg + ". Please try again."
+}
+
+// channelRequiredMessage is the user-facing copy surfaced when a
+// slash command that requires channel context (`/qurl get`,
+// `/qurl aliases`) is invoked from a payload without a channel_id.
+// Slack always sends channel_id on real slash commands; an empty
+// value is a synthetic payload (test harness or future channel-less
+// surface), so fail-closed.
+const channelRequiredMessage = "This command must be invoked from a channel."
+
+// noResourceForAliasMessage formats the "no binding" copy surfaced
+// when a channel's alias_bindings map has no entry for the requested
+// alias. Phrased for an end user who doesn't know what an "alias" is:
+// name the literal token the user typed, say plainly what state it's
+// in, and give them BOTH a self-serve action (`/qurl aliases` lists
+// what is configured here, so a typo is one tab away) AND the
+// escalation path (ask the admin to wire it up) since only the
+// admin can run setalias.
+func noResourceForAliasMessage(alias string) string {
+	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
+}
+
 // authFailureMessageGet is the auth-failure copy shown when API-key
 // lookup fails for /qurl get. Same shape as authFailureMessage but
 // distinguished because the get path also needs to gracefully fall
@@ -59,17 +103,22 @@ func userErrorf(format string, args ...any) error {
 	return &userError{msg: fmt.Sprintf(format, args...)}
 }
 
-// errAdminStoreNotConfigured is returned by getWork's policy/
-// rate-limit gates when the handler's AdminStore is nil (sandbox /
-// no-DDB deployment). Surfaces as a friendly user-facing message
-// rather than a stack-trace.
-var errAdminStoreNotConfigured = &userError{msg: "Admin features are not configured for this deployment."}
+// errAdminStoreNotConfigured is returned by getWork when the handler's
+// AdminStore is nil (sandbox / no-DDB deployment). Surfaces as a user-
+// facing message that doesn't expose the "AdminStore" implementation
+// term — it points the user at the workspace admin who would have
+// completed the install.
+var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Please contact your Slack admin for assistance."}
 
-// handleGet implements `/qurl get $<alias>`:
-//  1. Parse the slash-command text → [Command].
+// handleGet implements `/qurl get <url|$alias>`:
+//  1. Parse the slash-command text → [Command]. The positional arg
+//     is either a URL (`http://…` / `https://…`) or a channel-scoped
+//     `$alias` name configured by a workspace admin.
 //  2. Ack within 3s via [runAsync] (200 + ackWorkingOnIt).
-//  3. Async goroutine resolves alias → resource_id → policy check →
-//     rate-limit → mint, and POSTs the result to response_url.
+//  3. Async goroutine: for URL form, mint directly; for alias form,
+//     resolve alias → resource_id via channel_policies.alias_bindings
+//     then mint. Rate-limit gates both. POSTs the result to
+//     response_url.
 //
 // Optional flags:
 //   - `dm:true` → final message via PostDM to the user's DM instead
@@ -90,8 +139,8 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 		return
 	}
-	if cmd.Alias == "" {
-		respondSlack(w, ":warning: missing $alias argument. Usage: `/qurl get $alias`.")
+	if cmd.Alias == "" && cmd.Target == "" {
+		respondSlack(w, ":warning: Usage: `/qurl get <url>` to mint for a URL, or `/qurl get $name` to mint for a name your Slack admin has configured here.")
 		return
 	}
 
@@ -114,7 +163,7 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		// Channel-scope guard; see [Handler.processAliases] for the
 		// full rationale (single source of truth).
 		log.Warn("get: empty channel_id; refusing channel-less invocation")
-		h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+		h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
 
@@ -151,11 +200,15 @@ type getWorkArgs struct {
 	triggerID string
 }
 
-// getWork runs the inner alias→policy→rate-limit→mint pipeline.
-// Returns the rendered reply text (without leading `:warning:`) on
-// success, or a [*userError] whose msg routes to the user.
+// getWork runs the inner resolve→rate-limit→mint pipeline for both
+// the URL form (`/qurl get <url>`) and the alias form
+// (`/qurl get $name`). Returns the rendered reply text (without
+// leading `:warning:`) on success, or a [*userError] whose msg routes
+// to the user.
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
+	target := args.cmd.Target
+	isAliasForm := alias != ""
 
 	// Refuse `dm:true` early when PostDM is not wired — the user's
 	// intent is "do not leak the link in channel history", and a
@@ -166,71 +219,78 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
 	}
 
-	// 1. Refuse early on a no-DDB sandbox deploy. AdminStore-nil
-	//    means there's no policy gate to enforce, so the result is
-	//    the same regardless of alias resolution — but checking now
-	//    avoids burning a customer-API GetResourceByAlias round-trip
-	//    on a workspace that can't gate it (and lets the user probe
-	//    alias existence ahead of the not-configured signal).
-	if h.cfg.AdminStore == nil {
-		log.Warn("get: AdminStore is nil; refusing to mint without policy gate", "team_id", args.teamID)
-		return "", errAdminStoreNotConfigured
+	input := client.CreateInput{
+		Reason:         args.cmd.Reason(),
+		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
-	// 2. Resolve alias → resource via the customer API (uses the
-	//    workspace's API key).
+	if isAliasForm {
+		// Refuse early on a no-DDB sandbox deploy. Alias-form requires
+		// the channel-scoped binding store; URL form does not, so this
+		// gate only fires here.
+		if h.cfg.AdminStore == nil {
+			log.Warn("get: AdminStore is nil; alias-form lookup unavailable", "team_id", args.teamID)
+			return "", errAdminStoreNotConfigured
+		}
+		// Resolve alias → resource_id via channel_policies.alias_bindings.
+		// The presence of the binding in THIS channel is itself the
+		// authorization signal — `/qurl setalias` is the admin act that
+		// authorizes a resource for use in the channel.
+		//
+		// NOTE: setalias is the only authorization signal today. If the
+		// orthogonal `admin allow` / `allowed_resource_ids` surface gets
+		// re-wired (currently dropped from this path), the channel-policy
+		// gate goes here, between the binding lookup and `input.ResourceID =`.
+		resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, args.teamID, args.channelID, alias)
+		if err != nil {
+			log.Warn("get: alias lookup failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "alias", alias)
+			return "", &userError{msg: serviceUnreachableMessage}
+		}
+		if !found {
+			return "", &userError{msg: noResourceForAliasMessage(alias)}
+		}
+		input.ResourceID = resourceID
+	} else {
+		// URL-form has no per-channel authorization gate — anyone in the
+		// workspace who can invoke `/qurl get` can mint against any URL on
+		// the workspace's API key (qurl-service's per-key quota is the
+		// only enforcer). Same posture the deprecated `/qurl create` had;
+		// the alias path is the surface that adds binding-scoped auth.
+		input.TargetURL = target
+	}
+
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
 		log.Error("get: API key lookup failed", "error", err)
 		return "", &userError{msg: authErrorMessage(err)}
 	}
-	resource, err := c.GetResourceByAlias(ctx, alias)
-	if err != nil {
-		return "", mapAliasResolutionError(log, alias, err)
+
+	// Rate-limit gate only fires when an AdminStore is wired; URL-form
+	// on a no-DDB sandbox is unguarded (qurl-service's per-key quota is
+	// the only enforcer in that mode).
+	if h.cfg.AdminStore != nil {
+		ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
+		if err != nil {
+			log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+			return "", &userError{msg: commonGetMintFailedMessage}
+		}
+		if !ok {
+			return "", userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
+		}
 	}
 
-	// 3. Policy + rate-limit checks via the DDB-direct AdminStore.
-	allowed, err := h.cfg.AdminStore.ResolvePolicy(ctx, args.teamID, args.channelID, resource.ResourceID)
-	if err != nil {
-		log.Warn("get: policy check failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "resource_id", resource.ResourceID)
-		return "", &userError{msg: commonGetMintFailedMessage}
-	}
-	if !allowed {
-		return "", userErrorf("Alias `$%s` is not allowed in this channel. Ask an admin to run `/qurl admin allow #channel $%s`.", alias, alias)
-	}
-
-	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
-	if err != nil {
-		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-		return "", &userError{msg: commonGetMintFailedMessage}
-	}
-	if !ok {
-		return "", userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
-	}
-
-	// 4. Mint. Idempotency key derived from (team, channel, user,
-	//    trigger_id) so a Slack-side retry on the 3s ack budget
-	//    dedupes to the same qURL.
-	idemKey := IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID)
-	out, err := c.Create(ctx, client.CreateInput{
-		ResourceID:     resource.ResourceID,
-		Reason:         args.cmd.Reason(),
-		IdempotencyKey: idemKey,
-	})
+	out, err := c.Create(ctx, input)
 	if err != nil {
 		return "", mapMintError(log, err)
 	}
-	// Defensive: a 200 with an empty qurl_link would render as
-	// `:link: *qURL ready:* \n_alias_: …` — useless. Log loud and
-	// surface the generic message so the user retries.
+	// Defensive: a 200 with an empty qurl_link is a server contract
+	// surprise — log loud and surface the generic retry message.
 	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "resource_id", resource.ResourceID)
+		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm, "resource_id", input.ResourceID)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// 5. Surface. dm:true routes through PostDM; default is the
-	//    channel ephemeral (response_url).
-	message := fmt.Sprintf(":link: *qURL ready:* %s\n_alias_: `$%s`", out.QURLLink, alias)
+	message := ":link: *qURL ready:* " + out.QURLLink
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}
@@ -253,32 +313,6 @@ func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, userID, me
 		return ":warning: Could not DM you the link. Please re-run the command without `dm:true` to receive it in-channel."
 	}
 	return ":incoming_envelope: Sent to your DM."
-}
-
-// mapAliasResolutionError converts an [*client.APIError] from the
-// alias-resolution call into a friendly user-facing message. Known
-// codes get specific text; everything else falls through to
-// [serviceUnreachableMessage]. Uses the caller-supplied request-
-// scoped logger so the failure log carries the same team/channel
-// attribution as the mint path (mapMintError threads `log` too).
-func mapAliasResolutionError(log *slog.Logger, alias string, err error) error {
-	var apiErr *client.APIError
-	if errors.As(err, &apiErr) {
-		switch {
-		case apiErr.StatusCode == http.StatusNotFound:
-			return userErrorf("No resource has alias `$%s`.", alias)
-		case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == "tunnel_disabled":
-			return &userError{msg: tunnelDisabledMessage}
-		case apiErr.StatusCode == http.StatusTooManyRequests:
-			// Mirror mapMintError's 429 handling — the customer API
-			// can rate-limit the resolution call independently of
-			// the mint call.
-			retry := time.Duration(apiErr.RetryAfter) * time.Second
-			return userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
-		}
-	}
-	log.Warn("get: alias resolution failed", "error", err, "alias", alias)
-	return &userError{msg: serviceUnreachableMessage}
 }
 
 // mapMintError converts an [*client.APIError] from the mint into a
@@ -308,8 +342,8 @@ func mapMintError(log *slog.Logger, err error) error {
 			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", "code", apiErr.Code, "detail", apiErr.Detail)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code)
-			return &userError{msg: serviceUnreachableMessage}
+			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+			return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 		default:
 			// Unmapped 5xx (e.g. 500, 599) is server-side trouble —
 			// same retry-friendly disposition as 502/503/504 above.
@@ -317,8 +351,8 @@ func mapMintError(log *slog.Logger, err error) error {
 			// would tell the user "permanent failure, do not retry"
 			// when the upstream is actually transient.
 			if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
-				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code)
-				return &userError{msg: serviceUnreachableMessage}
+				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+				return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 			}
 			// Other unmapped statuses (401, 404, 422, etc.) are
 			// permanent-class — log loud so the operator sees the

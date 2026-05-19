@@ -268,6 +268,51 @@ func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit i
 	return list, nil
 }
 
+// LookupChannelAlias returns the resource id bound to aliasName on
+// (teamID, channelID), or found=false when no binding exists. Issued
+// as a targeted GetItem with a ProjectionExpression on the single
+// `alias_bindings.#a` map key so the row's other attributes (the
+// orthogonal `allowed_resource_ids` set, future audit columns) don't
+// land in the read.
+//
+// Missing row, missing alias_bindings map, and missing map key all
+// collapse to (resourceID="", found=false, err=nil) — the caller
+// renders the same "`$X` is not configured for this channel. Run
+// `/qurl aliases` to see what's available here, or contact your
+// Slack admin to add it." copy for all three.
+func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
+	if teamID == "" || channelID == "" || aliasName == "" {
+		return "", false, &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "LookupChannelAlias: team_id, channel_id, alias_name are required",
+		}
+	}
+	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(channelID),
+		},
+		ProjectionExpression: aws.String("#ab.#a"),
+		ExpressionAttributeNames: map[string]string{
+			"#ab": attrAliasBindings,
+			"#a":  aliasName,
+		},
+	})
+	if err != nil {
+		return "", false, ddbToError("LookupChannelAlias", err)
+	}
+	if len(out.Item) == 0 {
+		return "", false, nil
+	}
+	bindings := readStringMap(out.Item, attrAliasBindings)
+	rid, ok := bindings[aliasName]
+	if !ok {
+		return "", false, nil
+	}
+	return rid, true, nil
+}
+
 // GetChannelPolicy returns every alias binding for a single
 // (teamID, channelID) row via a single GetItem against the PK+SK.
 // Replaces the previous "page team-wide then filter" shape that

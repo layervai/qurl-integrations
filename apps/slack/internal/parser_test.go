@@ -44,11 +44,11 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "admin policies", text: "admin policies", wantSub: SubcmdAdmin, wantAdmin: AdminPolicies, wantFlags: map[string]string{}},
 		{name: "admin status", text: "admin status", wantSub: SubcmdAdmin, wantAdmin: AdminStatus, wantFlags: map[string]string{}},
 		{name: "admin revoke alias", text: "admin revoke $prod-db", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantAlias: "prod-db", wantFlags: map[string]string{}},
-		{name: "create url legacy", text: "create https://example.com", wantSub: SubcmdCreate, wantTarget: "https://example.com", wantFlags: map[string]string{}},
 		{name: "list", text: "list", wantSub: SubcmdList, wantFlags: map[string]string{}},
 		{name: "channel ref without name", text: "admin allow <#C00001> $alias-name", wantSub: SubcmdAdmin, wantAdmin: AdminAllow, wantAlias: "alias-name", wantChannel: "C00001", wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
-		{name: "create with quoted target strips outer quotes", text: `create "https://x.example/with space"`, wantSub: SubcmdCreate, wantTarget: "https://x.example/with space", wantFlags: map[string]string{}},
+		{name: "get url form", text: "get https://example.com", wantSub: SubcmdGet, wantTarget: "https://example.com", wantFlags: map[string]string{}},
+		{name: "get url form with reason", text: `get https://example.com reason:"on-call"`, wantSub: SubcmdGet, wantTarget: "https://example.com", wantFlags: map[string]string{"reason": "on-call"}},
 		// Unbalanced quotes: tokenize tolerates (does not reject)
 		// odd-count `"` runs. The opening quote stays literal in
 		// Target and downstream URL validation surfaces the error.
@@ -137,7 +137,6 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "admin allow without alias", text: "admin allow <#C123|ops>", wantErr: ErrEmptyResource},
 		{name: "admin allow garbage positional", text: "admin allow notachannel notalias", wantErr: ErrMissingSigil},
 		{name: "admin revoke missing alias", text: "admin revoke", wantErr: ErrEmptyResource},
-		{name: "create without target", text: "create", wantErr: ErrMissingTarget},
 		{name: "alias with uppercase rejected", text: "get $ProdDB", wantErr: ErrInvalidAlias},
 		{name: "alias with leading hyphen rejected", text: "get $-foo", wantErr: ErrInvalidAlias},
 		{name: "alias with space (quoted) rejected", text: `get "$prod db"`, wantErr: ErrInvalidAlias},
@@ -416,7 +415,7 @@ func FuzzParse(f *testing.F) {
 		"admin disallow $alias <#C99999|qa>",
 		"admin claim",
 		"admin revoke $alias",
-		"create https://example.com",
+		"get https://example.com",
 		"list",
 		"aliases",
 		"\x00",

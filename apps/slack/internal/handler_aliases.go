@@ -63,7 +63,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// future channel-less invocation). Fail closed rather than
 		// fan out a team-wide list — that's not the v1 surface.
 		log.Warn("aliases: empty channel_id; refusing team-wide list")
-		h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+		h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		h.postResponse(log, responseURL, ":mag: No aliases are allowed in this channel. Ask a workspace admin to run `/qurl admin allow #channel $alias`.")
+		h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl setalias $<alias> <url-or-resource-id>` to add one.")
 		return
 	}
 
@@ -96,7 +96,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := fanoutAliasRows(ctx, log, c, entries, aliasesResourceFanoutLimit)
 	sort.Strings(lines)
 
-	body := "*Aliases allowed in this channel:*\n" + strings.Join(lines, "\n")
+	body := "*Aliases configured for this channel:*\n" + strings.Join(lines, "\n")
 	h.postResponse(log, responseURL, body)
 }
 

@@ -74,7 +74,7 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <body>
 <div class="card">
 <h1><span class="ok">&#10003;</span> qURL Connected</h1>
-<p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl create</code> and <code>/qurl list</code>.</p>
+<p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl get</code> and <code>/qurl list</code>.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 {{if .KeyPrefix}}<div>API key prefix: <code>{{.KeyPrefix}}</code></div>{{end}}
@@ -334,7 +334,7 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dmTimeout)
 	defer cancel()
-	msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl create`."
+	msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl get`."
 	if keyPrefix != "" {
 		msg += "\nKey prefix: `" + keyPrefix + "`"
 	}

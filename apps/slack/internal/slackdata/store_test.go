@@ -440,3 +440,192 @@ func TestHashBootstrapCode_AcceptsAtAndAboveFloor(t *testing.T) {
 		t.Errorf("hashBootstrapCode above floor returned err: %v", err)
 	}
 }
+
+// TestLookupChannelAlias_ValidationGuards fences the empty-input
+// contract: empty teamID, channelID, or aliasName all return a
+// 400-bracketed *Error before the DDB call. The handler layer guards
+// these upstream, but this is defense-in-depth — a future caller
+// that skips its own validation gets a typed error rather than a
+// DDB ValidationException on the wire.
+func TestLookupChannelAlias_ValidationGuards(t *testing.T) {
+	cases := []struct {
+		name                     string
+		team, channel, aliasName string
+	}{
+		{"empty team", "", "C1", "a"},
+		{"empty channel", "T1", "", "a"},
+		{"empty alias", "T1", "C1", ""},
+		{"all empty", "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var dbHits int
+			ddb := &stubDDB{
+				getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+					dbHits++
+					return &dynamodb.GetItemOutput{}, nil
+				},
+			}
+			store := newStore(ddb)
+			rid, found, err := store.LookupChannelAlias(context.Background(), c.team, c.channel, c.aliasName)
+			if rid != "" || found {
+				t.Errorf("got (rid=%q, found=%v), want zero-valued returns", rid, found)
+			}
+			var ae *Error
+			if !errors.As(err, &ae) {
+				t.Fatalf("got %v, want *Error", err)
+			}
+			if ae.StatusCode != http.StatusBadRequest {
+				t.Errorf("StatusCode = %d, want 400", ae.StatusCode)
+			}
+			if dbHits != 0 {
+				t.Errorf("DDB GetItem reached despite validation guard (hits = %d)", dbHits)
+			}
+		})
+	}
+}
+
+// TestLookupChannelAlias_MissingRow fences the row-missing branch:
+// no channel_policies row for (team, channel) returns
+// (resourceID="", found=false, err=nil). DDB returns an empty
+// Item map; we must NOT treat that as a 5xx surface.
+func TestLookupChannelAlias_MissingRow(t *testing.T) {
+	ddb := &stubDDB{
+		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{}, nil
+		},
+	}
+	rid, found, err := newStore(ddb).LookupChannelAlias(context.Background(), "T1", "C1", "prod-db")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if found {
+		t.Errorf("found = true, want false on missing row")
+	}
+	if rid != "" {
+		t.Errorf("resourceID = %q, want empty on missing row", rid)
+	}
+}
+
+// TestLookupChannelAlias_MissingMap fences the row-present-but-no-
+// alias_bindings branch: the projection comes back with no
+// `alias_bindings` attribute at all. Treated as not-found, never as
+// an error.
+func TestLookupChannelAlias_MissingMap(t *testing.T) {
+	ddb := &stubDDB{
+		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			// Non-empty Item with a placeholder attribute so the
+			// `len(out.Item) == 0` early-return doesn't fire — exercises
+			// the readStringMap-misses-key branch instead.
+			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+				"placeholder": &ddbtypes.AttributeValueMemberS{Value: "x"},
+			}}, nil
+		},
+	}
+	rid, found, err := newStore(ddb).LookupChannelAlias(context.Background(), "T1", "C1", "prod-db")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if found || rid != "" {
+		t.Errorf("got (rid=%q, found=%v), want zero values when alias_bindings is missing", rid, found)
+	}
+}
+
+// TestLookupChannelAlias_MissingKey fences the alias_bindings-present-
+// but-key-missing branch: the projection returns alias_bindings as a
+// Map with other entries but not the requested alias. Same disposition
+// as missing-row and missing-map: (found=false, err=nil).
+func TestLookupChannelAlias_MissingKey(t *testing.T) {
+	ddb := &stubDDB{
+		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+				attrAliasBindings: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+					"someone-else": &ddbtypes.AttributeValueMemberS{Value: "r_other"},
+				}},
+			}}, nil
+		},
+	}
+	rid, found, err := newStore(ddb).LookupChannelAlias(context.Background(), "T1", "C1", "prod-db")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if found || rid != "" {
+		t.Errorf("got (rid=%q, found=%v), want zero values when alias key is missing", rid, found)
+	}
+}
+
+// TestLookupChannelAlias_HappyPath fences the binding-present return:
+// alias_bindings carries the requested key → (resource_id, true, nil).
+// Also asserts the GetItem input shape: PK/SK on the channel-policies
+// table and ProjectionExpression scoped to the single map key (no
+// over-projection that pulls allowed_resource_ids or audit columns).
+func TestLookupChannelAlias_HappyPath(t *testing.T) {
+	var captured *dynamodb.GetItemInput
+	ddb := &stubDDB{
+		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			captured = in
+			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+				attrAliasBindings: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+					"prod-db": &ddbtypes.AttributeValueMemberS{Value: "r_prod_db"},
+				}},
+			}}, nil
+		},
+	}
+	rid, found, err := newStore(ddb).LookupChannelAlias(context.Background(), "T1", "C1", "prod-db")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !found {
+		t.Errorf("found = false, want true on binding present")
+	}
+	if rid != "r_prod_db" {
+		t.Errorf("resourceID = %q, want r_prod_db", rid)
+	}
+	if captured == nil {
+		t.Fatal("GetItem was not called")
+	}
+	if aws.ToString(captured.TableName) != "cp" {
+		t.Errorf("TableName = %q, want cp", aws.ToString(captured.TableName))
+	}
+	if aws.ToString(captured.ProjectionExpression) != "#ab.#a" {
+		t.Errorf("ProjectionExpression = %q, want #ab.#a (single map key, not the full row)", aws.ToString(captured.ProjectionExpression))
+	}
+	if captured.ExpressionAttributeNames["#ab"] != attrAliasBindings {
+		t.Errorf("ExpressionAttributeNames[#ab] = %q, want %q", captured.ExpressionAttributeNames["#ab"], attrAliasBindings)
+	}
+	if captured.ExpressionAttributeNames["#a"] != "prod-db" {
+		t.Errorf("ExpressionAttributeNames[#a] = %q, want prod-db (alias must flow through escaping, not literal expression)", captured.ExpressionAttributeNames["#a"])
+	}
+	teamAttr, _ := captured.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
+	if teamAttr == nil || teamAttr.Value != "T1" {
+		t.Errorf("Key[%s] = %#v, want T1", attrSlackTeamID, captured.Key[attrSlackTeamID])
+	}
+	channelAttr, _ := captured.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS)
+	if channelAttr == nil || channelAttr.Value != "C1" {
+		t.Errorf("Key[%s] = %#v, want C1", attrSlackChannelID, captured.Key[attrSlackChannelID])
+	}
+}
+
+// TestLookupChannelAlias_DDBError fences the transport-error
+// branch: a non-nil err from GetItem flows through ddbToError into
+// a typed *Error with a 5xx-class StatusCode. Handlers branch on
+// the typed shape; a refactor that returned a bare error here would
+// degrade the handler's "transient retry" routing.
+func TestLookupChannelAlias_DDBError(t *testing.T) {
+	ddb := &stubDDB{
+		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return nil, errors.New("ddb transport boom")
+		},
+	}
+	rid, found, err := newStore(ddb).LookupChannelAlias(context.Background(), "T1", "C1", "prod-db")
+	if rid != "" || found {
+		t.Errorf("got (rid=%q, found=%v), want zero-valued returns on error", rid, found)
+	}
+	var ae *Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("got %v, want *Error", err)
+	}
+	if ae.StatusCode < 500 || ae.StatusCode >= 600 {
+		t.Errorf("StatusCode = %d, want 5xx (transport-class)", ae.StatusCode)
+	}
+}

@@ -459,7 +459,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case pathSlackCommands:
 		// r.Context() is intentionally NOT threaded into the slash-command
-		// dispatch: handleCreate/handleList spawn goroutines that outlive
+		// dispatch: handleGet/handleList spawn goroutines that outlive
 		// the HTTP response, and r.Context() cancels as soon as ServeHTTP
 		// returns. Async work uses h.baseCtx instead.
 		h.handleSlashCommand(w, body)
@@ -551,8 +551,13 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		respondSlack(w, h.helpMessage())
 	case text == "setup":
 		h.handleSetup(w, values)
-	case strings.HasPrefix(text, "create "):
-		h.handleCreate(w, values)
+	case text == "create" || strings.HasPrefix(text, "create "):
+		// `/qurl create` is deprecated — its URL-form behavior is
+		// folded into `/qurl get <url>`, and the alias form was never
+		// promoted to a user-facing command. Surface a deprecation
+		// hint instead of an "unknown subcommand" so existing users
+		// hitting muscle memory get a direct redirect.
+		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <url>` instead.")
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
@@ -647,20 +652,6 @@ func redactSlashCommandText(text string) string {
 	return text
 }
 
-func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
-	text := strings.TrimSpace(values.Get(fieldText))
-	targetURL := strings.TrimSpace(strings.TrimPrefix(text, "create "))
-
-	if targetURL == "" {
-		respondSlack(w, "Usage: `/qurl create <url>`")
-		return
-	}
-
-	h.runAsync(w, "create", values, func(ctx context.Context, log *slog.Logger) {
-		h.processCreate(ctx, log, values, targetURL)
-	})
-}
-
 func (h *Handler) handleList(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processList(ctx, log, values)
@@ -746,29 +737,31 @@ func (h *Handler) helpMessage() string {
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl setup` — Connect qURL to your Slack workspace (workspace admin only)",
-		"• `/qurl create <url>` — Create a qURL for the given URL",
-		"• `/qurl list` — Show your 5 most recent qURLs",
-		"• `/qurl get $alias` — Mint an access link for an alias-bound resource",
+		"• `/qurl get <url>` — Get a qURL for a URL",
+		"• `/qurl get $name` — Get a qURL for a name your Slack admin has configured in this channel",
 	}
 	if h.cfg.PostDM != nil {
-		lines = append(lines, "• `/qurl get $alias dm:true` — DM the link to you instead of channel ephemeral")
+		lines = append(lines, "• `/qurl get <url|$name> dm:true` — DM the link to you instead of posting it in-channel")
 	}
 	lines = append(lines,
-		"• `/qurl get $alias reason:\"…\"` — Annotate the audit log with a reason",
-		"• `/qurl aliases` — List the aliases allowed in this channel",
+		"• `/qurl get <url|$name> reason:\"…\"` — Annotate the audit log with a reason",
+		"• `/qurl list` — Show your 5 most recent qURLs",
+		"• `/qurl setup` — Connect qURL to your Slack workspace (workspace admin only)",
 	)
 	if h.cfg.OpenView != nil {
-		lines = append(lines, "• `/qurl admin claim` — Open the bootstrap-code modal to claim this workspace")
+		lines = append(lines, "• `/qurl admin claim` — Open the bootstrap-code modal to claim this workspace (admin only)")
 	}
 	if h.aliasStore != nil {
-		// setalias/unsetalias verbs reply ":warning: not configured"
+		// setalias/unsetalias/aliases reply ":warning: not configured"
 		// on a sandbox deploy without an aliasStore; mirror the
 		// PostDM / OpenView gates above so help doesn't advertise
-		// verbs whose reply tells the user they can't be used.
+		// verbs whose reply tells the user they can't be used. These
+		// are admin verbs — the internal "alias" terminology is fine
+		// here because the audience for these lines is admins.
 		lines = append(lines,
-			"• `/qurl setalias $<alias> <url-or-resource-id>` — Bind an alias to this channel (admin only)",
-			"• `/qurl unsetalias $<alias>` — Clear this channel's alias (admin only)",
+			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
+			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
+			"• `/qurl aliases` — List the aliases configured in this channel",
 		)
 	}
 	lines = append(lines,

@@ -11,24 +11,6 @@ import (
 	"time"
 )
 
-// writeResourceFixture writes a /v1/resources/by-alias/:alias
-// success envelope. Shared with the admin-test path's identical
-// helper — duplicated here so this test file is self-contained
-// against #231's renames.
-func writeResourceFixture(t *testing.T, w http.ResponseWriter, resourceID, alias string) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	body := map[string]any{
-		testKeyData: map[string]any{
-			testKeyResourceID: resourceID,
-			"alias":           alias,
-		},
-	}
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-}
-
 // writeCreateFixture writes a POST /v1/qurls success envelope.
 func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID string) {
 	t.Helper()
@@ -63,14 +45,11 @@ func writeAPIError(t *testing.T, w http.ResponseWriter, status int, code, title 
 }
 
 // TestHandleGet_HappyPath fences the canonical /qurl get flow:
-// alias resolve → policy allow → rate-limit OK → mint → channel
+// channel-scoped alias lookup → rate-limit OK → mint → channel
 // ephemeral reply carrying the qURL link.
 func TestHandleGet_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
 	})
@@ -87,19 +66,16 @@ func TestHandleGet_HappyPath(t *testing.T) {
 	if !strings.Contains(async, "https://qurl.link/abc") {
 		t.Errorf("async reply missing link: %q", async)
 	}
-	if !strings.Contains(async, "`$prod-db`") {
-		t.Errorf("async reply missing alias: %q", async)
-	}
 }
 
-// TestHandleGet_AliasNotFound fences the alias-not-found path:
-// alias resolution 404 → user-facing "No resource has alias" reply.
+// TestHandleGet_AliasNotFound fences the no-binding path: when the
+// channel's alias_bindings map has no entry for the requested alias
+// (no row, missing map, or missing key), getWork surfaces the
+// "not configured for this channel" copy that points the user at
+// their Slack admin, and never reaches the mint.
 func TestHandleGet_AliasNotFound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	ts.addCustomer("GET", "/v1/resources/by-alias/missing", func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(t, w, http.StatusNotFound, "alias_not_found", "Not Found")
-	})
 	var mintHits atomic.Int32
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
@@ -109,38 +85,14 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $missing", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No resource has alias `$missing`") {
-		t.Errorf("async reply missing not-found message: %q", async)
+	if !strings.Contains(async, "`$missing` is not configured for this channel") {
+		t.Errorf("async reply missing not-configured message: %q", async)
+	}
+	if !strings.Contains(async, "contact your Slack admin") {
+		t.Errorf("async reply missing admin-contact fallback: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite alias-not-found (hits = %d)", mintHits.Load())
-	}
-}
-
-// TestHandleGet_PolicyDenied fences the channel-policy gate.
-// Alias resolves OK, but no channel_policies row allows the
-// resource in C_test → friendly "not allowed in this channel" reply
-// and no mint.
-func TestHandleGet_PolicyDenied(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
-	var mintHits atomic.Int32
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
-		mintHits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "not allowed in this channel") {
-		t.Errorf("async reply missing policy-denied message: %q", async)
-	}
-	if mintHits.Load() != 0 {
-		t.Errorf("mint reached despite policy-denied (hits = %d)", mintHits.Load())
 	}
 }
 
@@ -150,9 +102,6 @@ func TestHandleGet_PolicyDenied(t *testing.T) {
 func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(t, w, http.StatusForbidden, "tunnel_disabled", "Forbidden")
 	})
@@ -170,9 +119,6 @@ func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 func TestHandleGet_MintRateLimit(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "30")
 		writeAPIError(t, w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests")
@@ -195,9 +141,6 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 func TestHandleGet_MintTransportError(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "Bad Gateway")
 	})
@@ -228,21 +171,15 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 	}
 }
 
-// TestHandleGet_AdminStoreNil fences the post-pivot fail-closed
-// posture: a nil AdminStore (sandbox / no-DDB) refuses to mint
-// because the policy gate can't run. The user sees a friendly
-// "Admin features are not configured" message and the customer API
-// is never reached for the mint NOR for the upstream alias
-// resolution (round-17 cr #2: the not-configured check happens
-// before GetResourceByAlias so we don't burn customer-API quota /
-// leak alias-existence on a workspace that can't gate the result).
+// TestHandleGet_AdminStoreNil fences the fail-closed posture when
+// AdminStore is nil (sandbox / no-DDB deployment) and the user
+// requested the alias form: the channel-scoped lookup can't run, so
+// the user sees the "qURL admin features are not yet configured"
+// message that routes them to a workspace admin. The customer API is
+// never reached for the mint.
 func TestHandleGet_AdminStoreNil(t *testing.T) {
 	ts := newAdminTestServers(t)
-	var aliasHits, mintHits atomic.Int32
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		aliasHits.Add(1)
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
+	var mintHits atomic.Int32
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
@@ -253,14 +190,70 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Admin features are not configured") {
+	if !strings.Contains(async, "qURL admin features are not yet configured") {
 		t.Errorf("async reply missing not-configured message: %q", async)
+	}
+	if !strings.Contains(async, "contact your Slack admin") {
+		t.Errorf("async reply missing admin-contact fallback: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite nil AdminStore (hits = %d)", mintHits.Load())
 	}
-	if aliasHits.Load() != 0 {
-		t.Errorf("GetResourceByAlias reached despite nil AdminStore (hits = %d) — admin-store-nil check must short-circuit before alias resolution", aliasHits.Load())
+}
+
+// TestHandleGet_URLForm_AdminStoreConfigured fences the URL-form
+// happy path under the production config (AdminStore wired): the
+// rate-limit gate runs (today a stubbed always-allow) and the mint
+// proceeds. Locks the contract so a future refactor that inverted
+// the form gate — routing URL-form through errAdminStoreNotConfigured
+// when AdminStore is wired — would be caught here.
+func TestHandleGet_URLForm_AdminStoreConfigured(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/url-form-cfg", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get https://example.com", testAdminTeamID, testAdminUserID)
+	if mintHits.Load() != 1 {
+		t.Errorf("mint hits = %d, want 1 (URL-form must reach mint with AdminStore wired)", mintHits.Load())
+	}
+	if !strings.Contains(async, "https://qurl.link/url-form-cfg") {
+		t.Errorf("async reply missing qURL link: %q", async)
+	}
+}
+
+// TestHandleGet_URLForm_AdminStoreNil fences the symmetric URL-form
+// path on a no-DDB sandbox: `/qurl get <url>` MUST proceed to the
+// mint when AdminStore is nil — the AdminStore gate is alias-form
+// only, and the rate-limit gate is also alias-store-scoped. This
+// locks the gate asymmetry inside [Handler.getWork] (alias-form
+// refuses, URL-form proceeds) so a refactor that hoisted the
+// AdminStore-nil check above the form split would be caught here.
+func TestHandleGet_URLForm_AdminStoreNil(t *testing.T) {
+	ts := newAdminTestServers(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/url-form", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AdminStore = nil
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get https://example.com", testAdminTeamID, testAdminUserID)
+	if mintHits.Load() != 1 {
+		t.Errorf("mint hits = %d, want 1 (URL-form must reach mint even with nil AdminStore)", mintHits.Load())
+	}
+	if !strings.Contains(async, "https://qurl.link/url-form") {
+		t.Errorf("async reply missing qURL link: %q", async)
+	}
+	if strings.Contains(async, "admin features are not yet configured") {
+		t.Errorf("async reply leaked the alias-form not-configured copy on a URL-form invocation: %q", async)
 	}
 }
 
@@ -273,9 +266,6 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	var mintCalls atomic.Int32
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintCalls.Add(1)
@@ -303,9 +293,6 @@ func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		writeCreateFixture(t, w, "https://qurl.link/dm-secret", testResourceIDFix)
 	})
@@ -373,9 +360,6 @@ func TestHumanizeRetry(t *testing.T) {
 func TestCreateInputJSON_ResourceID(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	var capturedBody []byte
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -405,9 +389,6 @@ func TestCreateInputJSON_ResourceID(t *testing.T) {
 func TestCreateInputJSON_Reason(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	var capturedBody []byte
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -434,9 +415,6 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 func TestCreateInputJSON_IdempotencyKeyHeader(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-	})
 	var capturedHeader string
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
 		capturedHeader = r.Header.Get("Idempotency-Key")
@@ -468,9 +446,6 @@ func TestMapMintError_Unmapped5xx(t *testing.T) {
 	for _, s := range statuses {
 		ts := newAdminTestServers(t)
 		ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-		ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
-			writeResourceFixture(t, w, testResourceIDFix, "prod-db")
-		})
 		ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 			writeAPIError(t, w, s, "upstream_error", "Upstream Error")
 		})
