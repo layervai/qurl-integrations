@@ -7799,6 +7799,13 @@ const commands = [
         const looksIncomplete = cacheSize === 0
           || (expectedMembers != null && cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD);
         if (looksIncomplete) {
+          // Debug-log the trip so dashboards can surface false-positive
+          // patterns (e.g. `approximateMemberCount` over-reporting on
+          // guilds with high churn → healthy run flagged degraded).
+          logger.debug('unlinked surfaced degraded-cache message', {
+            command: '/unlinked', guild_id: guild.id,
+            cache_size: cacheSize, expected_members: expectedMembers,
+          });
           return interaction.editReply({
             content: '⚠️ Could not load complete member list (Discord API may be degraded). Please retry.',
           });

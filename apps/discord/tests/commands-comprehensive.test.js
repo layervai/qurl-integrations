@@ -1242,6 +1242,25 @@ describe('/unlinked command', () => {
       );
     }
 
+    // EXACT boundary → proceeds (the check uses `<`, not `<=`).
+    // A future refactor flipping the operator would silently change
+    // admin-visible behavior; this case locks the direction.
+    {
+      mockDb.getLinkedDiscordIds.mockResolvedValue(new Set());
+      const interaction = makeInteraction({
+        commandName: 'unlinked',
+        guild: {
+          members: { cache: mkCache(90), list: jest.fn(async () => new Map()) },
+          roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
+          memberCount: 100,
+        },
+      });
+      await findCmd().execute(interaction);
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('All contributors') }),
+      );
+    }
+
     // Above boundary → proceeds. With no contributors found,
     // /unlinked reports "All contributors have linked".
     {
