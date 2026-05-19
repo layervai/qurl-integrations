@@ -281,12 +281,14 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	}
 }
 
-// TestHandle_AsyncGetSurfacesGenericMessageOn500 fences the no-leak
-// contract on the /qurl get path: a 500 from upstream carries a
-// representative Detail string that MUST NOT reach the user. The
-// mapMintError 5xx branch surfaces the generic service-unreachable
-// copy instead.
-func TestHandle_AsyncGetSurfacesGenericMessageOn500(t *testing.T) {
+// TestHandle_AsyncGetSurfaces5xxCorrelationHandle fences the
+// mirror-of-pre-consolidation contract on /qurl get: a 5xx from
+// upstream surfaces the bounded Title and the opaque RequestID so
+// users have a handle to share with support, while Detail (which
+// can carry internal hostnames / DB error strings) MUST stay
+// stripped. The retry-friendly "Please try again." is preserved so
+// the disposition is unchanged.
+func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 	const titleText = "Internal Server Error"
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -326,15 +328,28 @@ func TestHandle_AsyncGetSurfacesGenericMessageOn500(t *testing.T) {
 	}
 	text := posts[0]["text"]
 
-	// Detail / Title / RequestID must NOT appear — the get path's
-	// 5xx mapping collapses to the generic copy below.
-	for _, leak := range []string{"internal-host", "stack", titleText, "req_abc123"} {
+	// Detail MUST NOT appear — it can carry internal hostnames / DB
+	// error strings. The leak check is the security-critical
+	// assertion here; everything else is UX confirmation.
+	for _, leak := range []string{"internal-host", "stack", "SECRET_LEAK_HOOK"} {
 		if strings.Contains(text, leak) {
-			t.Errorf("leak on 5xx: response contains %q: %q", leak, text)
+			t.Errorf("Detail leak on 5xx: response contains %q: %q", leak, text)
 		}
+	}
+	// Title (bounded short text) and RequestID (opaque correlation
+	// handle) SHOULD appear — mirrors the pre-consolidation
+	// /qurl create UX and lets users share the handle with support.
+	if !strings.Contains(text, titleText) {
+		t.Errorf("expected Title %q in 5xx reply for support correlation, got: %q", titleText, text)
+	}
+	if !strings.Contains(text, "req_abc123") {
+		t.Errorf("expected RequestID req_abc123 in 5xx reply for support correlation, got: %q", text)
 	}
 	if !strings.Contains(text, "Could not reach qURL") {
 		t.Errorf("expected service-unreachable copy on 5xx, got: %q", text)
+	}
+	if !strings.Contains(text, "Please try again") {
+		t.Errorf("expected retry hint on 5xx, got: %q", text)
 	}
 }
 

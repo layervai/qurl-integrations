@@ -31,6 +31,30 @@ const tunnelDisabledMessage = "Tunnel resources are not yet enabled for this wor
 // the user knows a retry is the right next move.
 const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
+// serviceUnreachableMessageWith builds the retry-friendly message
+// augmented with the upstream's bounded Title and the opaque
+// RequestID for support correlation. Detail is suppressed — it can
+// carry internal hostnames / DB error strings. Mirrors the
+// pre-consolidation /qurl create behavior (sanitizeAPIError) so
+// users keep the reference handle they previously had for support
+// tickets; on-call can paste the RequestID directly into
+// qurl-service CloudWatch to find the failed request server-side.
+// Falls back to [serviceUnreachableMessage] when neither field is
+// present.
+func serviceUnreachableMessageWith(apiErr *client.APIError) string {
+	if apiErr == nil || (apiErr.Title == "" && apiErr.RequestID == "") {
+		return serviceUnreachableMessage
+	}
+	msg := "Could not reach qURL"
+	if apiErr.Title != "" {
+		msg += ": " + strings.TrimRight(apiErr.Title, ".")
+	}
+	if apiErr.RequestID != "" {
+		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
+	}
+	return msg + ". Please try again."
+}
+
 // channelRequiredMessage is the user-facing copy surfaced when a
 // slash command that requires channel context (`/qurl get`,
 // `/qurl aliases`) is invoked from a payload without a channel_id.
@@ -318,8 +342,8 @@ func mapMintError(log *slog.Logger, err error) error {
 			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", "code", apiErr.Code, "detail", apiErr.Detail)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code)
-			return &userError{msg: serviceUnreachableMessage}
+			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+			return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 		default:
 			// Unmapped 5xx (e.g. 500, 599) is server-side trouble —
 			// same retry-friendly disposition as 502/503/504 above.
@@ -327,8 +351,8 @@ func mapMintError(log *slog.Logger, err error) error {
 			// would tell the user "permanent failure, do not retry"
 			// when the upstream is actually transient.
 			if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
-				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code)
-				return &userError{msg: serviceUnreachableMessage}
+				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+				return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 			}
 			// Other unmapped statuses (401, 404, 422, etc.) are
 			// permanent-class — log loud so the operator sees the
