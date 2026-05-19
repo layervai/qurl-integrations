@@ -71,6 +71,14 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // what is configured here, so a typo is one tab away) AND the
 // escalation path (ask the admin to wire it up) since only the
 // admin can run setalias.
+//
+// TODO(#460): a user can see `$<alias>` rendered by `/qurl list`
+// (workspace-wide post-revert of #234) and still hit this surface
+// when minting from a channel without the binding. Followup tracks
+// either an inline "alias resolves in: #channel-a, …" annotation on
+// the list output or a clearer error here distinguishing
+// "alias does not exist anywhere" from "alias not bound here, but
+// bound in: …".
 func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }

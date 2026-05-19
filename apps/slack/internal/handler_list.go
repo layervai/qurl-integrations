@@ -47,8 +47,11 @@ const resourceTypeTunnel = "tunnel"
 // The list is unscoped: every workspace member sees the same master
 // listing. Capability gating on individual resources happens at mint
 // time — `/qurl get $r_<id>` still enforces the channel allow set
-// for non-admins (see handler_get.go), so dropping the list-side
-// filter widens disclosure within a workspace but not capability.
+// for non-admins via [Handler.authorizeResourceIDForGet], and
+// `/qurl get $<alias>` resolves through the per-channel
+// `alias_bindings` Map via [Store.LookupChannelAlias]. So dropping
+// the list-side filter widens disclosure within a workspace but not
+// capability.
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processListResources(ctx, log, values)

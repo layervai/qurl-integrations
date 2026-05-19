@@ -67,11 +67,11 @@ func TestHandleList_RendersResources(t *testing.T) {
 	}
 }
 
-// TestHandleList_NonAdminSeesAliasUnboundInChannel fences the
-// post-revert disclosure semantics: every workspace member sees the
-// same master alias list regardless of admin status or channel-policy
-// state. A non-admin invoking /qurl list from a channel with no
-// alias_bindings still sees aliases bound elsewhere in the workspace.
+// TestHandleList_UnscopedAcrossChannels fences the post-revert
+// disclosure semantics: every workspace member sees the same master
+// alias list regardless of admin status or channel-policy state. A
+// non-admin invoking /qurl list from a channel with no alias_bindings
+// still sees aliases bound elsewhere in the workspace.
 //
 // Capability gating still happens at mint time — /qurl get $alias
 // from a channel without that binding returns the alias-not-found
@@ -79,7 +79,7 @@ func TestHandleList_RendersResources(t *testing.T) {
 // does not widen the capability boundary. Re-introducing a
 // channel-policy filter on /qurl list would have to delete or update
 // this test.
-func TestHandleList_NonAdminSeesAliasUnboundInChannel(t *testing.T) {
+func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	ts := newAdminTestServers(t)
 	// Non-admin seed is intentional: admin status no longer affects
 	// /qurl list output, but seeding a non-admin caller pins the
