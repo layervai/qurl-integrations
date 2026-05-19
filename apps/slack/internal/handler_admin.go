@@ -135,7 +135,7 @@ const adminSyncVerbBudget = 1500 * time.Millisecond
 // causes live in CloudWatch where on-call can read them; the wire
 // surface never includes upstream message bodies that could carry
 // request IDs or stack-frame fragments.
-func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string) bool {
+func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string, action AdminAction) bool {
 	if teamID == "" || userID == "" {
 		respondSlack(w, ":warning: missing team_id or user_id in slash command payload")
 		return false
@@ -144,7 +144,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string)
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("admin check failed", "error", err, "team_id", teamID, "user_id", userID)
+		slog.Error("admin check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(action))
 		respondSlack(w, ":warning: failed to verify admin status (upstream error; see logs).")
 		return false
 	}
@@ -152,8 +152,10 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string)
 		// Audit non-admin denials so brute-force / curiosity probes
 		// are visible to on-call. Distinct slog.Warn level from the
 		// success path's slog.Info so dashboards can filter "denied"
-		// without scanning every admin command.
-		slog.Warn("admin command denied: non-admin", "team_id", teamID, "user_id", userID)
+		// without scanning every admin command. `action` lets the
+		// filter distinguish e.g. "probed admin revoke" from
+		// "probed admin list".
+		slog.Warn("admin command denied: non-admin", "team_id", teamID, "user_id", userID, "action", string(action))
 		respondSlack(w, ":warning: this command is admin-only")
 		return false
 	}
@@ -165,7 +167,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string)
 // surfaces as a friendly "already revoked or typo'd?" message; other
 // failures surface a generic upstream-error.
 func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, userID) {
+	if !h.requireAdminSync(w, teamID, userID, AdminRevoke) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
@@ -212,7 +214,7 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, callerUserID) {
+	if !h.requireAdminSync(w, teamID, callerUserID, AdminAdd) {
 		return
 	}
 	target := cmd.UserID
@@ -267,7 +269,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, callerUserID) {
+	if !h.requireAdminSync(w, teamID, callerUserID, AdminRemove) {
 		return
 	}
 	target := cmd.UserID
@@ -295,7 +297,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 				// for safety against gate refactors.
 				respondSlack(w, workspaceUnboundReply)
 				return
-			case se.StatusCode == http.StatusNotFound:
+			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeAdminNotFound:
 				respondSlack(w, fmt.Sprintf("<@%s> isn't an admin — nothing to do.", target))
 				return
 			}
@@ -318,7 +320,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID string) {
-	if !h.requireAdminSync(w, teamID, callerUserID) {
+	if !h.requireAdminSync(w, teamID, callerUserID, AdminList) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
