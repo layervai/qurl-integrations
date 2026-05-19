@@ -63,7 +63,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// future channel-less invocation). Fail closed rather than
 		// fan out a team-wide list — that's not the v1 surface.
 		log.Warn("aliases: empty channel_id; refusing team-wide list")
-		h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+		h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
 

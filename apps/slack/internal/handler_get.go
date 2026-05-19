@@ -31,6 +31,22 @@ const tunnelDisabledMessage = "Tunnel resources are not yet enabled for this wor
 // the user knows a retry is the right next move.
 const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
+// channelRequiredMessage is the user-facing copy surfaced when a
+// slash command that requires channel context (`/qurl get`,
+// `/qurl create $alias`, `/qurl aliases`) is invoked from a payload
+// without a channel_id. Slack always sends channel_id on real slash
+// commands; an empty value is a synthetic payload (test harness or
+// future channel-less surface), so fail-closed.
+const channelRequiredMessage = "This command must be invoked from a channel."
+
+// noResourceForAliasMessage formats the "no binding" copy surfaced
+// when a channel's alias_bindings map has no entry for the requested
+// alias. Shared between the `/qurl get` and `/qurl create $alias`
+// paths so users see the same wording regardless of verb.
+func noResourceForAliasMessage(alias string) string {
+	return fmt.Sprintf("No resource has alias `$%s`.", alias)
+}
+
 // authFailureMessageGet is the auth-failure copy shown when API-key
 // lookup fails for /qurl get. Same shape as authFailureMessage but
 // distinguished because the get path also needs to gracefully fall
@@ -114,7 +130,7 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		// Channel-scope guard; see [Handler.processAliases] for the
 		// full rationale (single source of truth).
 		log.Warn("get: empty channel_id; refusing channel-less invocation")
-		h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+		h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
 
@@ -191,7 +207,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
 	if !found {
-		return "", userErrorf("No resource has alias `$%s`.", alias)
+		return "", &userError{msg: noResourceForAliasMessage(alias)}
 	}
 
 	c, err := h.authenticatedClient(ctx, args.teamID)

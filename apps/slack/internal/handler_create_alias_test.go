@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -23,9 +24,10 @@ func TestHandleCreate_AliasForm_HappyPath(t *testing.T) {
 		// Body parse is incidental — what matters is `target_url`
 		// MUST NOT be present (mutually-exclusive with resource_id on
 		// the server). The presence-only check tolerates field-order
-		// drift in the encoded JSON.
-		buf := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(buf)
+		// drift in the encoded JSON. ReadAll (not a single Body.Read
+		// of len ContentLength) so a chunked or partial-read transport
+		// can't split the body and silently pass the absence check.
+		buf, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(buf), `"target_url"`) {
 			sawTargetURL = true
 		}
@@ -77,6 +79,32 @@ func TestHandleCreate_AliasForm_NotFound(t *testing.T) {
 	}
 }
 
+// TestHandleCreate_AliasForm_EmptyAlias fences the bare-`$` path:
+// `create $` (no alias name after the sigil) surfaces a usage hint
+// without reaching DDB or the mint. Without this guard, the empty
+// alias would land at `LookupChannelAlias` and surface as the
+// generic "Could not reach qURL" copy — wrong disposition for
+// a fix-your-input case.
+func TestHandleCreate_AliasForm_EmptyAlias(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("create $", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "missing alias name after `$`") {
+		t.Errorf("async reply missing empty-alias usage hint: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached despite empty alias (hits = %d)", mintHits.Load())
+	}
+}
+
 // TestHandleCreate_URLForm_Unchanged fences the URL-form path: the
 // existing `create <url>` behavior is preserved — body carries
 // target_url, no alias lookup happens. Regression fence so the
@@ -86,8 +114,7 @@ func TestHandleCreate_URLForm_Unchanged(t *testing.T) {
 	ts.seedAdmin(t)
 	var sawTargetURL bool
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(buf)
+		buf, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(buf), `"target_url":"https://example.com"`) {
 			sawTargetURL = true
 		}

@@ -133,22 +133,32 @@ func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values ur
 	isAliasForm := strings.HasPrefix(target, "$")
 	if isAliasForm {
 		alias := strings.TrimPrefix(target, "$")
+		if alias == "" {
+			// Bare `$` — `handleCreate`'s ad-hoc parser doesn't run
+			// the full grammar that fences this on /qurl get, so
+			// catch it here before LookupChannelAlias surfaces it as
+			// a generic 400 ("alias_name is required" via DDB
+			// validation) that the user would otherwise see as
+			// "Could not reach qURL" — wrong disposition.
+			h.postResponse(log, responseURL, ":warning: missing alias name after `$`. Usage: `/qurl create $alias`.")
+			return
+		}
 		if h.cfg.AdminStore == nil {
 			h.postResponse(log, responseURL, ":warning: Aliases require admin configuration. Run `/qurl create <url>` instead, or ask an admin to wire alias support.")
 			return
 		}
 		if channelID == "" {
-			h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+			h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 			return
 		}
 		resourceID, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 		if lookupErr != nil {
 			log.Warn("create: alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "alias", alias)
-			h.postResponse(log, responseURL, ":warning: Could not reach qURL. Please try again.")
+			h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
 			return
 		}
 		if !found {
-			h.postResponse(log, responseURL, fmt.Sprintf(":warning: No resource has alias `$%s`.", alias))
+			h.postResponse(log, responseURL, ":warning: "+noResourceForAliasMessage(alias))
 			return
 		}
 		input.ResourceID = resourceID
