@@ -23,6 +23,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/aliasstore"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -121,29 +122,8 @@ func run() error {
 	var authProvider auth.Provider = ddbProvider
 	userAgent := "qurl-slack/" + version
 
-	// Optional pool-cap override. Empty env is "use default" silently;
-	// non-empty-but-malformed env is a misconfiguration we surface at
-	// startup so it doesn't get discovered during a saturation
-	// incident. Either way the value reaching NewHandler may be 0,
-	// which Handler interprets as "use the built-in default (50)".
-	maxConcurrentAsync := 0
-	if raw := os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		switch {
-		case err != nil:
-			slog.Warn("ignoring malformed QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-				"raw", raw, "error", err)
-		case parsed <= 0:
-			// NewHandler treats 0/negative as "use default", but a
-			// negative value is more likely a typo or env-substitution
-			// mishap than an intentional choice — surface it the same
-			// way as malformed input so it doesn't silently swallow.
-			slog.Warn("ignoring non-positive QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-				"raw", raw)
-		default:
-			maxConcurrentAsync = parsed
-		}
-	}
+	maxConcurrentAsync := readMaxConcurrentAsync()
+	adminStore := buildAdminStore(signalCtx)
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -159,6 +139,7 @@ func run() error {
 		SlackSigningSecret: slackSigningSecret,
 		BaseContext:        signalCtx,
 		MaxConcurrentAsync: maxConcurrentAsync,
+		AdminStore:         adminStore,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;
@@ -464,4 +445,80 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
+}
+
+// missingAdminStoreEnvVars returns the slackdata table env-var names
+// that are empty so the warn log surfaces exactly what's missing.
+// Mirrors missingOAuthEnvVars's stable-order shape so the slog
+// attribute is diff-friendly across runs.
+func missingAdminStoreEnvVars() []string {
+	keys := []string{
+		slackdata.EnvWorkspaceMappingsTable,
+		slackdata.EnvChannelPoliciesTable,
+		slackdata.EnvBootstrapCodesTable,
+	}
+	var missing []string
+	for _, k := range keys {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		}
+	}
+	return missing
+}
+
+// readMaxConcurrentAsync parses QURL_SLACK_MAX_CONCURRENT_ASYNC. Empty
+// env is "use default" silently; non-empty-but-malformed env is a
+// misconfiguration surfaced at startup so it doesn't get discovered
+// during a saturation incident. Either way the value returned to
+// NewHandler may be 0, which Handler interprets as "use the built-in
+// default (50)".
+func readMaxConcurrentAsync() int {
+	raw := os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC")
+	if raw == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(raw)
+	switch {
+	case err != nil:
+		slog.Warn("ignoring malformed QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			"raw", raw, "error", err)
+		return 0
+	case parsed <= 0:
+		// NewHandler treats 0/negative as "use default", but a
+		// negative value is more likely a typo or env-substitution
+		// mishap than an intentional choice — surface it the same
+		// way as malformed input so it doesn't silently swallow.
+		slog.Warn("ignoring non-positive QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			"raw", raw)
+		return 0
+	default:
+		return parsed
+	}
+}
+
+// buildAdminStore constructs the DDB-direct facade for
+// workspace_mappings + channel_policies + bootstrap_codes. When all
+// three QURL_*_TABLE env vars are set, we construct it; otherwise the
+// /qurl admin verbs reply "Admin features are not configured" rather
+// than crashing. Failure during construction (AWS config load, etc.)
+// degrades the bot to no-admin mode rather than failing startup, so
+// the OAuth + create/list surface stays available.
+func buildAdminStore(ctx context.Context) *slackdata.Store {
+	if os.Getenv(slackdata.EnvWorkspaceMappingsTable) == "" ||
+		os.Getenv(slackdata.EnvChannelPoliciesTable) == "" ||
+		os.Getenv(slackdata.EnvBootstrapCodesTable) == "" {
+		slog.Warn("admin store NOT configured — /qurl admin will reply 'not configured'",
+			"missing_env", missingAdminStoreEnvVars())
+		return nil
+	}
+	s, err := slackdata.NewStore(ctx)
+	if err != nil {
+		slog.Error("slackdata.NewStore failed; /qurl admin will be disabled", "error", err)
+		return nil
+	}
+	slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.
+		"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
+		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable),
+		"bootstrap_codes_table", os.Getenv(slackdata.EnvBootstrapCodesTable))
+	return s
 }

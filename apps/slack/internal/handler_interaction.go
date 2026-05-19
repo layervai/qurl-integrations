@@ -1,0 +1,193 @@
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"runtime/debug"
+	"time"
+)
+
+// interactionAsyncBudget bounds the view_submission handler. Slack
+// gives view_submission a 3s ack budget (same as slash commands).
+// 2.5s leaves headroom for the JSON encode + write while covering
+// the redeem chain (RedeemBootstrap + BindWorkspace + PostDM —
+// `chat.postMessage` alone can spike toward ~1s on a bad Slack edge,
+// so 2s was uncomfortably close to the wire).
+const interactionAsyncBudget = 2500 * time.Millisecond
+
+// handleInteraction routes Slack interaction POSTs (button clicks,
+// modal submissions) to the right inner handler. Today only the
+// `view_submission` type carrying [callbackIDAdminClaim] is wired;
+// every other interaction acks 200 with an empty body (Slack
+// requires a 200 even when we ignore the event).
+//
+// The payload arrives form-URL-encoded with a single `payload` field
+// carrying the JSON; we decode that nested shape into
+// [interactionPayload].
+func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
+	payload, err := parseInteractionPayload(string(body))
+	if err != nil {
+		slog.Warn("interaction payload parse failed", "error", err, "body_length", len(body))
+		// Slack expects 200 to dismiss the modal even when we can't
+		// process it; signaling 4xx here would leave the modal stuck.
+		respondJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	// LogValue redacts secret-bearing blocks (e.g. blockIDClaimCode)
+	// before serialization — this slog line is safe to keep even
+	// against future log-injection regressions.
+	slog.Info("interaction received", "payload", payload)
+
+	if payload.Type != "view_submission" {
+		// Buttons + select menus + shortcut entries land here. Ack
+		// 200 with an empty body and ignore until a feature wires
+		// the dispatch.
+		respondJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	switch payload.View.CallbackID {
+	case callbackIDAdminClaim:
+		// Synchronous-handler panic recovery scoped to the modal
+		// dispatch path. runAsync owns recovery for goroutine-spawning
+		// handlers; this branch runs on the request goroutine and
+		// calls into RedeemBootstrap / BindWorkspace / PostDM — a
+		// panic on any of those bubbles to net/http's default
+		// recovery, which closes the connection without writing a
+		// body and leaves Slack with a hung modal. Scoping the
+		// recover to this branch (rather than the function top)
+		// keeps the modal-shaped error envelope from leaking onto
+		// non-view_submission interactions like buttons / select
+		// menus, where blockIDClaimCode is not a real block.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("admin claim interaction panicked", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+				// Best-effort: the response may or may not have been
+				// partially written. If headers were already flushed,
+				// respondModalError's WriteHeader call is a no-op and
+				// the client still sees something — preferable to the
+				// silent-close path.
+				respondModalError(w, blockIDClaimCode, "Something went wrong. Please retry, or contact LayerV support if the issue persists.")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(h.baseCtx, interactionAsyncBudget)
+		defer cancel()
+		h.handleAdminClaimSubmit(ctx, w, payload)
+	default:
+		// Unknown callback_id — ack 200 (Slack hangs the modal
+		// otherwise) and log so a future view drift is visible.
+		slog.Info("unknown view_submission callback_id", "callback_id", payload.View.CallbackID)
+		respondJSON(w, http.StatusOK, map[string]any{})
+	}
+}
+
+// interactionPayload is the subset of Slack's view_submission
+// payload we read. Fields we don't touch are intentionally elided so
+// the JSON unmarshal is forgiving to upstream additions.
+//
+// SECURITY: this struct can carry the bootstrap code in
+// `View.State.Values[blockIDClaimCode][actionIDClaimCode].Value`
+// (Blocker #3). [interactionPayload.LogValue] redacts every block
+// whose ID is in [redactedSubmissionBlockIDs] before slog serializes
+// the payload — log sites that pass `payload` to slog go through
+// LogValue automatically. To extend redaction to a new
+// secret-bearing block, add the block_id to redactedSubmissionBlockIDs
+// in views.go rather than hand-rolling masking at each log site.
+type interactionPayload struct {
+	Type string `json:"type"`
+	Team struct {
+		ID string `json:"id"`
+	} `json:"team"`
+	User struct {
+		ID string `json:"id"`
+	} `json:"user"`
+	View struct {
+		ID              string `json:"id"`
+		CallbackID      string `json:"callback_id"`
+		PrivateMetadata string `json:"private_metadata"`
+		State           struct {
+			Values map[string]map[string]struct {
+				Value string `json:"value"`
+			} `json:"values"`
+		} `json:"state"`
+	} `json:"view"`
+	TriggerID string `json:"trigger_id"`
+}
+
+// LogValue implements [slog.LogValuer] so a `slog` call that takes
+// the payload as a value (`slog.Info("interaction", "payload", p)`)
+// emits a redacted form. Block IDs named in
+// [redactedSubmissionBlockIDs] have their value replaced with the
+// literal "<redacted>" before reaching the log writer.
+//
+// Defense-in-depth: a future log line added during incident response
+// doesn't have to know about the redaction obligation — the slog
+// path consults LogValue automatically.
+func (p *interactionPayload) LogValue() slog.Value {
+	if p == nil {
+		return slog.AnyValue(nil)
+	}
+	const redactedSentinel = "<redacted>"
+	redactedValues := make(map[string]map[string]string, len(p.View.State.Values))
+	for blockID, actions := range p.View.State.Values {
+		inner := make(map[string]string, len(actions))
+		for actionID, v := range actions {
+			if IsRedactedSubmissionBlock(blockID) {
+				inner[actionID] = redactedSentinel
+			} else {
+				inner[actionID] = v.Value
+			}
+		}
+		redactedValues[blockID] = inner
+	}
+	return slog.GroupValue(
+		slog.String("type", p.Type),
+		slog.String("team_id", p.Team.ID),
+		slog.String("user_id", p.User.ID),
+		slog.String("trigger_id", p.TriggerID),
+		slog.String("view_id", p.View.ID),
+		slog.String("callback_id", p.View.CallbackID),
+		slog.Any("state_values", redactedValues),
+	)
+}
+
+// submissionValue extracts state.values[blockID][actionID].value
+// from a view-submission payload. Returns "" if missing — the caller
+// is expected to surface a friendly "field empty" error.
+func (p *interactionPayload) submissionValue(blockID, actionID string) string {
+	if p == nil {
+		return ""
+	}
+	block, ok := p.View.State.Values[blockID]
+	if !ok {
+		return ""
+	}
+	action, ok := block[actionID]
+	if !ok {
+		return ""
+	}
+	return action.Value
+}
+
+// parseInteractionPayload decodes the `payload=` form field Slack
+// sends on every interaction POST. Returns nil + error if the
+// payload field is missing or malformed.
+func parseInteractionPayload(formBody string) (*interactionPayload, error) {
+	v, err := url.ParseQuery(formBody)
+	if err != nil {
+		return nil, fmt.Errorf("parse form: %w", err)
+	}
+	raw := v.Get("payload")
+	if raw == "" {
+		return nil, errors.New("missing payload field")
+	}
+	var p interactionPayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil, fmt.Errorf("unmarshal payload: %w", err)
+	}
+	return &p, nil
+}

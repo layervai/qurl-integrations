@@ -278,6 +278,12 @@ type CreateInput struct {
 	OneTimeUse   bool          `json:"one_time_use,omitempty"`
 	MaxSessions  int           `json:"max_sessions,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	// Reason is forwarded to the audit log when set (e.g. an
+	// operator-supplied "for incident #123" annotation from the
+	// `/qurl get $alias reason:"…"` slash-command flag). The server
+	// writes this to the audit row only; it is not persisted on the
+	// resulting qURL.
+	Reason string `json:"reason,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so the API dedupes retried writes. See
