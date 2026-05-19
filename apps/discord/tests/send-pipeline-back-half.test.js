@@ -530,6 +530,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
 
     // /qurl add a new recipient AFTER the monitor settled.
     monitor.updateBaseMsg('Sent to 2 users');
+    const callsBeforeAdd = mockDb.getQurlViews.mock.calls.length;
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
 
     // The re-armed setInterval picks up Eve's view on the next tick.
@@ -539,6 +540,10 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     ]));
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
+    // The post-allDone tick must actually have fired — a missing
+    // re-arm would leave callsBeforeAdd == calls.length and the
+    // counter frozen at 1/0 instead of advancing to 2/0.
+    expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(callsBeforeAdd);
     expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 2 viewed / 0 pending');
     monitor.stop();
   });

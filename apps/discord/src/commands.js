@@ -1180,10 +1180,13 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       // If the monitor had already settled (all initial recipients viewed
       // → setInterval cleared), re-arm it so the new recipients' views
       // get a chance to flip. Without this, /qurl add on an already-
-      // resolved send leaves the counter frozen at `N viewed / M pending`
-      // for the rest of the 1h monitor lifetime.
+      // resolved send leaves the counter frozen for the rest of the 1h
+      // monitor lifetime. Reset pollCount too — the throttling decay
+      // (every-other / every-4th) is meant for an idle send; /qurl add
+      // is the explicit signal that the send is NOT steady-state.
       if (allDone && !stopped) {
         allDone = false;
+        pollCount = 0;
         clearInterval(timer);
         timer = setInterval(runTick, pollInterval);
         if (timer && timer.unref) timer.unref();
