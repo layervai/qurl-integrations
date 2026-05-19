@@ -195,7 +195,6 @@ const {
   _resetAutocompleteFailureBurst,
   AUTOCOMPLETE_FAILURE_LOG_BURST,
   safeDecodeURIComponent,
-  softenCooldown,
   SEND_STAGE_AWAITING_CONFIRM,
   CONFIRM_USER_SELECT_CUSTOM_ID,
   CONFIRM_SEND_CUSTOM_ID,
@@ -1151,61 +1150,19 @@ describe('resolveRoleNames (#326 helper)', () => {
   });
 });
 
-describe('softenCooldown', () => {
-  // Cancel-path helper: leave `residualMs` of cooldown remaining,
-  // monotonically SHRINK (never extend). Tests use the real
-  // QURL_SEND_COOLDOWN_MS via config (mocked in the test setup).
-  const config = require('../src/config');
-  const COOLDOWN_MS = config.QURL_SEND_COOLDOWN_MS;
-
+describe('clearCooldown', () => {
   beforeEach(() => sendCooldowns.clear());
 
-  test('no-op when no cooldown is set', () => {
-    softenCooldown('u1', 5000);
-    expect(sendCooldowns.has('u1')).toBe(false);
-  });
-
-  test('softens a fresh cooldown so ~5s remain', () => {
-    const now = Date.now();
-    sendCooldowns.set('u1', now);
-    softenCooldown('u1', 5000);
-    expect(sendCooldowns.has('u1')).toBe(true);
-    // Resulting `last` should be approximately now - (COOLDOWN - 5000)
-    // so remaining time is 5000ms.
-    const last = sendCooldowns.get('u1');
-    expect(last).toBeLessThanOrEqual(now - (COOLDOWN_MS - 5000) + 5);
-    expect(last).toBeGreaterThanOrEqual(now - (COOLDOWN_MS - 5000) - 5);
-  });
-
-  test('does NOT extend an already-short remaining cooldown', () => {
-    // existing `last` is older than the soften target → remaining is
-    // already less than 5s. Soften must NOT bump it back up.
-    const ancient = Date.now() - (COOLDOWN_MS - 1000);  // 1s remaining
-    sendCooldowns.set('u1', ancient);
-    softenCooldown('u1', 5000);
-    expect(sendCooldowns.get('u1')).toBe(ancient);
-  });
-
-  test('residualMs=0 effectively clears (last pushed far enough back that remaining=0)', () => {
+  test('removes the cooldown entry entirely', () => {
     sendCooldowns.set('u1', Date.now());
-    softenCooldown('u1', 0);
+    clearCooldown('u1');
+    expect(sendCooldowns.has('u1')).toBe(false);
     expect(isOnCooldown('u1')).toBe(false);
   });
 
-  test('soften reorders the Map: softened entry moves to the end of iteration order', () => {
-    // LRU iteration contract: setCooldown's bulk eviction (commands.js:~248)
-    // drops the oldest N keys in iteration order. softenCooldown deletes-
-    // then-sets so a soften refreshes the user's iteration position to
-    // the end, keeping them resident through bulk evictions. Without
-    // this, a Cancel-then-Cancel sequence would still drop the active
-    // user during the next eviction wave.
-    sendCooldowns.set('uA', Date.now());
-    sendCooldowns.set('uB', Date.now());
-    sendCooldowns.set('uC', Date.now());
-    // Initial iteration order: A, B, C.
-    softenCooldown('uA', 5000);
-    // After softening A, iteration order should be: B, C, A.
-    expect(Array.from(sendCooldowns.keys())).toEqual(['uB', 'uC', 'uA']);
+  test('no-op when no cooldown is set', () => {
+    clearCooldown('u1');
+    expect(sendCooldowns.has('u1')).toBe(false);
   });
 });
 
@@ -4176,40 +4133,37 @@ describe('handleConfirmSendClick', () => {
 // ──────────────────────────────────────────────────────────────
 
 describe('handleConfirmCancelClick', () => {
-  test('happy path → version-gated deleteFlow + cooldown softened to ~5s residual + update', async () => {
-    // softenCooldown leaves 5s of throttle so a user can't spam
-    // /qurl send → Cancel → /qurl send → Cancel and rack up
-    // supersedeOrCreate DDB writes with zero cost. A legitimate
-    // "I changed my mind" still has the cooldown softened from full
-    // QURL_SEND_COOLDOWN_MS down to 5s.
+  test('happy path → version-gated deleteFlow + cooldown CLEARED + update', async () => {
+    // A user who cancels a send and immediately retries should not see
+    // "Please wait before sending again." — the cooldown is meant to
+    // throttle rapid resends of a completed send, not penalize a
+    // user who changed their mind. The earlier soften-to-5s-residual
+    // behavior generated user-reported false-positive blocks; the
+    // abuse-defense it was guarding against is bounded by Discord's
+    // own slash-command rate limiting (the user has to click between
+    // each iteration).
     const int = makeInteraction();
-    const cooldownStart = Date.now();
-    sendCooldowns.set(SENDER_ID, cooldownStart);
+    sendCooldowns.set(SENDER_ID, Date.now());
     await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
       expectedVersion: 3,
     }));
-    // Cooldown ENTRY still exists (not deleted) — softening pushes
-    // `last` to a value that leaves ~5s remaining. isOnCooldown is
-    // therefore still true (within the 5s residual window).
-    expect(sendCooldowns.has(SENDER_ID)).toBe(true);
-    expect(isOnCooldown(SENDER_ID)).toBe(true);
-    // The new `last` should be older than the original cooldownStart
-    // (softening pushed it back so remaining time is now ~5s).
-    expect(sendCooldowns.get(SENDER_ID)).toBeLessThan(cooldownStart);
+    // Cooldown entry is fully removed — user can immediately retry.
+    expect(sendCooldowns.has(SENDER_ID)).toBe(false);
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/cancelled/),
     }));
   });
 
-  test('deleteFlow dedup loser → ephemeral message + cooldown PRESERVED (no soften)', async () => {
+  test('deleteFlow dedup loser → ephemeral message + cooldown PRESERVED (no clear)', async () => {
     // Critical: when Send won the race, we must NOT touch the cooldown
-    // — Send is fanning out DMs and a soften would let the user
-    // re-fire /qurl send within 5s of clicking Cancel, before the
-    // first send finishes. The Cancel-loser branch leaves the
-    // original cooldown timestamp intact (no softening).
+    // — Send is fanning out DMs and clearing would let the user
+    // re-fire /qurl send before the first send finishes. The
+    // Cancel-loser branch leaves the original cooldown timestamp
+    // intact.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const cooldownAt = Date.now();
     sendCooldowns.set(SENDER_ID, cooldownAt);
@@ -4220,7 +4174,7 @@ describe('handleConfirmCancelClick', () => {
       ephemeral: true,
     }));
     // Cooldown is exactly as the test set it — Cancel-loser must not
-    // soften OR clear it.
+    // touch it (Send is mid-fanout; original throttle stays).
     expect(isOnCooldown(SENDER_ID)).toBe(true);
     expect(sendCooldowns.get(SENDER_ID)).toBe(cooldownAt);
   });
