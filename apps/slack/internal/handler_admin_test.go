@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -86,6 +87,29 @@ func TestHandleAdminRevoke_InvalidQURLID(t *testing.T) {
 	_, reply := inv.invokeAdmin("admin revoke not-a-real-id", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "q_<id>") {
 		t.Errorf("reply missing format hint: %q", reply)
+	}
+}
+
+// TestHandleAdminRevoke_AuthRejected fences the 401/403 surface: a
+// rotated workspace API key surfaces a "re-run /qurl setup" hint
+// instead of the generic upstream-error copy, so the admin has a
+// concrete next step.
+func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":{"title":"auth rejected","status":` + strconv.Itoa(status) + `}}`))
+		})
+
+		h := newAdminTestHandler(t, ts)
+		inv := newAdminSlashInvoker(t, h)
+
+		_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(reply, "re-run `/qurl setup`") {
+			t.Errorf("status %d: reply missing rotate-hint: %q", status, reply)
+		}
 	}
 }
 

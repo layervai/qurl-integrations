@@ -72,7 +72,10 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// instead of being swallowed by the normal-traffic claim path.
 	switch cmd.AdminAction {
 	case AdminClaim: // unreachable in practice — short-circuited above
-		slog.Error("admin claim reached dispatcher switch — defensive misroute (short-circuit above should have caught it)", "team_id", teamID, "user_id", userID)
+		// Warn (not Error) so a synthetic test or a misroute is
+		// visible in CloudWatch without paging on-call. Operators
+		// want to see this; they don't need to be woken up for it.
+		slog.Warn("admin claim reached dispatcher switch — defensive misroute (short-circuit above should have caught it)", "team_id", teamID, "user_id", userID)
 		h.handleAdminClaim(w, values)
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
@@ -177,10 +180,20 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string
 	}
 	if err := c.Delete(ctx, cmd.Target); err != nil {
 		var apiErr *client.APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			slog.Info("admin revoke: qURL not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-			respondSlack(w, fmt.Sprintf("`%s` not found — already revoked, or check the qurl_id.", cmd.Target))
-			return
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode {
+			case http.StatusNotFound:
+				slog.Info("admin revoke: qURL not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
+				respondSlack(w, fmt.Sprintf("`%s` not found — already revoked, or check the qurl_id.", cmd.Target))
+				return
+			case http.StatusUnauthorized, http.StatusForbidden:
+				// API key rotated or invalidated — generic upstream-error
+				// would leave the admin guessing. Point at /qurl setup so
+				// they have a concrete next step.
+				slog.Warn("admin revoke: upstream auth rejected (API key rotated?)", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
+				respondSlack(w, "This workspace's API key was rejected by qurl-service — re-run `/qurl setup` to rotate.")
+				return
+			}
 		}
 		slog.Error("revoke qURL failed", "error", err, "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
 		respondSlack(w, fmt.Sprintf(":warning: failed to revoke `%s` (upstream error; see logs).", cmd.Target))
@@ -330,10 +343,14 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// Filter the owner out of the admins line so it doesn't duplicate
 	// the owner line. The owner is on the admin set by construction
 	// (BindWorkspace seeds it), so a single-admin workspace would
-	// otherwise render "Owner: <@X>\nAdmins: <@X>".
+	// otherwise render "Owner: <@X>\nAdmins: <@X>". The `ownerID !=
+	// ""` guard pairs with the storage-corruption case above — when
+	// ownerID is empty we don't want to silently drop legitimately-
+	// empty admin entries (impossible today via readStringSet, but
+	// defensive against a future contract change).
 	otherAdmins := make([]string, 0, len(admins))
 	for _, a := range admins {
-		if a == ownerID {
+		if ownerID != "" && a == ownerID {
 			continue
 		}
 		otherAdmins = append(otherAdmins, fmt.Sprintf("<@%s>", a))

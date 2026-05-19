@@ -62,8 +62,10 @@ func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.Attribute
 // both the post-pivot shape (`alias_bindings` Map +
 // `allowed_resource_ids` SS) AND the legacy single-row scalar
 // (`alias` + `resource_id`) so the fixture exercises ResolvePolicy's
-// gate against both shapes in one row. Pinned by
-// TestResolvePolicy_LegacySingleRowShape.
+// gate against both shapes in one row. NOT a canonical legacy-only
+// row — tests that need the legacy scalar fallback in isolation
+// (the actual `TestResolvePolicy_LegacySingleRowShape`) construct
+// their row inline.
 func seedChannelPolicySingle(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(teamID),
