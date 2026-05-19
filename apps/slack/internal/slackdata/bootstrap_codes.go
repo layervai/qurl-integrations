@@ -140,7 +140,7 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 	return mapping, nil
 }
 
-// minBootstrapPlaintextLen is the runtime tripwire on plaintext
+// MinBootstrapPlaintextLen is the runtime tripwire on plaintext
 // length passed to [hashBootstrapCode]. The production issuer mints
 // codes ≥16 chars over the base32 alphabet (≥80 bits of CSPRNG
 // entropy — the rainbow-table-resistance floor the unsalted-sha256
@@ -150,7 +150,7 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 // or similar low-entropy code shape) and lets the issuer raise its
 // own floor independently. Tests use short, readable plaintexts
 // (e.g. "BOOT-VALID") that stay above this floor.
-const minBootstrapPlaintextLen = 10
+const MinBootstrapPlaintextLen = 10
 
 // hashBootstrapCode is sha256-hex of the plaintext bootstrap code.
 // Matches the schema fenced in modules/qurl-slack-ddb/main.tf:
@@ -161,7 +161,7 @@ const minBootstrapPlaintextLen = 10
 // (minted by the bootstrap-code issuer, NOT by this bot). At that
 // entropy floor the hash is rainbow-table-resistant on its own.
 // Plaintext length is asserted at runtime (see
-// [minBootstrapPlaintextLen]) so an issuer-side regression that
+// [MinBootstrapPlaintextLen]) so an issuer-side regression that
 // shrinks the entropy floor fails fast rather than silently
 // weakening the hash.
 //
@@ -170,13 +170,13 @@ const minBootstrapPlaintextLen = 10
 // without ALSO updating this file — the comment-only fence is not
 // enough on its own.
 func hashBootstrapCode(plaintext string) string {
-	if len(plaintext) < minBootstrapPlaintextLen {
+	if len(plaintext) < MinBootstrapPlaintextLen {
 		// Panic rather than return a sentinel: this is a programmer/
 		// rotation error, not a user-input failure. The only call
 		// site is RedeemBootstrap, which has already validated
 		// `code != ""` upstream; reaching here with a short plaintext
 		// means the issuer-side contract has drifted.
-		panic("hashBootstrapCode: plaintext shorter than minBootstrapPlaintextLen — entropy floor would silently weaken")
+		panic("hashBootstrapCode: plaintext shorter than MinBootstrapPlaintextLen — entropy floor would silently weaken")
 	}
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])

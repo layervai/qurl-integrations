@@ -347,7 +347,14 @@ func humanizeRetry(d time.Duration) string {
 		return humanFallbackMoment
 	}
 	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()+0.5))
+		secs := int(d.Seconds() + 0.5)
+		// 59.5s ≤ d < 60s rounds half-up to 60s, which reads worse
+		// than the minutes-branch "1m". Roll over to the minutes
+		// branch instead so the seconds field never prints ≥60.
+		if secs >= 60 {
+			return "1m"
+		}
+		return fmt.Sprintf("%ds", secs)
 	}
 	mins := int(d.Minutes() + 0.5)
 	return fmt.Sprintf("%dm", mins)

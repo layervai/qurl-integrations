@@ -488,6 +488,45 @@ func TestHandleAdminClaimSubmit_InvalidCode(t *testing.T) {
 	}
 }
 
+// TestHandleAdminClaimSubmit_ShortCodeRejectedBeforeHashTripwire
+// fences round-16 blocker #1: a user-typed bootstrap code shorter
+// than [slackdata.MinBootstrapPlaintextLen] is rejected at the
+// handler boundary with the same "invalid or expired" copy the 410
+// path uses — NOT propagated into the slackdata package where the
+// entropy-floor tripwire panic would otherwise fire on
+// user-controlled input. Without this gate, a deliberate flood of
+// short submissions becomes a per-request panic / log-spam vector.
+func TestHandleAdminClaimSubmit_ShortCodeRejectedBeforeHashTripwire(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Hook UpdateItem on bootstrap_codes — it MUST NOT be called
+	// when the handler-side length gate fires. If it is, the
+	// short code reached RedeemBootstrap and the gate is broken.
+	// handleAdminClaimSubmit on the short-code path must NOT reach
+	// any DDB UpdateItem. The only UpdateItem the submit path emits
+	// is RedeemBootstrap's atomic flip on bootstrap_codes; failing
+	// on any UpdateItem is therefore equivalent to "RedeemBootstrap
+	// must not be called" without needing to type-assert on the
+	// input.
+	ts.ddb.SetUpdateItemHook(func(_ interface{}) {
+		t.Errorf("RedeemBootstrap reached on a short user-controlled code — length gate is broken")
+	})
+
+	h := newAdminTestHandler(t, ts)
+	// 3 chars — well below MinBootstrapPlaintextLen (10).
+	_, reply := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "abc"))
+	if got, _ := reply[modalKeyResponseAction].(string); got != modalResponseActionErrors {
+		t.Errorf("reply response_action = %v, want \"errors\"", reply[modalKeyResponseAction])
+	}
+	errs, _ := reply[modalKeyErrors].(map[string]any)
+	msg, _ := errs[blockIDClaimCode].(string)
+	// Same copy as the 410/bootstrap_code_invalid path so the user
+	// sees one consistent signal regardless of which rejection branch
+	// fired (too short / expired / already used).
+	if !strings.Contains(msg, "invalid or expired") {
+		t.Errorf("short-code path missing the canonical invalid-or-expired copy: %q", msg)
+	}
+}
+
 // TestHandleAdminClaimSubmit_EmptyCode fences the validation surface:
 // an empty code (hand-crafted POST bypassing Slack's client-side
 // required check) gets a field-level "Bootstrap code is required."

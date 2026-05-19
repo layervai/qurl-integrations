@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"time"
 )
 
@@ -51,6 +52,28 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 	}
 	switch payload.View.CallbackID {
 	case callbackIDAdminClaim:
+		// Synchronous-handler panic recovery scoped to the modal
+		// dispatch path. runAsync owns recovery for goroutine-spawning
+		// handlers; this branch runs on the request goroutine and
+		// calls into RedeemBootstrap / BindWorkspace / PostDM — a
+		// panic on any of those bubbles to net/http's default
+		// recovery, which closes the connection without writing a
+		// body and leaves Slack with a hung modal. Scoping the
+		// recover to this branch (rather than the function top)
+		// keeps the modal-shaped error envelope from leaking onto
+		// non-view_submission interactions like buttons / select
+		// menus, where blockIDClaimCode is not a real block.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("admin claim interaction panicked", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+				// Best-effort: the response may or may not have been
+				// partially written. If headers were already flushed,
+				// respondModalError's WriteHeader call is a no-op and
+				// the client still sees something — preferable to the
+				// silent-close path.
+				respondModalError(w, blockIDClaimCode, "Something went wrong. Please retry, or contact LayerV support if the issue persists.")
+			}
+		}()
 		ctx, cancel := context.WithTimeout(h.baseCtx, interactionAsyncBudget)
 		defer cancel()
 		h.handleAdminClaimSubmit(ctx, w, payload)

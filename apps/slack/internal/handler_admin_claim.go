@@ -25,6 +25,14 @@ const adminClaimSuccessMessage = ":white_check_mark: You're now an admin for thi
 // which are useless or scary to end users.
 const modalOpenFailureMessage = "Could not open the modal. Please retry the command."
 
+// copyCodeInvalidOrExpired is the user-facing copy used on every
+// "code can't be redeemed" branch — too-short / 410 expired /
+// already-used / unknown-code. The user can't act differently across
+// those cases (they all mean "ask for a fresh code"), so they share
+// one signal. Extracted into a const so the length-gate and the
+// surfaceClaimError 410 branch stay in lockstep.
+const copyCodeInvalidOrExpired = "Code is invalid or expired."
+
 // handleAdminClaim opens the bootstrap-code modal. The code is NEVER
 // accepted as a slash-command argument — the dispatcher routes
 // `admin claim <anything>` to a "use the modal" hint instead of here
@@ -109,6 +117,18 @@ func (h *Handler) handleAdminClaimSubmit(ctx context.Context, w http.ResponseWri
 		respondModalError(w, blockIDClaimCode, "Bootstrap code is required.")
 		return
 	}
+	if len(code) < slackdata.MinBootstrapPlaintextLen {
+		// Length-gate user-controlled input BEFORE reaching the
+		// hashBootstrapCode entropy-floor tripwire (slackdata pkg
+		// panics on short plaintexts as defense-in-depth against an
+		// issuer-side regression). Surface the same retry-friendly
+		// copy the 410 path uses so the user gets one consistent
+		// signal whether the code is too short, expired, or already
+		// used — and so the tripwire stays strictly unreachable from
+		// user input.
+		respondModalError(w, blockIDClaimCode, copyCodeInvalidOrExpired)
+		return
+	}
 
 	teamID := payload.Team.ID
 	userID := payload.User.ID
@@ -175,7 +195,7 @@ func (h *Handler) handleAdminClaimSubmit(ctx context.Context, w http.ResponseWri
 func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, userID string, err error) {
 	var ae *slackdata.Error
 	if errors.As(err, &ae) && (ae.Code == slackdata.ErrCodeBootstrapInvalid || ae.StatusCode == http.StatusGone) {
-		respondModalError(w, blockIDClaimCode, "Code is invalid or expired.")
+		respondModalError(w, blockIDClaimCode, copyCodeInvalidOrExpired)
 		return
 	}
 	logUnmappedClaimError(err, userID)

@@ -346,7 +346,7 @@ func TestRedeemBootstrap_ValidationGuards(t *testing.T) {
 // at the issuer side (e.g. swapping in a 6-digit OTP) silently
 // weakens the hash unless this panic fires. The plaintext length
 // floor is intentionally lower than the production floor — see
-// minBootstrapPlaintextLen's doc.
+// MinBootstrapPlaintextLen's doc.
 func TestHashBootstrapCode_RejectsShortPlaintext(t *testing.T) {
 	defer func() {
 		r := recover()
@@ -362,9 +362,9 @@ func TestHashBootstrapCode_RejectsShortPlaintext(t *testing.T) {
 }
 
 // TestHashBootstrapCode_AcceptsAtAndAboveFloor sanity-checks the
-// boundary: exactly minBootstrapPlaintextLen chars must not panic.
+// boundary: exactly MinBootstrapPlaintextLen chars must not panic.
 func TestHashBootstrapCode_AcceptsAtAndAboveFloor(t *testing.T) {
-	plain := strings.Repeat("a", minBootstrapPlaintextLen)
+	plain := strings.Repeat("a", MinBootstrapPlaintextLen)
 	hashBootstrapCode(plain) // must not panic
 	// And one over the floor — sanity.
 	hashBootstrapCode(plain + "b")

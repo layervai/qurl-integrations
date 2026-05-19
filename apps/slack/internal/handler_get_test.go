@@ -340,11 +340,17 @@ func TestHumanizeRetry(t *testing.T) {
 		want string
 	}{
 		{0, humanFallbackMoment},
+		{-1 * time.Second, humanFallbackMoment},
 		{500 * time.Millisecond, humanFallbackMoment},
 		{900 * time.Millisecond, humanFallbackMoment},
 		{1 * time.Second, "1s"},
 		{30 * time.Second, "30s"},
 		{59 * time.Second, "59s"},
+		// 59.5s rounds half-up to 60s in the seconds branch — that's
+		// the boundary the round-16 cr flagged. Rolls over to "1m"
+		// instead of leaking a "60s" reading that contradicts the
+		// minutes-branch shape (humanizeRetry must never print ≥60s).
+		{59500 * time.Millisecond, "1m"},
 		{60 * time.Second, "1m"},
 		{2 * time.Minute, "2m"},
 	}

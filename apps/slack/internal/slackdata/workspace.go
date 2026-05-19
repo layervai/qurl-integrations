@@ -34,6 +34,17 @@ const (
 	ErrCodeWorkspaceAlreadyBound         = "workspace_already_bound"
 )
 
+// bindDisambiguationBudget caps the post-CCFE GetItem that decides
+// between the caller-already-bound and different-admin 409 message
+// variants. The full BindWorkspace call already runs inside the
+// view_submission [interactionAsyncBudget] (2.5s); this sub-budget
+// keeps a slow disambiguating read from consuming whatever budget
+// remains after the failed PutItem and forcing the post-409 PostDM
+// off the wire. Worst case we lose the message variant and fall
+// through to "workspace_already_bound" — bounded impact, matches
+// the race-window posture documented at the call site.
+const bindDisambiguationBudget = 300 * time.Millisecond
+
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
 //
 // Workspace not yet bound to an owner → (false, "", nil) — the
@@ -232,7 +243,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// the user sees (caller-already-bound vs different-admin); the
 	// binding itself stays correctly held by the existing admin set
 	// either way. Bounded impact → no extra locking.
-	if check, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	//
+	// [bindDisambiguationBudget] caps this read so a slow DDB
+	// response can't push the parent interaction over its 2.5s wall.
+	disambigCtx, disambigCancel := context.WithTimeout(ctx, bindDisambiguationBudget)
+	defer disambigCancel()
+	if check, getErr := s.Client.GetItem(disambigCtx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(m.TeamID),
