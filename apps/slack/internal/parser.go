@@ -557,9 +557,18 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	tail := rest[1:]
 	switch action {
 	case AdminClaim:
-		// Code never appears as text — modal-only flow.
+		// Code never appears as text — modal-only flow. The error
+		// message intentionally OMITS the tail token because callers
+		// echo Parse's errors to Slack (and Slack may log them in the
+		// audit log); a user who typed `admin claim BOOT-SECRET`
+		// would otherwise see the bootstrap code repeated in the
+		// reply. The slash-command-line dispatcher in handler.go
+		// catches the case-exact `admin claim ` prefix earlier with
+		// its own (also tail-stripped) hint, but mixed-case input
+		// (`admin CLAIM ...`) falls through to handleAdmin → Parse,
+		// so this error path has to be safe in isolation.
 		if len(tail) > 0 {
-			return nil, fmt.Errorf("%w: %q (use the modal to enter the code)", ErrUnexpectedArgument, tail[0])
+			return nil, fmt.Errorf("%w: use the modal to enter the bootstrap code (no arguments on the slash-command line)", ErrUnexpectedArgument)
 		}
 		return cmd, nil
 	case AdminRevoke:

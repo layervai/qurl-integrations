@@ -579,18 +579,23 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// the trigger_id rotates after one use. Sync dispatch via
 		// views.open is the only correct shape.
 		//
-		// Exact-match-only is load-bearing: `admin claim <code>` must
-		// NOT route here because the slash-command logger above would
-		// have already written the bootstrap code into CloudWatch
-		// before we got to the handler. Anything other than the bare
-		// verb falls through to the AdminClaimArgsHint branch below,
-		// which renders a usage hint without echoing the args. NOTE:
-		// case-fold + Unicode-whitespace tolerance for the redaction
-		// fence lives in [redactSlashCommandText]; case-sensitivity
-		// here is intentional — mixed-case variants fall through to
-		// the default branch's redacted slog.Info, NOT to the modal
-		// path. Do not case-fold here without thinking through the
-		// load-bearing position.
+		// Exact-match-only is load-bearing for the WITH-TAIL case:
+		// `admin claim <code>` (lowercase) must NOT route here
+		// because we need the prefix-hint branch below to handle it
+		// (the slash-command logger above already redacted the code,
+		// so this is about reply UX, not log safety). The
+		// case-sensitivity is intentional for the bare-verb match
+		// only — mixed-case bare verbs (`admin CLAIM`) fall through
+		// to the `admin`-catch-all and end up at handleAdmin →
+		// Parse → AdminClaim short-circuit → handleAdminClaim, which
+		// is the same modal-open path with one extra hop. The Parse
+		// error path for `admin CLAIM <tail>` is engineered to NOT
+		// echo `<tail>` (see parseAdmin's AdminClaim arm) so the
+		// reply stays code-safe even on the mixed-case fallthrough.
+		// The redaction fence at the slog.Info above
+		// ([redactSlashCommandText]) is case-folded + Unicode-
+		// whitespace-tolerant and catches the log surface
+		// independently.
 		h.handleAdminClaim(w, values)
 	case strings.HasPrefix(text, "admin claim "):
 		// User typed `admin claim <something>` — usually the

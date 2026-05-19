@@ -330,6 +330,34 @@ func TestParse_QURLIDLengthBoundary(t *testing.T) {
 	}
 }
 
+// TestParse_AdminClaimErrorOmitsTail fences the bootstrap-code
+// redaction posture at the parser layer: when a user types
+// `admin claim BOOT-SECRET` (or mixed-case variants that bypass
+// the case-sensitive prefix-hint branch in handleSlashCommand),
+// Parse's error MUST NOT include the bootstrap-code token in the
+// rendered message — handler_admin echoes Parse errors to Slack and
+// Slack may log them in its audit feed.
+func TestParse_AdminClaimErrorOmitsTail(t *testing.T) {
+	t.Parallel()
+	const secret = "BOOT-SECRET-XYZ-DO-NOT-LEAK"
+	for _, text := range []string{
+		"admin claim " + secret,
+		"admin CLAIM " + secret,
+	} {
+		_, err := Parse(text)
+		if err == nil {
+			t.Errorf("Parse(%q) returned nil error", text)
+			continue
+		}
+		if !errors.Is(err, ErrUnexpectedArgument) {
+			t.Errorf("Parse(%q) error = %v, want ErrUnexpectedArgument", text, err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("Parse(%q) error leaks bootstrap code: %q", text, err.Error())
+		}
+	}
+}
+
 // TestParse_AliasLengthBoundary pins the off-by-one boundary on the
 // shared 64-char alias cap. 64 chars must accept (qurl-service's
 // nhp #1825 GSI key is exactly 64); 65 must reject with the
