@@ -302,7 +302,15 @@ async function prewarmGuildMembersCache(guild, logCtx) {
   // a future caller that does `.then(...)`.
   if (!guild || !guild.members || typeof guild.members.list !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
-  if (cacheSize >= (effectiveGuildMemberCount(guild) ?? Infinity)) return;
+  // Only short-circuit on EXACT `memberCount` (gateway tier). The
+  // `approximateMemberCount` value can underreport by hundreds — if the
+  // cache happened to be partially warmed by per-user `members.fetch(id)`
+  // calls from `resolveRecipientUsers`, an approximate-based gate could
+  // fire prematurely and underresolve @everyone, re-introducing this
+  // PR's original bug in a quieter form. http-only tier (no
+  // `memberCount`) accepts the perf cost of always paginating; the
+  // in-flight dedup below prevents concurrent invocations from stacking.
+  if (guild.memberCount != null && cacheSize >= guild.memberCount) return;
   const existing = prewarmInFlight.get(guild.id);
   if (existing) return existing;
   const inFlight = (async () => {
@@ -341,6 +349,14 @@ async function prewarmGuildMembersCache(guild, logCtx) {
       if (page === PREWARM_MAX_PAGES) {
         logger.warn('members pre-warm hit safety cap; @everyone/role expansion may underresolve', {
           ...logCtx, guild_id: guild.id, pages: page, cache_size: guild.members.cache?.size,
+        });
+      } else {
+        // Successful-completion observability. Captures cache footprint
+        // for large-guild memory tracking — paginating a 500k-member
+        // guild persists 500k GuildMember objects in-process until the
+        // worker recycles.
+        logger.info('members pre-warm complete', {
+          ...logCtx, guild_id: guild.id, pages: page + 1, cache_size: guild.members.cache?.size,
         });
       }
     } catch (err) {

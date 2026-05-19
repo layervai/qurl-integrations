@@ -3208,13 +3208,14 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
-  test('cache already at approximateMemberCount (http-only tier) → pre-warm short-circuits', async () => {
-    // In http-only worker mode, Guild._patch never sets `memberCount`
-    // from gateway GUILD_CREATE — the REST `?with_counts=true` path
-    // populates `approximateMemberCount` instead. The short-circuit
-    // must fall back to that field; otherwise every @everyone click in
-    // http-only mode paginates the entire guild even when the cache is
-    // already hot.
+  test('http-only tier (memberCount undefined) → pre-warm always paginates, NEVER short-circuits on approximateMemberCount', async () => {
+    // Correctness over perf in http-only mode: `approximateMemberCount`
+    // can underreport by hundreds, and per-user `members.fetch(id)`
+    // calls in `resolveRecipientUsers` could leave the cache partially
+    // populated. An approximate-based short-circuit would fire
+    // prematurely on a partial cache and underresolve @everyone — the
+    // exact bug this PR fixes. Pin the strict-memberCount-only gate
+    // so a future "optimization" reverting to approximate breaks here.
     const aliceId = '500000000000000007';
     const bobId = '500000000000000008';
     const int = makeInteraction({
@@ -3225,7 +3226,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     int.guild.memberCount = undefined;
     int.guild.approximateMemberCount = 2;
     await handleQurlSend(int);
-    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall).length).toBeGreaterThan(0);
   });
 
   test('concurrent invocations in the same guild share one in-flight fetch', async () => {
@@ -3419,6 +3420,40 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     // cache_size context lives in the payload (debugging signal — what
     // actually landed in cache before the cap fired).
     expect(warnCall[1]).toEqual(expect.objectContaining({ cache_size: expect.anything() }));
+  });
+
+  test('pagination: each successful list() call merges members into guild.members.cache', async () => {
+    // Coverage gap defense: a future regression where someone routes
+    // prewarm to a non-caching call (e.g. raw REST helper, or
+    // `list({ cache: false })`) would still pass the call-shape tests
+    // above. Simulate discord.js's cache-merge behavior by having the
+    // mock add members to the cache on each call, and assert the cache
+    // ends up populated with the union of all pages.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone` },
+      guildMembers: {},
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2500;
+
+    const page1Ids = ['100', '101', '102'];
+    const page2Ids = ['200', '201'];
+    int.guild.members.list = jest.fn(async ({ after }) => {
+      if (!after) {
+        // Simulate discord.js merging into cache.
+        for (const id of page1Ids) int.guild.members.cache.set(id, { user: { id, bot: false } });
+        // size=1000 keeps the loop going; lastKey() advances the cursor.
+        return { size: 1000, lastKey: () => page1Ids[page1Ids.length - 1] };
+      }
+      for (const id of page2Ids) int.guild.members.cache.set(id, { user: { id, bot: false } });
+      return new Map(); // partial → loop breaks
+    });
+
+    await handleQurlSend(int);
+
+    for (const id of [...page1Ids, ...page2Ids]) {
+      expect(int.guild.members.cache.has(id)).toBe(true);
+    }
   });
 });
 
