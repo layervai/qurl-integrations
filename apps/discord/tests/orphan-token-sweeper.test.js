@@ -112,4 +112,24 @@ describe('orphan token sweeper', () => {
     await sweepOnce();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
+
+  it('skips a row whose decrypt throws and leaves it in place (will retry next sweep)', async () => {
+    // Pre-PR (when the test used the real SQLite layer) this branch
+    // was covered by a corrupt-ciphertext / missing-KEK row in the
+    // seeded fixture. The in-memory mock here skips the
+    // encrypt/decrypt roundtrip, so the only way to exercise
+    // `orphan-token-sweeper.js`'s `db.decryptOrphanedToken` catch
+    // branch (line 48-50) is to override the mock to reject. We
+    // verify the row survives AND that fetch was never called —
+    // a decrypt failure must NOT silently issue a revoke for the
+    // wrong token.
+    await db.recordOrphanedToken('gho_corrupt');
+    db.decryptOrphanedToken.mockRejectedValueOnce(new Error('bad ciphertext'));
+    globalThis.fetch = jest.fn();
+
+    await sweepOnce();
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(await db.countOrphanedTokens()).toBe(1);
+  });
 });

@@ -183,8 +183,18 @@ describe('store/index boot-time assertions (via child_process)', () => {
   // the test setup file (`tests/setup-env.js`) sets these for
   // in-process jest workers, but child_processes inherit the
   // parent env via `{...process.env}` which already includes them.
-  // Pinning the values here makes the spawn self-contained and
-  // independent of which sentinel `setup-env.js` happens to use.
+  // Pinning these two values explicitly insulates the spawn from a
+  // future setup-env.js sentinel change for the two vars whose
+  // default is changing in this PR; KEY_ENCRYPTION_KEY / NODE_ENV /
+  // other inherited values still come from the parent process.
+  //
+  // Note for future contributors: when a new table is added to
+  // `ddb-store.js`'s TABLES map, the local-dev provisioner at
+  // `scripts/provision-ddb-local.js` must learn the schema too — the
+  // contract test below loads the default backend without invoking
+  // its methods, so a missing table only surfaces as a
+  // `ResourceNotFoundException` once a test or `npm start` actually
+  // queries it.
   function spawnStoreBoot(storeTypeValue) {
     const requirePath = JSON.stringify(path.join(appRoot, 'src/store'));
     const env = {

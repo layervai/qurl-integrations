@@ -118,9 +118,9 @@ data store, so the SDK has to reach a real DDB endpoint somewhere. The
 the one-shot provisioner creates every table `ddb-store` expects.
 
 ```bash
+npm ci                                  # provisioner needs @aws-sdk/client-dynamodb
 docker compose up -d dynamodb-local
-node scripts/provision-ddb-local.js   # idempotent, re-run after every `compose up`
-npm ci
+node scripts/provision-ddb-local.js     # idempotent, re-run after every `compose up`
 DDB_TEST_ENDPOINT=http://localhost:8000 \
   DDB_TABLE_PREFIX=qurl-bot-discord-local- \
   AWS_REGION=us-east-1 \

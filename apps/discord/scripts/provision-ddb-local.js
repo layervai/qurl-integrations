@@ -13,8 +13,12 @@
 // `guild_configs`) match the `modules/qurl-bot-ddb/main.tf`
 // definitions in `qurl-integrations-infra`; the rest are inferred from
 // `ddb-store.js` call sites (key + GSI usage) for the OpenNHP-feature
-// tables that aren't yet provisioned in the infra repo's qurl-bot-ddb
-// module.
+// tables (`github_links`, `pending_links`, `contributions`, `badges`,
+// `streaks`, `milestones`, `orphaned_oauth_tokens`). Those tables are
+// intentionally absent from the non-OpenNHP prod deployment per
+// `ddb-store.js`'s top-of-file comment about unused tables — local dev
+// provisions them so an operator can exercise OpenNHP code paths
+// without flipping ENABLE_OPENNHP_FEATURES off first.
 //
 // Drift caveat: this is a parallel schema source from the terraform
 // module. If `ddb-store.js` adds a new GSI / changes a key, this
