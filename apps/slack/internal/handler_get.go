@@ -228,7 +228,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// 4. Surface. dm:true routes through PostDM; default is the
+	// 5. Surface. dm:true routes through PostDM; default is the
 	//    channel ephemeral (response_url).
 	message := fmt.Sprintf(":link: *qURL ready:* %s\n_alias_: `$%s`", out.QURLLink, alias)
 	if args.cmd.DM() {

@@ -81,7 +81,15 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 			Title:      "RedeemBootstrap: code, team_id, user_id are required",
 		}
 	}
-	codeHash := hashBootstrapCode(code)
+	codeHash, err := hashBootstrapCode(code)
+	if err != nil {
+		// Short plaintext — handler-side length gate is supposed to
+		// catch this before we get here, but route it through the
+		// same 410/"invalid or expired" surface as a missed/expired
+		// code so a missed gate degrades to a user-visible reject
+		// instead of a panic.
+		return nil, err
+	}
 	// Capture `now` once so the same logical action's
 	// expires_at-compare, redeemed_at, and CreatedAt all see the same
 	// instant — otherwise production traces would show sub-microsecond
@@ -194,24 +202,26 @@ const MinBootstrapPlaintextLen = 10
 // the plaintext code itself carrying ≥80 bits of CSPRNG entropy
 // (minted by the bootstrap-code issuer, NOT by this bot). At that
 // entropy floor the hash is rainbow-table-resistant on its own.
-// Plaintext length is asserted at runtime (see
-// [MinBootstrapPlaintextLen]) so an issuer-side regression that
-// shrinks the entropy floor fails fast rather than silently
-// weakening the hash.
+// Returns ("", error) on plaintext shorter than
+// [MinBootstrapPlaintextLen] so the caller can route the failure
+// through the same "code invalid or expired" path used for 410
+// from the conditional UpdateItem — keeping the entropy-floor
+// tripwire reachable from any call site without the brittle "every
+// caller must length-gate first" panic posture.
 //
-// If a future refactor swaps in a lower-entropy code shape (e.g. a
-// 6-digit OTP) the tripwire panics and the change cannot land
-// without ALSO updating this file — the comment-only fence is not
-// enough on its own.
-func hashBootstrapCode(plaintext string) string {
+// The handler-side length gate in handleAdminClaimSubmit is still
+// load-bearing for the UX path (faster reject, no DDB hit), but
+// the function itself is now safe against any future caller that
+// forgets it: a missed gate becomes a "code invalid" reply instead
+// of a per-request panic / log-spam vector.
+func hashBootstrapCode(plaintext string) (string, error) {
 	if len(plaintext) < MinBootstrapPlaintextLen {
-		// Panic rather than return a sentinel: this is a programmer/
-		// rotation error, not a user-input failure. The only call
-		// site is RedeemBootstrap, which has already validated
-		// `code != ""` upstream; reaching here with a short plaintext
-		// means the issuer-side contract has drifted.
-		panic("hashBootstrapCode: plaintext shorter than MinBootstrapPlaintextLen — entropy floor would silently weaken")
+		return "", &Error{
+			StatusCode: http.StatusGone,
+			Code:       ErrCodeBootstrapInvalid,
+			Title:      "hashBootstrapCode: plaintext shorter than MinBootstrapPlaintextLen",
+		}
 	}
 	sum := sha256.Sum256([]byte(plaintext))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }

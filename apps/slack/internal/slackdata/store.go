@@ -294,6 +294,17 @@ func ddbToError(op string, err error) error {
 		// surface a sentinel string here so the caller can identify
 		// it via errors.As + Code without parsing Detail. The
 		// caller-supplied wrapper sets the right HTTP-shaped status.
+		//
+		// CONTRACT: every existing call site (RedeemBootstrap,
+		// BindWorkspace, AllowResource) catches
+		// ConditionalCheckFailedException BEFORE calling
+		// ddbToError, so this 412 branch is currently unreachable.
+		// Any new op that calls ddbToError MUST do the same — the
+		// handler layer doesn't dispatch on 412, so a leak through
+		// here would surface to the user as the generic 503 copy
+		// even when the underlying failure was a conditional check.
+		// The 412 fallback exists for defense-in-depth, not as a
+		// supported branch.
 		return &Error{
 			StatusCode: http.StatusPreconditionFailed,
 			Code:       "conditional_check_failed",

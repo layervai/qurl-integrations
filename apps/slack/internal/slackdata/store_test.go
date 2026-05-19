@@ -11,7 +11,6 @@ package slackdata
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -232,6 +231,32 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 		}
 	})
 
+	// Fence round-19 cr #1: the post-CCFE disambiguation GetItem
+	// MUST use ConsistentRead=true. The CCFE confirms a row exists,
+	// but an eventually-consistent read on a stale replica could
+	// miss it and route a same-caller re-entry to the "different
+	// admin" branch. A refactor that drops the flag would replay
+	// that race silently.
+	t.Run("disambig GetItem uses ConsistentRead=true", func(t *testing.T) {
+		var disambigConsistent bool
+		store := newStore(&stubDDB{
+			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			},
+			getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				disambigConsistent = aws.ToBool(in.ConsistentRead)
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID:       &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"U_other"}},
+				}}, nil
+			},
+		})
+		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, "U_caller")
+		if !disambigConsistent {
+			t.Errorf("disambig GetItem ConsistentRead = false, want true (regression would replay the eventual-consistency race)")
+		}
+	})
+
 	// Fence the disambiguation-GetItem-fails path: the binding is
 	// still held (the CCFE confirmed that), but the post-CCFE Get
 	// failed. Surface the [ErrCodeWorkspaceBindUnverified] variant
@@ -377,32 +402,41 @@ func TestRedeemBootstrap_ValidationGuards(t *testing.T) {
 	}
 }
 
-// TestHashBootstrapCode_RejectsShortPlaintext fences the runtime
-// tripwire added in round-15. The unsalted-sha256 posture depends on
-// the issuer mint shape carrying ≥80 bits of entropy; a regression
-// at the issuer side (e.g. swapping in a 6-digit OTP) silently
-// weakens the hash unless this panic fires. The plaintext length
-// floor is intentionally lower than the production floor — see
-// MinBootstrapPlaintextLen's doc.
+// TestHashBootstrapCode_RejectsShortPlaintext fences the
+// entropy-floor tripwire. Round-20 cr flipped the contract from
+// panic to ("", *Error{StatusCode:410, Code:ErrCodeBootstrapInvalid})
+// so a missed handler-side length gate degrades to a "code invalid
+// or expired" reply instead of a per-request panic. The
+// unsalted-sha256 posture still depends on the issuer mint shape
+// carrying ≥80 bits of entropy — a regression at the issuer side
+// (e.g. a 6-digit OTP) hits this branch and surfaces a
+// user-visible reject rather than silently weakening the hash.
 func TestHashBootstrapCode_RejectsShortPlaintext(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatalf("hashBootstrapCode did not panic on short plaintext")
-		}
-		if !strings.Contains(fmt.Sprint(r), "entropy floor") {
-			t.Errorf("panic message did not mention entropy floor: %q", r)
-		}
-	}()
 	// 6-digit OTP — the regression class the cr called out.
-	_ = hashBootstrapCode("123456")
+	got, err := hashBootstrapCode("123456")
+	if got != "" {
+		t.Errorf("hashBootstrapCode returned non-empty hash %q on short plaintext", got)
+	}
+	var ae *Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("got %v, want *Error", err)
+	}
+	if ae.StatusCode != http.StatusGone {
+		t.Errorf("StatusCode = %d, want 410", ae.StatusCode)
+	}
+	if ae.Code != ErrCodeBootstrapInvalid {
+		t.Errorf("Code = %q, want %q (so callers route through the same code-invalid path)", ae.Code, ErrCodeBootstrapInvalid)
+	}
 }
 
 // TestHashBootstrapCode_AcceptsAtAndAboveFloor sanity-checks the
-// boundary: exactly MinBootstrapPlaintextLen chars must not panic.
+// boundary: exactly MinBootstrapPlaintextLen chars must succeed.
 func TestHashBootstrapCode_AcceptsAtAndAboveFloor(t *testing.T) {
 	plain := strings.Repeat("a", MinBootstrapPlaintextLen)
-	hashBootstrapCode(plain) // must not panic
-	// And one over the floor — sanity.
-	hashBootstrapCode(plain + "b")
+	if _, err := hashBootstrapCode(plain); err != nil {
+		t.Errorf("hashBootstrapCode at floor (%d chars) returned err: %v", MinBootstrapPlaintextLen, err)
+	}
+	if _, err := hashBootstrapCode(plain + "b"); err != nil {
+		t.Errorf("hashBootstrapCode above floor returned err: %v", err)
+	}
 }

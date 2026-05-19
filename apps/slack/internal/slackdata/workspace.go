@@ -303,6 +303,15 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			}
 		}
 	}
+	// ErrCodeWorkspaceAlreadyBound covers two structurally distinct
+	// conflicts: (a) the existing row's owner_id matches m.OwnerID but
+	// the caller is not on the admin set, and (b) the existing row's
+	// owner_id is a DIFFERENT owner entirely (a bootstrap code minted
+	// against owner A landed on a row owned by B). Both produce the
+	// same "different admin claims this workspace" user copy because
+	// the user signal is the same — they cannot become admin via this
+	// path regardless of which mismatch fired. Operators who need the
+	// distinction read the workspace_mappings row directly.
 	return &Error{
 		StatusCode: http.StatusConflict,
 		Code:       ErrCodeWorkspaceAlreadyBound,

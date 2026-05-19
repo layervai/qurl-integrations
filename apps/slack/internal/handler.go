@@ -579,7 +579,13 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// have already written the bootstrap code into CloudWatch
 		// before we got to the handler. Anything other than the bare
 		// verb falls through to the AdminClaimArgsHint branch below,
-		// which renders a usage hint without echoing the args.
+		// which renders a usage hint without echoing the args. NOTE:
+		// case-fold + Unicode-whitespace tolerance for the redaction
+		// fence lives in [redactSlashCommandText]; case-sensitivity
+		// here is intentional — mixed-case variants fall through to
+		// the default branch's redacted slog.Info, NOT to the modal
+		// path. Do not case-fold here without thinking through the
+		// load-bearing position.
 		h.handleAdminClaim(w, values)
 	case strings.HasPrefix(text, "admin claim "):
 		// User typed `admin claim <something>` — usually the
