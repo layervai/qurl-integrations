@@ -41,11 +41,14 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 
 // noResourceForAliasMessage formats the "no binding" copy surfaced
 // when a channel's alias_bindings map has no entry for the requested
-// alias. Phrased for an end user who doesn't know what an "alias" is —
-// names the literal token the user typed, says plainly what state it's
-// in, and points them at the only person who can fix it.
+// alias. Phrased for an end user who doesn't know what an "alias" is:
+// name the literal token the user typed, say plainly what state it's
+// in, and give them BOTH a self-serve action (`/qurl aliases` lists
+// what is configured here, so a typo is one tab away) AND the
+// escalation path (ask the admin to wire it up) since only the
+// admin can run setalias.
 func noResourceForAliasMessage(alias string) string {
-	return fmt.Sprintf("`$%s` is not configured for this channel. Please contact your Slack admin for assistance.", alias)
+	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key

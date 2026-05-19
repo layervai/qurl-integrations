@@ -277,8 +277,9 @@ func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit i
 //
 // Missing row, missing alias_bindings map, and missing map key all
 // collapse to (resourceID="", found=false, err=nil) — the caller
-// renders the same "`$X` is not configured for this channel. Please
-// contact your Slack admin for assistance." copy for all three.
+// renders the same "`$X` is not configured for this channel. Run
+// `/qurl aliases` to see what's available here, or contact your
+// Slack admin to add it." copy for all three.
 func (s *Store) LookupChannelAlias(ctx context.Context, teamID, channelID, aliasName string) (resourceID string, found bool, err error) {
 	if teamID == "" || channelID == "" || aliasName == "" {
 		return "", false, &Error{
