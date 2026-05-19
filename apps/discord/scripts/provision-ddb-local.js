@@ -50,8 +50,11 @@ const endpoint = process.env.DDB_TEST_ENDPOINT || 'http://localhost:8000';
 const prefix = (process.env.DDB_TABLE_PREFIX ?? '').trim() || 'qurl-bot-discord-local-';
 const region = process.env.AWS_REGION || 'us-east-1';
 
-if (!prefix.endsWith('-')) {
-  console.error(`DDB_TABLE_PREFIX must end with '-' (got '${prefix}').`);
+// Tighter than `endsWith('-')`: also rejects a bare `'-'` (which
+// would produce table names like `-github-links`). Matches the
+// pattern terraform's `qurl-bot-ddb` module uses for `local.table_prefix`.
+if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix)) {
+  console.error(`DDB_TABLE_PREFIX must match /^[a-z0-9][a-z0-9-]*-$/ (got '${prefix}').`);
   process.exit(1);
 }
 
@@ -68,6 +71,11 @@ if (!prefix.endsWith('-')) {
     console.error(`Invalid DDB_TEST_ENDPOINT URL: '${endpoint}'.`);
     process.exit(1);
   }
+  // `0.0.0.0` is unusual as a client target but legitimate when an
+  // operator runs the bot inside a container that connects to
+  // `host.docker.internal` / `0.0.0.0`-bound docker-compose services
+  // — keeping it widens the allowlist without widening the blast
+  // radius (a real AWS DDB endpoint is never 0.0.0.0).
   const isLocal = ['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(parsed.hostname)
     || parsed.hostname.endsWith('.local')
     || parsed.hostname.endsWith('.internal');
@@ -190,9 +198,11 @@ const tables = [
     keySchema: [{ AttributeName: 'guild_id', KeyType: 'HASH' }],
     attributes: [{ AttributeName: 'guild_id', AttributeType: 'S' }],
   },
-  // NOTE: `weekly_stats` is listed in `ddb-store.js`'s TABLES map but
-  // has no DDB call site today. When the first reader/writer lands,
-  // add the schema here.
+  // NOTE: TABLES.weekly_stats is listed in `ddb-store.js`'s TABLES map
+  // but has no DDB call site today. When the first reader/writer
+  // lands, add the schema here — `git grep 'TABLES.weekly_stats'`
+  // will surface both this marker and the new call site so the pair
+  // moves together.
 ];
 
 async function ensureTable(spec) {

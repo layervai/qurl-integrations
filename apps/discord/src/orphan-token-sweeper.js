@@ -62,21 +62,22 @@ async function sweepOnce() {
         // Exponential backoff when GitHub secondary rate-limits us. Cap at
         // 60s so a single sweep never stalls beyond the interval window.
         // Abort the rest of the batch — we'll retry on the next hourly sweep.
+        // `finally` below nulls `accessToken` on `break`, so no inline null
+        // assignment is needed here.
         logger.warn('Orphan sweep hit GitHub rate limit, aborting batch', {
           id, status: result.status, backoffMs,
         });
         backoffMs = Math.min(backoffMs * 2, 60_000);
         await new Promise(r => setTimeout(r, backoffMs));
-        accessToken = null;
         break;
       }
     } catch (err) {
-      // Only log a real token hash. If accessToken was already nulled out
-      // (e.g. rate-limit abort path above set it null before break), emit
-      // a sentinel instead of a misleading "hash of empty string".
-      const tokenHash8 = accessToken
-        ? crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8)
-        : '(already-released)';
+      // Catch fires when `revokeOneDetailed` (or the rate-limit branch's
+      // `setTimeout` await) throws — `accessToken` is still set at that
+      // point because the `finally` below hasn't run yet. Hash the
+      // plaintext for log-correlation only (first 8 hex chars; SHA-256
+      // is one-way).
+      const tokenHash8 = crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8);
       logger.warn('Orphan token retry-revoke failed (will retry next sweep)', {
         id, tokenHash8, error: err.message,
       });

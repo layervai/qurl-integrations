@@ -15,6 +15,13 @@
 // satisfies Jest's hoisted-factory variable-allowlist (the factory below
 // runs before the test file's top-level body, so any referenced symbol
 // has to be either Node-global or a `mock*`-prefixed name).
+//
+// Encrypt / decrypt parity is intentionally NOT exercised here: the mock
+// stores plaintext directly, so a corrupt-ciphertext-shape regression in
+// `utils/crypto.js` won't surface in this suite. That parity lives in
+// `tests/crypto.test.js` (algorithm-level) and `tests/ddb-store.test.js`
+// (recordOrphanedToken / decryptOrphanedToken round-trip via the real
+// `encryptStrict` / `decrypt` calls).
 const mockOrphanedTokens = new Map();
 
 jest.mock('../src/config', () => ({

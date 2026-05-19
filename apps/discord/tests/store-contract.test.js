@@ -178,15 +178,14 @@ describe('store/index boot-time assertions (via child_process)', () => {
   // require path so a workspace dir with a quote / backslash /
   // `${}` can't break out of the inline `node -e` script literal.
   //
-  // Each child must carry DDB_TABLE_PREFIX + AWS_REGION because
-  // ddb-store's module-load guards refuse to boot without them —
-  // the test setup file (`tests/setup-env.js`) sets these for
-  // in-process jest workers, but child_processes inherit the
-  // parent env via `{...process.env}` which already includes them.
-  // Pinning these two values explicitly insulates the spawn from a
-  // future setup-env.js sentinel change for the two vars whose
-  // default is changing in this PR; KEY_ENCRYPTION_KEY / NODE_ENV /
-  // other inherited values still come from the parent process.
+  // ddb-store's module-load guards refuse to boot without
+  // DDB_TABLE_PREFIX + AWS_REGION. The spawn inherits the full
+  // parent env via `{...process.env}`, so the values would arrive
+  // via setup-env.js anyway — pinning them explicitly here insulates
+  // the test from a future setup-env.js sentinel change (these are
+  // the two values whose default is changing in the PR that
+  // introduced this rewrite). KEY_ENCRYPTION_KEY / NODE_ENV / any
+  // other inherited values stay implicit.
   //
   // Note for future contributors: when a new table is added to
   // `ddb-store.js`'s TABLES map, the local-dev provisioner at
