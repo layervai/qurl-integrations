@@ -394,6 +394,15 @@ func TestHandleAdminList_HappyPath(t *testing.T) {
 			t.Errorf("reply missing admin %q: %q", want, reply)
 		}
 	}
+	// Sort-order fence: ListAdmins documents sort.Strings(adminIDs).
+	// UADMIN001 < UOTHER001 ascending, so the admin mention must
+	// appear before the other one in the rendered reply. Pins the
+	// audit-paste-determinism contract.
+	adminIdx := strings.Index(reply, "<@"+testAdminUserID+">")
+	otherIdx := strings.Index(reply, "<@"+testOtherAdminID+">")
+	if adminIdx > otherIdx {
+		t.Errorf("admins not in sorted order: %q (adminIdx=%d, otherIdx=%d)", reply, adminIdx, otherIdx)
+	}
 }
 
 // TestHandleAdminList_OwnerOnly fences the single-admin variant: a
