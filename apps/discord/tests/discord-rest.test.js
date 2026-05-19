@@ -42,7 +42,7 @@ jest.mock('../src/discord', () => {
 
 const restMock = require('../src/discord').__mockRestInstance;
 
-const { sendDM, editDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
+const { sendDM, editDM, sendChannelMessage, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
 
 beforeEach(() => {
   restMock.post.mockReset();
@@ -238,5 +238,37 @@ describe('removeRoleFromMember via REST', () => {
     expect(restMock.delete).toHaveBeenCalledTimes(1);
     // DELETE /guilds/:guild/members/:user/roles/:role — same path shape as PUT.
     expect(restMock.delete.mock.calls[0][0]).toBe('/guilds/guild-1/members/user-1/roles/role-1');
+  });
+});
+
+describe('sendChannelMessage via REST', () => {
+  it('POSTs to /channels/:cid/messages with the message body, returns ok:true with messageId', async () => {
+    restMock.post.mockResolvedValueOnce({ id: 'message-7' });
+    const result = await sendChannelMessage('channel-1', { content: 'hello room' });
+    expect(result).toEqual({ ok: true, messageId: 'message-7' });
+    expect(restMock.post).toHaveBeenCalledTimes(1);
+    expect(restMock.post.mock.calls[0][0]).toBe('/channels/channel-1/messages');
+    expect(restMock.post.mock.calls[0][1]).toEqual({ body: { content: 'hello room' } });
+  });
+
+  it('returns ok:false on 403 (Missing Permissions) — caller decides whether to surface', async () => {
+    // The /qURL channel-notification call site treats this as
+    // logged-and-swallowed: a customer server without "Send Messages"
+    // for the bot must NOT fail a send whose DMs already delivered.
+    const err = new Error('Missing Permissions');
+    err.status = 403;
+    restMock.post.mockRejectedValueOnce(err);
+    const result = await sendChannelMessage('channel-1', { content: 'x' });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(403);
+  });
+
+  it('returns ok:false on transient 5xx', async () => {
+    const err = new Error('Bad Gateway');
+    err.status = 502;
+    restMock.post.mockRejectedValueOnce(err);
+    const result = await sendChannelMessage('channel-1', { content: 'x' });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(502);
   });
 });

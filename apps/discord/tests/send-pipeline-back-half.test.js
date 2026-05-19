@@ -143,6 +143,7 @@ jest.mock('../src/store', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 const mockEditDM = jest.fn().mockResolvedValue({ ok: true });
+const mockSendChannelMessage = jest.fn().mockResolvedValue({ ok: true, messageId: 'ch-m' });
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -155,6 +156,7 @@ jest.mock('../src/discord', () => ({
 }));
 jest.mock('../src/discord-rest', () => ({
   editDM: mockEditDM,
+  sendChannelMessage: mockSendChannelMessage,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -2309,6 +2311,101 @@ describe('executeSendPipeline — truncForLog applies to value-rendering gates',
     const huge = 'y'.repeat(1024);
     await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn: huge })))
       .rejects.toThrow(/expiresIn must be one of .* \(got y{64}…\)/);
+  });
+});
+
+// Channel-notification on @everyone / voice mode. Each test drives
+// executeSendPipeline through the full file-prep + mint + DM happy
+// path so the post-send notification site is actually reached; the
+// collector setup that runs after the notification throws because
+// the editReply mock returns undefined, but the throw is caught
+// inside the pipeline and is not load-bearing for these assertions.
+//
+// The channel post is fire-and-forget — the call to sendChannelMessage
+// is synchronous (so `.toHaveBeenCalled()` reads true immediately after
+// the pipeline resolves), but the `.then` callback that emits the
+// failure warn-log runs on the microtask queue. Tests that assert on
+// the warn-log flush microtasks with `await Promise.resolve()` first.
+describe('executeSendPipeline — channel notification on @everyone / voice mode', () => {
+  beforeEach(() => {
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/1', resource_id: 'res-1' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+  });
+
+  test('posts non-ephemeral channel notification when recipientMode is "everyone"', async () => {
+    const interaction = makeInteraction({ channelId: 'channel-everyone' });
+    await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' }));
+    expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendChannelMessage).toHaveBeenCalledWith(
+      'channel-everyone',
+      expect.objectContaining({
+        content: expect.stringMatching(/shared something with everyone in this server.*qURL Bot/),
+      }),
+    );
+  });
+
+  test('posts notification with voice-channel copy when recipientMode is "voice"', async () => {
+    const interaction = makeInteraction({ channelId: 'channel-voice' });
+    await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'voice' }));
+    expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendChannelMessage).toHaveBeenCalledWith(
+      'channel-voice',
+      expect.objectContaining({
+        content: expect.stringMatching(/shared something with everyone in this voice channel.*qURL Bot/),
+      }),
+    );
+  });
+
+  // 'picker' is the gate's explicit no-notify branch; `undefined`
+  // exercises the normalizeRecipientMode fallback that maps stale
+  // pre-field flow rows + any future off-set drift to picker. Two
+  // distinct branches, not two framings of the same one.
+  test.each([
+    ['picker', 'picker'],
+    ['undefined (stale flow row, normalizeRecipientMode fallback)', undefined],
+  ])('does NOT post channel notification when recipientMode is %s', async (_label, recipientMode) => {
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams({ recipientMode }));
+    expect(mockSendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  test('does NOT post channel notification when delivered === 0 (every DM failed)', async () => {
+    // Without this gate, a public "X shared something with everyone"
+    // would post even though nobody actually got the DM.
+    mockSendDM.mockResolvedValue({ ok: false, error: 'all DMs blocked' });
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' }));
+    expect(mockSendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  test('logs warn on REST failure without failing the send (a missing Send Messages permission cannot fail a send whose DMs already delivered)', async () => {
+    mockSendChannelMessage.mockResolvedValueOnce({ ok: false, error: 'Missing Permissions', status: 403 });
+    logger.warn.mockClear();
+    const interaction = makeInteraction({ channelId: 'channel-no-perm' });
+    await expect(
+      executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' })),
+    ).resolves.not.toThrow();
+    // Flush the fire-and-forget `.then` so the warn-log assertion sees it.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Failed to send channel notification',
+      expect.objectContaining({ channelId: 'channel-no-perm', status: 403 }),
+    );
+  });
+
+  test('sanitizes the sender display name before posting (bidi/RTL spoof defense)', async () => {
+    // U+202E (RIGHT-TO-LEFT OVERRIDE) in a public post would flip the
+    // announcement RTL for every viewer in the channel.
+    const interaction = makeInteraction({
+      member: { displayName: 'Alice‮Evil' },
+      user: { id: 'sender-1', username: 'Alice' },
+    });
+    await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' }));
+    expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
+    const [, message] = mockSendChannelMessage.mock.calls[0];
+    expect(message.content).not.toMatch(/‮/);
   });
 });
 

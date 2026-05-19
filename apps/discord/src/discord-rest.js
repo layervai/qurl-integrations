@@ -166,6 +166,33 @@ async function editDM(channelId, messageId, message) {
 }
 
 /**
+ * Post a message to a guild channel via REST (no Gateway).
+ *
+ * Why REST and not `interaction.channel.send()`: http-only worker
+ * mode skips `client.login()`, so no GUILD_CREATE events fire and
+ * `client.channels.cache` stays empty. The discord.js
+ * `interaction.channel` getter resolves to null on the cache miss and
+ * `.send()` throws synchronously. `interaction.channelId` is set
+ * straight from the payload, so REST works in both modes.
+ *
+ * Returns `{ ok: true, messageId }` on success, `{ ok: false, error,
+ * status }` on failure. Caller decides whether to surface or swallow.
+ */
+async function sendChannelMessage(channelId, message) {
+  try {
+    const sent = await client.rest.post(Routes.channelMessages(channelId), {
+      body: message,
+    });
+    return { ok: true, messageId: sent.id };
+  } catch (err) {
+    logger.warn('sendChannelMessage via REST failed', {
+      channelId, status: err.status, errorMessage: err.message,
+    });
+    return { ok: false, error: err.message, status: err.status };
+  }
+}
+
+/**
  * Add a role to a guild member via REST (no Gateway).
  * Idempotent on the Discord side — re-adding an existing role is
  * a no-op.
@@ -209,6 +236,7 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 module.exports = {
   sendDM,
   editDM,
+  sendChannelMessage,
   addRoleToMember,
   removeRoleFromMember,
 };
