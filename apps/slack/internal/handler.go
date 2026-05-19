@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -616,9 +617,16 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 }
 
 // redactSlashCommandText sanitizes the slash-command `text` form field
-// before it reaches slog. Currently masks the tail of `admin claim
-// <code>` so a bootstrap code typed on the slash-command line (instead
-// of via the modal) doesn't land in CloudWatch verbatim.
+// before it reaches slog. Masks two surfaces:
+//
+//   - the tail of `admin claim <code>` so a bootstrap code typed on
+//     the slash-command line (instead of via the modal) doesn't land
+//     in CloudWatch verbatim;
+//   - the value of any `reason:"…"` flag so operator-supplied
+//     free-form text (e.g. `/qurl get $alias reason:"incident 123"`)
+//     doesn't end up grep-able after the fact. The reason field is
+//     advertised by `helpMessage` as audit-log annotation; operators
+//     dropping PII or short-lived secrets in there is foreseeable.
 //
 // The dispatcher above routes `admin claim <args>` to a user-facing
 // "use the modal" hint rather than the redeem path, but the slash-
@@ -644,8 +652,37 @@ func redactSlashCommandText(text string) string {
 	if len(fields) >= 3 && strings.EqualFold(fields[0], "admin") && strings.EqualFold(fields[1], "claim") {
 		return claimPrefix + "<redacted>"
 	}
-	return text
+	return redactReasonFlag(text)
 }
+
+// redactReasonFlag masks every `reason:` value in the slash-command
+// text. Operates on the raw text rather than the parsed Command so
+// the redaction works at the slog boundary even on malformed input
+// the parser would have rejected. Preserves the literal `reason:`
+// prefix so operators can see the flag was present without seeing
+// the contents.
+func redactReasonFlag(text string) string {
+	return reasonFlagRedactRE.ReplaceAllString(text, `reason:"<redacted>"`)
+}
+
+// reasonFlagRedactRE matches both flag-value shapes the parser
+// accepts (see [parser.flagPattern]):
+//
+//   - `reason:"<anything-not-quote>"` — quoted, multi-word value
+//   - `reason:<run-of-non-whitespace>` — unquoted, single-token value
+//
+// Both reach `Command.Flags["reason"]` via the parser; both need
+// masking at the slog boundary. Slack doesn't escape embedded quotes
+// inside slash-command text so the non-greedy `[^"]*` body terminates
+// at the first `"` (matching the parser's own contract). The
+// unquoted branch is required by parser_test.go's `reason:foo`
+// fixture — a quoted-only redactor would let unquoted values leak.
+//
+// Surface-coupling: any new free-form flag added to [Command.Flags]
+// MUST also extend this pattern. The parser's `flagKeyCharset` keeps
+// flag-key shapes in lockstep, so a future flag landing alongside
+// `applyFlag`'s switch is the natural touch-point.
+var reasonFlagRedactRE = regexp.MustCompile(`reason:(?:"[^"]*"|\S+)`)
 
 func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))

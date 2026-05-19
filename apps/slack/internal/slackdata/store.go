@@ -284,6 +284,14 @@ type WorkspaceConfig struct {
 // shaped StatusCode so handler callers can keep the same
 // `errors.As(&Error) && StatusCode == X` branch shape they had
 // against the old AdminError. Non-SDK errors return a generic 503.
+//
+// CONTRACT: every caller MUST pre-catch
+// [ddbtypes.ConditionalCheckFailedException] before invoking
+// ddbToError. The handler layer doesn't dispatch on 412 (the
+// defensive fallback inside this helper), so a CCFE that leaks
+// through would surface to the user as the generic 503 copy
+// regardless of which conditional actually failed. The pre-catch is
+// the load-bearing fence; see the inline comment for the rationale.
 func ddbToError(op string, err error) error {
 	if err == nil {
 		return nil

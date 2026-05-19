@@ -195,6 +195,27 @@ func TestRedactSlashCommandText(t *testing.T) {
 		{"Admin claim BOOT-SECRET", "admin claim <redacted>"},
 		{"admin Claim BOOT-SECRET", "admin claim <redacted>"},
 		{"ADMIN CLAIM BOOT-SECRET", "admin claim <redacted>"},
+		// Round-21 cr: reason:"…" free-form value is logged via the
+		// slash-command audit line. Operators are foreseeably going
+		// to drop PII / short-lived secrets in there; mask the value
+		// while keeping the flag visible so the audit log still shows
+		// the reason flag was present.
+		{`get $prod reason:"incident 123"`, `get $prod reason:"<redacted>"`},
+		{`get $prod reason:""`, `get $prod reason:"<redacted>"`},
+		// Multiple flags + reason — only the reason value is masked.
+		{`get $prod dm:true reason:"PII here"`, `get $prod dm:true reason:"<redacted>"`},
+		// Multiple reason flags (malformed input — parser would
+		// reject) — all values masked at the log boundary regardless.
+		{`get $a reason:"foo" reason:"bar"`, `get $a reason:"<redacted>" reason:"<redacted>"`},
+		// Unquoted reason value — parser accepts this shape
+		// (parser_test.go's `reason:foo` fixture). Must also be
+		// masked or a single-word PII / secret leaks through.
+		{`get $prod reason:incident-123`, `get $prod reason:"<redacted>"`},
+		{`get $prod dm:true reason:foo`, `get $prod dm:true reason:"<redacted>"`},
+		// admin-claim redaction still wins when both could match
+		// (defense-in-depth — bootstrap code is the more sensitive
+		// of the two).
+		{`admin claim BOOT-CODE reason:"x"`, "admin claim <redacted>"},
 		{"list", "list"},
 		{"", ""},
 	}

@@ -104,6 +104,14 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 	// All three folded into one ConditionExpression so a single
 	// failed-condition surfaces as one "code invalid or expired"
 	// signal rather than three branches.
+	//
+	// Type contract: `:now` is a Number (epoch seconds) and the row's
+	// `expires_at` attribute MUST also be Number for the comparison
+	// to match. Schema fence lives in
+	// modules/qurl-slack-ddb/main.tf:273-285 (also the DDB-TTL
+	// type-requirement comment). A type mismatch on the issuer side
+	// would surface as a ValidationException at this UpdateItem
+	// rather than silently letting an expired code redeem.
 	out, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.BootstrapCodesName),
 		Key: map[string]ddbtypes.AttributeValue{
