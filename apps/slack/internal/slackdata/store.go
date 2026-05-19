@@ -10,12 +10,13 @@
 // in qurl-service for admin/policy state; calling
 // `/internal/v1/admin/*` returns 404.
 //
-// This package exposes a `Store` facade with the same method shapes
-// the old AdminClient had (CheckAdmin, ResolvePolicy, AllowResource,
-// DisallowResource, ListPolicies, GetWorkspaceConfig, RedeemBootstrap)
-// so the slash-command handlers in apps/slack/internal change as
-// little as possible — same call sites, same error-shape contract
-// (`*Error` with a StatusCode that handlers branch on via errors.As).
+// This package exposes a `Store` facade with the method shapes the
+// post-pivot Slack handlers depend on (CheckAdmin, ResolvePolicy,
+// GetChannelPolicy, AllowedResourceIDsForChannel, LookupChannelAlias,
+// BindWorkspace, GetWorkspaceConfig, AddAdmin, RemoveAdmin,
+// ListAdmins, RedeemBootstrap). Errors carry an HTTP-shaped
+// StatusCode on `*Error` so handlers branch via errors.As without
+// caring about the underlying DDB exception shape.
 //
 // Three env vars wire the tables on Fargate (set by
 // qurl-bot-slack/terraform via modules/qurl-slack-ddb's outputs):
@@ -232,24 +233,15 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s%s (%d)", e.Title, codeSuffix, e.StatusCode)
 }
 
-// PolicyEntry is one row of the channel_policies-by-team query.
-// JSON tags retained from the old wire shape so any caller that
-// happens to marshal one (e.g. for slog) renders identically.
+// PolicyEntry is one alias binding for a single (team, channel) row.
+// Returned by [Store.GetChannelPolicy]. JSON tags retained from the
+// pre-pivot wire shape so any caller that happens to marshal one
+// (e.g. for slog) renders identically.
 type PolicyEntry struct {
 	ChannelID  string    `json:"channel_id"`
 	Alias      string    `json:"alias"`
 	ResourceID string    `json:"resource_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at,omitempty"`
-}
-
-// PolicyList preserves the old envelope shape so handler.go's
-// pagination-rendering code (HasMore, NextCursor) doesn't have to
-// change. NextCursor is the base64 of the DDB LastEvaluatedKey;
-// callers pass it back into ListPolicies for the next page.
-type PolicyList struct {
-	Entries    []PolicyEntry `json:"entries"`
-	NextCursor string        `json:"next_cursor,omitempty"`
-	HasMore    bool          `json:"has_more,omitempty"`
 }
 
 // WorkspaceMapping describes the 1:1 workspace → owner row stored on
@@ -296,7 +288,7 @@ func ddbToError(op string, err error) error {
 		// caller-supplied wrapper sets the right HTTP-shaped status.
 		//
 		// CONTRACT: every existing call site (RedeemBootstrap,
-		// BindWorkspace, AllowResource) catches
+		// BindWorkspace, AddAdmin, RemoveAdmin) catches
 		// ConditionalCheckFailedException BEFORE calling
 		// ddbToError, so this 412 branch is currently unreachable.
 		// Any new op that calls ddbToError MUST do the same — the

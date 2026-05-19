@@ -146,25 +146,6 @@ func seedChannelPolicyAliasBindings(teamID, channelID string, bindings map[strin
 	}
 }
 
-// seedChannelPolicyWithBindings is the same shape as
-// [seedChannelPolicyAliasBindings] plus an auto-populated
-// `allowed_resource_ids` SS containing every binding's resource_id.
-// Mirrors what a real `allow + alias-bind` sequence would land — useful
-// for tests that exercise ListPolicies's flatten path (one entry per
-// binding plus any extra aliasless SS members the caller overrides).
-func seedChannelPolicyWithBindings(teamID, channelID string, bindings map[string]string) map[string]ddbtypes.AttributeValue {
-	item := seedChannelPolicyAliasBindings(teamID, channelID, bindings)
-	if len(bindings) == 0 {
-		return item
-	}
-	rids := make([]string, 0, len(bindings))
-	for _, rid := range bindings {
-		rids = append(rids, rid)
-	}
-	item[fAttrAllowedResourceIDs] = &ddbtypes.AttributeValueMemberSS{Value: rids}
-	return item
-}
-
 // seedBootstrapCode returns a bootstrap_codes row keyed by the
 // sha256(plaintext) code_hash. `expiresAt` is encoded as a numeric
 // epoch-seconds attribute (matches the DDB TTL conventions in the
@@ -261,6 +242,6 @@ func init() {
 	_ = ts.seedNonAdmin
 	_ = ts.seedWorkspaceCustom
 	_ = ts.seedPolicySingle
-	_ = ts.failOnAllowResource
+	_ = ts.failOnAdminMutation
 	_ = f.policyHasResource
 }

@@ -502,53 +502,6 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 	return out, nil
 }
 
-// ListByResourceInput narrows a List call to a specific resource_id.
-// Used by `admin revoke-all $alias` after the alias is resolved —
-// the bot then iterates the page of qURLs to delete each one.
-type ListByResourceInput struct {
-	ResourceID string
-	Limit      int
-	Cursor     string
-	Status     string
-}
-
-// ListByResource pages over qURLs filtered to a single resource_id.
-// Hits the same `/v1/qurls` endpoint as [Client.List] with a
-// `resource_id` query parameter. Reuses the same response shape so
-// callers can paginate via [ListOutput.NextCursor] the way they
-// already do.
-func (c *Client) ListByResource(ctx context.Context, input ListByResourceInput) (*ListOutput, error) {
-	if input.ResourceID == "" {
-		return nil, errors.New("ListByResource: resource_id is required")
-	}
-	params := url.Values{}
-	params.Set("resource_id", input.ResourceID)
-	if input.Limit > 0 {
-		params.Set("limit", strconv.Itoa(input.Limit))
-	}
-	if input.Cursor != "" {
-		params.Set("cursor", input.Cursor)
-	}
-	if input.Status != "" {
-		params.Set("status", input.Status)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls?"+params.Encode(), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	var qurls []QURL
-	meta, err := c.do(req, &qurls, "GET /v1/qurls?resource_id=...")
-	if err != nil {
-		return nil, err
-	}
-	out := &ListOutput{QURLs: qurls}
-	if meta != nil {
-		out.NextCursor = meta.NextCursor
-		out.HasMore = meta.HasMore
-	}
-	return out, nil
-}
-
 // Delete revokes a qURL by ID.
 func (c *Client) Delete(ctx context.Context, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)

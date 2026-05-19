@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,6 +43,23 @@ const (
 	// "different admin" (which would tell a same-caller re-entry to
 	// ask themselves for help).
 	ErrCodeWorkspaceBindUnverified = "workspace_bind_unverified"
+	// ErrCodeWorkspaceNotBound is surfaced by AddAdmin/RemoveAdmin/
+	// ListAdmins when the (team_id) row hasn't been claimed yet —
+	// the handler renders "run `/qurl setup` first" copy.
+	ErrCodeWorkspaceNotBound = "workspace_not_bound"
+	// ErrCodeAdminAlreadyExists is surfaced by AddAdmin when the
+	// target user is already on the admin set — idempotent no-op
+	// surface at the handler.
+	ErrCodeAdminAlreadyExists = "admin_already_exists"
+	// ErrCodeAdminNotFound is surfaced by RemoveAdmin when the target
+	// user isn't on the admin set — idempotent no-op surface at the
+	// handler.
+	ErrCodeAdminNotFound = "admin_not_found"
+	// ErrCodeCannotRemoveOwner is surfaced by RemoveAdmin when the
+	// caller targets the workspace owner. The owner is the OAuth
+	// installer; demoting them via the bot would leave the workspace
+	// in a half-claimed state. Re-install OAuth to transfer ownership.
+	ErrCodeCannotRemoveOwner = "cannot_remove_owner"
 )
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
@@ -317,4 +335,206 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		Code:       ErrCodeWorkspaceAlreadyBound,
 		Title:      "BindWorkspace: workspace is already claimed by a different admin",
 	}
+}
+
+// AddAdmin promotes targetUserID to bot admin on the (teamID)
+// workspace_mappings row. A single conditional UpdateItem folds the
+// "row exists + user not already on the set" check into the same DDB
+// item-lock as the mutation:
+//
+//   - ConditionalCheckFailed → either no row OR the user is already on
+//     the set. A follow-up GetItem disambiguates the two so the handler
+//     can render the right copy (404 workspace_not_bound vs 409
+//     admin_already_exists). Without this read the producer-side error
+//     codes would conflate two structurally different states.
+//   - Any other error surfaces via [ddbToError] as a 503.
+//
+// On success the existing admin_slack_user_ids SS gets the target user
+// appended (ADD on an SS is set-union); updated_at is bumped.
+func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error {
+	if teamID == "" || targetUserID == "" {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "AddAdmin: team_id and target_user_id are required",
+		}
+	}
+	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+		UpdateExpression: aws.String("ADD admin_slack_user_ids :uids SET updated_at = :now"),
+		// Two clauses combined: refuse on a missing row (handler maps
+		// to "workspace_not_bound") AND on an already-member user
+		// (handler maps to "admin_already_exists"). DDB doesn't let
+		// us discriminate which clause failed from the CCFE alone, so
+		// the post-CCFE GetItem below makes the call.
+		ConditionExpression: aws.String("attribute_exists(slack_team_id) AND NOT contains(admin_slack_user_ids, :uid)"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":uids": &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":  stringAttr(targetUserID),
+			exprNow: stringAttr(nowISO),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if !errors.As(err, &ccfe) {
+		return ddbToError("AddAdmin", err)
+	}
+	// Disambiguate: row missing → 404; row exists with user already on
+	// the set → 409. A bare CCFE doesn't tell us which arm of the
+	// AND fired; one GetItem is the cheapest way to surface the right
+	// user-facing code.
+	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      aws.String(s.WorkspaceMappingsName),
+		ConsistentRead: aws.Bool(true),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if getErr != nil {
+		// Disambiguation read failed; surface a generic 503 rather
+		// than guess at the underlying state. The audit log on the
+		// caller-side captures the original CCFE for triage.
+		return ddbToError("AddAdmin", getErr)
+	}
+	if len(out.Item) == 0 {
+		return &Error{
+			StatusCode: http.StatusNotFound,
+			Code:       ErrCodeWorkspaceNotBound,
+			Title:      "AddAdmin: workspace is not bound",
+		}
+	}
+	return &Error{
+		StatusCode: http.StatusConflict,
+		Code:       ErrCodeAdminAlreadyExists,
+		Title:      "AddAdmin: target user is already an admin",
+	}
+}
+
+// RemoveAdmin demotes targetUserID from bot admin on the (teamID)
+// workspace_mappings row.
+//
+// Refuses to demote the workspace owner — the owner is the OAuth
+// installer, and removing them via the bot would leave the workspace
+// in a half-claimed state where no one can re-promote (the new admin
+// set has no relationship to the OAuth identity). The owner check is
+// a read-before-write: a GetItem precedes the conditional UpdateItem
+// so the 400 cannot_remove_owner surfaces before any mutation
+// attempt. The read isn't strongly consistent because the
+// owner_id field doesn't mutate post-bind (BindWorkspace is the
+// only writer).
+//
+// CCFE on the UpdateItem maps to 404 admin_not_found — either the row
+// vanished (race with a concurrent OAuth re-install) or the target
+// wasn't on the admin set in the first place. Both render the same
+// idempotent "nothing to do" copy at the handler.
+func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) error {
+	if teamID == "" || targetUserID == "" {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "RemoveAdmin: team_id and target_user_id are required",
+		}
+	}
+	// Owner-check read precedes the mutation. Use the same GetItem as
+	// ListAdmins so the 404 path is identical — row missing surfaces
+	// as workspace_not_bound rather than racing into the UpdateItem's
+	// CCFE-classified-as-admin_not_found (which would render the
+	// wrong copy).
+	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if getErr != nil {
+		return ddbToError("RemoveAdmin", getErr)
+	}
+	if len(out.Item) == 0 {
+		return &Error{
+			StatusCode: http.StatusNotFound,
+			Code:       ErrCodeWorkspaceNotBound,
+			Title:      "RemoveAdmin: workspace is not bound",
+		}
+	}
+	if ownerID := readString(out.Item, attrOwnerID); ownerID != "" && ownerID == targetUserID {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Code:       ErrCodeCannotRemoveOwner,
+			Title:      "RemoveAdmin: cannot remove the workspace owner",
+		}
+	}
+	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+		UpdateExpression: aws.String("DELETE admin_slack_user_ids :uids SET updated_at = :now"),
+		// `contains(...)` guarantees the user is in the set at
+		// mutation time — a CCFE here is the "nothing to remove"
+		// case (either the row vanished mid-flight, or the user
+		// wasn't a member). attribute_exists pin protects against
+		// a row delete-race in the same code path.
+		ConditionExpression: aws.String("contains(admin_slack_user_ids, :uid) AND attribute_exists(slack_team_id)"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":uids": &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":  stringAttr(targetUserID),
+			exprNow: stringAttr(nowISO),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if !errors.As(err, &ccfe) {
+		return ddbToError("RemoveAdmin", err)
+	}
+	return &Error{
+		StatusCode: http.StatusNotFound,
+		Code:       ErrCodeAdminNotFound,
+		Title:      "RemoveAdmin: target user is not on the admin set",
+	}
+}
+
+// ListAdmins returns the workspace owner ID and the sorted set of
+// admin Slack user IDs. The owner is always present (BindWorkspace
+// stamps it on first claim); admin_slack_user_ids may include the
+// owner alongside additional admins added via AddAdmin.
+//
+// 404 workspace_not_bound when the row is missing. The slice is
+// sorted ascending so callers (the `/qurl admin list` handler in
+// particular) render a deterministic order across calls — operators
+// audit-via-paste, and a re-ordered listing reads as state churn
+// that didn't actually happen.
+func (s *Store) ListAdmins(ctx context.Context, teamID string) (ownerID string, adminIDs []string, err error) {
+	if teamID == "" {
+		return "", nil, &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "ListAdmins: team_id is required",
+		}
+	}
+	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if getErr != nil {
+		return "", nil, ddbToError("ListAdmins", getErr)
+	}
+	if len(out.Item) == 0 {
+		return "", nil, &Error{
+			StatusCode: http.StatusNotFound,
+			Code:       ErrCodeWorkspaceNotBound,
+			Title:      "ListAdmins: workspace is not bound",
+		}
+	}
+	ownerID = readString(out.Item, attrOwnerID)
+	adminIDs = readStringSet(out.Item, attrAdminSlackUserIDs)
+	sort.Strings(adminIDs)
+	return ownerID, adminIDs, nil
 }

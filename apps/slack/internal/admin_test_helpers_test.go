@@ -100,12 +100,16 @@ type customerPrefixRoute struct {
 const testAdminTeamID = "T_team"
 
 // testAdminUserID is the admin user ID matching seedAdmin/seedNonAdmin.
-const testAdminUserID = "U_admin"
+// Slack-shape (uppercase alphanumeric, no underscore) so the admin
+// add/remove handlers — which parse `<@U…>` mentions through the
+// strict userMentionPattern — can accept it as a mention target.
+const testAdminUserID = "UADMIN01"
 
 // testAdminOwnerID is the owner ID the workspace_mappings row binds
-// to in tests. Matches the canned `u_workspace_owner` the legacy
-// HTTP fixtures returned.
-const testAdminOwnerID = "u_workspace_owner"
+// to in tests. Slack-shape ID (see [testAdminUserID]) so the admin
+// remove handler's owner-check path can be exercised against a
+// `<@U…>` mention without tripping the mention validator.
+const testAdminOwnerID = "UOWNER01"
 
 // testWorkspaceConfiguredAt is the canonical `created_at` time the
 // workspace fixture exposes. Matches the legacy
@@ -179,17 +183,12 @@ func (ts *adminTestServers) seedPolicyAliasBindings(t *testing.T, teamID, channe
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyAliasBindings(teamID, channelID, bindings))
 }
 
-// failOnAllowResource installs a hook that fails the test if any
-// AllowResource UpdateItem hits the channel_policies table. Mirrors
-// the pre-pivot pattern `ts.addAdmin("POST",
-// "/internal/v1/admin/policy/allow", t.Error(...))`.
-//
-// Implementation: we wrap the existing fakeDDB with a UpdateItem
-// override via [fakeDDB.UpdateItemHook]. Tests that need this set
-// it before invoking the handler.
-func (ts *adminTestServers) failOnAllowResource(t *testing.T, msg string) {
+// failOnAdminMutation installs a hook that fails the test if any
+// UpdateItem hits the table set. Used to assert the admin-only gate
+// short-circuits before any policy or admin-set mutation.
+func (ts *adminTestServers) failOnAdminMutation(t *testing.T, msg string) {
 	t.Helper()
 	ts.ddb.SetUpdateItemHook(func(in interface{}) {
-		t.Errorf("AllowResource (UpdateItem) reached despite gate: %s", msg)
+		t.Errorf("admin UpdateItem reached despite gate: %s", msg)
 	})
 }

@@ -2,12 +2,7 @@ package slackdata
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"log/slog"
 	"net/http"
-	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -34,13 +29,11 @@ const (
 	attrAliasBindings      = "alias_bindings"
 	attrAllowedResourceIDs = "allowed_resource_ids"
 	// attrResourceID is the legacy per-row scalar shape that pre-pivot
-	// rows carry. Net-new mutations write through AllowResource into
-	// the `allowed_resource_ids` SS instead, but hand-seeded rows or
-	// any row that escapes the bot's mutation path may still carry the
-	// scalar. ResolvePolicy falls back to the scalar so a row that's
-	// listed by `/qurl admin policies` (which now flattens both shapes)
-	// also resolves at `/qurl get`. Without this fallback the listing
-	// vs resolve paths would diverge — exactly the foot-gun pinned by
+	// rows carry. Net-new mutations land in the `allowed_resource_ids`
+	// SS or `alias_bindings` Map, but hand-seeded rows or any row that
+	// escapes the bot's mutation path may still carry the scalar.
+	// ResolvePolicy falls back to the scalar so a legacy single-row
+	// grant continues to resolve at `/qurl get`. Pinned by
 	// TestResolvePolicy_LegacySingleRowShape.
 	attrResourceID = "resource_id"
 )
@@ -50,18 +43,18 @@ const (
 // `/qurl list`. The set is the union of two orthogonal surfaces on
 // the same row:
 //
-//   - `allowed_resource_ids` SS — the multi-resource gate
-//     `/qurl admin allow/disallow` mutates; `/qurl get $r_<id>`
-//     checks via [ResolvePolicy].
+//   - `allowed_resource_ids` SS — the legacy multi-resource gate
+//     hand-seeded or carried over from pre-pivot rows. `/qurl get
+//     $r_<id>` checks via [ResolvePolicy].
 //   - `alias_bindings` Map<alias_name, resource_id> — the alias
 //     surface `/qurl setalias` / `/qurl unsetalias` mutate;
 //     `/qurl get $alias` checks via [ResolveAlias].
 //
 // Either surface allows the row to mint, so `/qurl list` must show
 // resources visible via EITHER — surfacing only the alias-bindings
-// values (the bug closed here) hides allow-listed-but-unaliased
-// resources from non-admin listings even though `/qurl get $r_<id>`
-// would mint them. Single-row GetItem; no pagination needed.
+// values would hide legacy allow-set resources from non-admin
+// listings even though `/qurl get $r_<id>` would mint them.
+// Single-row GetItem; no pagination needed.
 //
 // Missing row → empty set (no policy = no access, fail-closed).
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
@@ -105,7 +98,7 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 // The old HTTP shape returned a `bool` and an error; same shape here.
 // Eventual-consistency read is intentional — `/qurl get` and `/qurl
 // aliases` tolerate ~few-second propagation lag after a fresh
-// allow/disallow; strong reads would double RCU cost without
+// setalias mutation; strong reads would double RCU cost without
 // changing failure modes that matter.
 func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID string) (bool, error) {
 	if teamID == "" || channelID == "" || resourceID == "" {
@@ -129,265 +122,17 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 	}
 	// Legacy single-row shape: per-row `resource_id` scalar. Hand-seeded
 	// rows that escaped the bot's mutation path may carry the grant
-	// only in the scalar — ListPolicies's flatten path already surfaces
-	// these, so ResolvePolicy must too or `/qurl admin policies` and
-	// `/qurl get` produce inconsistent answers for the same row.
+	// only in the scalar. Pinned by TestResolvePolicy_LegacySingleRowShape.
 	if rid := readString(out.Item, attrResourceID); rid == resourceID {
 		return true, nil
 	}
-	// Post-pivot multi-resource shape: SS membership. This is the
-	// shape AllowResource / DisallowResource mutate.
+	// Multi-resource shape: SS membership.
 	for _, rid := range readStringSet(out.Item, attrAllowedResourceIDs) {
 		if rid == resourceID {
 			return true, nil
 		}
 	}
 	return false, nil
-}
-
-// AllowResource adds `resourceID` to the (teamID, channelID) row's
-// allowed_resource_ids set via a conditional UpdateItem. Orthogonal
-// to alias_bindings — AllowResource only touches the allowed-set
-// surface that ResolvePolicy gates on.
-//
-// Returns 409 (via *Error) on a duplicate add. The 409 is surfaced
-// via DDB's ConditionalCheckFailedException on a
-// `NOT contains(allowed_resource_ids, :rid)` condition. Folding the
-// membership check into the conditional UpdateItem dodges the
-// TOCTOU window the prior probe-then-write shape had — two
-// concurrent admins running `/qurl admin allow` on the same
-// channel/resource would now see the second one get the 409 signal
-// instead of a false "Allowed" success.
-//
-// The condition fires only when the row exists AND the set already
-// contains the resource. A missing row passes the condition (the
-// attribute doesn't exist), and ADD creates the set on first write.
-func (s *Store) AllowResource(ctx context.Context, teamID, channelID, resourceID string) error {
-	if teamID == "" || channelID == "" || resourceID == "" {
-		return &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "AllowResource: team_id, channel_id, resource_id are required",
-		}
-	}
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-		// `if_not_exists(created_at, :now)` is load-bearing: this
-		// UpdateItem is also the row-creation path for the first
-		// `/qurl admin allow` against a channel (the
-		// `attribute_not_exists(allowed_resource_ids)` clause below
-		// passes when no row exists yet, and ADD creates the row).
-		// Without if_not_exists, the row would land with no
-		// created_at attribute and ListPolicies would later render
-		// the zero time into the audit/UI surface. A second allow on
-		// the same channel preserves the original created_at because
-		// if_not_exists short-circuits the SET on existing
-		// attributes.
-		UpdateExpression: aws.String("ADD allowed_resource_ids :rids SET updated_at = :now, created_at = if_not_exists(created_at, :now)"),
-		// "attribute_not_exists(allowed_resource_ids) OR NOT
-		// contains(...)" passes when the row is brand new (no set
-		// yet) AND when the existing set lacks the target. Either
-		// case is a legitimate add. A repeat add fails the
-		// condition → ConditionalCheckFailedException → 409.
-		//
-		// Note on legacy single-scalar rows: pre-multi-resource rows
-		// carry the grant only in the `resource_id` scalar (see
-		// ResolvePolicy's fallback). For those rows
-		// `allowed_resource_ids` is absent, so this condition passes
-		// and AllowResource writes the SS — intended migration
-		// toward the post-pivot shape, not a missing condition leg.
-		// ResolvePolicy reads both shapes, so the dual-write window
-		// is correctness-safe.
-		ConditionExpression: aws.String("attribute_not_exists(allowed_resource_ids) OR NOT contains(allowed_resource_ids, :rid)"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-			":rid":  stringAttr(resourceID),
-			exprNow: stringAttr(s.nowOrDefault().UTC().Format(timeFormat)),
-		},
-	})
-	if err != nil {
-		var ccfe *ddbtypes.ConditionalCheckFailedException
-		if errors.As(err, &ccfe) {
-			return &Error{
-				StatusCode: http.StatusConflict,
-				Code:       "policy_already_exists",
-				Title:      "AllowResource: policy already exists",
-			}
-		}
-		return ddbToError("AllowResource", err)
-	}
-	return nil
-}
-
-// DisallowResource removes `resourceID` from the (teamID, channelID)
-// row's allowed_resource_ids set via a single conditional UpdateItem.
-// Returns 404 (via *Error) if no matching row/member exists — the
-// handler maps 404 to the idempotent "nothing to remove" copy.
-//
-// The conditional `contains(allowed_resource_ids, :rid)` folds the
-// "is this resource currently allowed?" check into the same DDB
-// item-lock as the mutation. Without that fence, the prior
-// probe-then-DELETE shape had a TOCTOU window where two concurrent
-// disallows on the same channel/resource would BOTH see "yes it's
-// in the set" on the probe and BOTH render success; only one
-// actually mutated the set. The single conditional UpdateItem now
-// produces exactly one success and N-1 deterministic 404s for N
-// concurrent disallows. Closes #355.
-func (s *Store) DisallowResource(ctx context.Context, teamID, channelID, resourceID string) error {
-	if teamID == "" || channelID == "" || resourceID == "" {
-		return &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "DisallowResource: team_id, channel_id, resource_id are required",
-		}
-	}
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-		UpdateExpression:    aws.String("DELETE allowed_resource_ids :rids SET updated_at = :now"),
-		ConditionExpression: aws.String("contains(allowed_resource_ids, :rid)"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-			":rid":  stringAttr(resourceID),
-			exprNow: stringAttr(s.nowOrDefault().UTC().Format(timeFormat)),
-		},
-	})
-	if err != nil {
-		var ccfe *ddbtypes.ConditionalCheckFailedException
-		if errors.As(err, &ccfe) {
-			// Either the row doesn't exist OR the resource_id isn't
-			// in the allowed set. Either way, "nothing to remove" —
-			// surface as 404 so the handler maps to the idempotent
-			// "was not allowed" copy.
-			return notFoundError("DisallowResource: no matching policy member")
-		}
-		return ddbToError("DisallowResource", err)
-	}
-	return nil
-}
-
-// ListPolicies pages channel_policies rows for teamID. Cursor is a
-// base64-encoded JSON of the DDB LastEvaluatedKey; opaque to the
-// caller. Limit caps the page size (DDB enforces its own max).
-//
-// Each row carries an `alias_bindings` Map<alias_name, resource_id>;
-// ListPolicies flattens the map into one PolicyEntry per binding so
-// `/qurl aliases` can render one line per (channel, alias). Rows
-// without alias_bindings (only `allowed_resource_ids` populated)
-// emit zero entries — they're orthogonal to the alias listing.
-// `allowed_resource_ids` is the gate for `/qurl get` via
-// ResolvePolicy and intentionally NOT mirrored here.
-func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit int) (*PolicyList, error) {
-	if teamID == "" {
-		return nil, &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "ListPolicies: team_id is required",
-		}
-	}
-	if limit <= 0 {
-		limit = 50
-	}
-	in := &dynamodb.QueryInput{
-		TableName:              aws.String(s.ChannelPoliciesName),
-		KeyConditionExpression: aws.String("slack_team_id = :tid"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":tid": stringAttr(teamID),
-		},
-		Limit: aws.Int32(int32(limit)),
-	}
-	if cursor != "" {
-		startKey, decErr := decodeCursor(cursor)
-		if decErr != nil {
-			return nil, &Error{
-				StatusCode: http.StatusBadRequest,
-				Code:       "invalid_cursor",
-				Title:      "ListPolicies: cursor is malformed",
-				Detail:     decErr.Error(),
-			}
-		}
-		in.ExclusiveStartKey = startKey
-	}
-
-	out, err := s.Client.Query(ctx, in)
-	if err != nil {
-		return nil, ddbToError("ListPolicies", err)
-	}
-
-	list := &PolicyList{
-		Entries: make([]PolicyEntry, 0, len(out.Items)),
-	}
-	for _, item := range out.Items {
-		channelID := readString(item, attrSlackChannelID)
-		createdAt := readTime(item, attrCreatedAt)
-		bindings := readStringMap(item, attrAliasBindings)
-		// Sort alias names ascending so the listing is deterministic
-		// across calls — operators audit-via-diff against prior pastes.
-		aliasNames := make([]string, 0, len(bindings))
-		for name := range bindings {
-			aliasNames = append(aliasNames, name)
-		}
-		sort.Strings(aliasNames)
-		// Track resource_ids already emitted as alias bindings so the
-		// aliasless SS pass below doesn't double-list the same
-		// (channel, resource).
-		boundResources := make(map[string]struct{}, len(bindings))
-		for _, name := range aliasNames {
-			rid := bindings[name]
-			if rid == "" {
-				continue
-			}
-			boundResources[rid] = struct{}{}
-			list.Entries = append(list.Entries, PolicyEntry{
-				ChannelID:  channelID,
-				Alias:      name,
-				ResourceID: rid,
-				CreatedAt:  createdAt,
-			})
-		}
-		// Aliasless resources: members of `allowed_resource_ids` SS
-		// not covered by any alias binding. `/qurl admin policies`
-		// surfaces these as "(no alias bound)" entries so operators
-		// see the whole allow-set, not just the alias-decorated subset.
-		// Sorted deterministically for the same audit-diff reason as
-		// the alias names above.
-		aliasless := make([]string, 0)
-		for _, rid := range readStringSet(item, attrAllowedResourceIDs) {
-			if _, bound := boundResources[rid]; bound {
-				continue
-			}
-			aliasless = append(aliasless, rid)
-		}
-		sort.Strings(aliasless)
-		for _, rid := range aliasless {
-			list.Entries = append(list.Entries, PolicyEntry{
-				ChannelID:  channelID,
-				Alias:      "",
-				ResourceID: rid,
-				CreatedAt:  createdAt,
-			})
-		}
-	}
-	if len(out.LastEvaluatedKey) > 0 {
-		list.HasMore = true
-		cur, encErr := encodeCursor(out.LastEvaluatedKey)
-		if encErr != nil {
-			// Cursor encoding shouldn't fail on a valid DDB key (PK+SK
-			// are both String today), but don't blow up the listing —
-			// surface HasMore without a cursor. Log loud so operators
-			// can see the broken pagination instead of just observing
-			// "next page is unreachable" via user reports.
-			slog.Warn("ListPolicies: encodeCursor failed; pagination disabled for this page",
-				"error", encErr, "team_id", teamID)
-			return list, nil
-		}
-		list.NextCursor = cur
-	}
-	return list, nil
 }
 
 // LookupChannelAlias returns the resource id bound to aliasName on
@@ -479,52 +224,4 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 		})
 	}
 	return entries, nil
-}
-
-// timeFormat is the on-the-wire format for created_at/updated_at on
-// the DDB rows. Mirrors shared/auth.ddb_provider's RFC3339 usage so
-// a cross-table audit query renders timestamps uniformly.
-const timeFormat = "2006-01-02T15:04:05Z07:00"
-
-// encodeCursor serializes a DDB LastEvaluatedKey to an opaque
-// base64-of-JSON token. The only string fields in the channel_policies
-// PK/SK are slack_team_id + slack_channel_id; both are strings, so
-// the JSON shape is small and stable.
-func encodeCursor(key map[string]ddbtypes.AttributeValue) (string, error) {
-	flat := make(map[string]string, len(key))
-	for k, v := range key {
-		s, ok := v.(*ddbtypes.AttributeValueMemberS)
-		if !ok {
-			// Non-string attr in the key — refuse to encode rather
-			// than producing an inconsistent token. channel_policies'
-			// PK + SK are both S today; future schema changes would
-			// need to update this serializer.
-			return "", errors.New("encodeCursor: non-string attribute in PK/SK")
-		}
-		flat[k] = s.Value
-	}
-	body, err := json.Marshal(flat)
-	if err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.EncodeToString(body), nil
-}
-
-// decodeCursor inverts encodeCursor. Bad/malformed cursors return an
-// error so the handler can surface "cursor is malformed" rather than
-// silently restarting at the top of the listing.
-func decodeCursor(token string) (map[string]ddbtypes.AttributeValue, error) {
-	body, err := base64.URLEncoding.DecodeString(token)
-	if err != nil {
-		return nil, err
-	}
-	flat := make(map[string]string)
-	if err := json.Unmarshal(body, &flat); err != nil {
-		return nil, err
-	}
-	out := make(map[string]ddbtypes.AttributeValue, len(flat))
-	for k, v := range flat {
-		out[k] = stringAttr(v)
-	}
-	return out, nil
 }
