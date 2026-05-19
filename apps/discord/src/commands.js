@@ -1888,7 +1888,7 @@ async function executeSendPipeline(interaction, {
   const confirmRendered = buildConfirmMsg(false);
   let confirmMsg = confirmRendered.content;
   // In attachment mode the file IS the full list, so suppress the
-  // Show All toggle — the same shape the post-revoke flow uses.
+  // Show Recipients toggle — the same shape the post-revoke flow uses.
   const needsExpand = confirmRendered.needsExpand;
 
   const buttonRow = new ActionRowBuilder().addComponents(
@@ -1905,7 +1905,7 @@ async function executeSendPipeline(interaction, {
     buttonRow.addComponents(
       new ButtonBuilder()
         .setCustomId(`qurl_expand_${sendId}`)
-        .setLabel('Show All')
+        .setLabel('Show Recipients')
         .setStyle(ButtonStyle.Secondary),
     );
   }
@@ -2035,14 +2035,14 @@ async function executeSendPipeline(interaction, {
         const updatedRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`qurl_add_${sendId}`).setLabel('Add Recipients').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Hide Recipients' : 'Show Recipients').setStyle(ButtonStyle.Secondary),
         );
         await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(logIgnoredDiscordErr);
         return;
       }
 
       if (btnInteraction.customId === `qurl_revoke_expand_${sendId}`) {
-        // Toggle Show All / Show Less on the post-revoke recipient list.
+        // Toggle Show Recipients / Hide Recipients on the post-revoke list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
         const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
@@ -2208,7 +2208,7 @@ async function executeSendPipeline(interaction, {
         // message ("Failed to revoke links…") isn't overwritten with
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
-          // Terminal state: re-render content (Show All may have
+          // Terminal state: re-render content (Show Recipients may have
           // toggled), strip components. Omit `files`/`attachments`
           // so Discord keeps the existing revoked-users.txt without
           // re-uploading the same blob 15min later.
@@ -3171,7 +3171,7 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 // dispatcher routes against the new literal. See
 // SEND_STAGE_AWAITING_CONFIRM above for the matching stage-value drain.
 //
-// The post-send Add Recipients / Revoke / Show All buttons live on
+// The post-send Add Recipients / Revoke / Show Recipients buttons live on
 // different customId prefixes (`qurl_add_*`, `qurl_revoke_*`,
 // `qurl_expand_*`) — they are NOT affected by renaming the confirm-
 // card literals here, so the 180s flow_state TTL is the only drain
@@ -6865,7 +6865,7 @@ const {
 // Builds the editReply payload from a `renderRevokeMsg` result. When
 // the rendered names list overflowed the Discord content cap,
 // `attachmentText` is populated → wrap in a `revoked-users.txt`
-// attachment and drop the Show All button (the file IS the full list).
+// attachment and drop the Show Recipients button (the file IS the full list).
 function revokeReplyPayload(rendered) {
   const payload = { content: rendered.content };
   payload.components = rendered.row ? [rendered.row] : [];
@@ -6878,7 +6878,8 @@ function revokeReplyPayload(rendered) {
 }
 
 // Wraps `renderRevokeContent` (pure data) and adds the discord.js
-// ActionRowBuilder/ButtonBuilder for the Show All / Show Less toggle.
+// ActionRowBuilder/ButtonBuilder for the Show Recipients / Hide
+// Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
 function renderRevokeMsg(sendId, names, total, showAll, success = names.length) {
@@ -6887,7 +6888,7 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
     ? new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`qurl_revoke_expand_${sendId}`)
-        .setLabel(showAll ? 'Show Less' : 'Show All')
+        .setLabel(showAll ? 'Hide Recipients' : 'Show Recipients')
         .setStyle(ButtonStyle.Secondary),
     )
     : null;

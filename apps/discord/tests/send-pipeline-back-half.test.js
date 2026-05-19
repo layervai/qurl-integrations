@@ -1492,7 +1492,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     failedNamesPlain: [], successNames: [], showAll: false,
   };
 
-  it('small list: full inline + Show All toggle when >TRUNC_LIMIT', () => {
+  it('small list: full inline + Show Recipients toggle when >TRUNC_LIMIT', () => {
     const successNames = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
     const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames });
     expect(r.content).toMatch(/^Sent to \d+ users? \| /);
@@ -1530,7 +1530,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(r.attachmentText).toBeNull();
   });
 
-  it('overflow: full list >2000 chars triggers attachment + suppresses Show All', () => {
+  it('overflow: full list >2000 chars triggers attachment + suppresses Show Recipients', () => {
     // 200 long names ~= ~6kB inline; well over Discord's 2000-char cap.
     const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });
@@ -1650,22 +1650,26 @@ describe('renderRevokeMsg', () => {
     expect(r.row).toBeNull();
   });
 
-  it('truncates with "+N more" + adds Show All button when count > TRUNC_LIMIT', () => {
+  it('truncates with "+N more" + adds Show Recipients button when count > TRUNC_LIMIT', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 3 }, (_, i) => `u${i}`);
     const r = renderRevokeMsg('send-2', names, names.length, false);
     expect(r.content).toContain(`+${3} more`);
     expect(r.content).not.toContain(names.at(-1)); // last name truncated off
     expect(r.needsExpand).toBe(true);
     expect(r.row).not.toBeNull();
+    // Pin the renamed label so a regression that flips it back to the
+    // ambiguous "Show All" (which users misread as a permissions
+    // action next to "Revoke All") fails here.
+    expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Show Recipients');
   });
 
-  it('shows full list + Show Less button when showAll=true', () => {
+  it('shows full list + Hide Recipients button when showAll=true', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
     const r = renderRevokeMsg('send-3', names, names.length, true);
     expect(r.content).toContain(names.at(-1));
     expect(r.content).not.toMatch(/\+\d+ more/);
     expect(r.needsExpand).toBe(true);
-    expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Show Less');
+    expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Hide Recipients');
   });
 
   it('omits the names line when no successful revokes (e.g. all already-opened)', () => {
@@ -1686,7 +1690,7 @@ describe('renderRevokeMsg', () => {
     expect(r.content).not.toContain('already-opened');
   });
 
-  it('emits attachmentText + suppresses Show All when full list would exceed Discord 2000-char cap', () => {
+  it('emits attachmentText + suppresses Show Recipients when full list would exceed Discord 2000-char cap', () => {
     // 200 long usernames (~30 chars each) → ~6000 chars uncapped.
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true);
@@ -1696,7 +1700,7 @@ describe('renderRevokeMsg', () => {
     // Newline-separated full list — every name present.
     expect(r.attachmentText.split('\n')).toHaveLength(200);
     expect(r.attachmentText).toContain(names[199]);
-    // Show All button suppressed — file IS the full list.
+    // Show Recipients button suppressed — file IS the full list.
     expect(r.needsExpand).toBe(false);
     expect(r.row).toBeNull();
   });
