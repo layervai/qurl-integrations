@@ -141,7 +141,15 @@ describe('Google Maps: Fallback card render', () => {
     expect(html).not.toContain('google.com/maps/embed');
     expect(html).not.toContain('<iframe');
     expect(html).toContain('Open in Google Maps');
-    expect(html).toContain(`href="${originalUrl}"`);
+    // Tolerate either quote style on the href attribute. Go's
+    // html/template emits double quotes today, but the assertion
+    // shouldn't break on a future template-engine swap; what we
+    // actually care about is the URL appearing inside an href.
+    // The originalUrl here is a short maps.app.goo.gl path with no
+    // chars that html/template would entity-escape — if a future
+    // fixture adds `&` or quotes, switch this to a regex that
+    // matches the escaped form as well.
+    expect(html).toMatch(new RegExp(`href=["']${originalUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`));
     // Should NOT contain the canvas/watermark template (the page
     // is still routed as a Maps share, not as a generic file).
     expect(html).not.toContain('drawWatermark');
@@ -158,8 +166,11 @@ describe('Google Maps: Fallback card render', () => {
     expect(html).not.toContain('<iframe');
     expect(html).toContain('Open in Google Maps');
     // /maps/search/<query> with space as %20 (per handler.go's
-    // QueryEscape→%20 normalization at line 2492).
-    expect(html).toContain('https://www.google.com/maps/search/Eiffel%20Tower');
+    // QueryEscape→%20 normalization at line 2492). Pin the full
+    // segment including the `, Paris` suffix (comma as %2C) — a
+    // prefix-only check would silently pass on a regression that
+    // truncates the query at the first comma.
+    expect(html).toContain('https://www.google.com/maps/search/Eiffel%20Tower%2C%20Paris');
   });
 
   test('google-map with coordinates renders fallback card with /maps/@lat,lng URL', async () => {
@@ -251,7 +262,11 @@ describe('Google Maps: Fallback card render', () => {
     // unit refactors (e.g. `100vh` → `100dvh`) would fail the test for
     // no functional reason. The three markers above pin the template
     // firmly enough.
-    expect(html).toContain('class="card"');
+    // Tolerate either quote style on the class attribute and a
+    // future addition of co-classes (e.g. `class="card map-card"`)
+    // — what we care about is that the `card` class is applied,
+    // not the exact serialization.
+    expect(html).toMatch(/class=["']card(?:\s[^"']*)?["']/);
     expect(html).toContain('Shared Location');
     expect(html).toContain('Open in Google Maps to view this location.');
     // Negative: the iframe-embed template's `map-container` class
@@ -417,7 +432,10 @@ describe('Google Maps: Revoke', () => {
     const before = await fetchViewerPage(upload.viewerUrl);
     expect(before).toContain('Open in Google Maps');
     expect(before).toContain('Open in Google Maps to view this location.');
-    expect(before).toContain('https://www.google.com/maps/search/Revoke%20Test');
+    // Full-segment pin (incl. `%2C%20Boston` comma+space), same as
+    // the Eiffel assertion above — prefix-only would miss a query-
+    // truncation regression.
+    expect(before).toContain('https://www.google.com/maps/search/Revoke%20Test%2C%20Boston');
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
