@@ -81,6 +81,11 @@ func TestHandleList_RendersResources(t *testing.T) {
 // this test.
 func TestHandleList_NonAdminSeesAliasUnboundInChannel(t *testing.T) {
 	ts := newAdminTestServers(t)
+	// Non-admin seed is intentional: admin status no longer affects
+	// /qurl list output, but seeding a non-admin caller pins the
+	// disclosure surface under any future re-introduction of a
+	// list-side gate. If a channel-policy filter is re-added, this
+	// test fails — surfacing the disclosure-narrowing explicitly.
 	ts.seedNonAdmin(t)
 	// Seed an alias_bindings row for a DIFFERENT channel — proves
 	// the list isn't filtering by caller's channel.
