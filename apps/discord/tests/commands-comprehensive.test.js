@@ -1171,7 +1171,11 @@ describe('/unlinked command', () => {
     // Round-4 cr regression-pin: a mid-pagination failure leaves the
     // cache non-empty but incomplete. `size === 0` alone wouldn't
     // catch this — the tolerance check on
-    // `cacheSize < expectedMembers * 0.9` does.
+    // `cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD`
+    // does. The two adjacent tests (`prewarm list() rejection` above
+    // and this one) inline the guild rather than using
+    // `makeUnlinkedGuild` because they need to override `list` and set
+    // `memberCount`, both of which the helper hides.
     const member1 = {
       id: 'u1', user: { tag: 'User1' },
       roles: { cache: { has: jest.fn(() => true) } },
@@ -1194,6 +1198,67 @@ describe('/unlinked command', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
     );
+  });
+
+  it('completeness threshold boundary: cache=89/100 → degraded; cache=91/100 → proceeds', async () => {
+    // Pin the 0.9 boundary explicitly. Without these, a future tweak
+    // of `UNLINKED_CACHE_COMPLETENESS_THRESHOLD` shifts admin-visible
+    // behavior silently. The two cases bracket the threshold at
+    // memberCount=100: 89 must trigger degraded, 91 must proceed.
+    const { UNLINKED_CACHE_COMPLETENESS_THRESHOLD } = require('../src/constants');
+    expect(UNLINKED_CACHE_COMPLETENESS_THRESHOLD).toBe(0.9); // anchor the boundary cases to the constant
+
+    const mkMember = (id) => ({
+      id, user: { tag: id },
+      roles: { cache: { has: jest.fn(() => false) } }, // no contributor role on these
+    });
+
+    const mkCache = (n) => {
+      const cache = new Map();
+      for (let i = 0; i < n; i++) cache.set(`u${i}`, mkMember(`u${i}`));
+      // /unlinked uses `guild.members.cache.filter(...)`; discord.js
+      // Collection has `filter` but plain Map does not.
+      cache.filter = function (fn) {
+        const r = new Map();
+        for (const [k, v] of this) { if (fn(v, k)) r.set(k, v); }
+        return r;
+      };
+      return cache;
+    };
+
+    // Below boundary → degraded.
+    {
+      const interaction = makeInteraction({
+        commandName: 'unlinked',
+        guild: {
+          members: { cache: mkCache(89), list: jest.fn(async () => new Map()) },
+          roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
+          memberCount: 100,
+        },
+      });
+      await findCmd().execute(interaction);
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
+      );
+    }
+
+    // Above boundary → proceeds. With no contributors found,
+    // /unlinked reports "All contributors have linked".
+    {
+      mockDb.getLinkedDiscordIds.mockResolvedValue(new Set());
+      const interaction = makeInteraction({
+        commandName: 'unlinked',
+        guild: {
+          members: { cache: mkCache(91), list: jest.fn(async () => new Map()) },
+          roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
+          memberCount: 100,
+        },
+      });
+      await findCmd().execute(interaction);
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('All contributors') }),
+      );
+    }
   });
 
   it('handles error after prewarm — db query failure surfaces to user', async () => {

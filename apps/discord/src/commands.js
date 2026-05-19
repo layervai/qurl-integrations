@@ -387,8 +387,11 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         // Successful-completion observability. Captures cache footprint
         // for large-guild memory tracking — paginating a 500k-member
         // guild persists 500k GuildMember objects in-process until the
-        // worker recycles.
-        logger.info('members pre-warm complete', {
+        // worker recycles. Logged at `debug` (not `info`) because high-
+        // traffic http-only workers may fire this thousands of times
+        // per day; warn paths above remain at `warn` so the degraded
+        // signal isn't drowned out.
+        logger.debug('members pre-warm complete', {
           ...logCtx, guild_id: guild.id, pages: page + 1, cache_size: guild.members.cache?.size,
         });
       }
