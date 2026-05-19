@@ -12,14 +12,19 @@ import (
 // constants in tests because goconst would otherwise flag the 4+
 // duplications across fixture builders.
 const (
-	testKeyData         = "data"
-	testKeyError        = "error"
-	testKeyResourceID   = "resource_id"
-	testKeyTitle        = "title"
-	testResourceIDFix   = "r_prod_db" // canonical test resource_id
-	testCmdSlash        = "/qurl"
-	testCmdAdminClaim   = "admin claim"
-	testFieldCallbackID = "callback_id"
+	testKeyData       = "data"
+	testKeyError      = "error"
+	testKeyResourceID = "resource_id"
+	testKeyTitle      = "title"
+	testResourceIDFix = "r_prod_db" // canonical test resource_id
+	// mintByTestResourcePath is the resource-scoped mint endpoint
+	// that `client.Create` hits when given a ResourceID (alias-form
+	// /qurl get). Lifted so the alias-form tests register their
+	// httptest mock at the same path the bot actually calls.
+	mintByTestResourcePath = "/v1/resources/" + testResourceIDFix + "/qurls"
+	testCmdSlash           = "/qurl"
+	testCmdAdminClaim      = "admin claim"
+	testFieldCallbackID    = "callback_id"
 )
 
 // writeResourceFixtureWithTarget writes the resource envelope used

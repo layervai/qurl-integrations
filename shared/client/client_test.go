@@ -859,12 +859,15 @@ func TestCreatePathIsPlural(t *testing.T) {
 }
 
 func TestCreateResourceIDFlow(t *testing.T) {
-	// When ResourceID is set and TargetURL is empty, the wire payload
-	// must contain `resource_id` and must NOT contain `target_url`.
-	// Server-side `mutually_exclusive_fields` rejects bodies that
-	// serialize an empty `target_url` alongside a `resource_id`.
+	// When ResourceID is set, Create hits the resource-scoped mint
+	// endpoint (POST /v1/resources/{id}/qurls). The id rides in the
+	// URL path, so the request body MUST NOT carry resource_id or
+	// target_url — qURL service's CreateQurlForResourceRequest schema
+	// has neither (the path identifies the resource).
+	var gotPath string
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		var err error
 		gotBody, err = io.ReadAll(r.Body)
 		if err != nil {
@@ -882,16 +885,18 @@ func TestCreateResourceIDFlow(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Decode into a generic map so omitempty behavior is observable.
+	if got, want := gotPath, "/v1/resources/"+testResourceID+"/qurls"; got != want {
+		t.Errorf("path: got %q, want %q", got, want)
+	}
 	var raw map[string]any
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v (body=%s)", err, gotBody)
 	}
-	if got := raw["resource_id"]; got != testResourceID {
-		t.Errorf("resource_id: got %v, want %q", got, testResourceID)
+	if _, ok := raw["resource_id"]; ok {
+		t.Errorf("resource_id must NOT appear in body (rides in URL path); body=%s", gotBody)
 	}
-	if _, hasTargetURL := raw["target_url"]; hasTargetURL {
-		t.Errorf("target_url must be omitted when empty (server-side mutually_exclusive_fields rule); body=%s", gotBody)
+	if _, ok := raw["target_url"]; ok {
+		t.Errorf("target_url must NOT appear in body on resource-scoped mint; body=%s", gotBody)
 	}
 }
 
