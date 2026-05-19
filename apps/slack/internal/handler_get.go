@@ -358,8 +358,13 @@ func (h *Handler) resolveAliasForGet(ctx context.Context, log *slog.Logger, team
 // `$r_<id>` token. Workspace admins bypass the allow-set so the
 // list-and-get round-trip works in the admin's unfiltered list view;
 // non-admins must have the ID in `AllowedResourceIDsForChannel` (the
-// union of `alias_bindings.values()` and `allowed_resource_ids`),
-// keeping list visibility and mintability aligned for them.
+// union of `alias_bindings.values()` and `allowed_resource_ids`).
+//
+// Post-revert of #234 (PR #459), `/qurl list` is workspace-wide, so
+// a non-admin can see `$r_<id>` tokens from other channels in the
+// list. This gate keeps mintability channel-scoped despite the
+// widened list visibility — the asymmetry is intentional but
+// surfaces a UX gap tracked by TODO(GH-460).
 //
 // Returns nil on allow, [*userError] on AdminStore-nil, allow-set
 // fetch failure, or membership miss.

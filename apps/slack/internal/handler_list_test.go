@@ -78,6 +78,14 @@ func TestHandleList_RendersResources(t *testing.T) {
 // non-admin invoking /qurl list from a channel with no alias_bindings
 // still sees the upstream master listing as-is.
 //
+// The name describes the *intent* (no per-channel filter applies),
+// not the *mechanism* — the renderer reads `r.Alias` straight off
+// the upstream client.Resource payload and never consults
+// channel_policies, so no setup of alias_bindings rows in this test
+// could change what gets rendered. If a future change wires alias
+// resolution through DDB, this test should grow a positive
+// cross-channel-seed assertion to fence the regression.
+//
 // Load-bearing assertions are the two below: (a) the prod-db row
 // renders straight off the upstream payload, and (b) none of the
 // removed pagination-gap copy strings ("past the first page",
