@@ -1060,10 +1060,8 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_views,
       Key: { qurl_id: qurlId },
-      // `consumed` is a DDB reserved keyword (see the AWS reserved-words
-      // list); referencing it as a bare attribute name in Update/
-      // ConditionExpression returns ValidationException at write time.
-      // Aliased via ExpressionAttributeNames to dodge that.
+      // `consumed` is a DDB reserved keyword — must be aliased via
+      // ExpressionAttributeNames or DDB returns ValidationException.
       ConditionExpression:
         'attribute_not_exists(last_event_id) OR ('
         + 'last_event_id <> :eid AND ('
