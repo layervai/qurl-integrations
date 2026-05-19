@@ -48,7 +48,7 @@ const configured = rawStoreType && rawStoreType.trim();
 const BACKEND = configured || 'ddb';
 
 if (!VALID_BACKENDS.includes(BACKEND)) {
-  throw new Error(`Unknown STORE_TYPE: '${BACKEND}'. Valid backends: ${VALID_BACKENDS.join(', ')}. Set STORE_TYPE to one of these (or leave unset to default to ddb).`);
+  throw new Error(`Unknown STORE_TYPE: '${BACKEND}'. The only valid value today is 'ddb' — set STORE_TYPE='ddb' (or leave it unset to take the default). A stale 'sqlite' from a pre-DDB-only env file lands here.`);
 }
 
 let store;

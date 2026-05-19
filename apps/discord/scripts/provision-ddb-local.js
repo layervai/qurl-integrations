@@ -53,8 +53,12 @@ const region = process.env.AWS_REGION || 'us-east-1';
 // Tighter than `endsWith('-')`: also rejects a bare `'-'` (which
 // would produce table names like `-github-links`). Matches the
 // pattern terraform's `qurl-bot-ddb` module uses for `local.table_prefix`.
-if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix)) {
-  console.error(`DDB_TABLE_PREFIX must match /^[a-z0-9][a-z0-9-]*-$/ (got '${prefix}').`);
+// 64-char cap catches a copy-paste accident before any
+// `CreateTable` call surfaces DDB's 255-char `TableName` limit
+// (prefix + the longest suffix `orphaned-oauth-tokens` = ~85 chars
+// of headroom).
+if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
+  console.error(`DDB_TABLE_PREFIX must match /^[a-z0-9][a-z0-9-]*-$/ and be at most 64 chars (got '${prefix}').`);
   process.exit(1);
 }
 

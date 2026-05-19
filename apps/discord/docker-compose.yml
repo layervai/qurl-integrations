@@ -16,7 +16,11 @@
 # ./data` to the command line.
 services:
   dynamodb-local:
-    image: amazon/dynamodb-local:2.5.4
+    # Pinned by SHA digest (not just `:2.5.4`, which floats) so the
+    # bash `/dev/tcp` healthcheck below stays valid — a tag-only pin
+    # could silently land on an image revision without bash and the
+    # healthcheck would fail forever without surfacing the cause.
+    image: amazon/dynamodb-local:2.5.4@sha256:cf8cebd061f988628c02daff10fdb950a54478feff9c52f6ddf84710fe3c3906
     container_name: qurl-bot-discord-ddb-local
     # `-sharedDb` collapses every region/credential combo into one
     # backing store so the bot can use any (or no) AWS_REGION /

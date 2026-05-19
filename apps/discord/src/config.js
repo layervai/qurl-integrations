@@ -580,6 +580,14 @@ module.exports = {
   // gateway-shim wiring both read through the same parsed shape.
   // Unset / empty / whitespace-only falls back to 'ddb', matching
   // src/store/index.js's selection precedence.
+  //
+  // `src/store/index.js` is the source of truth for STORE_TYPE
+  // validation — it throws on unknown values at module load (which
+  // runs before any consumer reads this config field). This field
+  // is retained solely so the downstream guard `unsupportedRole-
+  // ResumeCombo` and other config-level checks can read a normalized
+  // string instead of re-parsing the env. Don't add validation
+  // logic here; surface it in store/index.js where it belongs.
   STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'ddb',
 
   // DDB table-name prefix shared by every per-table consumer
