@@ -218,9 +218,11 @@ var ErrInvalidFlag = errors.New("invalid flag")
 // includes the optional pipe-delimited display label). Real Slack
 // user IDs start with `U` (workspace user) or `W` (Enterprise Grid
 // org-level user) followed by 8+ uppercase-alphanumeric characters,
-// per Slack's documented ID grammar — `{8,}` after the prefix
+// per Slack's documented ID grammar — `{8,63}` after the prefix
 // rejects toy IDs like `<@A>` at parse time, where a future
-// AddAdmin would otherwise happily store a bogus user ID.
+// AddAdmin would otherwise happily store a bogus user ID. The
+// `{,63}` ceiling mirrors qurlIDPattern's posture so a pathological
+// paste surfaces as a parser error rather than propagating to DDB.
 //
 // TODO(legacy-slack-ids): pre-2017 Slack workspaces may have user
 // IDs shorter than 9 chars total (e.g. `U12345`). If any such
@@ -228,7 +230,7 @@ var ErrInvalidFlag = errors.New("invalid flag")
 // because their ID rejects here, relax the {8,} floor — the
 // security posture only depends on the regex rejecting truly-
 // malformed tokens, not on the length floor itself.
-var userMentionPattern = regexp.MustCompile(`^<@([UW][A-Z0-9]{8,})(?:\|[^>]*)?>$`)
+var userMentionPattern = regexp.MustCompile(`^<@([UW][A-Z0-9]{8,63})(?:\|[^>]*)?>$`)
 
 // flagKeyCharset is the shared key-shape contract for flag-style
 // tokens. Used by both [flagPattern] (full key:value parse) and

@@ -18,7 +18,6 @@ package internal
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -47,8 +46,9 @@ type fakeDDB struct {
 	keySchemas map[string][]string
 
 	// updateHook is invoked on every UpdateItem if non-nil. Tests use
-	// it for "must NOT be called" assertions (e.g., the AllowResource
-	// gate that prevents non-admins from reaching the mutation).
+	// it for "must NOT be called" assertions (e.g., the AddAdmin /
+	// RemoveAdmin admin-gate that prevents non-admins from reaching
+	// the mutation — see failOnAdminMutation).
 	updateHook func(in *dynamodb.UpdateItemInput)
 	// putHook mirrors updateHook for PutItem (BindWorkspace).
 	putHook func(in *dynamodb.PutItemInput)
@@ -58,8 +58,6 @@ type fakeDDB struct {
 	updateItemErrs map[string]error
 	// putItemErrs maps tableName → injected PutItem error.
 	putItemErrs map[string]error
-	// queryErrs maps tableName → injected Query error.
-	queryErrs map[string]error
 	// getItemCounts tracks call counts per table for the
 	// SetGetItemErrAfter mechanism.
 	getItemCounts map[string]int
@@ -129,16 +127,6 @@ func (f *fakeDDB) SetPutItemErr(table string, err error) {
 		f.putItemErrs = map[string]error{}
 	}
 	f.putItemErrs[table] = err
-}
-
-// SetQueryErr injects an error returned on every Query against `table`.
-func (f *fakeDDB) SetQueryErr(table string, err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.queryErrs == nil {
-		f.queryErrs = map[string]error{}
-	}
-	f.queryErrs[table] = err
 }
 
 // SetUpdateItemHook installs a callback invoked on every UpdateItem.
@@ -410,84 +398,6 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-// Query implements [slackdata.DynamoDBClient] over the
-// `slack_team_id = :tid` shape used by [slackdata.Store.ListPolicies].
-// Honors Limit and ExclusiveStartKey.
-//
-// We don't parse the KeyConditionExpression — the only shape in use
-// is `slack_team_id = :tid`. If a future caller adds a begins_with
-// or SK predicate the fake will need to grow with it; until then
-// keeping the parser narrow avoids over-engineering.
-func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err, ok := f.queryErrs[aws.ToString(in.TableName)]; ok {
-		return nil, err
-	}
-	table, schema, err := f.tableAndSchema(aws.ToString(in.TableName))
-	if err != nil {
-		return nil, err
-	}
-	if len(schema) < 1 {
-		return nil, errors.New("fakeDDB.Query: table has no PK")
-	}
-	pkAttr := schema[0]
-	tidVal, err := requireStringExprValue(in.ExpressionAttributeValues, ":tid")
-	if err != nil {
-		return nil, err
-	}
-	// Filter rows whose PK matches :tid, ordered by composite-key
-	// string so pagination is deterministic across runs.
-	keys := make([]string, 0, len(table))
-	for k, item := range table {
-		s, ok := item[pkAttr].(*ddbtypes.AttributeValueMemberS)
-		if !ok || s.Value != tidVal {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	sortStrings(keys)
-
-	startKey := ""
-	if len(in.ExclusiveStartKey) > 0 {
-		startKey, err = compositeKey(schema, in.ExclusiveStartKey)
-		if err != nil {
-			return nil, fmt.Errorf("Query: ExclusiveStartKey: %w", err)
-		}
-	}
-
-	limit := -1
-	if in.Limit != nil {
-		limit = int(*in.Limit)
-	}
-
-	out := &dynamodb.QueryOutput{}
-	collected := 0
-	skipping := startKey != ""
-	for _, k := range keys {
-		if skipping {
-			if k == startKey {
-				skipping = false
-			}
-			continue
-		}
-		out.Items = append(out.Items, cloneItem(table[k]))
-		collected++
-		out.Count = int32(collected)
-		if limit > 0 && collected >= limit {
-			// Did we reach the end? If more keys remain after this
-			// position, set LastEvaluatedKey to the current row's PK/SK.
-			pos := indexOf(keys, k)
-			if pos >= 0 && pos < len(keys)-1 {
-				out.LastEvaluatedKey = lastEvaluatedKeyFrom(schema, table[k])
-			}
-			break
-		}
-	}
-
-	return out, nil
-}
-
 // tableAndSchema looks up the table map and key schema, returning a
 // clear error on an unknown table name (catches typos in test setup).
 func (f *fakeDDB) tableAndSchema(name string) (table map[string]map[string]ddbtypes.AttributeValue, schema []string, err error) {
@@ -496,15 +406,6 @@ func (f *fakeDDB) tableAndSchema(name string) (table map[string]map[string]ddbty
 		return nil, nil, fmt.Errorf("fakeDDB: unknown table %q (did you wire it via newFakeDDB?)", name)
 	}
 	return t, f.keySchemas[name], nil
-}
-
-// lastEvaluatedKeyFrom extracts just the PK/SK attrs from an item.
-func lastEvaluatedKeyFrom(schema []string, item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.AttributeValue {
-	out := make(map[string]ddbtypes.AttributeValue, len(schema))
-	for _, attr := range schema {
-		out[attr] = item[attr]
-	}
-	return out
 }
 
 // cloneItem returns a shallow copy of the item map. AttributeValue
@@ -516,41 +417,6 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 		out[k] = v
 	}
 	return out
-}
-
-// sortStrings is a tiny stable insertion sort so the package doesn't
-// need an additional import for sort.Strings. The slices are small
-// (typical workspace has tens of channel_policies rows) so an O(n^2)
-// sort is fine.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
-}
-
-func indexOf(s []string, v string) int {
-	for i, x := range s {
-		if x == v {
-			return i
-		}
-	}
-	return -1
-}
-
-// requireStringExprValue reads a string expression-attribute value
-// or errors. Used by Query to extract :tid.
-func requireStringExprValue(vals map[string]ddbtypes.AttributeValue, name string) (string, error) {
-	v, ok := vals[name]
-	if !ok {
-		return "", fmt.Errorf("fakeDDB: missing expression attribute %q", name)
-	}
-	s, ok := v.(*ddbtypes.AttributeValueMemberS)
-	if !ok {
-		return "", fmt.Errorf("fakeDDB: expression attribute %q is not a string", name)
-	}
-	return s.Value, nil
 }
 
 // applyUpdateExpression walks the SET/ADD/DELETE clauses the

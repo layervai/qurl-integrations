@@ -97,12 +97,11 @@ func TestHandleList_NonAdminFiltersToChannelPolicy(t *testing.T) {
 // TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAlias fences the
 // `allowed_resource_ids`-only branch of the union: a row whose
 // channel_policies has only `allowed_resource_ids` populated (no
-// `alias_bindings`) — set by `/qurl admin allow #channel $r_<id>` —
-// MUST surface the resource in non-admin `/qurl list`. Pre-fix, the
-// handler read [ListPolicies] which only emits one entry per
-// `alias_bindings` binding, so a pure-allowed-set resource was
-// `/qurl get`-mintable but invisible in `/qurl list` — the two
-// surfaces diverged.
+// `alias_bindings`) — a hand-seeded legacy shape from before the
+// alias-bindings pivot — MUST surface the resource in non-admin
+// `/qurl list`. Pre-fix the list handler walked alias-bindings
+// only, so a pure-allowed-set resource was `/qurl get`-mintable
+// but invisible in `/qurl list` — the two surfaces diverged.
 func TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)

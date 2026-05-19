@@ -13,8 +13,8 @@ import (
 )
 
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
-// flow: ListPolicies → filter by channel → per-row resource fetch →
-// rendered list. Single alias binding on the channel.
+// flow: LookupChannelAlias → per-row resource fetch → rendered
+// list. Single alias binding on the channel.
 func TestHandleAliases_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -98,7 +98,7 @@ func TestHandleAliases_ChannelWithNoAliasBindingsShowsNone(t *testing.T) {
 // gets a helpful "ask an admin" hint rather than an empty reply.
 func TestHandleAliases_NoEntries(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// No seeded policies — ListPolicies returns empty.
+	// No seeded policies — LookupChannelAlias returns empty.
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
