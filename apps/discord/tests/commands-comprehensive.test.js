@@ -1136,7 +1136,63 @@ describe('/unlinked command', () => {
     await findCmd().execute(interaction);
 
     expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Could not load member list') }),
+      expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
+    );
+  });
+
+  it('prewarm list() rejection (REST 429) → degraded message surfaces', async () => {
+    // End-to-end pin of the "REST failure swallowed → degraded
+    // message" path: the empty-cache test above pins the BRANCH but
+    // not the original failure trigger. Here `members.list()` rejects
+    // with a 429-shaped error (the most likely real-world cause); the
+    // prewarm swallows it, cache stays empty, and the degraded check
+    // surfaces the message.
+    const interaction = makeInteraction({
+      commandName: 'unlinked',
+      guild: {
+        members: {
+          cache: new Map(),
+          list: jest.fn(async () => {
+            const err = new Error('rate limited'); err.code = 429; throw err;
+          }),
+        },
+        roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
+      },
+    });
+
+    await findCmd().execute(interaction);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
+    );
+  });
+
+  it('prewarm partial cache (mid-pagination failure) → degraded message surfaces', async () => {
+    // Round-4 cr regression-pin: a mid-pagination failure leaves the
+    // cache non-empty but incomplete. `size === 0` alone wouldn't
+    // catch this — the tolerance check on
+    // `cacheSize < expectedMembers * 0.9` does.
+    const member1 = {
+      id: 'u1', user: { tag: 'User1' },
+      roles: { cache: { has: jest.fn(() => true) } },
+    };
+    const interaction = makeInteraction({
+      commandName: 'unlinked',
+      guild: {
+        // Cache has 1 member, but the guild reports 100 — clearly partial.
+        members: {
+          cache: new Map([['u1', member1]]),
+          list: jest.fn(async () => new Map()),
+        },
+        roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
+        memberCount: 100,
+      },
+    });
+
+    await findCmd().execute(interaction);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
     );
   });
 

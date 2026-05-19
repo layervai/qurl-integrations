@@ -89,6 +89,14 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
 const MAX_CONCURRENT_MONITORS = 50;
 
+// Discord's `GET /guilds/{id}/members` page cap (and the maximum value
+// accepted by the `limit` query param).
+const DISCORD_MEMBERS_PAGE_SIZE = 1000;
+// Safety bound on the @everyone prewarm pagination loop. Exceeding
+// Discord's per-guild ceiling (~1M) means an upstream bug is returning
+// steady-state full pages without advancing the `after` cursor.
+const PREWARM_MAX_PAGES = 1000;
+
 // GitHub event actions we care about
 const GITHUB_ACTIONS = {
   PR_MERGED: 'closed',  // with merged=true
@@ -451,6 +459,8 @@ module.exports = {
   LIMITS,
   MAX_FILE_SIZE,
   MAX_CONCURRENT_MONITORS,
+  DISCORD_MEMBERS_PAGE_SIZE,
+  PREWARM_MAX_PAGES,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,

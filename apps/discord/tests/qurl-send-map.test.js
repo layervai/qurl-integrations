@@ -3082,13 +3082,16 @@ describe('handleQurlSend — slash entry', () => {
 // here, not in production.
 
 // Identifies the pre-warm call by its options-object shape: a bulk
-// list carries `{ limit: 1000, after? }` with no per-user keys.
-// Disambiguates from the per-ID `members.fetch(id)` calls in
-// resolveRecipientUsers AND from any future per-user `list` shape
-// that might carry a `query` field.
+// list carries `{ limit: DISCORD_MEMBERS_PAGE_SIZE, after? }` with no
+// per-user keys. Disambiguates from the per-ID `members.fetch(id)`
+// calls in resolveRecipientUsers AND from any future per-user `list`
+// shape that might carry a `query` field. Pulling the constant from
+// the source-of-truth module avoids drift if Discord raises the page
+// cap or we back off for memory reasons.
+const { DISCORD_MEMBERS_PAGE_SIZE } = require('../src/constants');
 const isPrewarmCall = ([arg]) =>
   arg && typeof arg === 'object'
-  && arg.limit === 1000
+  && arg.limit === DISCORD_MEMBERS_PAGE_SIZE
   && arg.user === undefined
   && arg.query === undefined;
 

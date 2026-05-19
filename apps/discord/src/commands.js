@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS, TRUST } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -256,15 +256,6 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
 const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
 
-// Discord's `GET /guilds/{id}/members` page cap (and the maximum value
-// accepted by the `limit` query param).
-const DISCORD_MEMBERS_PAGE_SIZE = 1000;
-// Safety bound on the prewarm pagination loop. Exceeding Discord's
-// per-guild member ceiling (~1M) means an upstream bug is returning
-// steady-state full pages without advancing the `after` cursor; bail
-// out and warn rather than spin.
-const PREWARM_MAX_PAGES = 1000;
-
 // discord.js `Guild._patch` only sets `memberCount` from the gateway
 // GUILD_CREATE payload. The REST `GET /guilds/:id?with_counts=true`
 // path populates `approximateMemberCount` instead. HTTP-only worker
@@ -327,6 +318,10 @@ async function prewarmGuildMembersCache(guild, logCtx) {
       // mode). The reply is deferred so Discord's 3s rule doesn't apply;
       // user-perceived latency on huge guilds is the accepted trade-off.
       let after;
+      // `page` is declared outside the loop because the post-loop
+      // safety-cap check (`page === PREWARM_MAX_PAGES`) needs to read
+      // its final value. A future "scope this inside the for" cleanup
+      // would silently disable the safety-cap warn.
       let page;
       for (page = 0; page < PREWARM_MAX_PAGES; page++) {
         const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after });
@@ -335,8 +330,18 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         // Discord sorts ascending by user_id — lastKey() is the right
         // `after` cursor for the next page.
         const nextAfter = batch.lastKey();
-        // Defensive: if Discord ever returns a full page without advancing
-        // the cursor (upstream bug), bail rather than burn 1000 iterations
+        // Defensive: a non-empty Collection's `lastKey()` always returns
+        // a real key today, but `nextAfter == null` would equal an
+        // undefined `after` on iteration 0 and false-negative the
+        // non-advancement guard below.
+        if (nextAfter == null) {
+          logger.warn('members pre-warm received full page with null cursor; bailing', {
+            ...logCtx, guild_id: guild.id, pages: page + 1,
+          });
+          break;
+        }
+        // If Discord ever returns a full page without advancing the
+        // cursor (upstream bug), bail rather than burn 1000 iterations
         // re-fetching the same window forever.
         if (nextAfter === after) {
           logger.warn('members pre-warm cursor did not advance; bailing', {
@@ -7737,13 +7742,20 @@ const commands = [
         // the authoritative member set.
         await prewarmGuildMembersCache(guild, { command: '/unlinked' });
         // Prewarm swallows REST failures (correct for /qurl send
-        // degraded mode). For an admin reporting command an empty
-        // cache is pathological — reporting "all linked" against a
-        // zero-member cache is a silent false positive. Surface the
-        // degraded state explicitly.
-        if (guild.members.cache.size === 0) {
+        // degraded mode). For an admin reporting command, an empty
+        // OR partial cache is pathological — reporting "all linked"
+        // against an incomplete member set is a silent false positive.
+        // Mid-pagination failures (e.g. 429 on page 6 of 12) leave a
+        // non-empty cache that's still missing members. Compare against
+        // the expected count with a generous tolerance to allow
+        // approximateMemberCount drift but catch substantive shortfalls.
+        const expectedMembers = effectiveGuildMemberCount(guild);
+        const cacheSize = guild.members.cache?.size ?? 0;
+        const looksIncomplete = cacheSize === 0
+          || (expectedMembers != null && cacheSize < expectedMembers * 0.9);
+        if (looksIncomplete) {
           return interaction.editReply({
-            content: '⚠️ Could not load member list (Discord API may be degraded). Please retry.',
+            content: '⚠️ Could not load complete member list (Discord API may be degraded). Please retry.',
           });
         }
         const contributors = guild.members.cache.filter(
