@@ -182,6 +182,25 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// ErrUnexpectedArgument rather than the misleading
 		// "invalid flag" message applyFlag would otherwise return.
 		{name: "get with non-flag trailing positional rejected", text: "get $prod-db junk", wantErr: ErrUnexpectedArgument},
+		// Resource-ID-shape fences on the `get` verb. `requireResourceToken`
+		// tries [resourceIDPattern] first, then [aliasCharsetPattern];
+		// shapes that match neither must reject with ErrInvalidAlias
+		// (the joint sentinel) — exact behavior matters because the
+		// fallback shape would otherwise be the only path that minted
+		// a malformed token.
+		{name: "resource-id too short rejected", text: "get $r_short", wantErr: ErrInvalidAlias},
+		{name: "resource-id uppercase rejected", text: "get $r_TOOMANYCHARS", wantErr: ErrInvalidAlias},
+		// Exact-boundary fences for [resourceIDPattern]'s `{11}` cap:
+		// 10 chars (one under) and 12 chars (one over). The pattern is
+		// the joint shape `^r_[a-z0-9_-]{11}$` — a single char delta on
+		// either side flips the match. Without these, a future regex
+		// loosening to `{10,12}` would silently mint malformed tokens
+		// that qurl-service then 404s on.
+		{name: "resource-id exactly 10 chars rejected", text: "get $r_aaaaaaaaaa", wantErr: ErrInvalidAlias},
+		{name: "resource-id exactly 12 chars rejected", text: "get $r_aaaaaaaaaaaa", wantErr: ErrInvalidAlias},
+		// Invalid byte ($) anywhere in the body — neither resource-ID
+		// nor alias shape accepts $ in the tail.
+		{name: "resource-id invalid byte rejected", text: "get $r_aaa$bbbccc", wantErr: ErrInvalidAlias},
 		// A typo-class URL paste (`get $alias https://x.example:8080`)
 		// contains `:` but is plainly not a flag; the
 		// http://-and-https://-aware looksLikeFlag check routes it to
@@ -298,6 +317,50 @@ func TestParse_AliasLengthBoundary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "longer than 64 characters") {
 		t.Errorf("Parse(get $<65 chars>) error = %q, want substring %q", err.Error(), "longer than 64 characters")
+	}
+}
+
+// TestRequireResourceToken_PositiveShapes exercises the kind-tagged
+// return shape of [requireResourceToken] directly so a regex change
+// surfaces at the unit level rather than only through end-to-end
+// fixtures. The Parse-level tests cover the integration shape; this
+// pins the parser's structural contract — alias kind, resource-id
+// kind, and what each Value is — without the parseGet flag-handling
+// overhead.
+func TestRequireResourceToken_PositiveShapes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		input     string
+		wantKind  ResourceTokenKind
+		wantValue string
+	}{
+		{name: "alias shape", input: "$prod-db", wantKind: ResourceTokenAlias, wantValue: "prod-db"},
+		{name: "single-char alias", input: "$a", wantKind: ResourceTokenAlias, wantValue: "a"},
+		{name: "resource-id shape", input: "$r_abc123def01", wantKind: ResourceTokenResourceID, wantValue: "r_abc123def01"},
+		// All-zero body and mixed-charset body — both still match
+		// [resourceIDPattern]'s `^r_[a-z0-9_-]{11}$` so the kind tag
+		// must come back as ResourceTokenResourceID. Pinned so a
+		// regex tightening (e.g., to `[a-z0-9]` only) shows up as a
+		// kind-flip rather than a silent fall-through to the alias
+		// shape.
+		{name: "resource-id all digits body", input: "$r_00000000000", wantKind: ResourceTokenResourceID, wantValue: "r_00000000000"},
+		{name: "resource-id mixed body with dashes", input: "$r_a-b-c-d-e-f", wantKind: ResourceTokenResourceID, wantValue: "r_a-b-c-d-e-f"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tok, err := requireResourceToken(tc.input)
+			if err != nil {
+				t.Fatalf("requireResourceToken(%q) error = %v", tc.input, err)
+			}
+			if tok.Kind != tc.wantKind {
+				t.Errorf("Kind = %q, want %q", tok.Kind, tc.wantKind)
+			}
+			if tok.Value != tc.wantValue {
+				t.Errorf("Value = %q, want %q", tok.Value, tc.wantValue)
+			}
+		})
 	}
 }
 

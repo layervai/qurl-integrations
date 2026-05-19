@@ -463,3 +463,137 @@ func TestMapMintError_Unmapped5xx(t *testing.T) {
 		}
 	}
 }
+
+// testResourceIDFallback is an 11-char-suffix resource ID that
+// satisfies [resourceIDPattern] on the `$r_<id>` parser path.
+// `testResourceIDFix` (`r_prod_db`) is too short to match the regex
+// — it's the legacy fixture used by alias-form tests where the
+// resource ID is set via DDB binding and never user-typed.
+const testResourceIDFallback = "r_abc123def01"
+
+// mintByFallbackResourcePath is the resource-scoped mint endpoint
+// `client.Create` hits when given a `ResourceID = testResourceIDFallback`.
+// Mirrors [mintByTestResourcePath] from handler_test_helpers_test.go
+// but for the 11-char-suffix ID used by the `$r_<id>` parser-shape
+// fixtures.
+const mintByFallbackResourcePath = "/v1/resources/" + testResourceIDFallback + "/qurls"
+
+// TestHandleGet_DollarResourceIDAllowedSet fences the canonical
+// non-admin `/qurl get $r_<id>` flow: the resource ID is in the
+// channel's allowed-set (union of `alias_bindings.values()` and
+// `allowed_resource_ids`), the mint reaches the resource-scoped
+// `POST /v1/resources/{id}/qurls` endpoint, and the response_url
+// returns the qURL link. Closes the round-trip gap that `/qurl list`
+// rendered `$r_<id>` rows for but `/qurl get` couldn't consume.
+//
+// The ID rides in the URL path (#454 cutover), so the body must NOT
+// carry `resource_id` — the assertion below pins that contract.
+func TestHandleGet_DollarResourceIDAllowedSet(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{testResourceIDFallback})
+	var bodyHadResourceID bool
+	ts.addCustomer("POST", mintByFallbackResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, bodyHadResourceID = body[testKeyResourceID]
+		writeCreateFixture(t, w, "https://qurl.link/by-id", testResourceIDFallback)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
+	if bodyHadResourceID {
+		t.Errorf("mint request body carried resource_id field — should be in URL path only after #454")
+	}
+	if !strings.Contains(async, "https://qurl.link/by-id") {
+		t.Errorf("async reply missing qURL link: %q", async)
+	}
+}
+
+// TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin fences the
+// channel-scoped gate on the `$r_<id>` path for non-admins: a
+// resource ID that isn't in the channel's allow-set (union of
+// `alias_bindings` + `allowed_resource_ids`) must surface the
+// "not allowed in this channel" copy without ever reaching the
+// customer mint. Aligned with what `/qurl list` shows non-admins
+// so the get and list surfaces agree on what's available in the
+// channel for non-admins.
+func TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	// Seed a different ID into the allow-set so the requested one is
+	// definitively absent (empty allow-set would also work; this
+	// shape pins that lookup-then-membership is the gate, not
+	// "row missing").
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByFallbackResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not-be-minted", testResourceIDFallback)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "is not allowed in this channel") {
+		t.Errorf("async reply missing not-allowed copy: %q", async)
+	}
+	if !strings.Contains(async, "`/qurl list`") {
+		t.Errorf("async reply missing `/qurl list` self-serve pointer: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached despite resource-id not-in-allow-set (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_DollarResourceIDAdminBypassesAllowedSet fences the
+// admin asymmetry resolution: a workspace admin can mint `$r_<id>`
+// without the resource being in the current channel's allow-set,
+// matching `/qurl list`'s unfiltered admin view. Without this
+// bypass, the list footer's copy-paste promise ("Copy any `$token`
+// and run `/qurl get $token`") breaks for admins on cross-channel
+// resources.
+func TestHandleGet_DollarResourceIDAdminBypassesAllowedSet(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// Admin can mint resources NOT in this channel's allow-set —
+	// seed a row whose allow-set excludes the target ID.
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	ts.addCustomer("POST", mintByFallbackResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/admin-bypass", testResourceIDFallback)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/admin-bypass") {
+		t.Errorf("admin failed to mint resource outside channel allow-set: %q", async)
+	}
+}
+
+// TestHandleGet_DollarResourceIDAdminStoreNil fences the
+// AdminStore-nil short-circuit on the `$r_<id>` path. Same
+// fail-closed posture as the alias-form: no allow-set lookup
+// possible → refuse with the user-facing "admin features not
+// configured" copy that points the user at their Slack admin.
+// Mint MUST NOT be reached.
+func TestHandleGet_DollarResourceIDAdminStoreNil(t *testing.T) {
+	ts := newAdminTestServers(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AdminStore = nil
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "admin features are not yet configured") {
+		t.Errorf("async reply missing not-configured copy: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached despite nil AdminStore on resource-id form (hits = %d)", mintHits.Load())
+	}
+}

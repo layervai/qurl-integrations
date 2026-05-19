@@ -16,6 +16,8 @@ const (
 	testKeyError      = "error"
 	testKeyResourceID = "resource_id"
 	testKeyTitle      = "title"
+	testKeyType       = "type"
+	testKeyTargetURL  = "target_url"
 	testResourceIDFix = "r_prod_db" // canonical test resource_id
 	// mintByTestResourcePath is the resource-scoped mint endpoint
 	// that `client.Create` hits when given a ResourceID (alias-form

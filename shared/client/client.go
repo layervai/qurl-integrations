@@ -893,6 +893,76 @@ func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resourc
 	return &out, nil
 }
 
+// ListResourcesInput is the paginated input shape for [Client.ListResources].
+// Mirrors the qurl-service `GET /v1/resources` query parameters
+// (`cursor`, `limit`).
+type ListResourcesInput struct {
+	// Limit caps the number of items returned in one page. Server
+	// accepts 1-100; zero falls back to the server default.
+	Limit int
+	// Cursor is the opaque next-page handle from a previous response.
+	Cursor string
+}
+
+// ListResourcesOutput is the response shape from [Client.ListResources].
+type ListResourcesOutput struct {
+	Resources  []Resource
+	NextCursor string
+	HasMore    bool
+}
+
+// listResourcesMaxLimit is the server-enforced upper bound on the
+// `/v1/resources?limit=` query parameter (qurl-service rejects
+// `limit > 100` with a 400). Lifted to a constant so the boundary
+// clamp in [Client.ListResources] keeps a bad-math caller from ever
+// reaching the server.
+const listResourcesMaxLimit = 100
+
+// ListResources retrieves a paginated list of resources for the
+// authenticated workspace. Used by Slack's `/qurl list` to render
+// copy-paste-ready `$<alias>` / `$<resource_id>` rows.
+//
+// `input.Limit` is clamped to [listResourcesMaxLimit] before the
+// request fires — the server returns a 400 on overshoot, but the
+// boundary check here means a handler with bad math gets a clean
+// page instead of an upstream error.
+func (c *Client) ListResources(ctx context.Context, input ListResourcesInput) (*ListResourcesOutput, error) {
+	params := url.Values{}
+	if input.Limit > listResourcesMaxLimit {
+		input.Limit = listResourcesMaxLimit
+	}
+	if input.Limit > 0 {
+		params.Set("limit", strconv.Itoa(input.Limit))
+	}
+	if input.Cursor != "" {
+		params.Set("cursor", input.Cursor)
+	}
+	path := c.baseURL + "/v1/resources"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var resources []Resource
+	meta, err := c.do(req, &resources, "GET /v1/resources")
+	if err != nil {
+		return nil, err
+	}
+	out := &ListResourcesOutput{Resources: resources}
+	if out.Resources == nil {
+		// Normalize nil → empty slice so callers can range over it
+		// without a nil-guard.
+		out.Resources = []Resource{}
+	}
+	if meta != nil {
+		out.NextCursor = meta.NextCursor
+		out.HasMore = meta.HasMore
+	}
+	return out, nil
+}
+
 // --- Resolve ---
 
 // ResolveInput holds input for headless qURL resolution.
