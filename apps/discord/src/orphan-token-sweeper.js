@@ -65,6 +65,15 @@ async function sweepOnce() {
         // No inline `accessToken = null` here: the `finally` below clears
         // it on the `break`, and the loop's scope exit makes the binding
         // unreachable anyway.
+        //
+        // LOAD-BEARING: do NOT add a `throw` (or a statement that might
+        // throw — `await db.X()`, a metric emit that can fail, etc.)
+        // between this point and the `break` below. The catch above
+        // unconditionally hashes `accessToken` for log-correlation;
+        // a throw here would either need the catch to handle a null
+        // token (re-add the ternary) or — better — keep this branch
+        // throw-free so the catch's invariant ("accessToken is bound
+        // when this fires") stays valid.
         logger.warn('Orphan sweep hit GitHub rate limit, aborting batch', {
           id, status: result.status, backoffMs,
         });

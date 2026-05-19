@@ -86,6 +86,20 @@ if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
   // `host.docker.internal` (bot-in-container reaching a docker-
   // compose service on the host). If a new hostname becomes
   // legitimate, add it here explicitly.
+  //
+  // Acknowledged thin attack surface on `host.docker.internal`:
+  // unlike the loopback addresses, this resolves to the host's
+  // routable IP. An operator running this script INSIDE a
+  // container that (a) has real AWS creds in env, (b) has a host
+  // route to actual AWS DDB, and (c) somehow has DDB_TEST_ENDPOINT
+  // pointed at `host.docker.internal` with a working AWS port
+  // could in principle provision tables in real AWS. Mitigated by
+  // (1) the explicit `local` credential fallback for DDB-Local
+  // typical usage, (2) DDB-Local's AWS-incompatible HTTP shape
+  // surfacing as a fast-fail on real-AWS reach. If this combo ever
+  // looks plausible in practice, add a secondary guard that
+  // refuses when `AWS_ACCESS_KEY_ID` looks like a real key (e.g.
+  // starts with `AKIA` / `ASIA`).
   const LOCAL_HOSTNAMES = new Set([
     'localhost',
     '127.0.0.1',
