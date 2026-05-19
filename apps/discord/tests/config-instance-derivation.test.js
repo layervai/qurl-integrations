@@ -308,10 +308,4 @@ describe('INSTANCE_IP derivation', () => {
       },
     );
   });
-
-  it('_deriveInstanceIpForTest is exposed (test seam contract)', () => {
-    withFreshConfig({ env: {}, networkInterfaces: {} }, (config) => {
-      expect(typeof config._deriveInstanceIpForTest).toBe('function');
-    });
-  });
 });

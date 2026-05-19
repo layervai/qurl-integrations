@@ -647,10 +647,4 @@ module.exports = {
   // Exposed as a function, NOT a property — second call returns
   // undefined.
   takeGatewayHandoffHmac,
-
-  // Exported for unit-test coverage of the link-local filter (Pillar 3
-  // bug fix: Fargate platform 1.4+ has 169.254.172.2 bound on eth0
-  // alongside the real ENI IP). Production callers read INSTANCE_IP
-  // off the module exports above; this is just the test seam.
-  _deriveInstanceIpForTest: deriveInstanceIp,
 };
