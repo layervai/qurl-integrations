@@ -153,6 +153,17 @@ function createGatewayWsShim({
   // flap ECS into replacing the task. `wsConnected` is the Pillar 3
   // leader/watchdog signal — "should I call connect()" — and flips
   // false on Closed so the watchdog re-drives connect after a drop.
+  //
+  // Single-shard assumption: this is a module-level boolean, not
+  // a per-shardId map, because today's deployment has SHARD_ID=
+  // '0:1' (one shard total). A future horizontal scale-out would
+  // need to either (a) track wsConnected as a Map<shardId, boolean>
+  // and have isConnected() return some aggregate ("all-Ready" for
+  // the watchdog's purposes), or (b) split the shim into one
+  // instance per shard. As-is, any shard dropping would flip the
+  // flag false and the watchdog would re-call manager.connect()
+  // on the whole manager — upstream rejects "Tried to connect a
+  // shard that wasn't idle" for the still-Ready shards.
   let wsConnected = false;
   let appId = null;
   let identifyAttempts = 0;
@@ -351,6 +362,10 @@ function createGatewayWsShim({
         if (stopped) return;
         wsConnected = true;
       });
+      // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
+      // only. We destructure `reason` defensively against a future
+      // minor adding it (some Discord 4xxx close frames carry one);
+      // today it's always undefined, logged as null.
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
         if (stopped) return;
         wsConnected = false;

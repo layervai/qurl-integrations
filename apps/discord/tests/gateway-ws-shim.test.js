@@ -310,9 +310,12 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
   });
 
   it('isConnected() flips true on shard Resumed event (Pillar 2 happy path)', async () => {
+    // @discordjs/ws v1.2.x emits Resumed with `(shardId: number)` —
+    // a bare number, not an object. Match upstream shape so the
+    // fixture documents the real contract.
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    managerInstances[0].emit(WebSocketShardEvents.Resumed, { shardId: 0 });
+    managerInstances[0].emit(WebSocketShardEvents.Resumed, 0);
     expect(shim.isConnected()).toBe(true);
   });
 
@@ -324,7 +327,10 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
       shardId: 0,
     });
     expect(shim.isConnected()).toBe(true);
-    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, reason: 'unit-test', shardId: 0 });
+    // @discordjs/ws v1.2.x Closed payload is `{ code, shardId }` —
+    // no `reason`. Listener destructures `reason` defensively
+    // against a future minor adding it; the fallback logs null.
+    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
     expect(shim.isConnected()).toBe(false);
   });
 
@@ -412,7 +418,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     expect(shim.isConnected()).toBe(false);
     instances[0].emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
     expect(shim.isConnected()).toBe(false);
-    instances[0].emit(WebSocketShardEvents.Resumed, { shardId: 0 });
+    instances[0].emit(WebSocketShardEvents.Resumed, 0);
     expect(shim.isConnected()).toBe(false);
     instances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
     expect(shim.isConnected()).toBe(false);
@@ -908,8 +914,15 @@ describe('constants are pinned', () => {
     const path = require('node:path');
     const fs = require('node:fs');
     const wsEntry = require.resolve('@discordjs/ws');
-    const wsRoot = wsEntry.slice(0, wsEntry.indexOf(`${path.sep}@discordjs${path.sep}ws${path.sep}`))
-      + `${path.sep}@discordjs${path.sep}ws`;
+    const marker = `${path.sep}@discordjs${path.sep}ws${path.sep}`;
+    const markerIdx = wsEntry.indexOf(marker);
+    if (markerIdx < 0) {
+      throw new Error(
+        `Could not locate @discordjs/ws install from require.resolve('${wsEntry}'). ` +
+        'Update the path-extraction below to match the new install layout.',
+      );
+    }
+    const wsRoot = wsEntry.slice(0, markerIdx) + marker.slice(0, -1);
     const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
     const installedMajorMinor = djsWsVersion.split('.').slice(0, 2).join('.');
     expect(installedMajorMinor).toBe(VERIFIED_DJS_WS_MAJOR_MINOR);

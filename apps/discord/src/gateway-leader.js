@@ -88,6 +88,11 @@ const DEFAULT_TICK_INTERVAL_MS = 2_000;
 // than relying on the WS shim's wiring to enforce a timeout.
 const DEFAULT_INBOUND_CONNECT_TIMEOUT_MS = 5_000;
 
+// `manager` is conventionally the gateway-ws-shim instance (passed
+// from startHotStandby), but any object satisfying connect() +
+// sync isConnected() is accepted. The raw @discordjs/ws
+// WebSocketManager does NOT satisfy this contract — it exposes
+// only an async fetchStatus() — which is why the shim wraps it.
 function createGatewayLeader({
   lock,
   peerHeartbeat,

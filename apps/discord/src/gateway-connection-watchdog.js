@@ -79,6 +79,11 @@ const RELEASE_LOCK_CEILING_MS = 3_000;
 // like a connect rejection; the attempts ladder advances normally.
 const CONNECT_CEILING_MS = 8_000;
 
+// `manager` is conventionally the gateway-ws-shim instance (passed
+// from startHotStandby), but any object satisfying connect() +
+// sync isConnected() is accepted. The raw @discordjs/ws
+// WebSocketManager does NOT satisfy this contract — it exposes
+// only an async fetchStatus() — which is why the shim wraps it.
 function createConnectionWatchdog({
   manager,
   isHoldingLock,
