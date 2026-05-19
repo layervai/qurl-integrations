@@ -343,7 +343,35 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     const { shim } = makeShim();
     await shim.start({ connect: false });
     await shim.stop({ flushFinal: false });
-    await expect(shim.connect()).rejects.toThrow(/connect\(\) called after stop\(\)/);
+    await expect(shim.connect()).rejects.toThrow(/after stop\(\) or a failed start\(\)/);
+  });
+
+  // Drives a start({connect:true}) into the catch arm (stopped=true,
+  // manager still attached) — shared by the connect()-error and
+  // listener-guard tests below.
+  async function makeFailedStartShim() {
+    const { SlowFakeManager, instances } = makeSlowManagerCtor();
+    const { shim } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
+    await expect(shim.start({ timeoutMs: 5 })).rejects.toThrow(/timed out/);
+    return { shim, instances };
+  }
+
+  it('connect() rejects after a failed start() with the same terminal-state error', async () => {
+    // start({connect:true}) sets stopped=true on its failed-connect
+    // catch, but never calls stop(). The connect() error message
+    // must cover that state — without lying about which one happened.
+    const { shim } = await makeFailedStartShim();
+    await expect(shim.connect()).rejects.toThrow(/after stop\(\) or a failed start\(\)/);
+  });
+
+  it('connect() propagates the underlying manager rejection', async () => {
+    // The watchdog wraps shim.connect() in raceWithCeiling and
+    // surfaces rejections through its failure ladder — they must
+    // pass through verbatim, not be wrapped or swallowed.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].connect.mockRejectedValueOnce(new Error('discord 5xx'));
+    await expect(shim.connect()).rejects.toThrow('discord 5xx');
   });
 
   it('stop() removes every shim-installed shard listener (no leak across cycles)', async () => {
@@ -360,6 +388,20 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(0);
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Ready)).toBe(0);
     expect(managerInstances[0].listenerCount(WebSocketShardEvents.Resumed)).toBe(0);
+  });
+
+  it('shard event listeners no-op after a failed start() (stopped guard)', async () => {
+    // Listeners stay attached until gracefulShutdown → shim.stop()
+    // runs. A late shard event in that window must not mutate
+    // wsConnected on a teardown-bound shim.
+    const { shim, instances } = await makeFailedStartShim();
+    expect(shim.isConnected()).toBe(false);
+    instances[0].emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
+    instances[0].emit(WebSocketShardEvents.Resumed, { shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
+    instances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
   });
 
   it('isStarted() reflects construction state (false → true → false)', async () => {

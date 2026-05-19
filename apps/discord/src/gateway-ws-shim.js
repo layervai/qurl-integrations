@@ -331,9 +331,18 @@ function createGatewayWsShim({
       // it would re-call connect() on a shard whose status is
       // already Ready, throwing "Tried to connect a shard that
       // wasn't idle" upstream as an unhandled rejection.
-      manager.on(WebSocketShardEvents.Ready, () => { wsConnected = true; });
-      manager.on(WebSocketShardEvents.Resumed, () => { wsConnected = true; });
+      // `stopped` guard mirrors the Dispatch listener: drops late
+      // shard events between a failed-start catch and shim.stop().
+      manager.on(WebSocketShardEvents.Ready, () => {
+        if (stopped) return;
+        wsConnected = true;
+      });
+      manager.on(WebSocketShardEvents.Resumed, () => {
+        if (stopped) return;
+        wsConnected = true;
+      });
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
+        if (stopped) return;
         wsConnected = false;
         logger.info('gateway-ws-shim: shard closed', {
           shardId, code, reason: reason ?? null,
@@ -480,15 +489,19 @@ function createGatewayWsShim({
     // (Ready/Resumed/Closed listeners in start()) — both consumers
     // call it synchronously every tick, so awaiting fetchStatus()
     // there would be wrong.
-    async connect() {
-      // Order matters: stop() nulls `manager`, so a post-stop call
-      // would mis-classify as "never started" if !manager were
-      // checked first.
+    connect() {
+      // `stopped` is set by both stop() AND start()'s failed-connect
+      // catch, so the message covers both terminal states. Check it
+      // before `!manager` since stop() nulls manager.
       if (stopped) {
-        throw new Error('gateway-ws-shim: connect() called after stop()');
+        return Promise.reject(new Error(
+          'gateway-ws-shim: connect() called after stop() or a failed start()',
+        ));
       }
       if (!manager) {
-        throw new Error('gateway-ws-shim: connect() called before start() constructed the manager');
+        return Promise.reject(new Error(
+          'gateway-ws-shim: connect() called before start() constructed the manager',
+        ));
       }
       return manager.connect();
     },
