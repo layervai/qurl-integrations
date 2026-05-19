@@ -7135,6 +7135,100 @@ describe('renderConfirmCardRows', () => {
       expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
     });
 
+    // Diagnostic instrumentation: every render-time disable of the
+    // @everyone button emits a warn-log with the state that triggered
+    // it. Users report "why is @everyone disabled?" with no visible
+    // hint on the button — the warn-log makes those reports answerable
+    // from CloudWatch instead of needing repro instructions. Three
+    // tests pin the three branch labels so a future condition addition
+    // doesn't silently collapse them.
+    test('emits warn-log with branch=displayCount-null when memberCount is unavailable', async () => {
+      const logger = require('../src/logger');
+      logger.warn.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guildId = 'g-diag-null';
+      delete int.guild.memberCount;
+      await handleQurlSend(int);
+      expect(logger.warn).toHaveBeenCalledWith(
+        '@everyone button rendered disabled',
+        expect.objectContaining({
+          branch: 'displayCount-null',
+          guildId: 'g-diag-null',
+          guildMemberCount: null,
+          displayCount: null,
+        }),
+      );
+    });
+
+    test('emits warn-log with branch=over-cap when warm cache exceeds the recipient cap', async () => {
+      // Warm cache (cache.size >= memberCount) AND non-bot count > cap
+      // → over-cap branch fires. Builds a synthetic large cache so the
+      // computeEveryoneDisplayCount warm-cache branch counts > cap.
+      const config = require('../src/config');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      try {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 2, configurable: true, writable: true });
+        const logger = require('../src/logger');
+        logger.warn.mockClear();
+        // 3 non-bot members exceeds the cap of 2. Cache.size === memberCount.
+        const int = makeInteraction({
+          options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+          guildMembers: {
+            '100000000000000001': {},
+            '100000000000000002': {},
+            '100000000000000003': {},
+          },
+        });
+        int.memberPermissions = { has: jest.fn(() => true) };
+        int.guildId = 'g-diag-overcap';
+        int.guild.memberCount = 3;
+        await handleQurlSend(int);
+        expect(logger.warn).toHaveBeenCalledWith(
+          '@everyone button rendered disabled',
+          expect.objectContaining({
+            branch: 'over-cap',
+            guildId: 'g-diag-overcap',
+            displayCount: 3,
+            accurate: true,
+            cap: 2,
+          }),
+        );
+      } finally {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+      }
+    });
+
+    test('does NOT emit warn-log when @everyone button is enabled (cold-cache happy path)', async () => {
+      // Cold cache with memberCount set → displayCount = memberCount,
+      // accurate=false → over-cap branch cannot fire → button enabled.
+      // The diagnostic log must NOT fire in the common case, otherwise
+      // it's noise that drowns out the rare disable signal.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const logger = require('../src/logger');
+      logger.warn.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 5;
+      await handleQurlSend(int);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(false);
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        '@everyone button rendered disabled',
+        expect.anything(),
+      );
+    });
+
     test('does NOT render in DM context — direct renderer assertion', () => {
       // Pin the renderer's `interaction.guild` gate directly (not via
       // handleQurlSend's entry-point DM-rejection). Without a direct
