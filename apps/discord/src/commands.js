@@ -1169,7 +1169,17 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       if (Array.isArray(newLinks)) {
         for (const item of newLinks) {
           const qid = item && item.qurlId;
-          if (!qid) { viewCounterDegraded = true; continue; }
+          if (!qid) {
+            // Mirror the construction-time warn — an operator chasing
+            // "why is the counter blank?" needs a breadcrumb when the
+            // degraded flip happens mid-life via /qurl add, not just
+            // at the original send.
+            if (!viewCounterDegraded) {
+              logger.warn('Monitor view counter degraded mid-life — addRecipients link missing qurl_id', { sendId });
+            }
+            viewCounterDegraded = true;
+            continue;
+          }
           if (!trackedQurlIds.has(qid)) {
             trackedQurlIds.add(qid);
             linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
@@ -1311,6 +1321,18 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       }
       if (changed) {
         const pending = Math.max(0, expectedCount - viewed);
+        // Render-order analysis: two concurrent ticks both reaching
+        // this branch is bounded by the `=== 'opened' continue` guard
+        // at the flip site. A slower tick whose snapshot pre-dates a
+        // faster tick's flip can't double-flip the same qurl_id, so
+        // `viewed` never regresses across ticks. A truly stale tick
+        // would observe all-opened and exit with `changed=false`
+        // (no safeEdit). The remaining theoretical flicker — DDB
+        // eventual-consistency returning newer data to the older
+        // tick than to the newer one — is sub-ms in practice and
+        // self-corrects on the next tick. Acceptable cost for not
+        // adding a render-generation counter on top of the existing
+        // trackingGeneration.
         await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
         if (pending === 0) { allDone = true; clearInterval(timer); }
       }

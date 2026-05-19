@@ -244,6 +244,19 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(mockRecordQurlView).not.toHaveBeenCalled();
   });
 
+  it('rejects fractional access_count (wire contract is Go int64; floats are a shape regression)', async () => {
+    const payload = { ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, access_count: 1.5 } };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'invalid-payload' });
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+  });
+
   it('treats consumed as boolean-only — the string "false" does NOT coerce to true', async () => {
     // Regression guard for strict === true vs Boolean() coercion.
     // If qurl-service ever JSON-encodes consumed as a string, the

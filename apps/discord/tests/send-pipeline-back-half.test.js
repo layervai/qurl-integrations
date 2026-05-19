@@ -575,6 +575,28 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     monitor.stop();
   });
 
+  it('addRecipients() with a missing qurl_id flips viewCounterDegraded AND warns once', async () => {
+    // Regression guard for the silent-degrade bug cr round 3 surfaced:
+    // construction-time degrade warns once at send-start, but a /qurl
+    // add link arriving without qurl_id has to leave a breadcrumb too.
+    const monitor = monitorLinkStatus(
+      'send-degrade-add', makeInteraction(),
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent to 1 user', { components: [] }, 1,
+    );
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
+
+    monitor.addRecipients(1, [{ qurlId: '', username: 'Eve' }]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('degraded mid-life'),
+      expect.objectContaining({ sendId: 'send-degrade-add' }),
+    );
+    // Counter degrades to bare base msg, NOT a partial-attribution render.
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user');
+    monitor.stop();
+  });
+
   it('addRecipients() de-dupes a qurl_id already in the tracked set', async () => {
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),

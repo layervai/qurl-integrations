@@ -82,6 +82,12 @@ Each step blocks the next — do not skip ahead.
   Operators rotating in production should pre-stage both the SSM
   update and the subscription PATCH so the failed-sig window is as
   narrow as possible.
+  - **Paging note**: a >10-min rotation gap will fire both alarms
+    in sequence — `qurl-bot-discord-qurl-webhook-signature-invalid`
+    at ~5min, then `…-rate-limited` at ~10min — with the same root
+    cause. If `signature_invalid` already paged for the same time
+    window, ack `rate_limited` as the tail of that incident; do not
+    treat it as a new event.
 - **`qurl-views` table missing.** The bot's monitor `BatchGet` throws
   `ResourceNotFoundException`. The setInterval's try/catch swallows
   it and logs `Link monitor poll failed` — the counter sticks at

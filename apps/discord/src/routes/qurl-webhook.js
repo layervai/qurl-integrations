@@ -102,10 +102,14 @@ router.post('/qurl', async (req, res) => {
     return res.status(200).json({ status: 'invalid-payload' });
   }
 
-  // Strict typeof — Number(null) === 0 would otherwise let `null` slip
-  // through as accessCount=0, costing a DDB write per such event.
-  if (typeof data.access_count !== 'number' || !Number.isFinite(data.access_count) || data.access_count < 0) {
-    logger.warn('qURL webhook access_count not a non-negative number', { qurl_id: data.qurl_id, access_count: data.access_count });
+  // Strict integer gate — qurl-service emits access_count as Go int64
+  // (`WebhookEvent.Data['access_count']`), so a non-integer or a value
+  // past 2^53 here would be a wire-shape regression. isSafeInteger
+  // (NOT just isFinite + >= 0) catches the float case + the unsafe-
+  // int case in one check. Also blocks Number(null)===0 from slipping
+  // through, which would otherwise cost a DDB write per such event.
+  if (!Number.isSafeInteger(data.access_count) || data.access_count < 0) {
+    logger.warn('qURL webhook access_count not a non-negative integer', { qurl_id: data.qurl_id, access_count: data.access_count });
     return res.status(200).json({ status: 'invalid-payload' });
   }
   const accessCount = data.access_count;
