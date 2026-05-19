@@ -7,19 +7,20 @@ WORKDIR /app
 # key off this value.
 ENV NODE_ENV=production
 
-# Install deps as root so npm can write into /app/node_modules, then drop
-# to the non-root `node` user for the runtime stage. `--omit=dev` keeps
-# the production image free of jest + aws-sdk-client-mock; `--ignore-scripts`
-# is safe now that the last native-compile dep (better-sqlite3) is gone —
-# every remaining dependency is pure-JS with no postinstall steps.
-# `npm cache clean --force` after install shaves the ~/.npm cache (~tens
-# of MB) from the final image layer; the prior two-stage build dropped
-# this incidentally via the `COPY --from=build node_modules` carry-over,
-# so a single-stage Dockerfile has to clean explicitly.
+# Run `npm ci` directly as the non-root `node` user (`USER node` below
+# WORKDIR + chown of /app) so npm writes a node-owned node_modules tree
+# without a post-install `chown -R` pass. Possible now that the last
+# native-compile dep (better-sqlite3) is gone — `--ignore-scripts`
+# is safe because every remaining dependency is pure-JS with no
+# postinstall steps. `--omit=dev` keeps jest + aws-sdk-client-mock out
+# of the runtime image; `npm cache clean --force` shaves the ~/.npm
+# cache layer the prior two-stage build dropped incidentally via the
+# `COPY --from=build node_modules` carry-over.
+RUN chown node:node /app
+USER node
 COPY --chown=node:node package*.json ./
 RUN npm ci --omit=dev --ignore-scripts \
-  && npm cache clean --force \
-  && chown -R node:node /app/node_modules
+  && npm cache clean --force
 
 # Copy only what the runtime needs. A bare `COPY . .` invalidates the
 # build cache on any repo file change (README, tests, CI config) even
@@ -28,7 +29,6 @@ RUN npm ci --omit=dev --ignore-scripts \
 COPY --chown=node:node src/ ./src/
 
 EXPOSE 3000
-USER node
 
 # Port is hardcoded at 3000: ${PORT:-3000} inside a Dockerfile CMD's exec
 # form doesn't interpolate at runtime, and EXPOSE is already 3000. If the

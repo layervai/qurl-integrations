@@ -259,7 +259,7 @@ async function main() {
   // Verify DDB-Local is reachable up front — a typo on DDB_TEST_ENDPOINT
   // otherwise surfaces as a generic per-table CreateTable network error.
   try {
-    await client.send(new DescribeTableCommand({ TableName: `${prefix}__probe__` }));
+    await client.send(new DescribeTableCommand({ TableName: `${prefix}reachability-probe` }));
   } catch (err) {
     // ResourceNotFoundException is the expected "reachable but no
     // such table" response — keep going. Any other shape (typically

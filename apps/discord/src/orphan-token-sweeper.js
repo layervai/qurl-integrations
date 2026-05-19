@@ -62,8 +62,9 @@ async function sweepOnce() {
         // Exponential backoff when GitHub secondary rate-limits us. Cap at
         // 60s so a single sweep never stalls beyond the interval window.
         // Abort the rest of the batch — we'll retry on the next hourly sweep.
-        // `finally` below nulls `accessToken` on `break`, so no inline null
-        // assignment is needed here.
+        // No inline `accessToken = null` here: the `finally` below clears
+        // it on the `break`, and the loop's scope exit makes the binding
+        // unreachable anyway.
         logger.warn('Orphan sweep hit GitHub rate limit, aborting batch', {
           id, status: result.status, backoffMs,
         });
