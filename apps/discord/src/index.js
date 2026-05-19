@@ -923,6 +923,11 @@ async function startHotStandby() {
   // moves construction later (e.g. lazy on first connect), this
   // guard surfaces the wiring regression at boot rather than as a
   // delayed leader/watchdog runtime error.
+  //
+  // Not redundant with the leader/watchdog factory typeof checks:
+  // those pass when called before start() too, because the shim
+  // exposes connect()/isConnected() unconditionally. This catches
+  // the wiring-order regression those checks would miss.
   if (!gatewayShim.isStarted()) {
     throw new Error('startHotStandby: gatewayShim.isStarted() is false — shim.start() ordering regression');
   }

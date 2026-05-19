@@ -364,6 +364,20 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     await expect(shim.connect()).rejects.toThrow(/after stop\(\) or a failed start\(\)/);
   });
 
+  it('concurrent shim.connect() calls both delegate to manager.connect()', async () => {
+    // The shim itself doesn't dedupe concurrent connect() calls —
+    // the upstream WebSocketManager isn't concurrency-safe and the
+    // serialization invariant lives in the leader's `connecting`
+    // latch + the watchdog's `isConnecting` observer. Pinning this
+    // test surfaces a future shim refactor that accidentally adds
+    // a dedup layer (which would break the contract those callers
+    // expect).
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    await Promise.all([shim.connect(), shim.connect()]);
+    expect(managerInstances[0].connect).toHaveBeenCalledTimes(2);
+  });
+
   it('connect() propagates the underlying manager rejection', async () => {
     // The watchdog wraps shim.connect() in raceWithCeiling and
     // surfaces rejections through its failure ladder — they must
