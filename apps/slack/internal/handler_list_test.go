@@ -41,6 +41,11 @@ func writeResourceListFixture(t *testing.T, w http.ResponseWriter, resources []m
 // resource the master listing returns is rendered, with the
 // copy-paste `/qurl get $token` hint in the footer. There is no
 // per-channel filter — `/qurl list` is unscoped within a workspace.
+//
+// No `seedAdmin(t)` here (and none in the other rendering tests in
+// this file) — admin status is no longer load-bearing for /qurl list
+// output post-revert of #234. The default test setup gives a
+// workspace context that's sufficient.
 func TestHandleList_RendersResources(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {

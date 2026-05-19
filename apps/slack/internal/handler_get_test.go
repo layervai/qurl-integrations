@@ -516,9 +516,10 @@ func TestHandleGet_DollarResourceIDAllowedSet(t *testing.T) {
 // resource ID that isn't in the channel's allow-set (union of
 // `alias_bindings` + `allowed_resource_ids`) must surface the
 // "not allowed in this channel" copy without ever reaching the
-// customer mint. Aligned with what `/qurl list` shows non-admins
-// so the get and list surfaces agree on what's available in the
-// channel for non-admins.
+// customer mint. Post-revert of #234, `/qurl list` is workspace-wide,
+// so this surface routes straight to the admin rather than a
+// self-serve breadcrumb — see [notAllowedInChannelMessage] godoc and
+// TODO(#460).
 func TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
@@ -539,8 +540,14 @@ func TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin(t *testing.T) {
 	if !strings.Contains(async, "is not allowed in this channel") {
 		t.Errorf("async reply missing not-allowed copy: %q", async)
 	}
-	if !strings.Contains(async, "`/qurl list`") {
-		t.Errorf("async reply missing `/qurl list` self-serve pointer: %q", async)
+	if !strings.Contains(async, "Contact your Slack admin") {
+		t.Errorf("async reply missing admin-escalation pointer: %q", async)
+	}
+	// Post-revert of #234 the `/qurl list` breadcrumb is gone — the
+	// list is workspace-wide and pointing the user back at it would
+	// just surface the same row they pasted from. See TODO(#460).
+	if strings.Contains(async, "`/qurl list`") {
+		t.Errorf("async reply re-introduces misleading `/qurl list` breadcrumb: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite resource-id not-in-allow-set (hits = %d)", mintHits.Load())

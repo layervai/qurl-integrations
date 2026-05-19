@@ -86,18 +86,24 @@ func noResourceForAliasMessage(alias string) string {
 // notAllowedInChannelMessage is the copy surfaced when a user passes
 // a `$r_<id>` resource token that is not in the channel's allowed-set
 // (the union of `alias_bindings.values()` and `allowed_resource_ids`
-// returned by [Store.AllowedResourceIDsForChannel]). Same posture as
-// [noResourceForAliasMessage]: name the literal token the user
-// typed, plain-English state, point at `/qurl list` so the user can
-// see what IS available without a manual lookup, and route to the
-// admin since only the admin can extend the allow-set.
+// returned by [Store.AllowedResourceIDsForChannel]). Name the literal
+// token the user typed, state plainly what state it's in, and route
+// to the admin since only the admin can extend the allow-set.
 //
 // Mirrored copy for the two not-allowed branches so a workspace
 // member probing for valid resource IDs can't distinguish "id doesn't
 // exist" from "id exists but not in this channel" through the wire
 // text.
+//
+// TODO(#460): post-revert of #234, `/qurl list` returns workspace-wide
+// tokens, so a user pasting a `$r_<id>` they saw in the list into a
+// foreign channel hits this surface. The earlier breadcrumb
+// ("Run `/qurl list` to see what's available here") was misleading
+// under the new disclosure model and was removed. The follow-up
+// either reintroduces a channel-scoped discoverability hint or
+// reframes the list output so the asymmetry is obvious upstream.
 func notAllowedInChannelMessage(token string) string {
-	return fmt.Sprintf("`$%s` is not allowed in this channel. Run `/qurl list` to see what's available here, or contact your Slack admin for assistance.", token)
+	return fmt.Sprintf("`$%s` is not allowed in this channel. Contact your Slack admin for assistance.", token)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key
