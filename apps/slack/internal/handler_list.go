@@ -94,7 +94,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	body := "*qURL Resources:*\n" + strings.Join(lines, "\n") +
 		"\n\n_Copy any `$token` and run `/qurl get $token` to mint a qURL link._"
 	if page.HasMore {
-		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $alias` or ask an admin._", listResourcesPageLimit)
+		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $alias`._", listResourcesPageLimit)
 	}
 	h.postResponse(log, responseURL, body)
 }

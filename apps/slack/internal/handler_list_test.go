@@ -67,6 +67,40 @@ func TestHandleList_RendersResources(t *testing.T) {
 	}
 }
 
+// TestHandleList_NonAdminSeesAliasUnboundInChannel fences the
+// post-revert disclosure semantics: every workspace member sees the
+// same master alias list regardless of admin status or channel-policy
+// state. A non-admin invoking /qurl list from a channel with no
+// alias_bindings still sees aliases bound elsewhere in the workspace.
+//
+// Capability gating still happens at mint time — /qurl get $alias
+// from a channel without that binding returns the alias-not-found
+// surface (see handler_get_test.go), so widening list disclosure
+// does not widen the capability boundary. Re-introducing a
+// channel-policy filter on /qurl list would have to delete or update
+// this test.
+func TestHandleList_NonAdminSeesAliasUnboundInChannel(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	// Seed an alias_bindings row for a DIFFERENT channel — proves
+	// the list isn't filtering by caller's channel.
+	ts.seedPolicySet(t, testAdminTeamID, "C_other", testListAliasProdDB, []string{testListResIDProdDB})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testListResIDProdDB, fAttrAlias: testListAliasProdDB, testKeyTargetURL: "https://prod.example.com"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	// Invoke from C_no_bindings — a channel with zero
+	// channel_policies rows — to fence the cross-channel disclosure.
+	inv := newAdminSlashInvokerOnChannel(t, h, "C_no_bindings")
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$prod-db` → https://prod.example.com") {
+		t.Errorf("list should surface aliases bound in any channel — got: %q", async)
+	}
+}
+
 // TestHandleList_EmptyWorkspace fences the friendly empty-state copy
 // for a brand-new workspace with zero resources. The hint nudges the
 // user toward `/qurl create`.

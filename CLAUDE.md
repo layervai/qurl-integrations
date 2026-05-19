@@ -22,7 +22,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 ```
 <type>(<scope>): <description>
 
-type:  feat | fix | chore | docs | test | refactor | ci
+type:  feat | fix | chore | docs | test | refactor | ci | revert
 scope: slack | teams | discord | cli | zapier | shared | ci
 ```
 
