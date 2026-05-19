@@ -104,6 +104,15 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	if !strings.Contains(async, "`$prod-db` → https://prod.example.com") {
 		t.Errorf("list should surface aliases bound in any channel — got: %q", async)
 	}
+	// Negative assertions: defend against a partial filter
+	// reintroduction that gates only the empty-state copy. If any of
+	// the removed pagination-gap phrasing reappears, the test fails
+	// even if the row is still rendered.
+	for _, leak := range []string{"past the first page", "ask an admin to allow", "allow specific resources"} {
+		if strings.Contains(async, leak) {
+			t.Errorf("response leaks removed pagination-gap copy %q — possible partial filter reintroduction: %q", leak, async)
+		}
+	}
 }
 
 // TestHandleList_EmptyWorkspace fences the friendly empty-state copy
