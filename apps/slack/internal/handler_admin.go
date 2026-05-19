@@ -217,9 +217,18 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 	if !h.requireAdminSync(w, teamID, callerUserID) {
 		return
 	}
+	target := cmd.UserID
+	if target == callerUserID {
+		// requireAdminSync already passed → the caller is an admin →
+		// adding themselves is a no-op. Render an explicit copy so an
+		// admin who fat-fingered `/qurl admin add @themselves` doesn't
+		// read the indirect "already an admin" surface as if it
+		// referred to someone else.
+		respondSlack(w, "You're already an admin — nothing to do.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
-	target := cmd.UserID
 	if err := h.cfg.AdminStore.AddAdmin(ctx, teamID, target); err != nil {
 		var se *slackdata.Error
 		if errors.As(err, &se) {
@@ -362,7 +371,10 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	}
 	// Audit list reads — operators audit-via-paste and need to know
 	// who pulled the admin roster when. Mirrors the success slog on
-	// add/remove/revoke.
-	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_count", len(admins))
+	// add/remove/revoke. admin_set_size is the total stored set
+	// (owner-inclusive) so it matches `ListAdmins`'s return shape; the
+	// user-visible "Admins:" line filters the owner for tidiness, so
+	// the displayed count is `len(otherAdmins)`.
+	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size", len(admins), "displayed_admins", len(otherAdmins))
 	respondSlack(w, body)
 }

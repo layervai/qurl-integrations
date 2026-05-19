@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
@@ -227,6 +228,24 @@ func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
 	}
 }
 
+// TestHandleAdminAdd_SelfAdd fences the explicit self-add reply: an
+// admin who runs `/qurl admin add @themselves` sees "you're already
+// an admin" rather than the indirect "<@self> is already an admin"
+// surface that the 409 idempotent path would render.
+func TestHandleAdminAdd_SelfAdd(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.failOnAdminMutation(t, "self-add should bail before AddAdmin")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("admin add <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "You're already an admin") {
+		t.Errorf("reply missing self-add surface: %q", reply)
+	}
+}
+
 // TestHandleAdminAdd_InvalidMention fences the parser path: a
 // missing or malformed `<@U…>` mention surfaces as a parser error
 // without reaching AddAdmin.
@@ -396,6 +415,36 @@ func TestHandleAdminList_OwnerOnly(t *testing.T) {
 	}
 	if strings.Contains(reply, "Admins:") {
 		t.Errorf("owner-only workspace rendered redundant Admins line: %q", reply)
+	}
+}
+
+// TestHandleAdminList_EmptyOwnerCorruption fences the
+// storage-corruption render path: when workspace_mappings is
+// missing owner_id (impossible today via readStringSet but
+// defensive against a future contract change), the reply renders
+// the explicit "(unknown — workspace_mappings missing owner_id)"
+// copy instead of a malformed `Owner: <@>` mrkdwn link.
+func TestHandleAdminList_EmptyOwnerCorruption(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Seed a workspace_mappings row with admin_slack_user_ids set
+	// but owner_id ABSENT. Bypasses seedWorkspace (which stamps
+	// owner_id) by writing directly with ddbtypes.
+	row := map[string]ddbtypes.AttributeValue{
+		fAttrSlackTeamID:       stringMember(testAdminTeamID),
+		fAttrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testAdminUserID}},
+		fAttrCreatedAt:         stringMember(testWorkspaceConfiguredAt.UTC().Format(time.RFC3339)),
+	}
+	ts.ddb.seedItem(t, ts.tableNames.workspace, row)
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "workspace_mappings missing owner_id") {
+		t.Errorf("reply missing storage-corruption surface: %q", reply)
+	}
+	if strings.Contains(reply, "Owner: <@>") {
+		t.Errorf("reply rendered malformed `Owner: <@>` mrkdwn: %q", reply)
 	}
 }
 
