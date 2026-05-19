@@ -1097,23 +1097,42 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   let allDone = false;
 
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
+  // First poll fires fast so the live view counter catches sub-second
+  // self-destruct sends where the recipient opens + burns the link
+  // before the standard pollInterval tick would have fired. Fan-out
+  // per tick is `resourceIds.length` parallel GETs (not recipient
+  // count — qurls are batched per resource at TOKENS_PER_RESOURCE),
+  // so the t=3s vs. t=15s shift is a small load delta on qurl-service.
+  const FIRST_POLL_DELAY_MS = 3000;
   const startTime = Date.now();
+  // Triple-condition the runTick early-exit + the post-first-tick
+  // scheduling guard both check. Extracting keeps the invariant in
+  // one place; a future maintainer adding (e.g.) a "user revoked"
+  // condition adds it here once instead of in two parallel sites.
+  const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
 
 
   function buildStatusMsg() {
-    let opened = 0, expired = 0, pending = 0;
+    let opened = 0, expired = 0;
     for (const s of linkStatus.values()) {
       if (s.status === 'opened') opened++;
       else if (s.status === 'expired') expired++;
-      else pending++;
     }
+    // `expectedCount` (= delivered + adds) is the denominator from the
+    // moment the monitor is created, so `0 of N viewed` renders before
+    // the first poll initializes linkStatus. addRecipients() bumps
+    // expectedCount + forces re-init, keeping the two in sync.
+    const total = expectedCount;
     let msg = currentBaseMsg;
-    if (linkStatus.size > 0) {
-      msg += '\n\n**Link Status:**';
-      if (opened > 0) msg += `\n\u2705 ${opened} of ${linkStatus.size} opened`;
-      if (expired > 0) msg += `\n\u23f0 ${expired} expired`;
-      if (pending > 0) msg += `\n\u23f3 ${pending} pending`;
-      if (pending === 0) msg += `\n\n\u2714\ufe0f **All ${linkStatus.size} links resolved**`;
+    if (total === 0) return msg;
+    if (opened === total) {
+      msg += `\n\n\u2705 **All ${total} viewed**`;
+    } else if (opened === 0 && expired === total) {
+      // Distinct from "all viewed" so the failure outcome is unambiguous.
+      msg += `\n\n\u23f0 **All ${total} expired (none viewed)**`;
+    } else {
+      msg += `\n\n\ud83d\udc40 **${opened} of ${total} viewed**`;
+      if (expired > 0) msg += ` \u00b7 \u23f0 ${expired} expired`;
     }
     return msg;
   }
@@ -1126,11 +1145,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // must first re-check `if (!trackedQurlIds) return;` because addRecipients
   // can null it during any awaited gap. If you add new awaits here, guard
   // subsequent reads accordingly.
-  timer = setInterval(async () => {
+  const runTick = async () => {
     pollCount++;
     if (pollCount > 20 && pollCount % 4 !== 0) return;
     else if (pollCount > 5 && pollCount % 2 !== 0) return;
-    if (stopped || allDone || Date.now() - startTime > maxMonitorMs) {
+    if (isTerminated()) {
       clearInterval(timer);
       // interaction may have been nulled by stop() if this callback was
       // already mid-execution when stop fired — clearInterval only prevents
@@ -1230,7 +1249,21 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });
     }
-  }, pollInterval);
+  };
+  // Two-phase scheduling: fast first tick at FIRST_POLL_DELAY_MS, then
+  // standard setInterval cadence. clearInterval in Node handles both
+  // setTimeout and setInterval handles (Timeout objects share a class),
+  // so control.stop()'s existing clearInterval(timer) cancels either
+  // phase. The post-tick isTerminated() re-check skips the setInterval
+  // when the first tick already terminated the monitor (e.g., all
+  // links resolved instantly) — otherwise we'd create an interval that
+  // immediately self-clears on its first fire.
+  timer = setTimeout(async () => {
+    await runTick();
+    if (isTerminated()) return;
+    timer = setInterval(runTick, pollInterval);
+    if (timer && timer.unref) timer.unref();
+  }, FIRST_POLL_DELAY_MS);
   if (timer && timer.unref) timer.unref();
 
   // Register this monitor in the global set. If we're over the cap, stop
@@ -1853,8 +1886,16 @@ async function executeSendPipeline(interaction, {
   // the newly-added users surface in the post-revoke "Revoked for: …"
   // list (with its own overflow path) and in monitor link-status
   // updates.
+  // Hoisted above editReply so the initial confirmation can render the
+  // `👀 0 of N viewed` baseline via monitor.getFullMsg(); without the
+  // hoist the sender sees no counter until the first poll + at least
+  // one view.
+  let monitor = null;
+  if (delivered > 0) {
+    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
+  }
   const initialPayload = {
-    content: confirmMsg,
+    content: monitor ? monitor.getFullMsg() : confirmMsg,
     components: delivered > 0 ? [buttonRow] : [],
   };
   if (confirmRendered.attachmentText) {
@@ -1862,7 +1903,15 @@ async function executeSendPipeline(interaction, {
       new AttachmentBuilder(Buffer.from(confirmRendered.attachmentText, 'utf8'), { name: 'recipients.txt' }),
     ];
   }
-  const response = await interaction.editReply(initialPayload);
+  let response;
+  try {
+    response = await interaction.editReply(initialPayload);
+  } catch (err) {
+    // Hoisted monitor would otherwise tick for an hour with a dead
+    // interaction handle, calling editReply 30+ times that all fail.
+    if (monitor) monitor.stop();
+    throw err;
+  }
 
   // Non-ephemeral channel notification when sending to @everyone or the
   // voice-channel population. Recipients on voice or scrolling on mobile
@@ -1902,8 +1951,7 @@ async function executeSendPipeline(interaction, {
   });
 
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
-  let monitor = null;
-  if (delivered > 0) {
+  if (monitor) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
     // Single source of truth for the "adding recipients" lock: the global
     // addRecipientsLocks Set keyed by sendId. Acquire at the top of the
@@ -1911,11 +1959,10 @@ async function executeSendPipeline(interaction, {
     // between acquire and the previous dual-flag release paths can't
     // permanently block subsequent button clicks.
 
-    // Create the collector FIRST — if collector setup throws, we return
-    // without ever having started the monitor, so no setInterval leaks
-    // interaction/recipients/buttonRow/file data in a closure for up to
-    // an hour. Only after the collector is established do we kick the
-    // monitor setInterval.
+    // Collector arms AFTER the editReply (it needs `response` as anchor).
+    // On collector-setup throw we must stop the already-running monitor
+    // — without that the setInterval would leak the interaction +
+    // recipients + buttonRow closure for up to an hour.
     let collector;
     try {
       collector = response.createMessageComponentCollector({
@@ -1924,9 +1971,9 @@ async function executeSendPipeline(interaction, {
       });
     } catch (err) {
       logger.error('Failed to create button collector', { sendId, error: err.message });
+      monitor.stop();
       return;
     }
-    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
 
     let showAllRecipients = false;
 

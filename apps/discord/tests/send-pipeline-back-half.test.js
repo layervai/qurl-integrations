@@ -439,9 +439,11 @@ describe('monitorLinkStatus — status transitions', () => {
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-    // editReply called at least once with the opened-status message.
+    // editReply called at least once with the viewed-status message.
+    // Headline is `👀 X of N viewed` (was the legacy "✅ X of N opened"
+    // — see buildStatusMsg).
     const calls = interaction.editReply.mock.calls.map(c => c[0]?.content || '');
-    expect(calls.some(c => /opened/.test(c))).toBe(true);
+    expect(calls.some(c => /viewed/.test(c))).toBe(true);
     monitor.stop();
   });
 
@@ -497,6 +499,215 @@ describe('monitorLinkStatus — status transitions', () => {
     const lastCall = interaction.editReply.mock.calls.at(-1);
     expect(lastCall?.[0]).toEqual(expect.objectContaining({ components: expect.any(Array) }));
     // monitor.stop() in afterEach is a no-op since allDone already cleared
+    monitor.stop();
+  });
+});
+
+// View-counter UX: the headline answers "how many recipients have
+// viewed this so far?" — visible BEFORE the first poll, prominent in
+// the message body (not buried below the recipient list), and using
+// terminal-state copy that distinguishes "all viewed" (positive
+// feedback) from "all expired without views" (negative outcome).
+// User feedback driving this: live "1/X, 2/X, all viewed" counter
+// in the sender's confirmation.
+describe('monitorLinkStatus — buildStatusMsg view counter', () => {
+  // No fake timers — these tests exercise getFullMsg() synchronously
+  // without touching the polling loop.
+  it('renders `👀 0 of N viewed` baseline BEFORE first poll initializes linkStatus', async () => {
+    // Without the `Math.max(linkStatus.size, expectedCount)` fallback,
+    // total would be 0 here and the headline would be suppressed — the
+    // sender would see the bare confirmation with no counter until at
+    // least one view + one poll. Pin the pre-init render.
+    const monitor = monitorLinkStatus(
+      'send-1', makeInteraction(),
+      [{ resourceId: 'res-1' }],
+      [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }, { id: 'r3', username: 'Carol' }],
+      '1m', 'Sent to 3 users', { components: [] }, 3, 'apikey',
+    );
+    const msg = monitor.getFullMsg();
+    expect(msg).toContain('Sent to 3 users');
+    expect(msg).toMatch(/👀.*0 of 3 viewed/);
+    monitor.stop();
+  });
+
+  it('renders `✅ All N viewed` when every link is opened (positive terminal copy)', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGetResourceStatus
+        .mockResolvedValueOnce({
+          qurls: [
+            { qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+          ],
+        })
+        .mockResolvedValue({
+          qurls: [
+            { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+          ],
+        });
+
+      const monitor = monitorLinkStatus(
+        'send-1', makeInteraction(),
+        [{ resourceId: 'res-1' }],
+        [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+        '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      );
+
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+      expect(monitor.getFullMsg()).toMatch(/✅ \*\*All 2 viewed\*\*/);
+      monitor.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('renders `⏰ All N expired (none viewed)` when every link expired without any view (negative terminal copy)', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGetResourceStatus
+        .mockResolvedValueOnce({
+          qurls: [
+            { qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+          ],
+        })
+        .mockResolvedValue({
+          qurls: [
+            { qurl_id: 'q1', use_count: 0, status: 'expired', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'expired', created_at: '2026-01-01T00:00:01Z' },
+          ],
+        });
+
+      const monitor = monitorLinkStatus(
+        'send-1', makeInteraction(),
+        [{ resourceId: 'res-1' }],
+        [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+        '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      );
+
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+      expect(monitor.getFullMsg()).toMatch(/⏰ \*\*All 2 expired \(none viewed\)\*\*/);
+      monitor.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('renders mixed-state headline `👀 X of N viewed · ⏰ Y expired` when both bins have entries', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGetResourceStatus
+        .mockResolvedValueOnce({
+          qurls: [
+            { qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+            { qurl_id: 'q3', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:02Z' },
+          ],
+        })
+        .mockResolvedValue({
+          qurls: [
+            { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'expired', created_at: '2026-01-01T00:00:01Z' },
+            { qurl_id: 'q3', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:02Z' },
+          ],
+        });
+
+      const monitor = monitorLinkStatus(
+        'send-1', makeInteraction(),
+        [{ resourceId: 'res-1' }],
+        [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }, { id: 'r3', username: 'Carol' }],
+        '1m', 'Sent to 3 users', { components: [] }, 3, 'apikey',
+      );
+
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+      // 1 opened, 1 expired, 1 still pending — distinct from the
+      // all-viewed and all-expired branches.
+      expect(monitor.getFullMsg()).toMatch(/👀 \*\*1 of 3 viewed\*\* · ⏰ 1 expired/);
+      monitor.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+// First-poll latency: pre-PR the first tick fired at pollInterval
+// (15-60s). For short-TTL self-destruct sends the recipient could open
+// + burn the link before the first poll ran, meaning the sender's
+// view counter never reflected the view at all. New cadence: first
+// tick at 3s via setTimeout, then setInterval at pollInterval for
+// subsequent ticks. Pin the 3s number so a future refactor that
+// reintroduces the old setInterval-only shape fails CI.
+describe('monitorLinkStatus — first-poll cadence', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  it('first tick fires at ~3s, not at the 15s pollInterval', async () => {
+    mockGetResourceStatus.mockResolvedValue({
+      qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
+    });
+
+    const monitor = monitorLinkStatus(
+      'send-1', makeInteraction(),
+      [{ resourceId: 'res-1' }],
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1, 'apikey',
+    );
+
+    // Advance to just before the new first-poll mark — should NOT
+    // have polled yet.
+    await jest.advanceTimersByTimeAsync(2500);
+    expect(mockGetResourceStatus).not.toHaveBeenCalled();
+
+    // Cross the 3s mark — first poll must fire.
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(mockGetResourceStatus).toHaveBeenCalled();
+
+    monitor.stop();
+  });
+
+  it('subsequent ticks honor the standard pollInterval after the fast first tick', async () => {
+    // The setTimeout-then-setInterval pattern's failure mode is
+    // accidentally calling setInterval(runTick, FIRST_POLL_DELAY_MS)
+    // — every subsequent poll would then fire every 3s, hammering
+    // qurl-service. Pin that tick 2 lands at first-tick + pollInterval
+    // (~3s + 15s = 18s), not first-tick + 3s.
+    //
+    // Tick 1 calls getResourceStatus twice (init pass + poll pass —
+    // see the `if (!trackedQurlIds)` init block + the subsequent
+    // pollResults Promise.all). The test snapshots that count at
+    // t=3s and asserts it doesn't grow until the setInterval fires
+    // at t=18s.
+    mockGetResourceStatus.mockResolvedValue({
+      qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
+    });
+
+    const monitor = monitorLinkStatus(
+      'send-1', makeInteraction(),
+      [{ resourceId: 'res-1' }],
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1, 'apikey',
+    );
+
+    await jest.advanceTimersByTimeAsync(3000);   // first tick
+    const callsAfterFirstTick = mockGetResourceStatus.mock.calls.length;
+    expect(callsAfterFirstTick).toBeGreaterThanOrEqual(1);
+
+    // 3s later (now t=6s) — setInterval still waiting for its first
+    // fire at t=18s. No additional calls expected.
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(mockGetResourceStatus.mock.calls.length).toBe(callsAfterFirstTick);
+
+    // Cross t=18s — second tick fires from the setInterval.
+    await jest.advanceTimersByTimeAsync(12500);
+    expect(mockGetResourceStatus.mock.calls.length).toBeGreaterThan(callsAfterFirstTick);
+
     monitor.stop();
   });
 });
@@ -2409,3 +2620,53 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
   });
 });
 
+// executeSendPipeline-level pin that the initial confirmation editReply
+// includes the baseline `👀 0 of N viewed` headline — proves the
+// monitor-hoist refactor (create monitor BEFORE editReply, then render
+// monitor.getFullMsg() as the initial content) reached the editReply
+// site. Without the hoist the sender sees the bare confirmation with
+// no counter until the first poll fires AND a recipient views.
+describe('executeSendPipeline — initial confirmation includes view-counter baseline', () => {
+  beforeEach(() => {
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValue([
+      { qurl_link: 'https://q.test/1', resource_id: 'res-1' },
+      { qurl_link: 'https://q.test/2', resource_id: 'res-1' },
+      { qurl_link: 'https://q.test/3', resource_id: 'res-1' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+  });
+
+  test('initial editReply content includes `👀 0 of N viewed` baseline when delivered > 0', async () => {
+    const recipients = [
+      { id: 'u1', username: 'u1' },
+      { id: 'u2', username: 'u2' },
+      { id: 'u3', username: 'u3' },
+    ];
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams({ recipients }));
+    // The pipeline issues multiple editReply calls (Preparing… →
+    // Preparing links for N… → final confirmation). The final one
+    // carries the buttonRow components AND the monitor's baseline.
+    const finalCall = interaction.editReply.mock.calls
+      .map((c) => c[0])
+      .filter((p) => p && Array.isArray(p.components) && p.components.length > 0)
+      .at(-1);
+    expect(finalCall).toBeDefined();
+    expect(finalCall.content).toMatch(/Sent to 3 users/);
+    expect(finalCall.content).toMatch(/👀.*0 of 3 viewed/);
+  });
+
+  test('initial editReply omits view counter when delivered === 0 (no monitor created)', async () => {
+    mockSendDM.mockResolvedValue({ ok: false, error: 'all blocked' });
+    const interaction = makeInteraction();
+    await executeSendPipeline(interaction, makePipelineParams({
+      recipients: [{ id: 'u1', username: 'u1' }],
+    }));
+    const lastContent = interaction.editReply.mock.calls.at(-1)[0].content;
+    // No DMs delivered → no monitor → no view counter. Sender sees
+    // the bare "Sent to 0 users" confirmation (the failure copy lives
+    // in the same string but `0 of N viewed` would be misleading).
+    expect(lastContent).not.toMatch(/viewed/);
+  });
+});
