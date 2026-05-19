@@ -35,8 +35,8 @@ const (
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
-// (teamID, channelID) channel_policies row exposes as mintable for
-// non-admins on the `$r_<id>` get path (`handler_get.go`
+// (teamID, channelID) channel_policies row authorizes for non-admin
+// mint via the `$r_<id>` get path (`handler_get.go`
 // `authorizeResourceIDForGet`). The set is the union of two
 // orthogonal surfaces on the same row:
 //

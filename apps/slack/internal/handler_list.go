@@ -49,7 +49,7 @@ const resourceTypeTunnel = "tunnel"
 // time — `/qurl get $r_<id>` still enforces the channel allow set
 // for non-admins via [Handler.authorizeResourceIDForGet], and
 // `/qurl get $<alias>` resolves through the per-channel
-// `alias_bindings` Map via [Store.LookupChannelAlias]. So dropping
+// `alias_bindings` Map via slackdata.Store.LookupChannelAlias. So dropping
 // the list-side filter widens disclosure within a workspace but not
 // capability.
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
@@ -97,7 +97,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	body := "*qURL Resources:*\n" + strings.Join(lines, "\n") +
 		"\n\n_Copy any `$token` and run `/qurl get $token` to mint a qURL link._"
 	if page.HasMore {
-		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $alias`._", listResourcesPageLimit)
+		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $token`._", listResourcesPageLimit)
 	}
 	h.postResponse(log, responseURL, body)
 }
