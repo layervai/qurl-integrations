@@ -3390,6 +3390,14 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       ([msg]) => typeof msg === 'string' && msg.includes('cursor did not advance'),
     );
     expect(warnCall).toBeTruthy();
+    // The bail path MUST NOT also emit the "pre-warm complete" info
+    // log — the `bailed` flag prevents double-logging. Without this
+    // assertion a future refactor could re-introduce the misleading
+    // success log on a degraded run.
+    const successCall = logger.info.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('pre-warm complete'),
+    );
+    expect(successCall).toBeFalsy();
   });
 
   test('pagination: safety cap fires warn when full pages persist past PREWARM_MAX_PAGES', async () => {
@@ -3423,6 +3431,13 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     // cache_size context lives in the payload (debugging signal — what
     // actually landed in cache before the cap fired).
     expect(warnCall[1]).toEqual(expect.objectContaining({ cache_size: expect.anything() }));
+    // The cap path MUST NOT also emit the "pre-warm complete" info
+    // log. The `if/else if` branching in commands.js guarantees this;
+    // pin it so a future refactor to two separate `if`s would fail.
+    const successCall = logger.info.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('pre-warm complete'),
+    );
+    expect(successCall).toBeFalsy();
   });
 
   test('pagination: each successful list() call merges members into guild.members.cache', async () => {
@@ -3456,6 +3471,16 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
 
     for (const id of [...page1Ids, ...page2Ids]) {
       expect(int.guild.members.cache.has(id)).toBe(true);
+    }
+
+    // discord.js's `list({ cache })` defaults to `true` and merges
+    // results into `guild.members.cache`. If a future refactor passes
+    // `cache: false` to reduce memory, the cache-merge behavior this
+    // test simulates would silently break in production while this
+    // test still passes (the mock doesn't honor the flag). Pin that
+    // the production call shape never opts out of caching.
+    for (const call of int.guild.members.list.mock.calls) {
+      expect(call[0].cache).not.toBe(false);
     }
   });
 });

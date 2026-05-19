@@ -270,10 +270,10 @@ function effectiveGuildMemberCount(guild) {
 // can await before reading `guild.members.cache`. Swallows errors —
 // degraded expansion (parser sees a partial cache) is the correct
 // fallback for transient API blips; surfacing the failure to the user
-// would confuse them about a problem they can't act on. Skipped when
-// the cache already reports `memberCount` (defaults to `Infinity` if
-// memberCount is missing so we fail-open and fetch when uncertain) so
-// a hot cache from a prior invocation isn't burned a second time. The
+// would confuse them about a problem they can't act on. Hot-cache
+// short-circuit fires ONLY when `guild.memberCount` is present and
+// matched — see the inline comment at the gate for why
+// `approximateMemberCount` is deliberately not consulted here. The
 // populated cache is intentionally retained — discord.js `Collection`
 // has no LRU and eviction relies on `GUILD_MEMBER_REMOVE` gateway
 // events. Acceptable for our scale; revisit if a future regression in
@@ -323,6 +323,10 @@ async function prewarmGuildMembersCache(guild, logCtx) {
       // its final value. A future "scope this inside the for" cleanup
       // would silently disable the safety-cap warn.
       let page;
+      // `bailed` distinguishes "loop exited cleanly on a partial page"
+      // (success) from "loop bailed on an upstream-bug guard". Without
+      // it, both bail paths would also emit the success info-log below.
+      let bailed = false;
       for (page = 0; page < PREWARM_MAX_PAGES; page++) {
         const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after });
         if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
@@ -338,6 +342,7 @@ async function prewarmGuildMembersCache(guild, logCtx) {
           logger.warn('members pre-warm received full page with null cursor; bailing', {
             ...logCtx, guild_id: guild.id, pages: page + 1,
           });
+          bailed = true;
           break;
         }
         // If Discord ever returns a full page without advancing the
@@ -347,6 +352,7 @@ async function prewarmGuildMembersCache(guild, logCtx) {
           logger.warn('members pre-warm cursor did not advance; bailing', {
             ...logCtx, guild_id: guild.id, after, pages: page + 1,
           });
+          bailed = true;
           break;
         }
         after = nextAfter;
@@ -355,7 +361,7 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         logger.warn('members pre-warm hit safety cap; @everyone/role expansion may underresolve', {
           ...logCtx, guild_id: guild.id, pages: page, cache_size: guild.members.cache?.size,
         });
-      } else {
+      } else if (!bailed) {
         // Successful-completion observability. Captures cache footprint
         // for large-guild memory tracking — paginating a 500k-member
         // guild persists 500k GuildMember objects in-process until the
