@@ -72,6 +72,15 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // escalation path (ask the admin to wire it up) since only the
 // admin can run setalias.
 //
+// Why this message keeps a `/qurl aliases` breadcrumb while sibling
+// [notAllowedInChannelMessage] dropped its `/qurl list` breadcrumb:
+// `/qurl aliases` is channel-scoped (shows aliases bound here), so
+// the breadcrumb stays accurate post-revert. `/qurl list` went
+// workspace-wide and would just surface the same row the user
+// pasted from, so the sibling's breadcrumb was misleading and was
+// removed. If `/qurl aliases` ever widens to workspace-wide too,
+// this breadcrumb deserves the same treatment.
+//
 // TODO(#460): a user can see `$<alias>` rendered by `/qurl list`
 // (workspace-wide post-revert of #234) and still hit this surface
 // when minting from a channel without the binding. Followup tracks
@@ -364,7 +373,7 @@ func (h *Handler) resolveAliasForGet(ctx context.Context, log *slog.Logger, team
 // a non-admin can see `$r_<id>` tokens from other channels in the
 // list. This gate keeps mintability channel-scoped despite the
 // widened list visibility — the asymmetry is intentional but
-// surfaces a UX gap tracked by TODO(GH-460).
+// surfaces a UX gap tracked by TODO(#460).
 //
 // Returns nil on allow, [*userError] on AdminStore-nil, allow-set
 // fetch failure, or membership miss.
