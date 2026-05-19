@@ -15,10 +15,28 @@
 
 const { initHttpOnly, REFRESH_INTERVAL_MS } = require('../src/http-only-init');
 
+// Avoid constructing a real discord.js ClientUser in tests — it
+// walks the User -> Base inheritance chain and pokes the Client
+// for things like options.makeCache. The mock seeds the same
+// `client.user.{id,username}` shape that initHttpOnly's logger
+// reads + the dispatch-reconstruction path consumes.
+jest.mock('discord.js', () => ({
+  ClientUser: jest.fn().mockImplementation((_client, data) => ({
+    id: data.id,
+    username: data.username,
+    bot: true,
+  })),
+}));
+
 function makeClient() {
   return {
     rest: {
       setToken: jest.fn(),
+      get: jest.fn().mockResolvedValue({
+        id: 'bot-id-123',
+        username: 'qurl-bot-test',
+        bot: true,
+      }),
     },
   };
 }
@@ -28,6 +46,33 @@ function makeLogger() {
 }
 
 describe('initHttpOnly', () => {
+  it('seeds client.user from REST GET /users/@me (worker-tier dispatch reconstruction depends on it)', async () => {
+    // Pre-PR-#444 bug: discord.js's Action.getChannel reads
+    // `client.user.id` to filter the bot from the interaction's
+    // recipient list. http-only mode skips login() (gateway-token
+    // singleton), so without this REST seed, client.user stays null
+    // and every replayed INTERACTION_CREATE throws
+    // "Cannot read properties of null (reading 'id')". This test
+    // pins the seed so a future refactor that drops it fails CI
+    // instead of breaking every interaction in production.
+    const client = makeClient();
+    const refreshCache = jest.fn().mockResolvedValue(undefined);
+    const logger = makeLogger();
+    const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' };
+
+    await initHttpOnly({ client, config, refreshCache, logger });
+
+    // Routes.user('@me') URI-encodes @ to %40 — assert via includes
+    // so the test doesn't break if upstream Routes ever switches
+    // encoding strategy.
+    expect(client.rest.get).toHaveBeenCalledTimes(1);
+    expect(client.rest.get.mock.calls[0][0]).toMatch(/^\/users\/(@|%40)me$/);
+    expect(client.user).toEqual(expect.objectContaining({
+      id: 'bot-id-123',
+      username: 'qurl-bot-test',
+    }));
+  });
+
   it('sets the bot token on client.rest and warms the cache (single-guild)', async () => {
     const client = makeClient();
     const refreshCache = jest.fn().mockResolvedValue(undefined);
