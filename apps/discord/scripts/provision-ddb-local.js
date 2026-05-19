@@ -55,6 +55,30 @@ if (!prefix.endsWith('-')) {
   process.exit(1);
 }
 
+// Defense-in-depth refusal: this script is a local-dev tool only.
+// `AWS_ACCESS_KEY_ID || 'local'` below means an operator with real AWS
+// creds in their shell who runs the script with `DDB_TEST_ENDPOINT`
+// pointed at a real AWS endpoint would otherwise happily provision
+// 10 tables in real DDB (with `PAY_PER_REQUEST` billing — small but
+// nonzero blast radius). Refuse anything that doesn't look like a
+// local loopback or in-VPC test endpoint.
+{
+  let parsed;
+  try { parsed = new URL(endpoint); } catch {
+    console.error(`Invalid DDB_TEST_ENDPOINT URL: '${endpoint}'.`);
+    process.exit(1);
+  }
+  const isLocal = ['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(parsed.hostname)
+    || parsed.hostname.endsWith('.local')
+    || parsed.hostname.endsWith('.internal');
+  if (!isLocal) {
+    console.error(`Refusing to run: DDB_TEST_ENDPOINT='${endpoint}' does not look like a local DDB endpoint.`);
+    console.error('This script is for `amazon/dynamodb-local` only — never point it at a real AWS account.');
+    console.error('Allowed hostnames: localhost, 127.0.0.1, ::1, 0.0.0.0, *.local, *.internal.');
+    process.exit(1);
+  }
+}
+
 const client = new DynamoDBClient({
   region,
   endpoint,

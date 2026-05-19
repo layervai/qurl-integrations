@@ -113,6 +113,40 @@ describe('orphan token sweeper', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('aborts the batch on 429 rate limit, leaves remaining rows for the next sweep', async () => {
+    // Pin the rate-limit branch (`orphan-token-sweeper.js:58-68`):
+    // when GitHub returns 429 / 403, the sweeper logs, applies
+    // exponential backoff, and aborts the rest of the batch so the
+    // next hourly sweep can retry. Without this test, a regression
+    // that drops the `break` would silently amplify the rate-limit
+    // hit by churning through the full batch on every sweep.
+    await db.recordOrphanedToken('gho_first');
+    await db.recordOrphanedToken('gho_second');
+    globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 429 });
+
+    await sweepOnce();
+
+    // Batch aborted after the first row hits 429 — second row was
+    // never attempted. Both rows survive for the next sweep.
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(await db.countOrphanedTokens()).toBe(2);
+  });
+
+  it('aborts the batch on 403 rate limit (secondary rate-limit shape)', async () => {
+    // GitHub's secondary rate limit returns 403 (not 429); the
+    // sweeper treats both as retryable. Same shape as the 429 test
+    // above — pinned separately so a future refactor that
+    // accidentally narrows the check to just `status === 429` is
+    // caught.
+    await db.recordOrphanedToken('gho_403');
+    globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 403 });
+
+    await sweepOnce();
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(await db.countOrphanedTokens()).toBe(1);
+  });
+
   it('skips a row whose decrypt throws and leaves it in place (will retry next sweep)', async () => {
     // Pre-PR (when the test used the real SQLite layer) this branch
     // was covered by a corrupt-ciphertext / missing-KEK row in the
