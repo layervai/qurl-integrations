@@ -6857,9 +6857,9 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
 // again" message on their next /qurl send. The cancel-loser branch
 // (deleted=false) leaves cooldown untouched — Send won the race and is
 // mid-fanout; bypassing it is the abuse vector. Earlier versions used
-// a 5s-residual "soften" to defend against /send→Cancel→/send spam,
-// but the rapid-cancel-spam scenario is bounded by Discord's own
-// slash-command rate limiting AND requires a deliberate human click
+// a 5s-residual "soften" to defend against /qurl send → Cancel → /qurl
+// send spam, but the rapid-cancel-spam scenario is bounded by Discord's
+// own slash-command rate limiting AND requires a deliberate human click
 // loop; the UX cost of false-positive blocks on legitimate retries
 // outweighed the abuse defense.
 async function handleConfirmCancelClick(interaction, { flow_id, row }) {

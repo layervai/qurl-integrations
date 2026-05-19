@@ -1166,6 +1166,28 @@ describe('clearCooldown', () => {
   });
 });
 
+describe('setCooldown LRU iteration order', () => {
+  // setCooldown's bulk eviction (commands.js:~510) drops the oldest N
+  // keys in Map iteration order, which JS preserves as insertion order.
+  // setCooldown delete-then-sets on every call so a re-touched user
+  // moves to the end of iteration and survives evictions. This used
+  // to be pinned indirectly via the now-removed `softenCooldown
+  // reorders the Map` test; explicit standalone pin so a future
+  // refactor (e.g., bare `set` on an existing key) doesn't silently
+  // break the LRU contract.
+  beforeEach(() => sendCooldowns.clear());
+
+  test('re-setting an existing key moves it to the end of iteration order', () => {
+    setCooldown('uA');
+    setCooldown('uB');
+    setCooldown('uC');
+    expect(Array.from(sendCooldowns.keys())).toEqual(['uA', 'uB', 'uC']);
+    // Re-touch uA → it should move to the end.
+    setCooldown('uA');
+    expect(Array.from(sendCooldowns.keys())).toEqual(['uB', 'uC', 'uA']);
+  });
+});
+
 describe('parseLocationInput', () => {
   test('Google Maps short URL passes through verbatim', () => {
     const r = parseLocationInput('https://goo.gl/maps/abc123');
