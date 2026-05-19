@@ -335,10 +335,11 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// explicitly instead of rendering a malformed `<@>` mrkdwn link,
 	// and log at Error so on-call sees the corruption signal directly
 	// rather than reconstructing from user reports.
-	ownerCopy := fmt.Sprintf("<@%s>", ownerID)
+	ownerCopy := "(unknown — workspace_mappings missing owner_id)"
 	if ownerID == "" {
 		slog.Error("admin list: workspace_mappings row missing owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID)
-		ownerCopy = "(unknown — workspace_mappings missing owner_id)"
+	} else {
+		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
 	}
 	// Filter the owner out of the admins line so it doesn't duplicate
 	// the owner line. The owner is on the admin set by construction
