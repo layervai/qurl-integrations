@@ -13,10 +13,10 @@ This rollout replaces the poll with a `qurl.accessed` webhook receiver.
 
 Each step blocks the next — do not skip ahead.
 
-1. **`qurl-views` DDB table.** Terraform-managed in
-   `qurl-integrations-infra/qurl-bot-discord/terraform`. Without it, the
-   bot's monitor `BatchGet` returns the empty map and the counter
-   silently stays at `0 viewed / N pending` forever. Confirm with:
+1. **`qurl-views` DDB table.** Provisioned by the deploying organization's
+   infrastructure (separate from this repo). Without it, the bot's
+   monitor `BatchGet` returns the empty map and the counter silently
+   stays at `0 viewed / N pending` forever. Confirm with:
    ```
    aws dynamodb describe-table \
      --table-name <DDB_TABLE_PREFIX>qurl-views \
@@ -57,10 +57,11 @@ Each step blocks the next — do not skip ahead.
 - Header: `QURL-Signature` = bare-hex HMAC-SHA256 over the raw body.
   No `sha256=` prefix — that's the GitHub wire shape, NOT this one.
 - Body: `{id, type, data:{qurl_id, resource_id, access_count, consumed}, owner_id, timestamp, api_version}`
-  (peer is `qurl-service:internal/domain/webhook.go::WebhookEvent`).
-  Field names matter: `type` is the event type, `id` is the per-event
-  replay key. Receiver does NOT accept `event` / `event_id` as
-  synonyms — see the regression test in `tests/qurl-webhook.test.js`.
+  (peer is qurl-service's `WebhookEvent` payload shape per its
+  published API contract). Field names matter: `type` is the event
+  type, `id` is the per-event replay key. Receiver does NOT accept
+  `event` / `event_id` as synonyms — see the regression test in
+  `tests/qurl-webhook.test.js`.
 - `src_ip` + `user_agent` are stripped server-side for type=transit
   resources (the connector-owned privacy boundary). Discord bot sends
   are always transit; we don't read those fields.
@@ -92,11 +93,11 @@ Each step blocks the next — do not skip ahead.
   `ResourceNotFoundException`. The setInterval's try/catch swallows
   it and logs `Link monitor poll failed` — the counter sticks at
   `0 viewed / N pending`. Recover by applying the terraform.
-- **Some links missing `qurl_id`.** Upstream connector pre `qurl-s3-connector#747`
-  doesn't surface `qurl_id` from `MintLink`. The bot's empty-`qurlId`
-  boundary guard degrades the WHOLE monitor to the bare base message
-  (no `👀` line at all) and emits one WARN per affected send. Recover
-  by deploying the connector forward.
+- **Some links missing `qurl_id`.** Connector running an older
+  version (before `qurl_id` was surfaced from `MintLink`) — the bot's
+  empty-`qurlId` boundary guard degrades the WHOLE monitor to the
+  bare base message (no `👀` line at all) and emits one WARN per
+  affected send. Recover by deploying the connector forward.
 
 ## Known operator-burden tradeoffs
 

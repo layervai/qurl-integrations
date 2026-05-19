@@ -417,8 +417,9 @@ const AUDIT_EVENTS = {
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 
   // qURL webhook receiver — feeds CloudWatch metric filters +
-  // alarms in qurl-integrations-infra monitoring.tf. Flat counters
-  // only: do NOT promote qurl_id/resource_id to dimensions (unbounded).
+  // alarms managed in the deploying organization's infrastructure
+  // (separate from this repo). Flat counters only: do NOT promote
+  // qurl_id/resource_id to dimensions (unbounded).
   QURL_WEBHOOK_RECEIVED: 'qurl_webhook_received',
   // Sustained rate = SSM secret drift OR attacker probing.
   QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',

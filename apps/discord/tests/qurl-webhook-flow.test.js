@@ -55,9 +55,10 @@ const { app } = require('../src/server');
 const { _test } = require('../src/commands');
 const { monitorLinkStatus, activeMonitors } = _test;
 
-// Reproduced from qurl-service:internal/domain/webhook.go::SignPayload —
-// kept independent of any shared lib so a wire-format regression on
-// either side surfaces here, not via a coupled import.
+// Reproduces qurl-service's webhook payload signing (HMAC-SHA256 bare
+// hex over the raw body), independent of any shared lib so a
+// wire-format regression on either side surfaces here, not via a
+// coupled import.
 function qurlServiceSign(rawBody, secret) {
   return crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
 }

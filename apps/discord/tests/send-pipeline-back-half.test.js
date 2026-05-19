@@ -324,9 +324,10 @@ beforeEach(() => {
 // monitorLinkStatus
 // ===========================================================================
 
-// Canonical qurlLinks shape post-PR (post qurl-service #598 + connector
-// #747): every link carries a qurlId, which the monitor uses as the
-// BatchGet key against the qurl_views table.
+// Canonical qurlLinks shape: every link carries a qurlId, which the
+// monitor uses as the BatchGet key against the qurl_views table.
+// Pre-rollout, upstream connectors didn't surface qurl_id from
+// MintLink — the empty-id boundary guard handles that case.
 const TWO_LINK_SET = [
   { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
   { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa2', qurlLink: 'https://q.test/2', recipientId: 'r2' },
