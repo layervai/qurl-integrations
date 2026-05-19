@@ -638,14 +638,14 @@ describe('monitorLinkStatus — buildStatusMsg view counter', () => {
     }
   });
 
-  // CR regression: after stop() the collector's on('end') handler used
-  // to render `monitor.getFullMsg()` — but stop() clears linkStatus, so
-  // a fresh getFullMsg() against the still-set expectedCount denominator
-  // would render `0 of N viewed`, misleading the user 15 min after a
-  // completed send. The fix snapshots getFullMsg() BEFORE stop(); this
-  // test pins the contract that getFullMsg() loses its counts post-stop
-  // so future callers must snapshot.
-  it('getFullMsg() after stop() loses the counter (linkStatus cleared) — callers must snapshot before stop', async () => {
+  // CR regression: pre-frozen-render fix, post-stop getFullMsg() would
+  // re-render against a cleared linkStatus + still-set expectedCount,
+  // returning `0 of N viewed` even when every recipient had viewed.
+  // Fix: stop() snapshots buildStatusMsg() into frozenMsg BEFORE
+  // clearing linkStatus, and getFullMsg() returns frozenMsg if set.
+  // Test asserts the INVARIANT (getFullMsg() post-stop matches
+  // pre-stop), not the bug (no caller-side snapshot obligation needed).
+  it('getFullMsg() after stop() returns the frozen pre-stop render (stable across stop transitions)', async () => {
     jest.useFakeTimers();
     try {
       mockGetResourceStatus.mockResolvedValue({
@@ -663,18 +663,45 @@ describe('monitorLinkStatus — buildStatusMsg view counter', () => {
       await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
       await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-      // Snapshot the live render BEFORE stop — both qurls viewed.
+      // Both qurls viewed → "All 2 viewed" terminal copy.
       const beforeStop = monitor.getFullMsg();
       expect(beforeStop).toMatch(/✅ \*\*All 2 viewed\*\*/);
 
       monitor.stop();
 
-      // Post-stop, linkStatus is cleared so opened=0; expectedCount
-      // stays at 2; headline regresses to `0 of 2 viewed`. The
-      // collector.on('end') handler MUST capture the pre-stop render
-      // (commands.js:executeSendPipeline) — this pin documents why.
-      const afterStop = monitor.getFullMsg();
-      expect(afterStop).toMatch(/👀 \*\*0 of 2 viewed\*\*/);
+      // Frozen snapshot taken inside stop() BEFORE linkStatus.clear() —
+      // getFullMsg() returns the same render as before stop, so the
+      // collector.on('end') handler at executeSendPipeline can call
+      // monitor.getFullMsg() post-stop without losing the counter.
+      expect(monitor.getFullMsg()).toBe(beforeStop);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('stop() is idempotent — the frozen render captured by the FIRST stop wins (second stop cannot overwrite with stale state)', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGetResourceStatus.mockResolvedValue({
+        qurls: [
+          { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+        ],
+      });
+      const monitor = monitorLinkStatus(
+        'send-1', makeInteraction(),
+        [{ resourceId: 'res-1' }],
+        [{ id: 'r1', username: 'Alice' }],
+        '1m', 'Sent to 1 user', { components: [] }, 1, 'apikey',
+      );
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      const firstFrozen = monitor.getFullMsg();
+      expect(firstFrozen).toMatch(/✅ \*\*All 1 viewed\*\*/);
+
+      monitor.stop();
+      monitor.stop();  // double-stop must NOT re-freeze against the
+                       // now-cleared linkStatus (would render `0 of 1 viewed`)
+
+      expect(monitor.getFullMsg()).toBe(firstFrozen);
     } finally {
       jest.useRealTimers();
     }

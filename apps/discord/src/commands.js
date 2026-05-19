@@ -1041,6 +1041,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   let currentBaseMsg = baseMsg;
   let stopped = false;
   let timer = null; // assigned after control object
+  // Snapshot of the last live render, captured inside stop() BEFORE
+  // linkStatus.clear() — `getFullMsg()` returns this in preference to a
+  // re-render once stop() has fired. Without this, callers that read
+  // getFullMsg() post-stop see `0 of N viewed` (linkStatus is empty but
+  // expectedCount is still N) — actively misleading for a send where
+  // recipients had already viewed before the collector's window closed.
+  // Frozen-once-then-stable: subsequent stop() calls are no-ops, so a
+  // double-stop can't overwrite the frozen render with a stale state.
+  let frozenMsg = null;
   const control = {
     addRecipients(count, newResourceIds) {
       expectedCount += count;
@@ -1053,7 +1062,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       trackingGeneration++;
     },
     stop() {
+      if (stopped) return;
       stopped = true;
+      // Snapshot the live render BEFORE clearing linkStatus — otherwise
+      // a post-stop getFullMsg() would render against an empty Map
+      // with the still-set expectedCount, producing `0 of N viewed`.
+      frozenMsg = buildStatusMsg();
       clearInterval(timer);
       activeMonitors.delete(control);
       // Release references on the closures; over many sends these would
@@ -1074,7 +1088,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       currentBaseMsg = msg;
     },
     getFullMsg() {
-      return buildStatusMsg();
+      return frozenMsg ?? buildStatusMsg();
     },
   };
   const expiryMs = expiryToMs(expiresIn);
@@ -1123,7 +1137,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     //
     // Trade-off vs. pre-PR's `linkStatus.size` denominator: in the
     // tracking-count-mismatch case (qurl-service returns fewer qurls
-    // than expected \u2014 warn-logged above), opened can never equal total
+    // than expected — warn-logged above), opened can never equal total
     // and the headline stays at `X of N viewed` instead of reaching
     // "All N viewed." Acceptable: the case is rare, the warn-log
     // surfaces it to operators, and the alternative ("All K tracked
@@ -2041,8 +2055,10 @@ async function executeSendPipeline(interaction, {
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeInFlight = true;
         // Stop monitor BEFORE any editReply — its setInterval can
-        // overwrite the revoke-result message otherwise.
-        if (monitor) monitor.stop();
+        // overwrite the revoke-result message otherwise. Bare call
+        // (no `if (monitor)`) — we're inside the `if (monitor) { ... }`
+        // collector-setup block; the guard above already proved truthy.
+        monitor.stop();
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
@@ -2179,13 +2195,10 @@ async function executeSendPipeline(interaction, {
     });
 
     collector.on('end', (_, reason) => {
-      // Snapshot the monitor's last-known render BEFORE stop() — stop()
-      // clears linkStatus, so a subsequent getFullMsg() would render
-      // `0 of N viewed` against the still-set expectedCount denominator.
-      // For a send where everyone already viewed, that's actively
-      // misleading 15 min after the fact.
-      const finalMonitorMsg = monitor ? monitor.getFullMsg() : confirmMsg;
-      if (monitor) monitor.stop();
+      // stop() freezes the final getFullMsg() render internally, so the
+      // post-stop getFullMsg() below preserves the last-known counter
+      // (vs. re-rendering against a cleared linkStatus → `0 of N viewed`).
+      monitor.stop();
       if (reason === 'time') {
         // After a SUCCESSFUL revoke, re-render the revoke result
         // instead of the pre-revoke confirmMsg + Management-window
@@ -2206,7 +2219,7 @@ async function executeSendPipeline(interaction, {
         // Revoke attempted but failed — leave the failure message.
         if (revokeInFlight) return;
         interaction.editReply({
-          content: finalMonitorMsg + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
+          content: monitor.getFullMsg() + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
         }).catch(logIgnoredDiscordErr);
       }
