@@ -13,10 +13,10 @@
 // This package exposes a `Store` facade with the method shapes the
 // post-pivot Slack handlers depend on (CheckAdmin, ResolvePolicy,
 // GetChannelPolicy, AllowedResourceIDsForChannel, LookupChannelAlias,
-// BindWorkspace, GetWorkspaceConfig, AddAdmin, RemoveAdmin,
-// ListAdmins, RedeemBootstrap). Errors carry an HTTP-shaped
-// StatusCode on `*Error` so handlers branch via errors.As without
-// caring about the underlying DDB exception shape.
+// BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins, RedeemBootstrap).
+// Errors carry an HTTP-shaped StatusCode on `*Error` so handlers
+// branch via errors.As without caring about the underlying DDB
+// exception shape.
 //
 // Three env vars wire the tables on Fargate (set by
 // qurl-bot-slack/terraform via modules/qurl-slack-ddb's outputs):
@@ -251,25 +251,6 @@ type WorkspaceMapping struct {
 	TeamID    string    `json:"team_id"`
 	OwnerID   string    `json:"owner_id"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-// WorkspaceConfig is the response shape `/qurl admin status` renders.
-// Computed by the workspace-config read path: a single GetItem on
-// workspace_mappings plus a count-only Query on channel_policies for
-// PolicyCount.
-//
-// APIKeyFingerprint stays empty for now — pre-pivot it was a
-// service-side sha256-prefix over the workspace API key, but the
-// API key now lives in `workspace_state` (shared/auth/DDBProvider)
-// which this package doesn't own. A follow-up will plumb a
-// fingerprint accessor through handlerDeps without coupling
-// slackdata to the encrypted-API-key surface.
-type WorkspaceConfig struct {
-	OwnerID           string    `json:"owner_id"`
-	APIKeyFingerprint string    `json:"api_key_fingerprint"`
-	SeedAdminUserID   string    `json:"seed_admin_user_id"`
-	ConfiguredAt      time.Time `json:"configured_at"`
-	PolicyCount       int       `json:"policy_count"`
 }
 
 // ddbToError normalizes an SDK error into an [*Error] with an HTTP-

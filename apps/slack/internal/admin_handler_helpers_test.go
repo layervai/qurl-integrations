@@ -245,38 +245,3 @@ func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID str
 	}
 	return false
 }
-
-// policyHasResource returns true iff the channel_policies row for
-// (teamID, channelID) carries resourceID in its allowed_resource_ids
-// SS (set). The production AllowResource path stores resources in
-// the SS shape so the post-mutation check needs to look for set
-// membership, not bare equality.
-func (f *fakeDDB) policyHasResource(t *testing.T, teamID, channelID, resourceID string) bool {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Look up the row by composite key teamID:channelID.
-	for _, tbl := range f.tables {
-		for _, item := range tbl {
-			team, _ := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
-			ch, _ := item[fAttrSlackChannelID].(*ddbtypes.AttributeValueMemberS)
-			if team == nil || ch == nil {
-				continue
-			}
-			if team.Value != teamID || ch.Value != channelID {
-				continue
-			}
-			if ss, ok := item[fAttrAllowedResourceIDs].(*ddbtypes.AttributeValueMemberSS); ok {
-				for _, v := range ss.Value {
-					if v == resourceID {
-						return true
-					}
-				}
-			}
-			if rid, ok := item[fAttrResourceID].(*ddbtypes.AttributeValueMemberS); ok && rid.Value == resourceID {
-				return true
-			}
-		}
-	}
-	return false
-}

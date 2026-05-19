@@ -134,13 +134,12 @@ func TestHandleAdminAdd_HappyPath(t *testing.T) {
 func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	// Seed the target into the admin set so AddAdmin's conditional
-	// `NOT contains(...)` fails immediately.
-	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testTargetUserID, testWorkspaceConfiguredAt)
-	// Re-seed the caller on the same row (seedWorkspace overwrites).
+	// Seed the target onto the existing admin set so AddAdmin's
+	// conditional `NOT contains(...)` fails immediately. AddAdmin's
+	// ADD-on-SS is set-union, so the caller stays admin.
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
-	if err := store.AddAdmin(context.Background(), testAdminTeamID, testAdminUserID); err != nil {
-		t.Fatalf("seed caller as admin: %v", err)
+	if err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID); err != nil {
+		t.Fatalf("seed target as admin: %v", err)
 	}
 
 	h := newAdminTestHandler(t, ts)
@@ -274,11 +273,10 @@ func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 // guard: an admin trying to demote the workspace owner sees a clear
 // "transfer via OAuth re-install" copy.
 //
-// Builds the fixture by hand: testAdminUserID is on the admin set,
-// testAdminOwnerID is the owner. Default seedAdmin makes the owner
-// `u_workspace_owner` while the admin is `U_admin` — different
-// users — so the caller can target the owner without tripping the
-// self-remove guard.
+// Default seedAdmin makes the owner `testAdminOwnerID` (UOWNER01)
+// while the calling admin is `testAdminUserID` (UADMIN01) —
+// distinct users — so the caller can target the owner without
+// tripping the self-remove guard.
 func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)

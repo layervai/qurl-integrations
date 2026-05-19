@@ -411,9 +411,8 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 }
 
 // Query implements [slackdata.DynamoDBClient] over the
-// `slack_team_id = :tid` shape used by [slackdata.Store.ListPolicies]
-// and [slackdata.Store.countPoliciesForTeam]. Honors Limit,
-// ExclusiveStartKey, and Select=COUNT.
+// `slack_team_id = :tid` shape used by [slackdata.Store.ListPolicies].
+// Honors Limit and ExclusiveStartKey.
 //
 // We don't parse the KeyConditionExpression — the only shape in use
 // is `slack_team_id = :tid`. If a future caller adds a begins_with
@@ -486,10 +485,6 @@ func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*d
 		}
 	}
 
-	// COUNT-only requests strip Items (matches DDB behavior).
-	if in.Select == ddbtypes.SelectCount {
-		out.Items = nil
-	}
 	return out, nil
 }
 

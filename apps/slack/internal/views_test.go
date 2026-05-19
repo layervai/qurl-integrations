@@ -49,7 +49,7 @@ func TestHelpResponse_ValidJSON(t *testing.T) {
 }
 
 // TestHelpResponse_MentionsSubcommands fences the help text content
-// against the parser grammar. Every verb declared in parser.go must
+// against the parser grammar. Every verb the parser dispatches must
 // appear in the help body — a regression that drops a verb from
 // help silently degrades discoverability. Substring checks (not
 // full parse) so reformatting the help doesn't churn the test.
@@ -60,18 +60,18 @@ func TestHelpResponse_MentionsSubcommands(t *testing.T) {
 		t.Fatalf("HelpResponse: %v", err)
 	}
 	body := string(raw)
-	// Every Subcommand + AdminAction from parser.go must surface.
-	// `admin allow` / `admin disallow` are parser-known but not wired
-	// in the dispatcher today; the help body omits them so users don't
-	// see verbs they can't run.
+	// Every Subcommand + AdminAction wired in the v1 admin surface
+	// (claim/revoke/add/remove/list) plus the customer verbs must
+	// surface.
 	for _, want := range []string{
 		"qurl get",
 		"qurl setalias",
 		"qurl unsetalias",
 		"qurl aliases",
 		"qurl admin claim",
-		"qurl admin policies",
-		"qurl admin status",
+		"qurl admin add",
+		"qurl admin remove",
+		"qurl admin list",
 		"qurl admin revoke",
 		"qurl list",
 		"qurl help",

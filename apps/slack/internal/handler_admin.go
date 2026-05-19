@@ -50,9 +50,6 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// the claim flow is to create the first admin from a bootstrap
 	// code on a workspace where CheckAdmin returns (false, "") and
 	// AdminStore presence is irrelevant to the modal-open call.
-	// The matching `case AdminClaim` arm inside the switch is dead
-	// code that only exists to satisfy the `exhaustive` lint; the
-	// short-circuit above is the load-bearing branch.
 	if cmd.AdminAction == AdminClaim {
 		h.handleAdminClaim(w, values)
 		return
@@ -71,11 +68,9 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		h.handleAdminRemove(w, values, teamID, userID, cmd)
 	case AdminList:
 		h.handleAdminList(w, values, teamID, userID)
-	case AdminClaim:
-		// Dead code — short-circuited above so the AdminStore guard
-		// is skipped. Present only to satisfy the `exhaustive` lint.
-		h.handleAdminClaim(w, values)
 	default:
+		// AdminClaim is short-circuited above; any unknown action
+		// (parser drift or a future-but-unwired verb) lands here.
 		respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
 	}
 }

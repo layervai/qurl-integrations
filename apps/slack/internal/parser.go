@@ -440,8 +440,9 @@ func tokenize(text string) []string {
 //
 // `get` is the only verb in the grammar that accepts both alias and
 // resource-ID shapes — the alias-mutating verbs (`setalias`,
-// `unsetalias`, admin allow/disallow/revoke) intentionally stay
-// alias-only because their semantics are alias-scoped. Letting `get`
+// `unsetalias`) intentionally stay alias-only because their semantics
+// are alias-scoped. `admin revoke` takes a raw `q_<id>` qurl_id (no
+// sigil) so it doesn't go through this token shape. Letting `get`
 // take a raw ID closes the gap between `/qurl list` (which surfaces
 // IDs for un-aliased resources) and `/qurl get` (which previously
 // only minted from aliases or URLs) so a list line can be
@@ -648,8 +649,8 @@ func parseAliasToken(tok string) (string, error) {
 // [ErrInvalidAlias] with a message naming both accepted shapes.
 //
 // Used by verbs that accept both alias and resource-ID forms
-// (currently `/qurl get`). Alias-only verbs (`setalias`, `unsetalias`,
-// `admin allow/disallow/revoke`) use [parseAliasToken] instead.
+// (currently `/qurl get`). Alias-only verbs (`setalias`, `unsetalias`)
+// use [parseAliasToken] instead.
 func requireResourceToken(tok string) (ParsedResourceToken, error) {
 	if !strings.HasPrefix(tok, "$") {
 		return ParsedResourceToken{}, fmt.Errorf("%w: got %q", ErrMissingSigil, tok)

@@ -3,7 +3,6 @@ package slackdata
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"sort"
 	"time"
@@ -23,7 +22,6 @@ const (
 	attrCreatedAt          = "created_at"
 	attrUpdatedAt          = "updated_at"
 	attrSeedAdminSlackUser = "seed_admin_slack_user_id"
-	attrAPIKeyFingerprint  = "api_key_fingerprint"
 )
 
 // Error codes surfaced on [*Error.Code] by [Store.BindWorkspace]'s
@@ -80,12 +78,15 @@ const bindDisambiguationBudget = 300 * time.Millisecond
 
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
 //
-// Workspace not yet bound to an owner → (false, "", nil) — the
-// handler treats this as "not admin" and renders the friendly
-// "admin features not configured" copy. Distinguishing
-// "workspace-not-bound" from "user-not-on-admin-list" is left to a
-// follow-up (the old HTTP surface didn't distinguish them either —
-// both came back as `is_admin=false`).
+// Workspace not yet bound to an owner → (false, "", nil). The handler
+// treats this the same as "user not on admin set" and renders the
+// generic ":warning: this command is admin-only" copy. The distinct
+// "admin features not configured" copy is reserved for the
+// AdminStore==nil branch (sandbox deploys without DDB), which never
+// reaches this function. Distinguishing "workspace-not-bound" from
+// "user-not-on-admin-list" is left to a follow-up (the old HTTP
+// surface didn't distinguish them either — both came back as
+// `is_admin=false`).
 func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isAdmin bool, ownerID string, err error) {
 	if teamID == "" || slackUserID == "" {
 		return false, "", &Error{
@@ -114,94 +115,6 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 		}
 	}
 	return false, ownerID, nil
-}
-
-// GetWorkspaceConfig renders the `/qurl admin status` payload — owner
-// ID, seed admin, configured_at, and the policy count (a count-only
-// Query on channel_policies). The API-key fingerprint is left empty
-// for now; it'll be plumbed through handlerDeps in a follow-up so the
-// slackdata package doesn't have to know about the encrypted-API-key
-// surface in shared/auth.
-func (s *Store) GetWorkspaceConfig(ctx context.Context, teamID string) (*WorkspaceConfig, error) {
-	if teamID == "" {
-		return nil, &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "GetWorkspaceConfig: team_id is required",
-		}
-	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.WorkspaceMappingsName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID: stringAttr(teamID),
-		},
-	})
-	if err != nil {
-		return nil, ddbToError("GetWorkspaceConfig", err)
-	}
-	if len(out.Item) == 0 {
-		return nil, notFoundError("GetWorkspaceConfig: workspace not bound")
-	}
-	cfg := &WorkspaceConfig{
-		OwnerID:           readString(out.Item, attrOwnerID),
-		APIKeyFingerprint: readString(out.Item, attrAPIKeyFingerprint), // empty until follow-up
-		SeedAdminUserID:   readString(out.Item, attrSeedAdminSlackUser),
-		ConfiguredAt:      readTime(out.Item, attrCreatedAt),
-	}
-
-	// Count channel_policies rows for this team. Count-only DDB
-	// queries return only the Count field (no row scan on the
-	// wire). For workspaces with hundreds of channel policies this
-	// is still O(rows) on RCUs — acceptable at slash-command volumes,
-	// not acceptable on a hot path. Tracked as a follow-up if
-	// /qurl admin status gets called often enough to matter.
-	count, countErr := s.countPoliciesForTeam(ctx, teamID)
-	if countErr != nil {
-		// Don't fail the whole status reply on a count failure —
-		// surface the partial data with policy_count=0 so the
-		// operator still gets the workspace owner/admin info. The
-		// count discrepancy will show up as zero, which the
-		// /qurl admin policies command can correct.
-		//
-		// Audit the degraded path so operators can distinguish "no
-		// policies" from "count failed". Without this log line
-		// /qurl admin status quietly reports `Channel policies: 0`
-		// on any transient DDB blip — indistinguishable from a real
-		// empty-state.
-		slog.Warn("countPoliciesForTeam degraded; status reply shows policy_count=0",
-			"team_id", teamID, "error", countErr)
-		// Intentional nilerr: partial status > total failure for
-		// the operator. The slog.Warn above is the audit trail.
-		return cfg, nil
-	}
-	cfg.PolicyCount = count
-	return cfg, nil
-}
-
-// countPoliciesForTeam runs a count-only DDB Query on
-// channel_policies (PK=slack_team_id). Returns 0 + nil if no rows.
-func (s *Store) countPoliciesForTeam(ctx context.Context, teamID string) (int, error) {
-	var total int
-	var lastKey map[string]ddbtypes.AttributeValue
-	for {
-		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
-			TableName:              aws.String(s.ChannelPoliciesName),
-			KeyConditionExpression: aws.String("slack_team_id = :tid"),
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-				":tid": stringAttr(teamID),
-			},
-			Select:            ddbtypes.SelectCount,
-			ExclusiveStartKey: lastKey,
-		})
-		if err != nil {
-			return 0, ddbToError("countPoliciesForTeam", err)
-		}
-		total += int(out.Count)
-		if len(out.LastEvaluatedKey) == 0 {
-			break
-		}
-		lastKey = out.LastEvaluatedKey
-	}
-	return total, nil
 }
 
 // BindWorkspace creates the workspace mapping row on first claim.

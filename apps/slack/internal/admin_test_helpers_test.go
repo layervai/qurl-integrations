@@ -25,8 +25,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 // adminTestServers owns the customer httptest server and the
@@ -146,14 +144,6 @@ func (ts *adminTestServers) seedNonAdmin(t *testing.T) {
 func (ts *adminTestServers) seedWorkspace(t *testing.T, teamID, ownerID, slackUserID string, configuredAt time.Time) {
 	t.Helper()
 	ts.ddb.seedItem(t, ts.tableNames.workspace, seedWorkspaceAdmin(teamID, ownerID, slackUserID, configuredAt))
-}
-
-// seedWorkspaceCustom seeds a workspace_mappings row with arbitrary
-// fields. Used by status tests that need to vary api_key_fingerprint
-// or omit configured_at.
-func (ts *adminTestServers) seedWorkspaceCustom(t *testing.T, item map[string]ddbtypes.AttributeValue) {
-	t.Helper()
-	ts.ddb.seedItem(t, ts.tableNames.workspace, item)
 }
 
 // seedPolicySingle seeds a channel_policies row with a single
