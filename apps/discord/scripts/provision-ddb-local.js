@@ -230,6 +230,17 @@ const tables = [
     attributes: [{ AttributeName: 'send_id', AttributeType: 'S' }],
   },
   {
+    // Webhook-fed view counter for /qurl send + /qurl map. Populated by
+    // the qurl.accessed webhook receiver via conditional MAX-merge
+    // update; read by the live monitor's setInterval as the
+    // multi-instance bridge (a webhook lands on instance A while the
+    // originating monitor runs on instance B). No GSI — read path is
+    // always BatchGet by the in-memory qurlLinks set.
+    name: 'qurl-views',
+    keySchema: [{ AttributeName: 'qurl_id', KeyType: 'HASH' }],
+    attributes: [{ AttributeName: 'qurl_id', AttributeType: 'S' }],
+  },
+  {
     name: 'orphaned-oauth-tokens',
     keySchema: [{ AttributeName: 'token_hash', KeyType: 'HASH' }],
     attributes: [{ AttributeName: 'token_hash', AttributeType: 'S' }],
