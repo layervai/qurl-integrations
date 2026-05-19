@@ -32,7 +32,7 @@ const {
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
-const { deleteLink, getResourceStatus } = require('./qurl');
+const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
@@ -1107,227 +1107,233 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
 // the original message).
 const activeMonitors = new Set();
 
-function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered, apiKey) {
+// Discord ephemeral messages can ONLY be edited via the interaction
+// webhook token (which expires 15 min after the interaction is created),
+// not via bot-token channel PATCH. Both /qurl send and /qurl map
+// deferReply ephemeral, so the confirmation is unreachable once the
+// token expires. There's no cross-token fallback — we just cap the
+// monitor below the 15-min cliff so we don't waste setIntervals
+// against a dead token.
+
+function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered) {
   // Rebind params as closure-mutable so stop() can null them out for GC.
-  // Long-running monitors (up to 1h × MAX_CONCURRENT_MONITORS=50) otherwise
-  // pin interaction/recipients/buttonRow in the setInterval closure.
+  // Long-running monitors (up to MAX_MONITOR_DURATION_MS ×
+  // MAX_CONCURRENT_MONITORS=50) otherwise pin interaction/recipients/
+  // buttonRow in the setInterval closure.
   let interaction = interactionArg;
   let qurlLinks = qurlLinksArg;
   let recipients = recipientsArg;
   let buttonRow = buttonRowArg;
-  void buttonRow; // buttonRow is used transitively via setComponents inline; keep alias for symmetry
-  // Returns a control object: call monitor.addRecipients(count) when new recipients are added
   let currentBaseMsg = baseMsg;
   let stopped = false;
-  let timer = null; // assigned after control object
+  let timer = null;
+  let expectedCount = delivered;
+
+  // Seed tracked qurl_ids from the in-memory qurlLinks. Each linkStatus
+  // entry pre-populates with the recipient's username so the first
+  // webhook-fed tick can flip status → 'opened' without losing the
+  // label. Empty qurlId on ANY link degrades the whole monitor — a
+  // partial-attribution counter would mislead worse than no counter.
+  const trackedQurlIds = new Set();
+  const linkStatus = new Map();
+  let degradedAtConstruction = false;
+  for (let i = 0; i < qurlLinks.length; i++) {
+    const qid = qurlLinks[i].qurlId;
+    if (!qid) { degradedAtConstruction = true; continue; }
+    trackedQurlIds.add(qid);
+    const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
+    linkStatus.set(qid, { status: 'pending', username });
+  }
+  // Re-derived each tick so addRecipients() with a missing qurlId can
+  // re-degrade the monitor mid-life. Set during addRecipients too.
+  let viewCounterDegraded = degradedAtConstruction;
+  if (viewCounterDegraded) {
+    logger.warn('Monitor view counter degraded — some links missing qurl_id', {
+      sendId, missing: qurlLinks.filter(l => !l.qurlId).length, total: qurlLinks.length,
+    });
+  }
+
+  // Bumped by addRecipients. A tick whose getQurlViews resolves after
+  // generation advanced must skip its render — the views map was built
+  // against the pre-add tracked set and could under-report.
+  let trackingGeneration = 0;
+  let allDone = false;
+
   const control = {
-    addRecipients(count, newResourceIds) {
+    // newLinks: Array<{qurlId, username}> aligned per-recipient. Must
+    // seed `linkStatus` AND `trackedQurlIds` together — extending only
+    // the tracked set means runTick's view-flip lookup misses the new
+    // qurl_ids and the counter never advances for /qurl add recipients.
+    addRecipients(count, newLinks) {
       expectedCount += count;
-      if (newResourceIds) {
-        for (const rid of newResourceIds) {
-          if (!resourceIds.includes(rid)) resourceIds.push(rid);
+      if (Array.isArray(newLinks)) {
+        for (const item of newLinks) {
+          const qid = item && item.qurlId;
+          if (!qid) {
+            // Mirror the construction-time warn — an operator chasing
+            // "why is the counter blank?" needs a breadcrumb when the
+            // degraded flip happens mid-life via /qurl add, not just
+            // at the original send.
+            if (!viewCounterDegraded) {
+              logger.warn('Monitor view counter degraded mid-life — addRecipients link missing qurl_id', { sendId });
+            }
+            viewCounterDegraded = true;
+            continue;
+          }
+          if (!trackedQurlIds.has(qid)) {
+            trackedQurlIds.add(qid);
+            linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
+          }
         }
       }
-      trackedQurlIds = null;
       trackingGeneration++;
+      // If the monitor had already settled (all initial recipients viewed
+      // → setInterval cleared), re-arm it so the new recipients' views
+      // get a chance to flip. Without this, /qurl add on an already-
+      // resolved send leaves the counter frozen for the rest of the
+      // monitor lifetime. Reset pollCount too — the throttling decay
+      // (every-other / every-4th) is meant for an idle send; /qurl add
+      // is the explicit signal that the send is NOT steady-state.
+      // Re-uses the construction-time setTimeout→setInterval pattern
+      // so the first post-add tick fires at FIRST_POLL_DELAY_MS (3s),
+      // not at pollInterval (15-60s) — the same sub-second-click
+      // catching rationale applies to /qurl add recipients too.
+      if (allDone && !stopped) {
+        allDone = false;
+        pollCount = 0;
+        clearInterval(timer);
+        timer = setTimeout(async () => {
+          await runTick();
+          if (isTerminated()) return;
+          timer = setInterval(runTick, pollInterval);
+          if (timer && timer.unref) timer.unref();
+        }, FIRST_POLL_DELAY_MS);
+        if (timer && timer.unref) timer.unref();
+      }
     },
     stop() {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
       activeMonitors.delete(control);
-      // Release references on the closures; over many sends these would
-      // otherwise accumulate. trackedQurlIds may already be null (see
-      // addRecipients — null forces a re-init next tick).
       linkStatus.clear();
-      if (trackedQurlIds) trackedQurlIds.clear();
-      trackedQurlIds = null;
-      // Drop the big closure-captured objects so GC can reclaim them — an
-      // idle timer that was already cleared above holds the closure frame
-      // alive until the control object itself is GC'd.
+      trackedQurlIds.clear();
       interaction = null;
       qurlLinks = null;
       recipients = null;
       buttonRow = null;
     },
-    updateBaseMsg(msg) {
-      currentBaseMsg = msg;
-    },
-    getFullMsg() {
-      return buildStatusMsg();
-    },
+    updateBaseMsg(msg) { currentBaseMsg = msg; },
+    getFullMsg() { return buildStatusMsg(); },
   };
+
   const expiryMs = expiryToMs(expiresIn);
-  // Cap monitor lifetime at 1h regardless of link expiry. Links still expire
-  // normally at the API level; we just stop updating the Discord message
-  // after an hour to avoid multi-day setIntervals for 7d expiries.
-  const MAX_MONITOR_DURATION_MS = 60 * 60 * 1000;
+  // 14-min cap matches the practical edit window. The interaction
+  // webhook token expires at ~15 min from interaction creation; both
+  // /qurl send + /qurl map deferReply ephemeral, and ephemeral
+  // messages can't be edited via any other token. Past the cap the
+  // setInterval would only burn cycles against a dead token. Store-
+  // side view recording (recordQurlView) is unaffected — webhooks
+  // keep landing for the link's full lifetime; the sender's confirm-
+  // message counter just freezes after the cap. Links themselves
+  // still expire at the API level regardless of the monitor cap.
+  const MAX_MONITOR_DURATION_MS = 14 * 60 * 1000;
   const maxMonitorMs = Math.min(expiryMs + 60000, MAX_MONITOR_DURATION_MS);
 
-  const resourceIds = [...new Set(qurlLinks.map(l => l.resourceId))];
-  let expectedCount = delivered;
-
-  // Track status per qurl_id: { status, username }
-  const linkStatus = new Map();
-  let trackedQurlIds = null;
-  // Monotonic counter bumped by addRecipients(). A tick that begins init
-  // while generation=N and finishes after generation advanced to N+1 must
-  // abort — its localSet was built against pre-add resourceIds/expectedCount.
-  let trackingGeneration = 0;
-  let allDone = false;
-
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
-  // First poll fires fast so the live view counter catches sub-second
-  // self-destruct sends where the recipient opens + burns the link
-  // before the standard pollInterval tick would have fired. Fan-out
-  // per tick is `resourceIds.length` parallel GETs (not recipient
-  // count — qurls are batched per resource at TOKENS_PER_RESOURCE),
-  // so the t=3s vs. t=15s shift is a small load delta on qurl-service.
+  // Fast first tick catches sub-second self-destruct sends where the
+  // recipient burns the link before the standard interval would fire.
   const FIRST_POLL_DELAY_MS = 3000;
   const startTime = Date.now();
-  // Same termination check used at two sites (runTick early-exit +
-  // post-first-tick scheduling guard); centralized so a future
-  // condition (e.g., revoked) lands in one place.
   const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
 
+  // Best-effort edit through the interaction webhook token. After the
+  // 14-min monitor cap, this would 401 against an expired token —
+  // logIgnoredDiscordErr swallows it. Recipients see status from
+  // their DM, so the sender's frozen counter past cap is just a
+  // dashboard nicety, not a load-bearing surface.
+  async function safeEdit(payload) {
+    if (!interaction) return;
+    await interaction.editReply(payload).catch(logIgnoredDiscordErr);
+  }
+
+  // `viewed` counter is closure-tracked so we don't re-walk linkStatus
+  // on each render. Incremented when a link flips pending → opened in
+  // runTick; never decreases.
+  let viewed = 0;
+
+  // No explicit `expired` state in the rendered counter: qurl.accessed
+  // is the only event we receive, and the 1h monitor cap covers the
+  // practical "user never opened it" window. Pre-PR-455 modelled
+  // expired explicitly via upstream polling; the webhook-only world
+  // can't observe expiration without a separate qurl.expired
+  // subscription (out of scope).
   function buildStatusMsg() {
-    // View-counter rendering temporarily removed. qurl-service strips
-    // the `qurls` field from `GET /v1/qurls/:id` responses for
-    // type=transit resources (every Discord bot send is transit, since
-    // the connector targets the fileviewer URL). With qurls always
-    // empty, the polling-based counter could only ever render
-    // `0 of N viewed` — actively misleading. Returning the bare
-    // currentBaseMsg until the webhook-based replacement lands
-    // (qurl-service publishes EventQurlAccessed → bot receives →
-    // updates the confirmation directly, no polling). Tracking
-    // issue + webhook plan: qurl-service #596.
-    //
-    // `linkStatus`/`expectedCount` machinery is intentionally kept as
-    // scaffolding the webhook handler can populate once the receiver
-    // lands; the monitor setInterval also stays (now a no-op render-
-    // wise, but the polls cost nothing operationally beyond the bot's
-    // existing qurl-service GETs).
-    return currentBaseMsg;
+    if (viewCounterDegraded) return currentBaseMsg;
+    const pending = Math.max(0, expectedCount - viewed);
+    return `${currentBaseMsg}\n👀 ${viewed} viewed / ${pending} pending`;
   }
 
   let pollCount = 0;
-  // INVARIANT: `trackedQurlIds` starts null and is populated on the first tick
-  // (see line ~277). control.addRecipients() sets it back to null mid-tick so
-  // the NEXT tick re-initializes tracking against the new link set. Any read
-  // of `trackedQurlIds` inside this callback that happens AFTER an `await`
-  // must first re-check `if (!trackedQurlIds) return;` because addRecipients
-  // can null it during any awaited gap. If you add new awaits here, guard
-  // subsequent reads accordingly.
+  // Concurrent-tick safety: runTick has one `await` (db.getQurlViews).
+  // Two ticks queued from setInterval can both be in-flight, both
+  // iterating `views` after their respective resolves. The
+  // `if (current.status === 'opened') continue;` guard at the flip
+  // site is synchronous JS, so the second tick observes the first
+  // tick's flip and no-ops — `viewed++` doesn't double-count, the
+  // BatchGet path is idempotent on already-flipped status.
   const runTick = async () => {
     pollCount++;
+    // Decay tick rate to bound sustained cost of an idle monitor.
+    //   pollCount 1–5:    every tick fires (fast ramp)
+    //   pollCount 6–20:   every other tick (even-only)
+    //   pollCount 21+:    every 4th tick (multiple-of-4)
+    // The else-if chain reads in the same order: 21+ throttle first,
+    // then 6–20 throttle.
     if (pollCount > 20 && pollCount % 4 !== 0) return;
     else if (pollCount > 5 && pollCount % 2 !== 0) return;
     if (isTerminated()) {
       clearInterval(timer);
-      // interaction may have been nulled by stop() if this callback was
-      // already mid-execution when stop fired — clearInterval only prevents
-      // FUTURE ticks, not the one currently running. Skip the final edit
-      // in that case; the closure refs are already being released.
       if (!interaction) return;
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
-      await interaction.editReply({ content: finalMsg, components: [] }).catch(logIgnoredDiscordErr);
+      await safeEdit({ content: finalMsg, components: [] });
       return;
     }
+    if (viewCounterDegraded || trackedQurlIds.size === 0) return;
     try {
+      const genAtStart = trackingGeneration;
+      const views = await db.getQurlViews([...trackedQurlIds]);
+      // addRecipients during the await invalidates this snapshot.
+      if (trackingGeneration !== genAtStart) return;
+      if (!interaction) return;
+
+      // Iterate the (sparse) views map instead of the full linkStatus
+      // set — usually only a handful of qurls have actually been
+      // accessed, vs. up to 50 tracked links.
       let changed = false;
-
-      // Initialize tracking on first poll. A single send may span multiple
-      // resources (both file sends >TOKENS_PER_RESOURCE, which re-upload in
-      // batches of 10, and location sends which mint one qurl per resource),
-      // so walk every resource and collect all its qurls, then pick the
-      // `expectedCount` most recent across the whole send.
-      if (!trackedQurlIds) {
-        // Snapshot the generation BEFORE the await. If addRecipients fires
-        // during Promise.all it will bump the counter and the post-await
-        // check will abort this init — the new tick must re-read
-        // resourceIds/expectedCount against the updated state.
-        const genAtStart = trackingGeneration;
-        const snapshotResourceIds = resourceIds.slice();
-        const snapshotExpectedCount = expectedCount;
-        const localSet = new Set();
-        const statuses = await Promise.all(
-          snapshotResourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
-        );
-        if (trackingGeneration !== genAtStart) {
-          // addRecipients ran during the await; the snapshot is stale.
-          // Leave trackedQurlIds null so the next tick re-inits fresh.
-          return;
-        }
-        const allQurls = [];
-        for (const data of statuses) {
-          if (!data || !data.qurls) continue;
-          for (const q of data.qurls) allQurls.push(q);
-        }
-        // Secondary sort on qurl_id makes the order deterministic when two
-        // qurls land in the same created_at millisecond — otherwise the
-        // positional recipient→qurl mapping becomes non-deterministic.
-        allQurls.sort((a, b) => {
-          const d = new Date(a.created_at) - new Date(b.created_at);
-          if (d !== 0) return d;
-          return String(a.qurl_id).localeCompare(String(b.qurl_id));
-        });
-        const recentN = allQurls.slice(-snapshotExpectedCount);
-        if (recentN.length !== recipients.length) {
-          logger.warn('Monitor tracking count mismatch', {
-            sendId, qurls: recentN.length, recipients: recipients.length,
-          });
-        }
-        // Bound the zip to min(qurls, recipients) so we never index recipients
-        // past its end or leave a qurl without a label. Any excess on either
-        // side is logged above for oncall diagnosis.
-        const trackCount = Math.min(recentN.length, recipients.length);
-        for (let i = 0; i < trackCount; i++) {
-          const q = recentN[i];
-          localSet.add(q.qurl_id);
-          const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
-          // Preserve opened/expired status from a prior init pass —
-          // addRecipients() nulls trackedQurlIds and the next tick re-runs
-          // this init block. Blindly resetting to 'pending' would briefly
-          // render `0 of N+M viewed` until the same tick's poll loop
-          // re-flips. Only seed 'pending' for genuinely new qurl_ids;
-          // the subsequent poll pass will still upgrade any newly-opened.
-          const existing = linkStatus.get(q.qurl_id);
-          if (existing && existing.status !== 'pending') {
-            linkStatus.set(q.qurl_id, { ...existing, username });
-          } else {
-            linkStatus.set(q.qurl_id, { status: 'pending', username });
-          }
-        }
-        trackedQurlIds = localSet;
-        logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
-      }
-
-      // Poll all resources for status changes (parallel to avoid N sequential API calls per tick)
-      const pollResults = await Promise.all(
-        resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
-      );
-      // control.addRecipients() can null out trackedQurlIds during the await
-      // above — skip this tick and let the next one re-init the tracking set.
-      if (!trackedQurlIds) return;
-      for (const data of pollResults) {
-        if (!data || !data.qurls) continue;
-        for (const qurl of data.qurls) {
-          if (!trackedQurlIds.has(qurl.qurl_id)) continue;
-          const current = linkStatus.get(qurl.qurl_id);
-          if (!current) continue;
-          if (qurl.use_count > 0 && current.status !== 'opened') {
-            linkStatus.set(qurl.qurl_id, { ...current, status: 'opened' }); changed = true;
-          } else if (qurl.status === 'expired' && current.status === 'pending') {
-            linkStatus.set(qurl.qurl_id, { ...current, status: 'expired' }); changed = true;
-          }
-        }
+      for (const [qurlId, v] of views) {
+        if (!(v.accessCount > 0)) continue;
+        const current = linkStatus.get(qurlId);
+        if (!current || current.status === 'opened') continue;
+        linkStatus.set(qurlId, { ...current, status: 'opened' });
+        viewed++;
+        changed = true;
       }
       if (changed) {
-        // Same race as above — stop() may have nulled interaction during the
-        // awaited Promise.all. Skip the edit; next tick's stopped-check exits.
-        if (!interaction) return;
-        const pending = [...linkStatus.values()].filter(s => s.status === 'pending').length;
-        await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(logIgnoredDiscordErr);
+        const pending = Math.max(0, expectedCount - viewed);
+        // Render-order analysis: two concurrent ticks both reaching
+        // this branch is bounded by the `=== 'opened' continue` guard
+        // at the flip site. A slower tick whose snapshot pre-dates a
+        // faster tick's flip can't double-flip the same qurl_id, so
+        // `viewed` never regresses across ticks. A truly stale tick
+        // would observe all-opened and exit with `changed=false`
+        // (no safeEdit). The remaining theoretical flicker — DDB
+        // eventual-consistency returning newer data to the older
+        // tick than to the newer one — is sub-ms in practice and
+        // self-corrects on the next tick. Acceptable cost for not
+        // adding a render-generation counter on top of the existing
+        // trackingGeneration.
+        await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
         if (pending === 0) { allDone = true; clearInterval(timer); }
       }
     } catch (err) {
@@ -1388,7 +1394,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
  * @param {number} opts.recipientCount — number of tokens to mint in total.
  * @param {string} opts.apiKey — QURL API key.
- * @returns {Array<{qurl_link: string, resourceId: string}>}
+ * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey }) {
   const allLinks = [];
@@ -1404,7 +1410,9 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
     const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
     const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
     for (const link of minted) {
-      allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+      // qurl_id is the join key against qurl.accessed webhooks; empty
+      // string degrades the whole monitor to bare base-msg.
+      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: currentResourceId });
     }
     tokensUsed += batchSize;
   }
@@ -1710,6 +1718,7 @@ async function executeSendPipeline(interaction, {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
+        qurlId: allLinks[i].qurl_id,
         resourceId: allLinks[i].resourceId,
       }));
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
@@ -1743,6 +1752,7 @@ async function executeSendPipeline(interaction, {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
+        qurlId: allLinks[i].qurl_id,
         resourceId: allLinks[i].resourceId,
       }));
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
@@ -1976,7 +1986,7 @@ async function executeSendPipeline(interaction, {
   // one view.
   let monitor = null;
   if (delivered > 0) {
-    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
+    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered);
   }
   const initialPayload = {
     content: monitor ? monitor.getFullMsg() : confirmMsg,
@@ -2221,8 +2231,7 @@ async function executeSendPipeline(interaction, {
 
             if (addResult.delivered > 0) {
               addRecipientsCount += addResult.delivered;
-              // Tell the monitor to track the new links (including new resource IDs for location sends)
-              monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
+              monitor.addRecipients(addResult.delivered, addResult.newLinks);
               const totalSent = delivered + addRecipientsCount;
               confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
@@ -2287,7 +2296,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const senderDiscordId = originalInteraction.user.id;
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
-    return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: [] };
+    return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
@@ -2309,7 +2318,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     logger.warn('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
       msg: `Cannot add recipients — this send's saved expiry is invalid (the original send's links still work; create a new send to reach additional recipients).`,
-      newResourceIds: [], delivered: 0, failed: 0, newRecipients: [],
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
 
@@ -2327,7 +2336,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
-    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Create new QURL links for each resource type in the send config
@@ -2337,7 +2346,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const hasLocation = sendConfig.actual_url;
 
   if (!hasFile && !hasLocation) {
-    return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+    return { msg: 'Cannot add recipients — send configuration is incomplete.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Tracks which prep paths actually completed so we can emit a single
@@ -2364,7 +2373,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       if (!sendConfig.attachment_url) {
         return {
           msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
-          newResourceIds: [], newRecipients: resolvedRecipients,
+          newLinks: [], newRecipients: resolvedRecipients,
           delivered: 0,
           failed: 0,
         };
@@ -2377,7 +2386,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         logger.error('addRecipients refused non-Discord attachment_url', { sendId });
         return {
           msg: 'Cannot add file recipients — original attachment URL is no longer valid. Please create a new send.',
-          newResourceIds: [], newRecipients: resolvedRecipients,
+          newLinks: [], newRecipients: resolvedRecipients,
           delivered: 0,
           failed: 0,
         };
@@ -2410,13 +2419,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
-        return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+        return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
-        const newResourceIds = [...new Set(allLinks.map(l => l.resourceId))];
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds, delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
       // Iterate by allLinks length so an off-by-one can never index out of bounds.
       // The guard above ensures allLinks.length >= newRecipients.length.
@@ -2426,6 +2434,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
+          qurlId: allLinks[i].qurl_id,
           resourceId: allLinks[i].resourceId,
           resType: RESOURCE_TYPES.FILE,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
@@ -2447,12 +2456,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
+          qurlId: allLinks[i].qurl_id,
           resourceId: allLinks[i].resourceId,
           resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
         });
@@ -2465,7 +2475,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
-    return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+    return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Single emission per send. `kind` carries the composition so a future
@@ -2478,7 +2488,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   const recipientIds = Object.keys(recipientLinks);
   if (recipientIds.length === 0) {
-    return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
+    return { msg: 'Failed to create any links.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Hoist payload-shared inputs to the top of the dispatch block so
@@ -2531,7 +2541,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     });
     return {
       msg: 'Failed to save link records. Recipients were not messaged. Please try again.',
-      newResourceIds: [], newRecipients: resolvedRecipients,
+      newLinks: [], newRecipients: resolvedRecipients,
       delivered: 0,
       failed: 0,
     };
@@ -2607,13 +2617,23 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     else failed++;
   }
 
-  const allLinks = Object.values(recipientLinks).flat();
-  const newResourceIds = [...new Set(allLinks.map(l => l.resourceId))];
+  // newLinks pairs each qurlId with the recipient's username so the
+  // monitor can seed linkStatus correctly. Walking recipientLinks
+  // (rather than the flattened list) preserves the per-recipient
+  // association — a /qurl add user opening their link must surface
+  // under their username, not a positional guess.
+  const newLinks = [];
+  for (const [rid, links] of Object.entries(recipientLinks)) {
+    const recip = resolvedRecipients.find(r => r.id === rid);
+    const username = recip?.username || 'unknown';
+    for (const link of links) {
+      if (link.qurlId) newLinks.push({ qurlId: link.qurlId, username });
+    }
+  }
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  // Return delivered/failed explicitly so callers don't have to regex-parse msg.
-  return { msg, newResourceIds, delivered, failed, newRecipients: resolvedRecipients };
+  return { msg, newLinks, delivered, failed, newRecipients: resolvedRecipients };
 }
 
 // --- /qurl revoke handler ---

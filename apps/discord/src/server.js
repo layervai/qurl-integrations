@@ -10,6 +10,7 @@ const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
+const qurlWebhookRouter = require('./routes/qurl-webhook');
 
 const app = express();
 
@@ -62,29 +63,20 @@ app.use(helmet({
 }));
 
 // Parse JSON for webhooks with raw body for signature verification. MUST be
-// registered BEFORE the general app.use(express.json()) below so /webhook
-// requests hit this parser first and get req.rawBody populated. Do not
-// reorder without also updating routes/webhooks.js verifySignature().
-//
-// Startup contract: routes/webhooks.js verifySignature() asserts req.rawBody
-// exists at request time and refuses the request with an error log if the
-// middleware chain drops it. See that file's guard comment for details.
-//
-// Gated on isOpenNHPActive for symmetry with the router mount below —
-// when /webhook routes aren't mounted, Express would still parse up to
-// 1 MB of JSON per request before falling through to the 404 handler.
-// Skipping the parser registration avoids that wasted work (and the
-// small DoS surface of parsing unauthenticated request bodies).
+// registered BEFORE the general app.use(express.json()) below so webhook
+// requests hit this parser first and get req.rawBody populated.
+const rawBodyJson = express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+});
+
+// /webhook (GitHub) gated on isOpenNHPActive so we don't parse 1MB of
+// JSON for routes that aren't mounted. /webhooks (qURL) is unconditional
+// — the receiver itself returns 503 when QURL_WEBHOOK_SECRET is unset.
 if (config.isOpenNHPActive) {
-  app.use('/webhook', express.json({
-    // GitHub push-event payloads can exceed Express's 100KB default. Cap at
-    // 1MB so we accept legitimate payloads but still bound request memory.
-    limit: '1mb',
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    }
-  }));
+  app.use('/webhook', rawBodyJson);
 }
+app.use('/webhooks', rawBodyJson);
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -198,6 +190,14 @@ if (config.isOpenNHPActive) {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
 }
 
+// Unconditional mount — the route returns 503 until QURL_WEBHOOK_SECRET
+// is set, so a fresh deploy never accepts traffic without the secret.
+app.use('/webhooks', qurlWebhookRouter);
+if (!config.QURL_WEBHOOK_SECRET) {
+  logger.warn('QURL_WEBHOOK_SECRET unset — qURL webhook receiver returns 503 on all inbound');
+  logger.warn('To enable: set SSM /<project>/QURL_WEBHOOK_SECRET, then restart the task');
+}
+
 // Cache-Control: no-store on every response from the OAuth surfaces —
 // success page surfaces guild + qURL email + key prefix; error pages
 // could leak detail in the future; not-configured page is also OAuth-
@@ -265,6 +265,10 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
+  // Each webhook router owns a per-IP bad-sig sweep; stop them all on
+  // graceful shutdown so the interval doesn't outlive the server.
+  if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
+  if (typeof webhooksRouter.stopIntervals === 'function') webhooksRouter.stopIntervals();
 }
 
 module.exports = { app, startServer, stopIntervals };

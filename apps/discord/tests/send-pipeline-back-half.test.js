@@ -138,6 +138,11 @@ const mockDb = {
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
+  // qurl_views webhook-fed reader. Default is an empty Map so a test
+  // that doesn't override gets the "no views yet" path. Per-test
+  // mockResolvedValueOnce drives the status-transition assertions.
+  getQurlViews: jest.fn(async () => new Map()),
+  recordQurlView: jest.fn(),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -176,12 +181,10 @@ jest.mock('../src/connector', () => ({
   isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
 }));
 
-const mockGetResourceStatus = jest.fn();
 const mockDeleteLink = jest.fn();
 jest.mock('../src/qurl', () => ({
   createOneTimeLink: jest.fn(),
   deleteLink: mockDeleteLink,
-  getResourceStatus: mockGetResourceStatus,
 }));
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
@@ -321,238 +324,162 @@ beforeEach(() => {
 // monitorLinkStatus
 // ===========================================================================
 
-describe('monitorLinkStatus — initial poll + tracking', () => {
+// Canonical qurlLinks shape: every link carries a qurlId, which the
+// monitor uses as the BatchGet key against the qurl_views table.
+// Pre-rollout, upstream connectors didn't surface qurl_id from
+// MintLink — the empty-id boundary guard handles that case.
+const TWO_LINK_SET = [
+  { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+  { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa2', qurlLink: 'https://q.test/2', recipientId: 'r2' },
+];
+const ONE_LINK_SET = [
+  { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+];
+
+describe('monitorLinkStatus — view-counter render from qurl_views', () => {
   beforeEach(() => { jest.useFakeTimers(); });
-  afterEach(() => {
-    jest.useRealTimers();
-  });
+  afterEach(() => { jest.useRealTimers(); });
 
-  it('initializes trackedQurlIds from getResourceStatus on first tick', async () => {
-    const interaction = makeInteraction();
-    mockGetResourceStatus.mockResolvedValue({
-      qurls: [
-        { qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' },
-        { qurl_id: 'q2', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:01Z' },
-      ],
-    });
-
+  it('initial getFullMsg() shows 0 viewed / N pending before any webhook lands', () => {
     const monitor = monitorLinkStatus(
-      'send-1', interaction,
-      [{ resourceId: 'res-1', qurl_link: 'https://q.test/x' }],
+      'send-1', makeInteraction(),
+      TWO_LINK_SET,
       [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
-      '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      '1m', 'Sent to 2 users', { components: [] }, 2,
     );
-
-    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-
-    expect(mockGetResourceStatus).toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(
-      'Link monitor tracking',
-      expect.objectContaining({ sendId: 'send-1', tracked: 2, resources: 1 }),
-    );
+    expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 0 viewed / 2 pending');
     monitor.stop();
   });
 
-  it('warns when getResourceStatus returns fewer qurls than recipients', async () => {
+  it('webhook-fed view advances `viewed` counter on next tick', async () => {
     const interaction = makeInteraction();
-    // Only 1 qurl returned, but 2 recipients sent — count mismatch.
-    mockGetResourceStatus.mockResolvedValue({
-      qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
-    });
-
     const monitor = monitorLinkStatus(
       'send-1', interaction,
-      [{ resourceId: 'res-1', qurl_link: 'https://q.test/x' }],
+      TWO_LINK_SET,
       [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
-      '1m', 'Sent', { components: [] }, 2, 'apikey',
+      '1m', 'Sent to 2 users', { components: [] }, 2,
     );
 
+    // First tick: one of the two has been viewed (webhook landed via
+    // the qurl-webhook receiver, which wrote to qurl_views).
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Monitor tracking count mismatch',
-      expect.objectContaining({ sendId: 'send-1', qurls: 1, recipients: 2 }),
-    );
+    expect(interaction.editReply).toHaveBeenCalled();
+    expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 1 viewed / 1 pending');
     monitor.stop();
   });
 
-  it('returns early on first tick if getResourceStatus rejects on every resource', async () => {
+  it('all viewed → final-message edit clears components', async () => {
     const interaction = makeInteraction();
-    // .catch(() => null) on the call site — rejected promises become null,
-    // which is filtered out before the localSet.add loop. trackedQurlIds
-    // ends up empty (Set, size 0) but is still set, so the next tick
-    // proceeds normally with an empty tracked set.
-    mockGetResourceStatus.mockRejectedValue(new Error('upstream 503'));
-
     const monitor = monitorLinkStatus(
       'send-1', interaction,
-      [{ resourceId: 'res-1' }],
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
 
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: true }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL); // termination tick
+
+    const lastCall = interaction.editReply.mock.calls.at(-1);
+    expect(lastCall?.[0]).toEqual(expect.objectContaining({ components: [] }));
+    monitor.stop();
+  });
+
+  it('BatchGet error logs but does not crash the setInterval', async () => {
+    const interaction = makeInteraction();
+    mockDb.getQurlViews.mockRejectedValueOnce(new Error('DDB throttled'));
+
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1,
+    );
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-    // No throw; init logged; no editReply because no status changes.
+    expect(logger.error).toHaveBeenCalledWith('Link monitor poll failed', expect.any(Object));
+    // No editReply because the BatchGet failed before any status diff.
     expect(interaction.editReply).not.toHaveBeenCalled();
     monitor.stop();
   });
 });
 
-describe('monitorLinkStatus — status transitions', () => {
+describe('monitorLinkStatus — empty-qurl_id boundary guard', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('all-opened → posts final message and clears interval', async () => {
-    const interaction = makeInteraction();
-    mockGetResourceStatus
-      .mockResolvedValueOnce({
-        qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
-      })
-      .mockResolvedValueOnce({
-        qurls: [{ qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
-      });
-
+  it('any missing qurlId degrades the whole monitor to bare base-msg', async () => {
+    // Mixed batch: one link has qurlId, one does not. Misattribution
+    // would render `1 of 2 viewed` from a partial-attribution set —
+    // worse UX than no counter. Boundary guard degrades the whole
+    // monitor.
+    const mixed = [
+      { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+      { resourceId: 'res-1', qurlId: '', qurlLink: 'https://q.test/2', recipientId: 'r2' },
+    ];
     const monitor = monitorLinkStatus(
-      'send-1', interaction,
-      [{ resourceId: 'res-1' }],
-      [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      'send-1', makeInteraction(),
+      mixed,
+      [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+      '1m', 'Sent to 2 users', { components: [] }, 2,
+    );
+    expect(monitor.getFullMsg()).toBe('Sent to 2 users');
+    expect(monitor.getFullMsg()).not.toMatch(/viewed|pending|👀/);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Monitor view counter degraded'),
+      expect.objectContaining({ sendId: 'send-1', missing: 1, total: 2 }),
     );
 
+    // No DDB read happens during degraded mode — the BatchGet is
+    // unconditionally skipped at the top of runTick when degraded.
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-
-    // After all-done, an additional tick should hit the stop branch;
-    // a final-message editReply with components: [] confirms the path.
-    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-
-    const lastCall = interaction.editReply.mock.calls.at(-1);
-    expect(lastCall?.[0]).toEqual(expect.objectContaining({ components: expect.any(Array) }));
-    // monitor.stop() in afterEach is a no-op since allDone already cleared
+    expect(mockDb.getQurlViews).not.toHaveBeenCalled();
     monitor.stop();
   });
 });
 
-// First-poll latency: pre-PR the first tick fired at pollInterval
-// View counter is temporarily disabled at the render layer.
-// qurl-service's transit-resource strip (PR #539/#568) removes the
-// `qurls` field from GET /v1/qurls/:id responses for connector
-// uploads (= every Discord bot send), so the polling-based counter
-// could only ever render `0 of N viewed`. Until the webhook-based
-// replacement lands (qurl-service #596 + bot receiver), buildStatusMsg
-// returns the bare currentBaseMsg. Pin the disable so a re-enable
-// without the upstream fix surfaces here.
-describe('monitorLinkStatus — view counter temporarily disabled (qurl-service transit-strip)', () => {
-  it('getFullMsg() returns bare currentBaseMsg regardless of linkStatus state', async () => {
-    jest.useFakeTimers();
-    try {
-      // Even with all qurls "viewed" in the mock response, the headline
-      // must NOT render (the data is unreliable on transit resources).
-      mockGetResourceStatus.mockResolvedValue({
-        qurls: [
-          { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
-          { qurl_id: 'q2', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:01Z' },
-        ],
-      });
-      const monitor = monitorLinkStatus(
-        'send-1', makeInteraction(),
-        [{ resourceId: 'res-1' }],
-        [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
-        '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
-      );
-
-      // Pre-poll baseline: bare currentBaseMsg.
-      expect(monitor.getFullMsg()).toBe('Sent to 2 users');
-
-      // After polls — linkStatus would have 2 'opened' entries if the
-      // renderer ran, but the bare message must persist.
-      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-      expect(monitor.getFullMsg()).toBe('Sent to 2 users');
-      expect(monitor.getFullMsg()).not.toMatch(/viewed|expired|👀|✅|⏰/);
-
-      monitor.stop();
-
-      // Post-stop too — bare message remains (no frozen-render machinery
-      // needed when there's nothing to freeze).
-      expect(monitor.getFullMsg()).toBe('Sent to 2 users');
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-});
-
-// (15-60s). For short-TTL self-destruct sends the recipient could open
-// + burn the link before the first poll ran, meaning the sender's
-// view counter never reflected the view at all. New cadence: first
-// tick at 3s via setTimeout, then setInterval at pollInterval for
-// subsequent ticks. Pin the 3s number so a future refactor that
-// reintroduces the old setInterval-only shape fails CI.
-describe('monitorLinkStatus — first-poll cadence', () => {
+describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream fanout)', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
   it('first tick fires at ~3s, not at the 15s pollInterval', async () => {
-    mockGetResourceStatus.mockResolvedValue({
-      qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
-    });
-
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
-      [{ resourceId: 'res-1' }],
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
-
-    // Advance to just before the new first-poll mark — should NOT
-    // have polled yet.
     await jest.advanceTimersByTimeAsync(2500);
-    expect(mockGetResourceStatus).not.toHaveBeenCalled();
-
-    // Cross the 3s mark — first poll must fire.
+    expect(mockDb.getQurlViews).not.toHaveBeenCalled();
     await jest.advanceTimersByTimeAsync(1000);
-    expect(mockGetResourceStatus).toHaveBeenCalled();
-
+    expect(mockDb.getQurlViews).toHaveBeenCalled();
     monitor.stop();
   });
 
-  it('subsequent ticks honor the standard pollInterval after the fast first tick', async () => {
-    // The setTimeout-then-setInterval pattern's failure mode is
-    // accidentally calling setInterval(runTick, FIRST_POLL_DELAY_MS)
-    // — every subsequent poll would then fire every 3s, hammering
-    // qurl-service. Pin that tick 2 lands at first-tick + pollInterval
-    // (~3s + 15s = 18s), not first-tick + 3s.
-    //
-    // Tick 1 calls getResourceStatus twice (init pass + poll pass —
-    // see the `if (!trackedQurlIds)` init block + the subsequent
-    // pollResults Promise.all). The test snapshots that count at
-    // t=3s and asserts it doesn't grow until the setInterval fires
-    // at t=18s.
-    mockGetResourceStatus.mockResolvedValue({
-      qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
-    });
-
+  it('subsequent ticks honor standard pollInterval after the fast first tick', async () => {
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
-      [{ resourceId: 'res-1' }],
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
 
-    await jest.advanceTimersByTimeAsync(3000);   // first tick
-    const callsAfterFirstTick = mockGetResourceStatus.mock.calls.length;
+    await jest.advanceTimersByTimeAsync(3000);
+    const callsAfterFirstTick = mockDb.getQurlViews.mock.calls.length;
     expect(callsAfterFirstTick).toBeGreaterThanOrEqual(1);
 
-    // 3s later (now t=6s) — setInterval still waiting for its first
-    // fire at t=18s. No additional calls expected.
-    await jest.advanceTimersByTimeAsync(3000);
-    expect(mockGetResourceStatus.mock.calls.length).toBe(callsAfterFirstTick);
+    await jest.advanceTimersByTimeAsync(3000); // t=6s — no tick due
+    expect(mockDb.getQurlViews.mock.calls.length).toBe(callsAfterFirstTick);
 
-    // Cross t=18s — second tick fires from the setInterval.
-    await jest.advanceTimersByTimeAsync(12500);
-    expect(mockGetResourceStatus.mock.calls.length).toBeGreaterThan(callsAfterFirstTick);
-
+    await jest.advanceTimersByTimeAsync(12500); // cross t=18s
+    expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(callsAfterFirstTick);
     monitor.stop();
   });
 });
@@ -561,84 +488,185 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('addRecipients() bumps generation and forces re-init on next tick', async () => {
-    const interaction = makeInteraction();
-    mockGetResourceStatus.mockResolvedValue({
-      qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' }],
-    });
-
+  it('addRecipients() extends trackedQurlIds and the next tick BatchGets the new IDs', async () => {
     const monitor = monitorLinkStatus(
-      'send-1', interaction,
-      [{ resourceId: 'res-1' }],
+      'send-1', makeInteraction(),
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
 
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    mockDb.getQurlViews.mockClear();
 
-    // Add a recipient + new resource. Generation bumps; trackedQurlIds nulls.
-    monitor.addRecipients(1, ['res-2']);
-
-    // Next tick re-inits — getResourceStatus called again across both resources.
-    mockGetResourceStatus.mockClear();
+    // Add a recipient with a new qurl_id. The monitor's next BatchGet
+    // must include the new id in its key list.
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa3', username: 'Charlie' }]);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
-    expect(mockGetResourceStatus).toHaveBeenCalled();
+    expect(mockDb.getQurlViews).toHaveBeenCalled();
+    const lastCallKeys = mockDb.getQurlViews.mock.calls.at(-1)[0];
+    expect(lastCallKeys).toContain('q_aaaaaaaaaa3');
     monitor.stop();
   });
 
-  it('addRecipients() de-dupes new resource IDs already in the list', async () => {
+  it('addRecipients() re-arms the monitor after allDone so post-resolve adds still see views', async () => {
+    // cr-flagged repro: send to N → all view → setInterval clears
+    // (allDone) → /qurl add M more → without the re-arm, the counter
+    // stays frozen for the rest of the 1h cap.
     const interaction = makeInteraction();
-    mockGetResourceStatus.mockResolvedValue({ qurls: [] });
-
     const monitor = monitorLinkStatus(
-      'send-1', interaction,
-      [{ resourceId: 'res-1' }],
+      'send-resolve-add', interaction,
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent to 1 user', { components: [] }, 1,
     );
 
-    // Calling addRecipients with an already-present resourceId should not
-    // dup it. The Set-of-resourceIds semantics live inside the function;
-    // this asserts no crash + the next tick still polls cleanly.
-    monitor.addRecipients(1, ['res-1']);
+    // Initial recipient views — triggers allDone + clearInterval.
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
+
+    // /qurl add a new recipient AFTER the monitor settled.
+    monitor.updateBaseMsg('Sent to 2 users');
+    const callsBeforeAdd = mockDb.getQurlViews.mock.calls.length;
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+    // Re-arm uses the FIRST_POLL_DELAY_MS (3s) fast-tick pattern,
+    // mirroring construction. Eve's view should land within a few
+    // seconds of /qurl add, not pollInterval later.
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+      ['q_aaaaaaaaaa9', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(3500);
+
+    // The post-allDone tick must actually have fired — a missing
+    // re-arm would leave callsBeforeAdd == calls.length and the
+    // counter frozen at 1/0 instead of advancing to 2/0.
+    expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(callsBeforeAdd);
+    expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 2 viewed / 0 pending');
     monitor.stop();
   });
 
-  it('stop() called concurrently with running tick — caught by outer try/catch, no crash', async () => {
+  it('addRecipients() seeds linkStatus so views on newly-added recipients flip pending → viewed', async () => {
+    // Regression guard for the cr-flagged bug: extending trackedQurlIds
+    // without also seeding linkStatus left the new recipients invisible
+    // to the status-flip loop. Webhook would land, BatchGet would
+    // return the row, but the counter never advanced.
     const interaction = makeInteraction();
-    mockGetResourceStatus.mockImplementation(() => {
-      // Simulate slow upstream — by the time this resolves, stop() has run.
-      return new Promise(resolve => setTimeout(() => resolve({ qurls: [{
-        qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z',
-      }] }), 5000));
-    });
+    const monitor = monitorLinkStatus(
+      'send-add-bug', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent to 1 user', { components: [] }, 1,
+    );
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa9', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 1 pending');
+    monitor.stop();
+  });
+
+  it('addRecipients() with a missing qurl_id flips viewCounterDegraded AND warns once', async () => {
+    // Regression guard for the silent-degrade bug cr round 3 surfaced:
+    // construction-time degrade warns once at send-start, but a /qurl
+    // add link arriving without qurl_id has to leave a breadcrumb too.
+    const monitor = monitorLinkStatus(
+      'send-degrade-add', makeInteraction(),
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent to 1 user', { components: [] }, 1,
+    );
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
+
+    monitor.addRecipients(1, [{ qurlId: '', username: 'Eve' }]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('degraded mid-life'),
+      expect.objectContaining({ sendId: 'send-degrade-add' }),
+    );
+    // Counter degrades to bare base msg, NOT a partial-attribution render.
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user');
+    monitor.stop();
+  });
+
+  it('addRecipients() de-dupes a qurl_id already in the tracked set', async () => {
+    const monitor = monitorLinkStatus(
+      'send-1', makeInteraction(),
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1,
+    );
+    // Same ID already tracked — should be a no-op insertion-wise.
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa1', username: 'Alice' }]);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    const lastCallKeys = mockDb.getQurlViews.mock.calls.at(-1)[0];
+    // Set semantics — only one entry for q_aaaaaaaaaa1.
+    expect(lastCallKeys.filter(k => k === 'q_aaaaaaaaaa1')).toHaveLength(1);
+    monitor.stop();
+  });
+
+  it('stop() called concurrently with a running tick — no unhandled rejection', async () => {
+    const interaction = makeInteraction();
+    mockDb.getQurlViews.mockImplementation(() => new Promise(resolve =>
+      setTimeout(() => resolve(new Map([['q_aaaaaaaaaa1', { accessCount: 0, consumed: false }]])), 5000),
+    ));
 
     const monitor = monitorLinkStatus(
       'send-1', interaction,
-      [{ resourceId: 'res-1' }],
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
-
-    // Kick the first tick + start the slow getResourceStatus.
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
-    // Stop NOW, mid-await, before getResourceStatus resolves. stop() nulls
-    // `interaction`, `qurlLinks`, `recipients`, `buttonRow`. The first-tick
-    // init block reads `recipients.length` AFTER the Promise.all resolves,
-    // so a stop() during that gap surfaces as an NPE — caught by the outer
-    // try/catch on line 609 and logged as 'Link monitor poll failed'.
-    // The contract is: no thrown error escapes the setInterval; the impact
-    // is one logged error line per affected tick, not a process crash.
-    // (Tightening the post-await guard is tracked separately.)
     monitor.stop();
     await jest.advanceTimersByTimeAsync(10000);
+    // Contract: no uncaught throw, no "poll failed" log emission from
+    // the racing tick. logger.error firing here would mean stop() let
+    // a thrown error escape the setInterval callback.
+    expect(logger.error).not.toHaveBeenCalledWith(
+      'Link monitor poll failed',
+      expect.any(Object),
+    );
+  });
+});
 
-    // No unhandled rejection; the outer try/catch contained the failure.
-    // The exact log shape (none vs one logged poll-failed) depends on the
-    // race window — we only assert the failure-mode contract: no crash.
-    expect(true).toBe(true);
+describe('monitorLinkStatus — edits always go through interaction.editReply (ephemeral-safe)', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  it('never falls back to editDM — the confirm message is ephemeral and ephemeral edits are interaction-token-only', async () => {
+    // Pre-refactor the monitor switched to editDM (bot-token PATCH)
+    // past the 14-min cutover to bypass the interaction-token TTL.
+    // That fallback is broken on ephemeral messages (executeSendPipeline
+    // deferReplies ephemeral, and ephemeral messages can only be edited
+    // via the interaction webhook token). The monitor cap was lowered
+    // to 14 min so we don't run setIntervals past the usable window.
+    // This test pins the contract: no editDM call from the monitor
+    // path, no matter what.
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1h', 'Sent', { components: [] }, 1,
+    );
+
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    expect(interaction.editReply).toHaveBeenCalled();
+    expect(mockEditDM).not.toHaveBeenCalled();
+    monitor.stop();
   });
 });
 
@@ -646,61 +674,45 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('stops + posts final after MAX_MONITOR_DURATION_MS (1h cap on long expiries)', async () => {
-    const interaction = makeInteraction();
-    mockGetResourceStatus.mockResolvedValue({ qurls: [] });
-
-    // 7d expiry → MAX_MONITOR_DURATION_MS (1h) clamps the run.
+  it('stops + posts final after MAX_MONITOR_DURATION_MS (14min cap matches interaction-token TTL)', async () => {
     const monitor = monitorLinkStatus(
-      'send-1', interaction,
-      [{ resourceId: 'res-1' }],
+      'send-1', makeInteraction(),
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '7d', 'Sent', { components: [] }, 1, 'apikey',
+      '7d', 'Sent', { components: [] }, 1,
     );
-
-    // Skip ~1h+1min so the cap branch fires.
-    await jest.advanceTimersByTimeAsync(60 * 60 * 1000 + 60 * 1000);
-
-    // The cap branch sets the final message + clears interval; monitor
-    // is removed from activeMonitors via stop(). Subsequent .stop() is
-    // idempotent.
+    // Skip ~14min+1min so the cap branch fires.
+    await jest.advanceTimersByTimeAsync(14 * 60 * 1000 + 60 * 1000);
     monitor.stop();
   });
 
-  it('LRU-evicts oldest monitor when activeMonitors hits MAX_CONCURRENT_MONITORS', () => {
-    // The cap is 50 in module-private state. We can't test the exact
-    // boundary without exposing the constant, but we can confirm the set
-    // behavior: starting many monitors keeps activeMonitors size bounded
-    // and oldest gets stop()'d.
+  it('LRU bookkeeping: activeMonitors grows by N when N monitors start under the cap', () => {
     const before = activeMonitors.size;
     const monitors = [];
     for (let i = 0; i < 5; i++) {
       monitors.push(monitorLinkStatus(
         `send-${i}`, makeInteraction(),
-        [{ resourceId: `res-${i}` }],
+        [{ resourceId: `res-${i}`, qurlId: `q_aaaaaaaaaa${i}`, qurlLink: `https://q.test/${i}`, recipientId: `r${i}` }],
         [{ id: `r${i}`, username: `User${i}` }],
-        '1m', 'Sent', { components: [] }, 1, 'apikey',
+        '1m', 'Sent', { components: [] }, 1,
       ));
     }
-    // Set should have grown by exactly 5 (no eviction at 5 < 50 cap).
     expect(activeMonitors.size).toBe(before + 5);
     for (const m of monitors) m.stop();
   });
 
-  it('exposes control methods: addRecipients, stop, updateBaseMsg, getFullMsg', () => {
+  it('exposes control surface: addRecipients, stop, updateBaseMsg, getFullMsg', () => {
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
-      [{ resourceId: 'res-1' }],
+      ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
-
     expect(typeof monitor.addRecipients).toBe('function');
     expect(typeof monitor.stop).toBe('function');
     expect(typeof monitor.updateBaseMsg).toBe('function');
     expect(typeof monitor.getFullMsg).toBe('function');
 
-    // updateBaseMsg + getFullMsg round-trip with new base message.
     monitor.updateBaseMsg('New base');
     expect(monitor.getFullMsg()).toContain('New base');
     monitor.stop();
@@ -1808,7 +1820,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.delivered).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
-    expect(result.newResourceIds).toEqual(expect.arrayContaining(['res-loc-new']));
     // Happy-path delivery coalesces status='sent' + DM refs into a
     // single markSendDMDelivered write per recipient.
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledTimes(2);

@@ -415,6 +415,18 @@ const AUDIT_EVENTS = {
   // stays zero — but for an idle bot the rotation also doesn't
   // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
+
+  // qURL webhook receiver — feeds CloudWatch metric filters +
+  // alarms managed in the deploying organization's infrastructure
+  // (separate from this repo). Flat counters only: do NOT promote
+  // qurl_id/resource_id to dimensions (unbounded).
+  QURL_WEBHOOK_RECEIVED: 'qurl_webhook_received',
+  // Sustained rate = SSM secret drift OR attacker probing.
+  QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',
+  // Legit traffic NEVER triggers — sustained rate = sustained attacker.
+  QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
+  // Sustained rate = qurl_views table hot.
+  QURL_WEBHOOK_STORE_ERROR: 'qurl_webhook_store_error',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
@@ -423,6 +435,14 @@ const AUDIT_EVENTS = {
 // constant objects in this file aren't frozen, but AUDIT_EVENTS is the
 // only one whose mutation is undetectable by tests.
 Object.freeze(AUDIT_EVENTS);
+
+// Wire-protocol event-type strings for qURL webhook payloads.
+// Pinned as constants so a typo in the receiver's type check (or in a
+// test asserting against the wire shape) fails to import rather than
+// silently matching nothing. Mirrors qurl-service WebhookEventType.
+const QURL_WEBHOOK_EVENTS = Object.freeze({
+  ACCESSED: 'qurl.accessed',
+});
 
 // Discord gateway dispatch event names (the `t` field on op=0 frames).
 // Today only INTERACTION_CREATE is published to the worker tier;
@@ -474,6 +494,7 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,
   LOG_KINDS,

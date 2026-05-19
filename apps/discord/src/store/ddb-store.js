@@ -58,6 +58,7 @@ const {
   UpdateCommand,
   QueryCommand,
   ScanCommand,
+  BatchGetCommand,
   BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
@@ -122,6 +123,7 @@ const TABLES = Object.freeze({
   weekly_stats: `${TABLE_PREFIX}weekly-stats`,
   qurl_sends: `${TABLE_PREFIX}qurl-sends`,
   qurl_send_configs: `${TABLE_PREFIX}qurl-send-configs`,
+  qurl_views: `${TABLE_PREFIX}qurl-views`,
   orphaned_oauth_tokens: `${TABLE_PREFIX}orphaned-oauth-tokens`,
   guild_configs: `${TABLE_PREFIX}guild-configs`,
 });
@@ -1021,6 +1023,105 @@ async function recordQURLSendBatch(sends) {
   }
 }
 
+// ── QURL views (webhook-fed view counter for /qurl send + /qurl map) ──
+
+// 30d TTL on `expires_at` (peer attribute name across every TTL table
+// in qurl-bot-ddb), refreshed on every write. Safely past the longest
+// monitor lifetime (1h cap) + longest link expiry (7d) + DDB's ~48h
+// TTL precision — no monitor will ever read a row about to reap.
+const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+// `consumed` is persisted + returned by getQurlViews but not yet
+// rendered by the monitor (runTick only checks accessCount > 0).
+// Reserved for a future "🔥 N consumed" state on self-destruct sends —
+// see commands.js buildStatusMsg for the render site.
+
+// MAX-merge conditional update — first arrival ALWAYS wins; subsequent
+// arrivals must be a distinct event AND either advance access_count OR
+// flip consumed false → true at the same access_count. The trailing
+// false→true consumed clause covers a qurl-service emission shape
+// where a follow-on event records the burn without re-bumping the
+// counter; without it we'd silently drop that signal.
+//
+// Asymmetry note: a consumed: true → false flip at the same
+// access_count is silently dropped as "dedup" — intentional for
+// self-destruct semantics ("once consumed, always consumed"). If
+// qurl-service ever needs to un-consume a row, that's a separate
+// API contract change.
+async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
+  if (!qurlId) throw new Error('recordQurlView: qurlId is required');
+  if (typeof accessCount !== 'number' || accessCount < 0) {
+    throw new Error(`recordQurlView: accessCount must be a non-negative number (got ${accessCount})`);
+  }
+  if (!eventId) throw new Error('recordQurlView: eventId is required for replay protection');
+  const nowMs = Date.now();
+  const consumedBool = Boolean(consumed);
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_views,
+      Key: { qurl_id: qurlId },
+      ConditionExpression:
+        'attribute_not_exists(last_event_id) OR ('
+        + 'last_event_id <> :eid AND ('
+        + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
+        + '))',
+      UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now, expires_at = :exp',
+      ExpressionAttributeValues: {
+        ':n': accessCount,
+        ':c': consumedBool,
+        ':eid': eventId,
+        ':now': new Date(nowMs).toISOString(),
+        // DDB silently refuses to expire rows whose TTL attribute isn't
+        // a Number — keep this as epoch seconds (integer), not a string.
+        ':exp': Math.floor(nowMs / 1000) + QURL_VIEW_TTL_SECONDS,
+        ':false': false,
+        ':true': true,
+      },
+    }));
+    return 'recorded';
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') {
+      // Replay (same event_id) OR out-of-order (lower-or-equal count
+      // with no consumed flip). Row already reflects a >= state.
+      return 'dedup';
+    }
+    throw err;
+  }
+}
+
+// Returns a Map<qurl_id, {accessCount, consumed}>. BatchGet caps at 100
+// keys per request; today max recipients is 50 so chunking is defensive.
+async function getQurlViews(qurlIds) {
+  if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
+  // Drop empties defensively — an empty qurl_id is a collision attractor.
+  const keys = [...new Set(qurlIds.filter(Boolean))].map(id => ({ qurl_id: id }));
+  if (keys.length === 0) return new Map();
+  const CHUNK = 100;
+  const out = new Map();
+  const collect = (res) => {
+    for (const item of (res.Responses && res.Responses[TABLES.qurl_views]) || []) {
+      out.set(item.qurl_id, {
+        accessCount: item.access_count || 0,
+        consumed: Boolean(item.consumed),
+      });
+    }
+  };
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const slice = keys.slice(i, i + CHUNK);
+    const res = await ddb.send(new BatchGetCommand({
+      RequestItems: { [TABLES.qurl_views]: { Keys: slice } },
+    }));
+    collect(res);
+    // Single retry on UnprocessedKeys — persistent throttle is an oncall
+    // signal, not a per-call retry loop.
+    const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
+    if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
+      collect(await ddb.send(new BatchGetCommand({ RequestItems: { [TABLES.qurl_views]: unprocessed } })));
+    }
+  }
+  return out;
+}
+
 async function updateSendDMStatus(sendId, recipientDiscordId, status) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_sends,
@@ -1548,6 +1649,8 @@ module.exports = {
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
   getRecentSends, markSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
+  // QURL views (webhook-fed)
+  recordQurlView, getQurlViews,
   // Guild configs
   getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
   // Orphaned tokens

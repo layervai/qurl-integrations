@@ -53,6 +53,7 @@ const {
   UpdateCommand,
   QueryCommand,
   ScanCommand,
+  BatchGetCommand,
   BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
@@ -1001,6 +1002,128 @@ describe('qurl sends', () => {
     });
     const result = await store.getSendConfig('s1', 'attacker');
     expect(result).toBeUndefined();
+  });
+});
+
+// ── QURL views (webhook-fed view counter) ──
+
+describe('qurl views', () => {
+  test('recordQurlView: conditional UpdateItem with MAX-merge + replay-protection clause + TTL refresh', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const before = Math.floor(Date.now() / 1000);
+    const result = await store.recordQurlView({
+      qurlId: 'q_aaaaaaaaaa1', accessCount: 3, consumed: false, eventId: 'evt-1',
+    });
+    expect(result).toBe('recorded');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-qurl-views');
+    expect(input.Key).toEqual({ qurl_id: 'q_aaaaaaaaaa1' });
+    // Pin the condition exactly so a refactor that drops any clause
+    // (replay, out-of-order, OR the consumed false→true flip on equal
+    // access_count) fails CI rather than silently corrupting the
+    // counter.
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(last_event_id) OR ('
+      + 'last_event_id <> :eid AND ('
+      + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
+      + '))',
+    );
+    expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
+      ':n': 3, ':c': false, ':eid': 'evt-1', ':false': false, ':true': true,
+    }));
+    // TTL refresh on every write — 30 days from now, written to
+    // `expires_at` (the canonical TTL-attribute name across every
+    // table in this module). Numeric epoch seconds; DDB silently
+    // refuses to expire rows whose TTL attribute is the wrong type.
+    expect(input.UpdateExpression).toMatch(/expires_at = :exp/);
+    const THIRTY_DAYS = 30 * 24 * 60 * 60;
+    expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
+    expect(input.ExpressionAttributeValues[':exp']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
+  });
+
+  test('recordQurlView: ConditionalCheckFailedException → "dedup" (replay path, NOT a failure)', async () => {
+    const err = new Error('cond fail');
+    err.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(err);
+    const result = await store.recordQurlView({
+      qurlId: 'q_x', accessCount: 1, consumed: false, eventId: 'evt-1',
+    });
+    expect(result).toBe('dedup');
+  });
+
+  test('recordQurlView: rejects qurlId="" so an empty-id collision attractor never lands in DDB', async () => {
+    await expect(
+      store.recordQurlView({ qurlId: '', accessCount: 1, consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/qurlId is required/);
+  });
+
+  test('recordQurlView: rejects negative or non-numeric accessCount', async () => {
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: -1, consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/non-negative/);
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: 'two', consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/non-negative/);
+  });
+
+  test('recordQurlView: rejects missing eventId (replay protection requires a key)', async () => {
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: 1, consumed: false }),
+    ).rejects.toThrow(/eventId is required/);
+  });
+
+  test('getQurlViews: BatchGet for tracked ids, returns Map keyed on qurl_id', async () => {
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: {
+        'test-prefix-qurl-views': [
+          { qurl_id: 'q_a', access_count: 2, consumed: false },
+          { qurl_id: 'q_b', access_count: 1, consumed: true },
+        ],
+      },
+    });
+    const views = await store.getQurlViews(['q_a', 'q_b', 'q_c']);
+    expect(views.size).toBe(2);
+    expect(views.get('q_a')).toEqual({ accessCount: 2, consumed: false });
+    expect(views.get('q_b')).toEqual({ accessCount: 1, consumed: true });
+    expect(views.get('q_c')).toBeUndefined();
+    const keys = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'].Keys;
+    expect(keys).toEqual(expect.arrayContaining([
+      { qurl_id: 'q_a' }, { qurl_id: 'q_b' }, { qurl_id: 'q_c' },
+    ]));
+  });
+
+  test('getQurlViews: short-circuits to empty Map when called with empty or all-empty input', async () => {
+    expect((await store.getQurlViews([])).size).toBe(0);
+    expect((await store.getQurlViews(['', null, undefined])).size).toBe(0);
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(0);
+  });
+
+  test('getQurlViews: de-dupes input ids before BatchGet', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+    await store.getQurlViews(['q_a', 'q_a', 'q_b']);
+    const keys = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'].Keys;
+    expect(keys).toHaveLength(2);
+  });
+
+  test('getQurlViews: retries once on UnprocessedKeys', async () => {
+    let attempt = 0;
+    ddbMock.on(BatchGetCommand).callsFake(() => {
+      attempt++;
+      if (attempt === 1) {
+        return Promise.resolve({
+          Responses: { 'test-prefix-qurl-views': [{ qurl_id: 'q_a', access_count: 1, consumed: false }] },
+          UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: 'q_b' }] } },
+        });
+      }
+      return Promise.resolve({
+        Responses: { 'test-prefix-qurl-views': [{ qurl_id: 'q_b', access_count: 2, consumed: false }] },
+      });
+    });
+    const views = await store.getQurlViews(['q_a', 'q_b']);
+    expect(attempt).toBe(2);
+    expect(views.size).toBe(2);
   });
 });
 

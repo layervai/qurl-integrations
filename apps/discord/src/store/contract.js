@@ -94,6 +94,10 @@ const STORE_METHODS = Object.freeze([
   'getSendResourceIds',
   'getSendItems',
 
+  // QURL views (webhook-fed view counter)
+  'recordQurlView',
+  'getQurlViews',
+
   // Guild (BYOK) API keys
   'getGuildApiKey',
   'setGuildApiKey',

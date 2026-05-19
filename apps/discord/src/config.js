@@ -356,6 +356,10 @@ module.exports = {
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
 
+  // qURL webhook receiver HMAC; peer is the qurl-service subscription's
+  // `secret` field on POST /v1/webhooks (must match exactly).
+  QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
+
   // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
   // When unset, /qurl setup falls back to the legacy modal-paste path so the
   // bot stays usable until Justin registers the Auth0 application + drops
