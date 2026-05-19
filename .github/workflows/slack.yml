@@ -119,7 +119,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@4edea7408d64f424780e08f68a54000308817a08 # v0.6.1
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@ca41c7123c507ad45331a723851da6c010541154 # v0.6.2
     with:
       target_repo: qurl-integrations-infra
       # An off-allowlist value hard-fails in the reusable; an allowlisted
