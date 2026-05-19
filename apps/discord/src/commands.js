@@ -1105,12 +1105,10 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // so the t=3s vs. t=15s shift is a small load delta on qurl-service.
   const FIRST_POLL_DELAY_MS = 3000;
   const startTime = Date.now();
-  // Triple-condition the runTick early-exit + the post-first-tick
-  // scheduling guard both check. Extracting keeps the invariant in
-  // one place; a future maintainer adding (e.g.) a "user revoked"
-  // condition adds it here once instead of in two parallel sites.
+  // Same termination check used at two sites (runTick early-exit +
+  // post-first-tick scheduling guard); centralized so a future
+  // condition (e.g., revoked) lands in one place.
   const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
-
 
   function buildStatusMsg() {
     let opened = 0, expired = 0;
@@ -1122,6 +1120,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     // moment the monitor is created, so `0 of N viewed` renders before
     // the first poll initializes linkStatus. addRecipients() bumps
     // expectedCount + forces re-init, keeping the two in sync.
+    //
+    // Trade-off vs. pre-PR's `linkStatus.size` denominator: in the
+    // tracking-count-mismatch case (qurl-service returns fewer qurls
+    // than expected \u2014 warn-logged above), opened can never equal total
+    // and the headline stays at `X of N viewed` instead of reaching
+    // "All N viewed." Acceptable: the case is rare, the warn-log
+    // surfaces it to operators, and the alternative ("All K tracked
+    // viewed (M untrackable)") leaks an internal concept users can't
+    // act on.
     const total = expectedCount;
     let msg = currentBaseMsg;
     if (total === 0) return msg;
@@ -1212,7 +1219,18 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           const q = recentN[i];
           localSet.add(q.qurl_id);
           const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
-          linkStatus.set(q.qurl_id, { status: 'pending', username });
+          // Preserve opened/expired status from a prior init pass —
+          // addRecipients() nulls trackedQurlIds and the next tick re-runs
+          // this init block. Blindly resetting to 'pending' would briefly
+          // render `0 of N+M viewed` until the same tick's poll loop
+          // re-flips. Only seed 'pending' for genuinely new qurl_ids;
+          // the subsequent poll pass will still upgrade any newly-opened.
+          const existing = linkStatus.get(q.qurl_id);
+          if (existing && existing.status !== 'pending') {
+            linkStatus.set(q.qurl_id, { ...existing, username });
+          } else {
+            linkStatus.set(q.qurl_id, { status: 'pending', username });
+          }
         }
         trackedQurlIds = localSet;
         logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
@@ -2161,7 +2179,12 @@ async function executeSendPipeline(interaction, {
     });
 
     collector.on('end', (_, reason) => {
-      // Stop monitor polling when collector ends for any reason
+      // Snapshot the monitor's last-known render BEFORE stop() — stop()
+      // clears linkStatus, so a subsequent getFullMsg() would render
+      // `0 of N viewed` against the still-set expectedCount denominator.
+      // For a send where everyone already viewed, that's actively
+      // misleading 15 min after the fact.
+      const finalMonitorMsg = monitor ? monitor.getFullMsg() : confirmMsg;
       if (monitor) monitor.stop();
       if (reason === 'time') {
         // After a SUCCESSFUL revoke, re-render the revoke result
@@ -2183,7 +2206,7 @@ async function executeSendPipeline(interaction, {
         // Revoke attempted but failed — leave the failure message.
         if (revokeInFlight) return;
         interaction.editReply({
-          content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
+          content: finalMonitorMsg + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
         }).catch(logIgnoredDiscordErr);
       }

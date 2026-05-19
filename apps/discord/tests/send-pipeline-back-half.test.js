@@ -514,10 +514,12 @@ describe('monitorLinkStatus — buildStatusMsg view counter', () => {
   // No fake timers — these tests exercise getFullMsg() synchronously
   // without touching the polling loop.
   it('renders `👀 0 of N viewed` baseline BEFORE first poll initializes linkStatus', async () => {
-    // Without the `Math.max(linkStatus.size, expectedCount)` fallback,
-    // total would be 0 here and the headline would be suppressed — the
-    // sender would see the bare confirmation with no counter until at
-    // least one view + one poll. Pin the pre-init render.
+    // `expectedCount` is initialized to `delivered` at monitor creation,
+    // so the denominator is correct before the first poll's init pass
+    // populates linkStatus. Without that wiring the headline would be
+    // suppressed (linkStatus.size === 0) and the sender would see the
+    // bare confirmation with no counter until at least one view + one
+    // poll. Pin the pre-init render.
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       [{ resourceId: 'res-1' }],
@@ -630,6 +632,102 @@ describe('monitorLinkStatus — buildStatusMsg view counter', () => {
       // 1 opened, 1 expired, 1 still pending — distinct from the
       // all-viewed and all-expired branches.
       expect(monitor.getFullMsg()).toMatch(/👀 \*\*1 of 3 viewed\*\* · ⏰ 1 expired/);
+      monitor.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // CR regression: after stop() the collector's on('end') handler used
+  // to render `monitor.getFullMsg()` — but stop() clears linkStatus, so
+  // a fresh getFullMsg() against the still-set expectedCount denominator
+  // would render `0 of N viewed`, misleading the user 15 min after a
+  // completed send. The fix snapshots getFullMsg() BEFORE stop(); this
+  // test pins the contract that getFullMsg() loses its counts post-stop
+  // so future callers must snapshot.
+  it('getFullMsg() after stop() loses the counter (linkStatus cleared) — callers must snapshot before stop', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGetResourceStatus.mockResolvedValue({
+        qurls: [
+          { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+          { qurl_id: 'q2', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+        ],
+      });
+      const monitor = monitorLinkStatus(
+        'send-1', makeInteraction(),
+        [{ resourceId: 'res-1' }],
+        [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+        '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      );
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+      // Snapshot the live render BEFORE stop — both qurls viewed.
+      const beforeStop = monitor.getFullMsg();
+      expect(beforeStop).toMatch(/✅ \*\*All 2 viewed\*\*/);
+
+      monitor.stop();
+
+      // Post-stop, linkStatus is cleared so opened=0; expectedCount
+      // stays at 2; headline regresses to `0 of 2 viewed`. The
+      // collector.on('end') handler MUST capture the pre-stop render
+      // (commands.js:executeSendPipeline) — this pin documents why.
+      const afterStop = monitor.getFullMsg();
+      expect(afterStop).toMatch(/👀 \*\*0 of 2 viewed\*\*/);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // CR regression #2: addRecipients() nulls trackedQurlIds and the next
+  // tick re-runs the init pass. Pre-fix the re-init blindly seeded every
+  // qurl_id with `status: 'pending'`, briefly demoting previously-opened
+  // qurls until the same tick's poll loop re-flipped them. With the
+  // expectedCount denominator that flicker becomes visible (`0 of N+M
+  // viewed`). Fix: preserve non-pending status across re-init.
+  it('addRecipients() re-init preserves opened/expired status (no flicker to pending)', async () => {
+    jest.useFakeTimers();
+    try {
+      // First tick: q1 opened, q2 not.
+      mockGetResourceStatus
+        .mockResolvedValueOnce({
+          qurls: [
+            { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+          ],
+        })
+        // Re-init pass (after addRecipients) returns the same q1 + q2.
+        // If init blindly overwrote status to 'pending', the headline
+        // between the init pass and the poll pass would render
+        // `0 of N viewed` for one render cycle. The preservation guard
+        // keeps q1 at 'opened' through the re-init.
+        .mockResolvedValue({
+          qurls: [
+            { qurl_id: 'q1', use_count: 1, status: 'active', created_at: '2026-01-01T00:00:00Z' },
+            { qurl_id: 'q2', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:01Z' },
+          ],
+        });
+
+      const monitor = monitorLinkStatus(
+        'send-1', makeInteraction(),
+        [{ resourceId: 'res-1' }],
+        [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+        '1m', 'Sent', { components: [] }, 2, 'apikey',
+      );
+
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      // After tick 1: q1 opened → `1 of 2 viewed`.
+      expect(monitor.getFullMsg()).toMatch(/👀 \*\*1 of 2 viewed\*\*/);
+
+      // Trigger the re-init path.
+      monitor.addRecipients(0);
+
+      await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+      // After the re-init tick the headline must still show q1 as
+      // viewed — NOT briefly regress to `0 of 2 viewed`.
+      expect(monitor.getFullMsg()).toMatch(/👀 \*\*1 of 2 viewed\*\*/);
+
       monitor.stop();
     } finally {
       jest.useRealTimers();
@@ -2668,5 +2766,46 @@ describe('executeSendPipeline — initial confirmation includes view-counter bas
     // the bare "Sent to 0 users" confirmation (the failure copy lives
     // in the same string but `0 of N viewed` would be misleading).
     expect(lastContent).not.toMatch(/viewed/);
+  });
+
+  // CR pin: when the final editReply rejects (Unknown Interaction after
+  // 15min, 50027 invalid token, Discord-side blip), the hoisted monitor
+  // would otherwise tick for the full maxMonitorMs (up to 1h) issuing
+  // PATCHes against a dead interaction handle. The try/catch around
+  // editReply must stop the monitor BEFORE re-throwing. Pinned via the
+  // first-poll-never-fires invariant: monitor.stop() clears the
+  // setTimeout, so mockGetResourceStatus is never invoked.
+  test('editReply throw on final confirmation stops the hoisted monitor (no orphan setTimeout)', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGetResourceStatus.mockClear();
+      // First few editReply calls succeed (Preparing… → Preparing
+      // links…); the FINAL confirmation editReply rejects. The
+      // implementation distinguishes which call by its payload
+      // (the final one carries `components: [buttonRow]`); cheaper
+      // to just fail on the call whose first arg has a components
+      // array of length > 0.
+      const interaction = makeInteraction();
+      interaction.editReply = jest.fn().mockImplementation((payload) => {
+        if (Array.isArray(payload?.components) && payload.components.length > 0) {
+          return Promise.reject(new Error('Unknown Interaction'));
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await expect(
+        executeSendPipeline(interaction, makePipelineParams({
+          recipients: [{ id: 'u1', username: 'u1' }],
+        })),
+      ).rejects.toThrow(/Unknown Interaction/);
+
+      // Advance well past FIRST_POLL_DELAY_MS — if the orphan setTimeout
+      // is still armed, runTick fires and calls mockGetResourceStatus.
+      // The catch-block must have stopped the monitor before re-throwing.
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(mockGetResourceStatus).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
