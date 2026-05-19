@@ -16,7 +16,7 @@ ENV NODE_ENV=production
 # of MB) from the final image layer; the prior two-stage build dropped
 # this incidentally via the `COPY --from=build node_modules` carry-over,
 # so a single-stage Dockerfile has to clean explicitly.
-COPY package*.json ./
+COPY --chown=node:node package*.json ./
 RUN npm ci --omit=dev --ignore-scripts \
   && npm cache clean --force \
   && chown -R node:node /app/node_modules

@@ -72,11 +72,13 @@ async function sweepOnce() {
         break;
       }
     } catch (err) {
-      // Catch fires when `revokeOneDetailed` (or the rate-limit branch's
-      // `setTimeout` await) throws — `accessToken` is still set at that
-      // point because the `finally` below hasn't run yet. Hash the
-      // plaintext for log-correlation only (first 8 hex chars; SHA-256
-      // is one-way).
+      // Catch fires when `revokeOneDetailed` or `db.deleteOrphanedToken`
+      // throws — `accessToken` is always set at that point because both
+      // throw sites run BEFORE the `finally` below nulls it. (The
+      // rate-limit branch's `await new Promise(r => setTimeout(...))`
+      // resolves rather than rejects, so it's not a throw site.) Hash
+      // the plaintext for log-correlation only (first 8 hex chars;
+      // SHA-256 is one-way).
       const tokenHash8 = crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8);
       logger.warn('Orphan token retry-revoke failed (will retry next sweep)', {
         id, tokenHash8, error: err.message,

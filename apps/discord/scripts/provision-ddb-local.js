@@ -71,18 +71,25 @@ if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix)) {
     console.error(`Invalid DDB_TEST_ENDPOINT URL: '${endpoint}'.`);
     process.exit(1);
   }
-  // `0.0.0.0` is unusual as a client target but legitimate when an
-  // operator runs the bot inside a container that connects to
-  // `host.docker.internal` / `0.0.0.0`-bound docker-compose services
-  // — keeping it widens the allowlist without widening the blast
-  // radius (a real AWS DDB endpoint is never 0.0.0.0).
-  const isLocal = ['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(parsed.hostname)
-    || parsed.hostname.endsWith('.local')
-    || parsed.hostname.endsWith('.internal');
+  // Exact-match allowlist rather than `.local` / `.internal` suffix
+  // matching: an attacker who controls mDNS or hosts-file resolution
+  // could otherwise route `attacker.local` through the guard.
+  // Realistic local-dev hostnames beyond loopback are `0.0.0.0`
+  // (docker-compose bind) and `host.docker.internal` (bot-in-
+  // container reaching a docker-compose service on the host). If a
+  // new hostname becomes legitimate, add it here explicitly.
+  const LOCAL_HOSTNAMES = new Set([
+    'localhost',
+    '127.0.0.1',
+    '::1',
+    '0.0.0.0',
+    'host.docker.internal',
+  ]);
+  const isLocal = LOCAL_HOSTNAMES.has(parsed.hostname);
   if (!isLocal) {
     console.error(`Refusing to run: DDB_TEST_ENDPOINT='${endpoint}' does not look like a local DDB endpoint.`);
     console.error('This script is for `amazon/dynamodb-local` only — never point it at a real AWS account.');
-    console.error('Allowed hostnames: localhost, 127.0.0.1, ::1, 0.0.0.0, *.local, *.internal.');
+    console.error(`Allowed hostnames: ${[...LOCAL_HOSTNAMES].join(', ')}.`);
     process.exit(1);
   }
 }

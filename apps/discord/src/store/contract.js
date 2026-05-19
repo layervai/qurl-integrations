@@ -13,10 +13,13 @@
 // directly against both a complete fixture AND the real default
 // backend AND a `child_process.spawnSync` of the real boot path.
 //
-// Backend lifecycle: every Store method returns a Promise. ddb-store
-// (the only supported backend) is async-native. If a sync backend is
-// ever re-added, it must still expose Promise-returning methods so
-// callers can `await` uniformly across backends.
+// Backend lifecycle: every Store *method* (everything in `STORE_METHODS`
+// below) returns a Promise. ddb-store (the only supported backend) is
+// async-native. If a sync backend is ever re-added, it must still
+// expose Promise-returning methods so callers can `await` uniformly
+// across backends. The `STORE_CONSTANTS` block (e.g. `BADGE_TYPES`,
+// `BADGE_INFO`) is exempt — those are plain-value exports, not
+// methods, and `assertStoreShape` honors the distinction.
 //
 // Scope of `assertStoreShape`: name-level only. A backend that exports
 // `createPendingLink` with a wrong arity / wrong return shape passes
