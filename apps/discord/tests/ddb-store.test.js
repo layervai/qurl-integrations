@@ -1021,13 +1021,17 @@ describe('qurl views', () => {
     // Pin the condition exactly so a refactor that drops any clause
     // (replay, out-of-order, OR the consumed false→true flip on equal
     // access_count) fails CI rather than silently corrupting the
-    // counter.
+    // counter. `#consumed` is the DDB-reserved-keyword alias.
     expect(input.ConditionExpression).toBe(
       'attribute_not_exists(last_event_id) OR ('
       + 'last_event_id <> :eid AND ('
-      + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
+      + 'access_count < :n OR (access_count = :n AND #consumed = :false AND :c = :true)'
       + '))',
     );
+    expect(input.UpdateExpression).toBe(
+      'SET access_count = :n, #consumed = :c, last_event_id = :eid, last_updated = :now, expires_at = :exp',
+    );
+    expect(input.ExpressionAttributeNames).toEqual({ '#consumed': 'consumed' });
     expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
       ':n': 3, ':c': false, ':eid': 'evt-1', ':false': false, ':true': true,
     }));
