@@ -216,7 +216,7 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string
 				// would leave the admin guessing. Point at /qurl setup so
 				// they have a concrete next step.
 				slog.Warn("admin revoke: upstream auth rejected (API key rotated?)", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-				respondSlack(w, "This workspace's API key was rejected by qurl-service — re-run `/qurl setup` to rotate.")
+				respondSlack(w, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup` to rotate.")
 				return
 			}
 		}

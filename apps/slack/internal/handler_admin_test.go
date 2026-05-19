@@ -246,6 +246,28 @@ func TestAddAdmin_DisambiguationCantConfirmMembership(t *testing.T) {
 // literal (DDB SDK exception types use pointer-string fields).
 func stringPtr(s string) *string { return &s }
 
+// TestHandleAdminAdd_Unverified fences the end-to-end handler
+// mapping for ErrCodeAdminAddUnverified. The store-layer fence
+// (TestAddAdmin_DisambiguationCantConfirmMembership) pins the
+// slackdata contract; this test pins the user-visible "couldn't
+// confirm — please retry" reply that handleAdminAdd renders.
+func TestHandleAdminAdd_Unverified(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t) // target NOT on admin_slack_user_ids
+	// Inject a CCFE on the workspace UpdateItem so the
+	// disambiguation read sees the row WITHOUT the target on the
+	// SS — surfaces as ErrCodeAdminAddUnverified.
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "couldn't confirm admin add") {
+		t.Errorf("reply missing unverified-retry surface: %q", reply)
+	}
+}
+
 // TestHandleAdminAdd_NonAdminCaller fences the admin-only gate on
 // add. A non-admin caller is denied before any mutation.
 func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
