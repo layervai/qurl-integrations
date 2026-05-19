@@ -25,7 +25,7 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Names configured for this channel") {
+	if !strings.Contains(async, "Aliases configured for this channel") {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	if !strings.Contains(async, "`$prod-db` → https://prod.example.com") {

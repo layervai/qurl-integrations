@@ -96,7 +96,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := fanoutAliasRows(ctx, log, c, entries, aliasesResourceFanoutLimit)
 	sort.Strings(lines)
 
-	body := "*Names configured for this channel:*\n" + strings.Join(lines, "\n")
+	body := "*Aliases configured for this channel:*\n" + strings.Join(lines, "\n")
 	h.postResponse(log, responseURL, body)
 }
 

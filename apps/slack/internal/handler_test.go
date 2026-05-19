@@ -158,7 +158,13 @@ func TestSlashCommandGetURL_AcksWithWorkingOnIt(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	h := newTestHandler(t, qurlSrv)
-	body := getURLCommandBody("https://example.com", "T123", "trig-1", "https://hooks.slack.com/services/x")
+	// Wire response_url to a local recorder so the async worker's
+	// follow-up POST stays in-process. The literal `hooks.slack.com`
+	// URL the migration left here would otherwise dial Slack on every
+	// CI run (postResponse's `Wait()` cleanup blocks for the goroutine,
+	// the recorder mock just captures and discards).
+	rec := newResponseURLRecorder(t)
+	body := getURLCommandBody("https://example.com", "T123", "trig-1", rec.URL)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
