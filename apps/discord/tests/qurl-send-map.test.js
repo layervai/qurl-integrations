@@ -277,8 +277,12 @@ function makeInteraction({
         const err = new Error('Unknown Member'); err.code = 10007; throw err;
       }),
       // Prewarm path uses REST `list({ limit, after })`. Default mock
-      // returns an empty Map so the pagination loop no-ops; tests that
-      // need specific list behavior reassign `members.list` explicitly.
+      // returns an empty Map so the pagination loop breaks on the
+      // partial-page check before ever reading `lastKey()` — required
+      // because a plain Map has no `lastKey()` method. Tests that need
+      // multi-page behavior must reassign `members.list` with a
+      // Collection-shaped object (`{ size, lastKey }`) or a real
+      // discord.js Collection.
       list: jest.fn(async () => new Map()),
     },
     roles: { cache: new Map() },
@@ -3323,6 +3327,98 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     expect(int.guild.members.list.mock.calls[0][0].after).toBeUndefined();
     // Second call: `after` is the lastKey of page 1.
     expect(int.guild.members.list.mock.calls[1][0]).toEqual(expect.objectContaining({ limit: 1000, after: lastIdOfPage1 }));
+  });
+
+  test('pagination: three full pages advance the cursor each time', async () => {
+    // Defends against a regression that captures `after` once outside
+    // the loop instead of updating it from each page's lastKey(). The
+    // two-page test would pass for both correct and broken
+    // implementations (lastKey is read once either way).
+    const aliceId = '500000000000000078';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2500;
+
+    const lastIdOfPage1 = '111111111111111111';
+    const lastIdOfPage2 = '222222222222222222';
+    const page1 = { size: 1000, lastKey: () => lastIdOfPage1 };
+    const page2 = { size: 1000, lastKey: () => lastIdOfPage2 };
+    const page3 = new Map(); // partial → loop breaks
+    int.guild.members.list = jest.fn()
+      .mockResolvedValueOnce(page1)
+      .mockResolvedValueOnce(page2)
+      .mockResolvedValueOnce(page3);
+
+    await handleQurlSend(int);
+
+    expect(int.guild.members.list).toHaveBeenCalledTimes(3);
+    expect(int.guild.members.list.mock.calls[0][0].after).toBeUndefined();
+    expect(int.guild.members.list.mock.calls[1][0].after).toBe(lastIdOfPage1);
+    expect(int.guild.members.list.mock.calls[2][0].after).toBe(lastIdOfPage2);
+  });
+
+  test('pagination: cursor non-advancement bails with warn', async () => {
+    // Upstream bug shape: API returns a full page but lastKey() doesn't
+    // advance. Without the guard we'd spin to PREWARM_MAX_PAGES; with
+    // it we bail after the second call (when nextAfter === after).
+    const aliceId = '500000000000000079';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 5000;
+
+    const stuckCursor = '333333333333333333';
+    const stuckPage = { size: 1000, lastKey: () => stuckCursor };
+    int.guild.members.list = jest.fn().mockResolvedValue(stuckPage);
+
+    await handleQurlSend(int);
+
+    // Call 1: after=undefined → fetch, nextAfter=stuckCursor (advanced)
+    // Call 2: after=stuckCursor → fetch, nextAfter=stuckCursor (NOT advanced) → bail
+    expect(int.guild.members.list).toHaveBeenCalledTimes(2);
+    const logger = require('../src/logger');
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('cursor did not advance'),
+    );
+    expect(warnCall).toBeTruthy();
+  });
+
+  test('pagination: safety cap fires warn when full pages persist past PREWARM_MAX_PAGES', async () => {
+    // If lastKey() advances on every page but the API somehow never
+    // returns a partial page (genuine >1M-member guild OR upstream bug),
+    // the loop must exit at exactly PREWARM_MAX_PAGES (1000) and warn —
+    // not spin forever. Distinct from the non-advancement guard.
+    const aliceId = '500000000000000080';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2000000; // > 1M, defeats the hot-cache short-circuit
+
+    let counter = 0;
+    int.guild.members.list = jest.fn(async () => ({
+      size: 1000,
+      lastKey: () => `cursor-${counter++}`, // unique every page
+    }));
+
+    await handleQurlSend(int);
+
+    // Exactly PREWARM_MAX_PAGES iterations; no spin.
+    expect(int.guild.members.list).toHaveBeenCalledTimes(1000);
+    const logger = require('../src/logger');
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('hit safety cap'),
+    );
+    expect(warnCall).toBeTruthy();
+    // cache_size context lives in the payload (debugging signal — what
+    // actually landed in cache before the cap fired).
+    expect(warnCall[1]).toEqual(expect.objectContaining({ cache_size: expect.anything() }));
   });
 });
 

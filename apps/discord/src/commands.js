@@ -314,6 +314,12 @@ async function prewarmGuildMembersCache(guild, logCtx) {
       // WebSocket via `shard.send`, which crashes in http-only worker mode
       // (no gateway shard). discord.js handles 429 backoff inside `list`
       // so we don't sleep here.
+      //
+      // No wall-clock deadline on the loop: @everyone must mean EVERYONE,
+      // and a wall-clock cap would silently truncate large-guild expansion
+      // back to the bug this PR fixes (just with a different failure
+      // mode). The reply is deferred so Discord's 3s rule doesn't apply;
+      // user-perceived latency on huge guilds is the accepted trade-off.
       let after;
       let page;
       for (page = 0; page < PREWARM_MAX_PAGES; page++) {
@@ -322,11 +328,21 @@ async function prewarmGuildMembersCache(guild, logCtx) {
         // Collection is insertion-ordered against the API response, which
         // Discord sorts ascending by user_id — lastKey() is the right
         // `after` cursor for the next page.
-        after = batch.lastKey();
+        const nextAfter = batch.lastKey();
+        // Defensive: if Discord ever returns a full page without advancing
+        // the cursor (upstream bug), bail rather than burn 1000 iterations
+        // re-fetching the same window forever.
+        if (nextAfter === after) {
+          logger.warn('members pre-warm cursor did not advance; bailing', {
+            ...logCtx, guild_id: guild.id, after, pages: page + 1,
+          });
+          break;
+        }
+        after = nextAfter;
       }
       if (page === PREWARM_MAX_PAGES) {
         logger.warn('members pre-warm hit safety cap; @everyone/role expansion may underresolve', {
-          ...logCtx, guild_id: guild.id, pages: page,
+          ...logCtx, guild_id: guild.id, pages: page, cache_size: guild.members.cache?.size,
         });
       }
     } catch (err) {
@@ -7701,9 +7717,14 @@ const commands = [
           });
         }
 
-        // Get all members with Contributor role
-        const members = await guild.members.fetch();
-        const contributors = members.filter(m => m.roles.cache.has(contributorRole.id));
+        // `guild.members.fetch()` (no args) crashes in http-only worker
+        // mode because it relies on a gateway shard; route through the
+        // REST prewarm helper instead. After it resolves, the cache is
+        // the authoritative member set.
+        await prewarmGuildMembersCache(guild, { command: '/unlinked' });
+        const contributors = guild.members.cache.filter(
+          (m) => m.roles.cache.has(contributorRole.id),
+        );
 
         // Check which ones are not linked (single bulk query, not N+1)
         const linkedIds = await db.getLinkedDiscordIds();

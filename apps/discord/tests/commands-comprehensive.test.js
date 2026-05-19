@@ -1045,28 +1045,39 @@ describe('/backfill-milestones command', () => {
 describe('/unlinked command', () => {
   const findCmd = () => commands.find(c => c.data.name === 'unlinked');
 
+  // /unlinked now reads from guild.members.cache after routing through
+  // the REST prewarm helper. Helper to build a Collection-shaped cache
+  // (Map + filter) plus a no-op list() that lets the prewarm complete.
+  const makeUnlinkedGuild = (memberCache, { contributorRole = { id: 'role-1', name: 'Contributor' } } = {}) => {
+    if (memberCache && typeof memberCache.filter !== 'function') {
+      memberCache.filter = function (fn) {
+        const result = new Map();
+        for (const [k, v] of this) { if (fn(v, k)) result.set(k, v); }
+        return result;
+      };
+    }
+    return {
+      members: {
+        cache: memberCache,
+        list: jest.fn(async () => new Map()), // prewarm no-op; cache already populated
+      },
+      roles: { cache: { find: jest.fn(() => contributorRole) } },
+    };
+  };
+
   it('reports unlinked contributors', async () => {
-    const contributorRole = { id: 'role-1', name: 'Contributor' };
     const member1 = {
       id: 'u1',
       user: { tag: 'User1#0001' },
       roles: { cache: { has: jest.fn(() => true) } },
     };
-    const members = new Map([['u1', member1]]);
-    members.filter = function (fn) {
-      const result = new Map();
-      for (const [k, v] of this) { if (fn(v, k)) result.set(k, v); }
-      return result;
-    };
+    const cache = new Map([['u1', member1]]);
 
     mockDb.getLinkedDiscordIds.mockReturnValue(new Set());
 
     const interaction = makeInteraction({
       commandName: 'unlinked',
-      guild: {
-        members: { fetch: jest.fn().mockResolvedValue(members) },
-        roles: { cache: { find: jest.fn(() => contributorRole) } },
-      },
+      guild: makeUnlinkedGuild(cache),
     });
 
     await findCmd().execute(interaction);
@@ -1077,10 +1088,7 @@ describe('/unlinked command', () => {
   it('handles missing contributor role', async () => {
     const interaction = makeInteraction({
       commandName: 'unlinked',
-      guild: {
-        members: { fetch: jest.fn().mockResolvedValue(new Map()) },
-        roles: { cache: { find: jest.fn(() => null) } },
-      },
+      guild: makeUnlinkedGuild(new Map(), { contributorRole: null }),
     });
 
     await findCmd().execute(interaction);
@@ -1091,27 +1099,18 @@ describe('/unlinked command', () => {
   });
 
   it('handles all contributors linked', async () => {
-    const contributorRole = { id: 'role-1', name: 'Contributor' };
     const member1 = {
       id: 'u1',
       user: { tag: 'User1' },
       roles: { cache: { has: jest.fn(() => true) } },
     };
-    const members = new Map([['u1', member1]]);
-    members.filter = function (fn) {
-      const result = new Map();
-      for (const [k, v] of this) { if (fn(v, k)) result.set(k, v); }
-      return result;
-    };
+    const cache = new Map([['u1', member1]]);
 
     mockDb.getLinkedDiscordIds.mockReturnValue(new Set(['u1']));
 
     const interaction = makeInteraction({
       commandName: 'unlinked',
-      guild: {
-        members: { fetch: jest.fn().mockResolvedValue(members) },
-        roles: { cache: { find: jest.fn(() => contributorRole) } },
-      },
+      guild: makeUnlinkedGuild(cache),
     });
 
     await findCmd().execute(interaction);
@@ -1121,13 +1120,16 @@ describe('/unlinked command', () => {
     );
   });
 
-  it('handles error during fetch', async () => {
+  it('handles error after prewarm — db query failure surfaces to user', async () => {
+    // prewarm swallows REST errors (degraded-mode fallback), so a
+    // members.list() rejection no longer reaches the /unlinked
+    // try/catch. A db.getLinkedDiscordIds rejection does — pin that
+    // path as the live error surface.
+    mockDb.getLinkedDiscordIds.mockRejectedValue(new Error('db fail'));
+
     const interaction = makeInteraction({
       commandName: 'unlinked',
-      guild: {
-        members: { fetch: jest.fn().mockRejectedValue(new Error('fetch fail')) },
-        roles: { cache: { find: jest.fn(() => ({ id: 'role-1' })) } },
-      },
+      guild: makeUnlinkedGuild(new Map()),
     });
 
     await findCmd().execute(interaction);
