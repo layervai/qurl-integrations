@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -71,14 +72,22 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 }
 
 // AllowResource adds `resourceID` to the (teamID, channelID) row's
-// allowed_resource_ids set. Uses `UpdateItem ADD` so DDB handles
-// set-create-or-add atomically. Orthogonal to alias_bindings —
-// AllowResource only touches the allowed-set surface that
-// ResolvePolicy gates on.
+// allowed_resource_ids set via a conditional UpdateItem. Orthogonal
+// to alias_bindings — AllowResource only touches the allowed-set
+// surface that ResolvePolicy gates on.
 //
-// Returns 409 (via *Error) on a duplicate add — this is "operator's
-// mental model already satisfied," and the handler maps it to the
-// "already allowed" copy.
+// Returns 409 (via *Error) on a duplicate add. The 409 is surfaced
+// via DDB's ConditionalCheckFailedException on a
+// `NOT contains(allowed_resource_ids, :rid)` condition. Folding the
+// membership check into the conditional UpdateItem dodges the
+// TOCTOU window the prior probe-then-write shape had — two
+// concurrent admins running `/qurl admin allow` on the same
+// channel/resource would now see the second one get the 409 signal
+// instead of a false "Allowed" success.
+//
+// The condition fires only when the row exists AND the set already
+// contains the resource. A missing row passes the condition (the
+// attribute doesn't exist), and ADD creates the set on first write.
 func (s *Store) AllowResource(ctx context.Context, teamID, channelID, resourceID string) error {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return &Error{
@@ -86,47 +95,34 @@ func (s *Store) AllowResource(ctx context.Context, teamID, channelID, resourceID
 			Title:      "AllowResource: team_id, channel_id, resource_id are required",
 		}
 	}
-	// First: probe the row to surface the idempotent "already
-	// allowed" path as 409 rather than silently no-op'ing. ADD on a
-	// set is idempotent in DDB, but the handler relies on the 409
-	// status to render the right user copy ("already allowed in
-	// <#channel>"). Without this probe we'd silently no-op and
-	// render the "Allowed" success copy on a duplicate add — wrong
-	// signal to the operator.
-	get, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-	})
-	if err != nil {
-		return ddbToError("AllowResource(probe)", err)
-	}
-	if len(get.Item) > 0 {
-		for _, rid := range readStringSet(get.Item, attrAllowedResourceIDs) {
-			if rid == resourceID {
-				return &Error{
-					StatusCode: http.StatusConflict,
-					Code:       "policy_already_exists",
-					Title:      "AllowResource: policy already exists",
-				}
-			}
-		}
-	}
-	_, err = s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
 		UpdateExpression: aws.String("ADD allowed_resource_ids :rids SET updated_at = :now"),
+		// "attribute_not_exists(allowed_resource_ids) OR NOT
+		// contains(...)" passes when the row is brand new (no set
+		// yet) AND when the existing set lacks the target. Either
+		// case is a legitimate add. A repeat add fails the
+		// condition → ConditionalCheckFailedException → 409.
+		ConditionExpression: aws.String("attribute_not_exists(allowed_resource_ids) OR NOT contains(allowed_resource_ids, :rid)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			":rid":  stringAttr(resourceID),
 			exprNow: stringAttr(s.nowOrDefault().UTC().Format(timeFormat)),
 		},
 	})
 	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			return &Error{
+				StatusCode: http.StatusConflict,
+				Code:       "policy_already_exists",
+				Title:      "AllowResource: policy already exists",
+			}
+		}
 		return ddbToError("AllowResource", err)
 	}
 	return nil
@@ -258,15 +254,64 @@ func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit i
 		list.HasMore = true
 		cur, encErr := encodeCursor(out.LastEvaluatedKey)
 		if encErr != nil {
-			// Cursor encoding shouldn't fail on a valid DDB key, but
-			// don't blow up the listing — surface HasMore without a
-			// cursor so the handler shows the "more pages exist"
-			// hint without a broken next-page token.
+			// Cursor encoding shouldn't fail on a valid DDB key (PK+SK
+			// are both String today), but don't blow up the listing —
+			// surface HasMore without a cursor. Log loud so operators
+			// can see the broken pagination instead of just observing
+			// "next page is unreachable" via user reports.
+			slog.Warn("ListPolicies: encodeCursor failed; pagination disabled for this page",
+				"error", encErr, "team_id", teamID)
 			return list, nil //nolint:nilerr // intentional degrade: surface partial list with HasMore but no cursor
 		}
 		list.NextCursor = cur
 	}
 	return list, nil
+}
+
+// GetChannelPolicy returns every alias binding for a single
+// (teamID, channelID) row via a single GetItem against the PK+SK.
+// Replaces the previous "page team-wide then filter" shape that
+// could miss the calling channel when its row sorted past page-
+// boundary (the team-wide ListPolicies + post-filter pattern hid
+// channel hits past the first `limit` rows).
+//
+// Returns an empty entries slice when no row exists or when the row
+// has no alias_bindings — both render the same "no aliases" empty
+// state at the handler. The caller does NOT need to distinguish
+// row-absent from row-without-bindings (the user-visible signal is
+// the same).
+func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) ([]PolicyEntry, error) {
+	if teamID == "" || channelID == "" {
+		return nil, &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "GetChannelPolicy: team_id and channel_id are required",
+		}
+	}
+	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(channelID),
+		},
+	})
+	if err != nil {
+		return nil, ddbToError("GetChannelPolicy", err)
+	}
+	if len(out.Item) == 0 {
+		return nil, nil
+	}
+	createdAt := readTime(out.Item, attrCreatedAt)
+	bindings := readStringMap(out.Item, attrAliasBindings)
+	entries := make([]PolicyEntry, 0, len(bindings))
+	for alias, rid := range bindings {
+		entries = append(entries, PolicyEntry{
+			ChannelID:  channelID,
+			Alias:      alias,
+			ResourceID: rid,
+			CreatedAt:  createdAt,
+		})
+	}
+	return entries, nil
 }
 
 // timeFormat is the on-the-wire format for created_at/updated_at on

@@ -164,41 +164,53 @@ func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
 	}
 }
 
-// TestHandleAliases_HasMoreFooter fences the truncation footer: when
-// the slackdata store reports has_more=true, the user-visible reply
-// surfaces a "more results truncated" hint so they know to expect
-// pagination in a future release.
-//
-// Setup constraint: channel_policies is (team_id, channel_id)-keyed
-// (one row per channel). To trigger has_more=true under the Query
-// Limit, we seed 1 row in C_test (the channel the test slash-cmd
-// is invoked in) and aliasesPageLimit more in distinct channels —
-// total = aliasesPageLimit + 1 rows for the team, so the page
-// returns LastEvaluatedKey and the handler's filter retains the
-// C_test row.
-func TestHandleAliases_HasMoreFooter(t *testing.T) {
+// TestHandleAliases_OtherChannelsDoNotLeak fences the channel-scoped
+// read: seeding alias bindings in OTHER channels under the same team
+// does NOT contaminate the calling channel's listing. The post-#233
+// shape uses a single GetItem against (team, channel) — there's no
+// "filter team-wide after pagination" window in which a sibling
+// channel's row could leak through.
+func TestHandleAliases_OtherChannelsDoNotLeak(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// "C_aaa" sorts before any "C_other_*" so the C_test row (renamed
-	// to C_aaa for this test) is in the first page returned by Query.
-	const filterChannelID = "C_aaa_first"
-	ts.seedPolicySet(t, testAdminTeamID, filterChannelID, "primary", []string{"r_primary"})
-	for i := 0; i < aliasesPageLimit; i++ {
-		channel := "C_zzz_other_"
-		if i < 26 {
-			channel += string(rune('a' + i))
-		} else {
-			channel += string(rune('a'+(i/26)-1)) + string(rune('a'+(i%26)))
-		}
-		ts.seedPolicySet(t, testAdminTeamID, channel, "alias", []string{"r_other"})
+	const callerChannel = "C_caller"
+	ts.seedPolicySet(t, testAdminTeamID, callerChannel, "primary", []string{"r_primary"})
+	// Seed many sibling-channel rows to confirm the GetItem scope
+	// stays tight even when the team has dozens of channels.
+	for i := 0; i < 20; i++ {
+		ts.seedPolicySet(t, testAdminTeamID, "C_other_"+string(rune('a'+i)), "leak-canary", []string{"r_leak"})
 	}
+	ts.addCustomer("GET", "/v1/resources/by-alias/primary", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceFixtureWithTarget(t, w, "r_primary", "primary", "https://prod.example.com")
+	})
 	ts.addCustomerPrefix("GET", "/v1/resources/by-alias/", func(w http.ResponseWriter, _ *http.Request) {
+		// Force a 404 on any non-primary fetch — if the handler leaks
+		// a sibling channel's alias, the resource fetch lands here
+		// and renders as id-only (not the prod-example.com URL).
 		w.WriteHeader(http.StatusNotFound)
 	})
 	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvokerOnChannel(t, h, filterChannelID)
+	inv := newAdminSlashInvokerOnChannel(t, h, callerChannel)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "more results truncated") {
-		t.Errorf("async reply missing has_more footer: %q", async)
+	if !strings.Contains(async, "`$primary`") {
+		t.Errorf("async reply missing primary alias: %q", async)
+	}
+	if strings.Contains(async, "leak-canary") {
+		t.Errorf("async reply leaked sibling-channel alias: %q", async)
+	}
+}
+
+// TestHandleAliases_EmptyChannelIDRejected fences the no-channel
+// guard: a slash command with an empty channel_id (synthetic test
+// payload, or some future channel-less invocation) MUST NOT fan
+// out a team-wide listing. The v1 surface is channel-scoped.
+func TestHandleAliases_EmptyChannelIDRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvokerOnChannel(t, h, "")
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "must be invoked from a channel") {
+		t.Errorf("response missing channel-required guard: %q", async)
 	}
 }

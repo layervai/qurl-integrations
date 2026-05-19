@@ -529,11 +529,19 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	command := values.Get(fieldCommand)
 	text := strings.TrimSpace(values.Get(fieldText))
 
-	slog.Info("slash command", "command", command, "text", text)
+	// Redact `admin claim <code>` arguments from the slash-command
+	// audit log. The modal path routes the bootstrap code through
+	// [interactionPayload.LogValue] for redaction; the slash-command
+	// path is unprotected without this sanitizer. A user typing
+	// `/qurl admin claim BOOT-SECRET` triggers the
+	// "admin claim "-prefix dispatch branch below, which surfaces a
+	// usage hint instead of routing — but we still log the request
+	// here and must not echo the tail.
+	slog.Info("slash command", "command", command, "text", redactSlashCommandText(text))
 
 	switch {
 	case text == "" || text == "help":
-		respondSlack(w, helpMessage())
+		respondSlack(w, h.helpMessage())
 	case text == "setup":
 		h.handleSetup(w, values)
 	case strings.HasPrefix(text, "create "):
@@ -554,11 +562,29 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		h.handleGet(w, values)
 	case text == "aliases":
 		h.handleAliases(w, values)
-	case text == "admin claim" || strings.HasPrefix(text, "admin claim "):
+	case text == "admin claim":
 		// `admin claim` opens a modal — it cannot run async because
 		// the trigger_id rotates after one use. Sync dispatch via
 		// views.open is the only correct shape.
+		//
+		// Exact-match-only is load-bearing: `admin claim <code>` must
+		// NOT route here because the slash-command logger above would
+		// have already written the bootstrap code into CloudWatch
+		// before we got to the handler. Anything other than the bare
+		// verb falls through to the AdminClaimArgsHint branch below,
+		// which renders a usage hint without echoing the args.
 		h.handleAdminClaim(w, values)
+	case strings.HasPrefix(text, "admin claim "):
+		// User typed `admin claim <something>` — usually the
+		// bootstrap code on the slash-command line instead of via
+		// the modal. Refuse routing and surface a hint that the
+		// code goes in the modal. Crucially we do NOT echo `text`
+		// in the reply (the code lives in the tail) — the
+		// slash-command log line at the top of this handler is
+		// the only line that could see it, and we intentionally
+		// route it through the redactSlashCommandText sanitizer
+		// before logging on this path.
+		respondSlack(w, ":warning: Do not pass the bootstrap code on the slash-command line — it shows up in our logs. Run `/qurl admin claim` (no arguments) and enter the code in the modal.")
 	case text == "setalias" || strings.HasPrefix(text, "setalias "):
 		// Bare `setalias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
@@ -569,9 +595,28 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
-		slog.Info("unknown slash subcommand", "command", command, "text", text)
+		// redactSlashCommandText keeps `admin claim <tail>` and any future
+		// secret-bearing verb out of CloudWatch.
+		slog.Info("unknown slash subcommand", "command", command, "text", redactSlashCommandText(text))
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 	}
+}
+
+// redactSlashCommandText sanitizes the slash-command `text` form field
+// before it reaches slog. Currently masks the tail of `admin claim
+// <code>` so a bootstrap code typed on the slash-command line (instead
+// of via the modal) doesn't land in CloudWatch verbatim.
+//
+// The dispatcher above routes `admin claim <args>` to a user-facing
+// "use the modal" hint rather than the redeem path, but the slash-
+// command audit log line fires before dispatch. This is the
+// defense-in-depth seam that keeps the secret out of logs regardless.
+func redactSlashCommandText(text string) string {
+	const claimPrefix = "admin claim "
+	if strings.HasPrefix(text, claimPrefix) {
+		return claimPrefix + "<redacted>"
+	}
+	return text
 }
 
 func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
@@ -661,21 +706,39 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	respondJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
-func helpMessage() string {
-	return `*/qurl* — Create and manage qURLs from Slack
-
-*Commands:*
-• ` + "`/qurl setup`" + ` — Connect qURL to your Slack workspace (workspace admin only)
-• ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
-• ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
-• ` + "`/qurl get $alias`" + ` — Mint an access link for an alias-bound resource
-• ` + "`/qurl get $alias dm:true`" + ` — DM the link to you instead of channel ephemeral
-• ` + "`/qurl get $alias reason:\"…\"`" + ` — Annotate the audit log with a reason
-• ` + "`/qurl aliases`" + ` — List the aliases allowed in this channel
-• ` + "`/qurl admin claim`" + ` — Open the bootstrap-code modal to claim this workspace
-• ` + "`/qurl setalias $<alias> <url-or-resource-id>`" + ` — Bind an alias to this channel (admin only)
-• ` + "`/qurl unsetalias $<alias>`" + ` — Clear this channel's alias (admin only)
-• ` + "`/qurl help`" + ` — Show this help message`
+// helpMessage renders the /qurl help text. Verbs that depend on
+// optional Config wiring are omitted when that wiring is nil — a
+// workspace without OpenView won't see /qurl admin claim, and one
+// without PostDM won't see the dm:true variant. The verbs still
+// dispatch if a user types them directly; the omission is just so
+// help text doesn't advertise a path that will reply with
+// ":warning: not configured".
+func (h *Handler) helpMessage() string {
+	lines := []string{
+		"*/qurl* — Create and manage qURLs from Slack",
+		"",
+		"*Commands:*",
+		"• `/qurl setup` — Connect qURL to your Slack workspace (workspace admin only)",
+		"• `/qurl create <url>` — Create a qURL for the given URL",
+		"• `/qurl list` — Show your 5 most recent qURLs",
+		"• `/qurl get $alias` — Mint an access link for an alias-bound resource",
+	}
+	if h.cfg.PostDM != nil {
+		lines = append(lines, "• `/qurl get $alias dm:true` — DM the link to you instead of channel ephemeral")
+	}
+	lines = append(lines,
+		"• `/qurl get $alias reason:\"…\"` — Annotate the audit log with a reason",
+		"• `/qurl aliases` — List the aliases allowed in this channel",
+	)
+	if h.cfg.OpenView != nil {
+		lines = append(lines, "• `/qurl admin claim` — Open the bootstrap-code modal to claim this workspace")
+	}
+	lines = append(lines,
+		"• `/qurl setalias $<alias> <url-or-resource-id>` — Bind an alias to this channel (admin only)",
+		"• `/qurl unsetalias $<alias>` — Clear this channel's alias (admin only)",
+		"• `/qurl help` — Show this help message",
+	)
+	return strings.Join(lines, "\n")
 }
 
 // respondMethodNotAllowed writes 405 with an RFC 7231 §6.5.5 Allow header.

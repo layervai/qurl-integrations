@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -23,18 +24,20 @@ import (
 // The hashing means the plaintext code never lives at rest — see the
 // "Security contract for the redemption path" comment in
 // modules/qurl-slack-ddb/main.tf.
-const (
-	attrCodeHash  = "code_hash"
-	attrKeyID     = "key_id"
-	attrRedeemed  = "redeemed"
-	attrExpiresAt = "expires_at"
-)
+// attrCodeHash is the bootstrap_codes PK (sha256 of the plaintext code
+// received from the modal). All other attributes are referenced via
+// string literals inside the UpdateExpression — DDB requires
+// expression-attribute aliases for reserved words anyway, and there's
+// no second call-site for the other names to drift from.
+const attrCodeHash = "code_hash"
 
-// errCodeBootstrapInvalid is the error code surfaced when the
-// bootstrap code is wrong/expired/already-used. The handler maps this
-// to the user-facing "code is invalid or expired" copy (see
-// handler_admin_claim.go's surfaceClaimError).
-const errCodeBootstrapInvalid = "bootstrap_code_invalid"
+// ErrCodeBootstrapInvalid is the error code surfaced on the *Error
+// returned from RedeemBootstrap when the bootstrap code is
+// wrong/expired/already-used. Exported so handlers can pattern-match
+// the [*Error.Code] field without redeclaring the literal — a
+// future rename would break the type-checker rather than silently
+// desynchronizing.
+const ErrCodeBootstrapInvalid = "bootstrap_code_invalid"
 
 // RedeemBootstrap consumes a one-time bootstrap code, atomically
 // flipping the row's `redeemed` flag from false → true via a DDB
@@ -88,7 +91,7 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":true":    boolAttr(true),
 			":false":   boolAttr(false),
-			exprNow:    &ddbtypes.AttributeValueMemberN{Value: epochSecondsString(nowEpoch)},
+			exprNow:    &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
 			":now_iso": stringAttr(s.nowOrDefault().UTC().Format(time.RFC3339)),
 			":user":    stringAttr(slackUserID),
 		},
@@ -99,7 +102,7 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 		if errors.As(err, &ccfe) {
 			return nil, &Error{
 				StatusCode: http.StatusGone,
-				Code:       errCodeBootstrapInvalid,
+				Code:       ErrCodeBootstrapInvalid,
 				Title:      "RedeemBootstrap: code is invalid, expired, or already used",
 			}
 		}
@@ -107,42 +110,27 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 	}
 
 	ownerID := readString(out.Attributes, attrOwnerID)
-	keyID := readString(out.Attributes, attrKeyID)
 	mapping := &WorkspaceMapping{
 		TeamID:    teamID,
 		OwnerID:   ownerID,
 		CreatedAt: s.nowOrDefault().UTC(),
 	}
 
-	// Step 2: call qurl-service POST /v1/external-identity-bindings
-	// to mint the API key and record the binding. The endpoint
-	// doesn't exist yet (see Appendix A of SLACK_QURL_ROLLOUT.md);
-	// when ExternalIdentityBindings is nil we return mapping as-is
-	// and leave the binding/key-mint to a follow-up.
+	// Step 2 (call qurl-service POST /v1/external-identity-bindings
+	// to mint the API key + record the binding) is deferred until
+	// qurl-service #547 ships the endpoint AND this bot plumbs the
+	// Auth0 Bearer through to the call site. The Store field
+	// `ExternalIdentityBindings` stays nil in cmd/main.go on
+	// purpose — calling Create() with an empty Bearer would burn
+	// this bootstrap code and then fail at the HTTP layer ("Bearer
+	// is required"), leaving the user stuck with a dead code and
+	// no usable workspace binding.
 	//
-	// TODO: implement once qurl-service ships the endpoint
-	if s.ExternalIdentityBindings != nil {
-		_, bindErr := s.ExternalIdentityBindings.Create(ctx, &CreateBindingRequest{
-			Provider:    "slack",
-			ExternalID:  teamID,
-			DisplayName: "", // optional; filled in by a follow-up
-			Bearer:      "", // Auth0 JWT plumbed via context in caller
-		})
-		if bindErr != nil {
-			// External binding failed AFTER the local bootstrap-code
-			// consume — we've burned the one-time code with nothing
-			// to show for it. Surface the error but leave the
-			// consume in place (DDB doesn't support multi-table
-			// rollback without TransactWriteItems against the
-			// remote table, which lives in qurl-service's account).
-			// Operators will need to mint a fresh code; tracked as
-			// an open question in Appendix A.
-			return nil, bindErr
-		}
-	}
-
-	// keep keyID referenced for future use (DM rendering)
-	_ = keyID
+	// The follow-up PR that flips the field non-nil lands the
+	// Bearer plumbing in the same change so the two-step flow
+	// stays atomic from the user's perspective. The interface
+	// shape lives in external_identity_bindings.go so the call-
+	// site signature is stable.
 	return mapping, nil
 }
 
@@ -152,31 +140,4 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 func hashBootstrapCode(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
-}
-
-// epochSecondsString renders an int64 epoch as decimal for use in a
-// DDB Number attribute. Direct strconv.FormatInt would work too;
-// this wrapper keeps the AttributeValue construction grep-able.
-func epochSecondsString(n int64) string {
-	// strconv.FormatInt is the standard, but to keep this file
-	// import-light we inline a small base-10 render.
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

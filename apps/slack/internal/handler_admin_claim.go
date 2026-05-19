@@ -12,12 +12,6 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
-// errCodeBootstrapInvalid is the slackdata error code returned when
-// the bootstrap_code is wrong, expired, or already redeemed
-// (single-use). Mapped to a friendly user-facing message instead of
-// surfacing the raw service title.
-const errCodeBootstrapInvalid = "bootstrap_code_invalid"
-
 // adminClaimSuccessMessage is the post-redeem confirmation surfaced
 // via DM when PostDM is wired. The slash-command HTTP body has
 // already been written by the time the redeem completes (view_submission
@@ -32,11 +26,13 @@ const adminClaimSuccessMessage = ":white_check_mark: You're now an admin for thi
 const modalOpenFailureMessage = "Could not open the modal. Please retry the command."
 
 // handleAdminClaim opens the bootstrap-code modal. The code is NEVER
-// accepted as a slash-command argument — the parser's parseAdmin
-// rejects `admin claim <args>` (Blocker #3). The modal collects the
-// code via a plain_text_input whose block_id is in
-// [redactedSubmissionBlockIDs], so the bot's logging boundary
-// redacts the code on submission.
+// accepted as a slash-command argument — the dispatcher routes
+// `admin claim <anything>` to a "use the modal" hint instead of here
+// (see handler.go::handleSlashCommand), AND the slash-command audit
+// log is redacted via [redactSlashCommandText] before it reaches slog
+// regardless. The modal collects the code via a plain_text_input
+// whose block_id is in [redactedSubmissionBlockIDs], so the bot's
+// logging boundary redacts the code on submission as well.
 //
 // views.open must hit Slack within the 3s slash-command budget —
 // async-defer would fire after the trigger_id has expired (Slack
@@ -127,12 +123,13 @@ func (h *Handler) handleAdminClaimSubmit(ctx context.Context, w http.ResponseWri
 	// admin." Bind seeds admin_slack_user_ids with the redeemer's
 	// userID.
 	if bindErr := h.cfg.AdminStore.BindWorkspace(ctx, mapping, userID); bindErr != nil {
-		// The bootstrap code is already burned. Surface the failure
-		// instead of lying about the outcome — surfaceClaimError maps
-		// 409 (workspace already bound to a different owner) to the
-		// right copy and falls everything else through the generic
-		// path so operators see the failure in slog.
-		h.surfaceClaimError(ctx, w, userID, bindErr)
+		// The bootstrap code is already burned. Surface a distinct
+		// "redeemed but bind failed" copy so the operator gets a
+		// clear ticket instead of the user retrying forever with a
+		// dead code. surfaceBindError maps 409 (workspace already
+		// claimed) to its own copy and falls everything else
+		// through the operator-actionable path.
+		h.surfaceBindError(ctx, w, userID, bindErr)
 		return
 	}
 	slog.Info("admin claim redeemed", "team_id", teamID, "user_id", userID)
@@ -170,7 +167,7 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 	var ae *slackdata.Error
 	if errors.As(err, &ae) {
 		switch {
-		case ae.Code == errCodeBootstrapInvalid, ae.StatusCode == http.StatusGone:
+		case ae.Code == slackdata.ErrCodeBootstrapInvalid, ae.StatusCode == http.StatusGone:
 			respondModalError(w, blockIDClaimCode, "Code is invalid or expired.")
 			return
 		case ae.StatusCode == http.StatusConflict:
@@ -194,6 +191,43 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 	// DM landed — close the modal so the user sees ONE signal.
+	respondJSON(w, http.StatusOK, map[string]any{})
+}
+
+// surfaceBindError handles a BindWorkspace failure that runs AFTER
+// the bootstrap code has been atomically consumed. Distinct user
+// copy from surfaceClaimError because the code is already burned —
+// the user CAN'T retry the same code. Operators must mint a fresh
+// one and reissue.
+//
+//   - 409 (workspace already bound) → "workspace is already claimed"
+//     copy; the redeemer should ask whoever holds the existing
+//     binding rather than rotating. Single-signal contract: modal
+//     stays open with a field-level error if PostDM isn't wired,
+//     else DM + close modal.
+//   - Everything else → "Code redeemed but binding failed — contact
+//     LayerV support" so the user pings the right escalation path.
+//     Logged at Error level (not Warn) because a transient bind
+//     failure leaves the workspace half-installed and needs human
+//     follow-up.
+func (h *Handler) surfaceBindError(ctx context.Context, w http.ResponseWriter, userID string, err error) {
+	var ae *slackdata.Error
+	if errors.As(err, &ae) && ae.StatusCode == http.StatusConflict {
+		respondModalError(w, blockIDClaimCode, "This workspace is already claimed. Ask the existing admin to add you instead of using a fresh bootstrap code.")
+		return
+	}
+	slog.Error("admin claim bind failed AFTER bootstrap-code consume — workspace is half-installed; needs operator follow-up", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
+
+	const supportCopy = "Code was redeemed but the workspace binding failed. Please contact LayerV support — your bootstrap code is now used; a fresh one will need to be minted."
+	if h.cfg.PostDM == nil {
+		respondModalError(w, blockIDClaimCode, supportCopy)
+		return
+	}
+	if dmErr := h.cfg.PostDM(ctx, userID, ":warning: "+supportCopy); dmErr != nil {
+		slog.Warn("admin claim bind-error DM failed; falling back to field-level modal error", "error", dmErr, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
+		respondModalError(w, blockIDClaimCode, supportCopy)
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]any{})
 }
 

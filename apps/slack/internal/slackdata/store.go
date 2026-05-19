@@ -44,7 +44,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -393,8 +392,3 @@ func notFoundError(title string) *Error {
 		Title:      title,
 	}
 }
-
-// aws.String adapter — exposed via re-export to avoid an extra import
-// on every callsite. The slackdata package itself wires through to
-// the SDK constructor.
-var _ = aws.String // keep the import in this file even if no use

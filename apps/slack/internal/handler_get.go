@@ -42,11 +42,6 @@ const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 // duration (server returned 0 / negative / sub-second).
 const humanFallbackMoment = "a moment"
 
-// errCodeBootstrapInvalid is the qurl-service error code returned
-// when the bootstrap_code is wrong, expired, or already redeemed.
-// Used by the admin-claim handler — lifted into this file because
-// handler_get.go already imports the slackdata package.
-
 // userError is the typed error returned from getWork when the
 // message text is intended for direct user display. Wrapping the
 // message in a typed error documents that it routes to the user via
@@ -163,7 +158,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 	resource, err := c.GetResourceByAlias(ctx, alias)
 	if err != nil {
-		return "", mapAliasResolutionError(alias, err)
+		return "", mapAliasResolutionError(log, alias, err)
 	}
 
 	// 2. Policy + rate-limit checks via the DDB-direct AdminStore.
@@ -240,8 +235,10 @@ func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, userID, me
 // mapAliasResolutionError converts an [*client.APIError] from the
 // alias-resolution call into a friendly user-facing message. Known
 // codes get specific text; everything else falls through to
-// [serviceUnreachableMessage].
-func mapAliasResolutionError(alias string, err error) error {
+// [serviceUnreachableMessage]. Uses the caller-supplied request-
+// scoped logger so the failure log carries the same team/channel
+// attribution as the mint path (mapMintError threads `log` too).
+func mapAliasResolutionError(log *slog.Logger, alias string, err error) error {
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
 		switch {
@@ -249,9 +246,15 @@ func mapAliasResolutionError(alias string, err error) error {
 			return userErrorf("No resource has alias `$%s`.", alias)
 		case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == "tunnel_disabled":
 			return &userError{msg: tunnelDisabledMessage}
+		case apiErr.StatusCode == http.StatusTooManyRequests:
+			// Mirror mapMintError's 429 handling — the customer API
+			// can rate-limit the resolution call independently of
+			// the mint call.
+			retry := time.Duration(apiErr.RetryAfter) * time.Second
+			return userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
 		}
 	}
-	slog.Warn("get: alias resolution failed", "error", err, "alias", alias)
+	log.Warn("get: alias resolution failed", "error", err, "alias", alias)
 	return &userError{msg: serviceUnreachableMessage}
 }
 
@@ -285,6 +288,23 @@ func mapMintError(log *slog.Logger, err error) error {
 			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code)
 			return &userError{msg: serviceUnreachableMessage}
 		}
+		// Unmapped 5xx (e.g. 500, 599) is server-side trouble — same
+		// retry-friendly disposition as 502/503/504 above. Falling
+		// through to commonGetMintFailedMessage on a 500 would tell
+		// the user "permanent failure, do not retry" when the
+		// upstream is actually transient. The unmapped non-5xx case
+		// (401, 404, 422, etc.) IS a permanent-class failure and
+		// falls through below.
+		if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
+			log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code)
+			return &userError{msg: serviceUnreachableMessage}
+		}
+		// Other unmapped statuses (401, 404, 422, etc.) are
+		// permanent-class — log loud so the operator sees the
+		// contract surprise, surface the generic message so the user
+		// isn't told to retry forever.
+		log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)
+		return &userError{msg: commonGetMintFailedMessage}
 	}
 	// No APIError → wrapped network/dial failure. Same retry-friendly
 	// disposition as 5xx above.

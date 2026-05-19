@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,24 +15,18 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-// aliasesPageLimit caps how many policy entries we read in a single
-// /qurl aliases call. The plan documents 50/page; pagination inside
-// Slack is awkward (no prev/next on ephemeral messages) and the v1
-// UX assumes a single workspace's alias set fits on one screen — a
-// "more truncated" footer surfaces when the page is full.
-const aliasesPageLimit = 50
-
 // aliasesResourceFanoutLimit bounds the parallelism of per-row
-// alias→target resolution under [aliasesWork]. With 50 entries
-// worst-case, sequential fetches against a slow customer API would
-// chew through asyncWorkTimeout (25s) on the page. 8 parallel
-// workers leaves comfortable headroom: 50/8 = ~7 batches × ~200ms
-// nominal = ~1.4s.
+// alias→target resolution. A channel's alias_bindings map can hold
+// dozens of aliases; sequential fetches against a slow customer API
+// would chew through asyncWorkTimeout (25s). 8 parallel workers
+// leaves comfortable headroom (~200ms nominal × ceil(N/8) batches).
 const aliasesResourceFanoutLimit = 8
 
-// handleAliases implements `/qurl aliases`. Lists owner-scoped
-// aliases filtered to the current channel's allowed set. Same
-// async-defer pattern as /qurl get:
+// handleAliases implements `/qurl aliases`. Lists the aliases bound
+// to the current channel via a single GetItem on channel_policies
+// (PK=team, SK=channel — point read, no pagination concerns).
+//
+// Async-defer pattern:
 //  1. Ack 200 + spinner.
 //  2. Goroutine reads channel_policies via the DDB-direct AdminStore,
 //     fans out customer-API resource fetches to render human-readable
@@ -53,6 +48,15 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
 		return
 	}
+	if channelID == "" {
+		// Slack always sends a channel_id on slash commands; an
+		// empty value means a synthetic payload (test harness or
+		// future channel-less invocation). Fail closed rather than
+		// fan out a team-wide list — that's not the v1 surface.
+		log.Warn("aliases: empty channel_id; refusing team-wide list")
+		h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+		return
+	}
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
@@ -61,24 +65,16 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 
-	policies, err := h.cfg.AdminStore.ListPolicies(ctx, teamID, "", aliasesPageLimit)
+	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
 	if err != nil {
 		// Raw store error text (`AdminError: Unauthorized [bad_token]
 		// (401)`) MUST NOT reach the user — strip to the generic
 		// serviceUnreachableMessage. Auth-class failures land on the
 		// same generic path because the operator-facing detail is in
 		// the slog line, not the wire reply.
-		log.Warn("aliases: ListPolicies failed", "error", err, "team_id", teamID)
+		log.Warn("aliases: GetChannelPolicy failed", "error", err, "team_id", teamID, "channel_id", channelID)
 		h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
 		return
-	}
-
-	// Filter to the current channel's allowed set. An empty channel
-	// (synthetic test payload) renders all team policies so callers
-	// can introspect.
-	entries := policies.Entries
-	if channelID != "" {
-		entries = filterEntriesByChannel(entries, channelID)
 	}
 	if len(entries) == 0 {
 		h.postResponse(log, responseURL, ":mag: No aliases are allowed in this channel. Ask a workspace admin to run `/qurl admin allow #channel $alias`.")
@@ -92,9 +88,6 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	sort.Strings(lines)
 
 	body := "*Aliases allowed in this channel:*\n" + strings.Join(lines, "\n")
-	if policies.HasMore {
-		body += fmt.Sprintf("\n_…more results truncated (showing first %d)._", aliasesPageLimit)
-	}
 	h.postResponse(log, responseURL, body)
 }
 
@@ -145,6 +138,12 @@ loop:
 						alias = r.Alias
 					}
 					target = r.TargetURL
+				} else if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
+					// Distinct log from the 404/5xx branch so operators
+					// can tell "request was cut short by SIGTERM /
+					// asyncWorkTimeout" apart from "upstream rejected
+					// this alias" when triaging.
+					log.Debug("aliases: resource fetch canceled before completion", "error", rerr, "resource_id", e.ResourceID)
 				} else {
 					log.Debug("aliases: resource fetch failed in fanout", "error", rerr, "resource_id", e.ResourceID)
 				}
@@ -154,19 +153,6 @@ loop:
 	}
 	wg.Wait()
 	return lines
-}
-
-// filterEntriesByChannel returns the subset of entries scoped to
-// `channelID`. Lifted to a helper so the test can exercise it in
-// isolation from the goroutine plumbing.
-func filterEntriesByChannel(entries []slackdata.PolicyEntry, channelID string) []slackdata.PolicyEntry {
-	out := make([]slackdata.PolicyEntry, 0, len(entries))
-	for i := range entries {
-		if entries[i].ChannelID == channelID {
-			out = append(out, entries[i])
-		}
-	}
-	return out
 }
 
 // formatAliasLine renders one row of the /qurl aliases listing. The

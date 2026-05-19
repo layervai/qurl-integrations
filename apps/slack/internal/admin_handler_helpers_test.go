@@ -134,7 +134,10 @@ type adminSlashInvoker struct {
 }
 
 // newAdminSlashInvoker spins up a response_url-capturing httptest
-// server and returns an invoker bound to it.
+// server and returns an invoker bound to it. Defaults the slash-
+// command channel_id to "C_test" — most tests don't care which
+// channel, so the default keeps boilerplate down. Tests that need a
+// non-default or empty channel_id use [newAdminSlashInvokerOnChannel].
 func newAdminSlashInvoker(t *testing.T, h *Handler) *adminSlashInvoker {
 	t.Helper()
 	captured := &capturedResponseURL{}
@@ -148,12 +151,14 @@ func newAdminSlashInvoker(t *testing.T, h *Handler) *adminSlashInvoker {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
-	return &adminSlashInvoker{t: t, h: h, captured: captured, responseU: srv}
+	return &adminSlashInvoker{t: t, h: h, captured: captured, responseU: srv, channelID: "C_test"}
 }
 
-// newAdminSlashInvokerOnChannel is newAdminSlashInvoker with a
-// non-default channel_id. Used by tests that exercise filter logic
-// against a specific channel.
+// newAdminSlashInvokerOnChannel is newAdminSlashInvoker with an
+// explicit channel_id. Passing "" sends a truly-empty channel_id on
+// the wire — the default-to-C_test fallback lives in
+// [newAdminSlashInvoker], not in invokeAdmin, so the
+// fail-closed-on-missing-channel branch can be exercised honestly.
 func newAdminSlashInvokerOnChannel(t *testing.T, h *Handler, channelID string) *adminSlashInvoker {
 	t.Helper()
 	inv := newAdminSlashInvoker(t, h)
@@ -166,16 +171,12 @@ func newAdminSlashInvokerOnChannel(t *testing.T, h *Handler, channelID string) *
 // status, revoke) — the rendered reply is in the sync body.
 func (a *adminSlashInvoker) invokeAdmin(text, teamID, userID string) (status int, replyText string) {
 	a.t.Helper()
-	channelID := a.channelID
-	if channelID == "" {
-		channelID = "C_test"
-	}
 	body := url.Values{
 		"command":      {"/qurl"},
 		"text":         {text},
 		"team_id":      {teamID},
 		"user_id":      {userID},
-		"channel_id":   {channelID},
+		"channel_id":   {a.channelID},
 		"response_url": {a.responseU.URL},
 		"trigger_id":   {"trigger_test"},
 	}.Encode()

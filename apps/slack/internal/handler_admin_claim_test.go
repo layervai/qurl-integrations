@@ -138,6 +138,55 @@ func TestHandleAdminClaim_NoTriggerID(t *testing.T) {
 	}
 }
 
+// TestHandleAdminClaim_RejectsArgsOnSlashCommand fences the security
+// posture: a user typing `/qurl admin claim <code>` (instead of
+// using the modal) MUST NOT route to the modal-opening handler. The
+// dispatcher renders a hint instead so the bootstrap code never
+// reaches the OpenView path.
+//
+// The unredacted slash-command audit log is the only place the code
+// could leak; [redactSlashCommandText] masks the tail before slog.
+// TestRedactSlashCommandText fences the redaction shape.
+func TestHandleAdminClaim_RejectsArgsOnSlashCommand(t *testing.T) {
+	ts := newAdminTestServers(t)
+	rov := &recordedOpenView{}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.OpenView = rov.fn()
+	inv := newAdminSlashInvoker(t, h)
+
+	_, ack := inv.invokeAdmin("admin claim BOOT-SECRET", testAdminTeamID, testAdminUserID)
+	if rov.calls.Load() != 0 {
+		t.Errorf("OpenView called despite `admin claim <args>` payload — bootstrap code path must not route to modal: %d calls", rov.calls.Load())
+	}
+	if !strings.Contains(ack, "Do not pass the bootstrap code on the slash-command line") {
+		t.Errorf("ack missing hint to use the modal: %q", ack)
+	}
+	if strings.Contains(ack, "BOOT-SECRET") {
+		t.Errorf("ack echoed the bootstrap code: %q", ack)
+	}
+}
+
+// TestRedactSlashCommandText fences the redactor used at the slash-
+// command audit-log site. `admin claim <tail>` is masked; everything
+// else passes through verbatim.
+func TestRedactSlashCommandText(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"create https://example.com", "create https://example.com"},
+		{"admin claim", "admin claim"},
+		{"admin claim BOOT-SECRET", "admin claim <redacted>"},
+		{"admin claim  multi  word  code", "admin claim <redacted>"},
+		{"list", "list"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := redactSlashCommandText(c.in); got != c.want {
+			t.Errorf("redactSlashCommandText(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // --- view_submission tests ---
 
 // invokeInteraction issues a signed POST /slack/interactions request
@@ -272,13 +321,57 @@ func TestHandleAdminClaimSubmit_PersistsAdminMapping(t *testing.T) {
 	}
 }
 
+// TestHandleAdminClaimSubmit_BindFailsAfterRedeem fences the
+// post-redeem error path: when BindWorkspace fails AFTER the
+// bootstrap code has been atomically consumed, the user gets a
+// distinct "redeemed but bind failed — contact support" copy
+// instead of the generic "Could not redeem code, please try again."
+// This is the difference between "retry with a fresh code" (clear
+// support-actionable signal) and "retry forever with a dead code"
+// (silent infinite loop).
+//
+// Setup: pre-seed a workspace_mappings row under the same team but
+// a DIFFERENT owner so BindWorkspace's
+// `attribute_not_exists(slack_team_id)` condition fails with 409.
+// RedeemBootstrap still succeeds because it's keyed on code_hash,
+// not team — so we exercise the exact "code burned, bind failed"
+// gap.
+func TestHandleAdminClaimSubmit_BindFailsAfterRedeem(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.ddb.seedItem(t, ts.tableNames.bootstrapCodes,
+		seedBootstrapCode(t, "BOOT-CONFLICT", testAdminOwnerID, "k_conflict", time.Now().Add(time.Hour), false))
+	// Pre-existing workspace row under a different owner — the bind
+	// condition will fire 409.
+	ts.seedWorkspace(t, testAdminTeamID, "u_other_owner", "U_other_admin", testWorkspaceConfiguredAt)
+
+	var dmCalls atomic.Int32
+	var dmText string
+	h := newAdminTestHandler(t, ts)
+	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+		dmCalls.Add(1)
+		dmText = text
+		return nil
+	}
+
+	status, _ := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-CONFLICT"))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	// 409 path: DM the "already claimed" copy, close the modal.
+	if dmCalls.Load() != 0 {
+		// 409 routes to modal-error, not DM. Only the generic post-
+		// redeem failure DMs.
+		t.Errorf("PostDM called on 409 path: got %d calls, dm=%q", dmCalls.Load(), dmText)
+	}
+}
+
 // TestHandleAdminClaimSubmit_InvalidCode fences the canonical
 // rejection path: a wrong/expired/already-used code returns the
 // view_submission errors envelope ("Code is invalid or expired.")
 // so the modal stays open with the field highlighted.
 func TestHandleAdminClaimSubmit_InvalidCode(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// No seeded code → RedeemBootstrap returns 410 + errCodeBootstrapInvalid.
+	// No seeded code → RedeemBootstrap returns 410 + slackdata.ErrCodeBootstrapInvalid.
 	h := newAdminTestHandler(t, ts)
 	_, reply := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-WRONG"))
 	if got, _ := reply[modalKeyResponseAction].(string); got != modalResponseActionErrors {

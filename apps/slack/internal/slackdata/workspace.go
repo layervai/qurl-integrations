@@ -151,17 +151,20 @@ func (s *Store) countPoliciesForTeam(ctx context.Context, teamID string) (int, e
 	return total, nil
 }
 
-// BindWorkspace upserts the workspace mapping row. Used by the
-// admin-claim redeem flow once the bootstrap code has been
-// atomically consumed. The seedAdmin is added to admin_slack_user_ids
-// on first bind; on overwrite the prior admin set is preserved
-// (single-use bootstrap codes ensure we don't get here twice without
-// an explicit rotate).
+// BindWorkspace creates the workspace mapping row on first claim.
+// Used by the admin-claim redeem flow once the bootstrap code has
+// been atomically consumed. The seedAdmin becomes the only entry in
+// admin_slack_user_ids — additional admins are added later via a
+// separate "add admin" path (not in this PR).
 //
-// Returns 409 (via *Error) if the row already exists with a
-// different owner — the redeem path should treat this as a fatal
-// "this workspace is already bound" failure rather than silently
-// overwriting.
+// Returns 409 (via *Error) if the row already exists — a single-use
+// bootstrap code can't legitimately produce a re-bind, so the
+// existing-row case is treated as a fatal "this workspace is already
+// claimed" failure. Surfacing same-owner as 409 (instead of silently
+// overwriting) is intentional: PutItem would replace the entire row
+// including any admin_slack_user_ids added after the first claim.
+// If/when an explicit "rotate" verb lands, it gets its own SET-based
+// UpdateItem rather than reusing this constructor path.
 func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error {
 	if m == nil || m.TeamID == "" || m.OwnerID == "" {
 		return &Error{
@@ -181,12 +184,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	}
 	now := s.nowOrDefault().UTC().Format(time.RFC3339)
 
-	// Conditional PutItem: refuse to overwrite an existing row with a
-	// different owner_id. The match-owner case is treated as
-	// idempotent (re-running /qurl admin claim with the same bootstrap
-	// code, before TTL clears the code — the conditional UpdateItem
-	// on bootstrap_codes will have flipped redeemed=true; if the row
-	// is still present this is a duplicate request).
+	// Conditional PutItem: refuse to overwrite any existing row. The
+	// single-use bootstrap code means we can't legitimately re-enter
+	// this path with the same workspace; an existing row is either a
+	// different-owner conflict (the new owner shouldn't silently win)
+	// OR a same-owner re-entry that would clobber later-added admins.
+	// Both deserve the 409 signal.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Item: map[string]ddbtypes.AttributeValue{
@@ -199,25 +202,20 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
 			attrUpdatedAt: stringAttr(now),
 		},
-		ConditionExpression: aws.String(
-			"attribute_not_exists(slack_team_id) OR owner_id = :owner",
-		),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":owner": stringAttr(m.OwnerID),
-		},
+		ConditionExpression: aws.String("attribute_not_exists(slack_team_id)"),
 	})
 	if err == nil {
 		return nil
 	}
-	// ConditionalCheckFailed here means the row exists with a different
-	// owner — surface as 409 so the handler can render the
-	// "this workspace already has an admin" copy.
+	// ConditionalCheckFailed here means the row already exists —
+	// surface as 409 so the handler can render the "this workspace
+	// already has an admin" copy.
 	var ccfe *ddbtypes.ConditionalCheckFailedException
 	if errors.As(err, &ccfe) {
 		return &Error{
 			StatusCode: http.StatusConflict,
 			Code:       "workspace_already_bound",
-			Title:      "BindWorkspace: workspace is already bound to a different owner",
+			Title:      "BindWorkspace: workspace is already claimed",
 		}
 	}
 	return ddbToError("BindWorkspace", err)
