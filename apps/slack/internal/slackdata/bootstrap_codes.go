@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -38,6 +39,17 @@ const attrCodeHash = "code_hash"
 // future rename would break the type-checker rather than silently
 // desynchronizing.
 const ErrCodeBootstrapInvalid = "bootstrap_code_invalid"
+
+// ErrCodeBootstrapRowMalformed is surfaced when the conditional
+// UpdateItem on bootstrap_codes succeeded (so the code WAS valid
+// and IS now consumed) but the returned row is missing a required
+// attribute (e.g. owner_id). This signals an issuer-side regression
+// — the bot caught a malformed row at the boundary instead of
+// silently propagating an empty OwnerID into BindWorkspace and
+// surfacing the failure as a generic "support" copy. The
+// bootstrap code is burned in this path; operators must mint a
+// fresh one after fixing the issuer.
+const ErrCodeBootstrapRowMalformed = "bootstrap_row_malformed"
 
 // RedeemBootstrap consumes a one-time bootstrap code, atomically
 // flipping the row's `redeemed` flag from false → true via a DDB
@@ -110,6 +122,23 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 	}
 
 	ownerID := readString(out.Attributes, attrOwnerID)
+	if ownerID == "" {
+		// Row shape is broken: the conditional UpdateItem succeeded
+		// so the row existed and was redeemable, but owner_id is
+		// missing or wrong-type. Fail loud here rather than handing
+		// BindWorkspace a mapping with an empty OwnerID — that would
+		// 400 at the BindWorkspace input validation and the user
+		// would get the generic "code redeemed but bind failed —
+		// contact support" copy, masking the actual operator signal
+		// (issuer-side regression wrote a malformed row).
+		slog.Error("RedeemBootstrap: bootstrap_codes row missing owner_id after redeem — issuer-side regression?",
+			"team_id", teamID, "slack_user_id", slackUserID)
+		return nil, &Error{
+			StatusCode: http.StatusInternalServerError,
+			Code:       ErrCodeBootstrapRowMalformed,
+			Title:      "RedeemBootstrap: row missing owner_id after redeem",
+		}
+	}
 	// CreatedAt is "when the workspace was claimed" — the moment
 	// the bootstrap code was redeemed — NOT the time the bootstrap
 	// code was originally minted. BindWorkspace propagates this onto

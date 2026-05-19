@@ -278,14 +278,23 @@ func (h *Handler) surfaceBindError(ctx context.Context, w http.ResponseWriter, u
 }
 
 // logUnmappedClaimError picks the slog level based on the error
-// signal. A 404 from the redeem path is almost always a deployment
-// misroute and should page operators (Error level); other unmapped
-// failures are routine churn (Warn).
+// signal. 404 from the redeem path is almost always a deployment
+// misroute (Error level); a malformed bootstrap_codes row signals
+// an issuer-side regression (Error level — already logged at the
+// slackdata layer, but the handler-side pair makes the user-facing
+// claim flow easy to grep); other unmapped failures are routine
+// churn (Warn).
 func logUnmappedClaimError(err error, userID string) {
 	var ae *slackdata.Error
-	if errors.As(err, &ae) && ae.StatusCode == http.StatusNotFound {
-		slog.Error("admin claim redeem returned 404 — likely a misrouted bootstrap_codes table or DDB endpoint", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
-		return
+	if errors.As(err, &ae) {
+		switch {
+		case ae.StatusCode == http.StatusNotFound:
+			slog.Error("admin claim redeem returned 404 — likely a misrouted bootstrap_codes table or DDB endpoint", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
+			return
+		case ae.Code == slackdata.ErrCodeBootstrapRowMalformed:
+			slog.Error("admin claim redeem succeeded but bootstrap_codes row was malformed — issuer-side regression; mint a fresh code after fixing the issuer", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
+			return
+		}
 	}
 	slog.Warn("admin claim redeem failed", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
 }

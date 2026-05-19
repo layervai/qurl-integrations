@@ -11,9 +11,6 @@ import (
 	"time"
 )
 
-// readAll is io.ReadAll renamed for terse use in capture closures.
-var readAll = io.ReadAll
-
 // writeResourceFixture writes a /v1/resources/by-alias/:alias
 // success envelope. Shared with the admin-test path's identical
 // helper — duplicated here so this test file is self-contained
@@ -381,7 +378,7 @@ func TestCreateInputJSON_ResourceID(t *testing.T) {
 	})
 	var capturedBody []byte
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := readAll(r.Body)
+		b, _ := io.ReadAll(r.Body)
 		capturedBody = b
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
 	})
@@ -413,7 +410,7 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	})
 	var capturedBody []byte
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := readAll(r.Body)
+		b, _ := io.ReadAll(r.Body)
 		capturedBody = b
 		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
 	})

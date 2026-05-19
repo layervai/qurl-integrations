@@ -311,6 +311,40 @@ func TestRedeemBootstrap_ConditionalCheckFailedMapsToGone(t *testing.T) {
 	}
 }
 
+// TestRedeemBootstrap_MalformedRowReturns500 fences round-18 cr #2:
+// the conditional UpdateItem succeeded (so the code existed and IS
+// now consumed) but the returned row is missing owner_id. Surface
+// the malformed-row signal at the slackdata boundary so an
+// issuer-side regression doesn't get masked into the generic
+// surfaceBindError "contact support" copy after BindWorkspace
+// 400s on the empty OwnerID.
+func TestRedeemBootstrap_MalformedRowReturns500(t *testing.T) {
+	store := newStore(&stubDDB{
+		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			// Successful redeem but the returned row has no owner_id —
+			// what an issuer-side regression that forgot to write the
+			// attribute would look like.
+			return &dynamodb.UpdateItemOutput{
+				Attributes: map[string]ddbtypes.AttributeValue{
+					"code_hash": &ddbtypes.AttributeValueMemberS{Value: "deadbeef"},
+					// owner_id intentionally omitted.
+				},
+			}, nil
+		},
+	})
+	_, err := store.RedeemBootstrap(context.Background(), "BOOT-VALID-CODE", "T", "U_caller")
+	var ae *Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("got %v, want *Error", err)
+	}
+	if ae.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500 (malformed row should surface as operator-actionable signal, not 503/410)", ae.StatusCode)
+	}
+	if ae.Code != ErrCodeBootstrapRowMalformed {
+		t.Errorf("Code = %q, want %q", ae.Code, ErrCodeBootstrapRowMalformed)
+	}
+}
+
 // TestRedeemBootstrap_ValidationGuards fences the input-validation
 // 400 surface: empty code / team_id / user_id bail before touching
 // DDB.

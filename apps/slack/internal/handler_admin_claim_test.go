@@ -187,6 +187,14 @@ func TestRedactSlashCommandText(t *testing.T) {
 		// (tab between `admin` and `claim`) — strings.Fields tokenizes
 		// on every Unicode whitespace, so this also gets caught.
 		{"admin\tclaim BOOT-SECRET", "admin claim <redacted>"},
+		// Round-18 cr #1: mixed-case prefix tokens (autocorrect /
+		// habit on mobile) must also trigger redaction. Slack passes
+		// slash-command text verbatim — no lowercasing on its end —
+		// so the unknown-subcommand log site would otherwise leak
+		// the code.
+		{"Admin claim BOOT-SECRET", "admin claim <redacted>"},
+		{"admin Claim BOOT-SECRET", "admin claim <redacted>"},
+		{"ADMIN CLAIM BOOT-SECRET", "admin claim <redacted>"},
 		{"list", "list"},
 		{"", ""},
 	}

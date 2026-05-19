@@ -561,7 +561,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// falls through to the unknown-subcommand branch and gets a
 		// help nudge.
 		h.handleList(w, values)
-	case strings.HasPrefix(text, "get ") || text == "get":
+	case text == "get" || strings.HasPrefix(text, "get "):
 		// Exact-token boundary so `getter`, `get-foo` fall through
 		// to the unknown-subcommand branch instead of silently
 		// routing here. The parser then produces ErrEmptyResource
@@ -625,10 +625,17 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // space-only prefix check. We tokenize on [strings.Fields] (every
 // Unicode whitespace separator) so the redaction holds regardless of
 // the separator byte.
+//
+// Case tolerance: Slack passes slash-command text verbatim, so a
+// user typing `Admin Claim BOOT-SECRET` (mobile autocorrect / habit)
+// falls through to the dispatcher's case-sensitive switch and lands
+// at the unknown-subcommand slog.Info that calls back into here.
+// Match the two prefix tokens with [strings.EqualFold] so the
+// redaction is a fence under every casing the user might submit.
 func redactSlashCommandText(text string) string {
 	const claimPrefix = "admin claim "
 	fields := strings.Fields(text)
-	if len(fields) >= 3 && fields[0] == "admin" && fields[1] == "claim" {
+	if len(fields) >= 3 && strings.EqualFold(fields[0], "admin") && strings.EqualFold(fields[1], "claim") {
 		return claimPrefix + "<redacted>"
 	}
 	return text
