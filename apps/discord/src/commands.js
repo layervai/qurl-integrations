@@ -286,10 +286,10 @@ function effectiveGuildMemberCount(guild) {
 // linearly. The map is keyed by `guild.id` so cross-guild calls still
 // proceed in parallel.
 const prewarmInFlight = new Map();
-// `logCtx` is spread FIRST in every log payload below so a local
-// `guild_id` (or any explicit field) wins over a caller's logCtx with
-// the same key. Don't add `guild_id` to logCtx at call sites expecting
-// it to override; it won't.
+// `logCtx` is spread first in every log payload below so explicit
+// fields after it (`guild_id`, `cache_size`, etc.) override any
+// matching key in the caller's `logCtx`. Don't put `guild_id` in
+// `logCtx` at call sites expecting it to win — it won't.
 async function prewarmGuildMembersCache(guild, logCtx) {
   // Uniform Promise return shape regardless of which branch the caller
   // hits — early-exit paths used to resolve `undefined`, which works
@@ -4115,6 +4115,11 @@ function formatPersonalMessagePreview(message) {
 const everyoneCountMemo = new WeakMap();
 function computeEveryoneDisplayCount(guild) {
   const cache = guild?.members?.cache;
+  // Display-only path — `approximateMemberCount` fallback is acceptable
+  // here even though prewarmGuildMembersCache deliberately avoids it.
+  // A render-time label off by a few members is benign; the strict gate
+  // is reserved for the prewarm decision where underresolve would
+  // silently truncate the @everyone recipient set.
   const memberCount = effectiveGuildMemberCount(guild);
   if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
     const fingerprint = `${cache.size}:${memberCount}`;
