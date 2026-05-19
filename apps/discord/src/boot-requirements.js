@@ -173,6 +173,13 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
       'the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
     );
   }
+  // Defense-in-depth canary: `store/index.js` already rejects every
+  // non-ddb STORE_TYPE at module load with a listing-of-valid-backends
+  // error, so in practice the bot can't reach this function with a
+  // non-ddb value. This branch survives so that if a future PR adds a
+  // second backend to `VALID_BACKENDS` without thinking through the
+  // RESUME cross-process semantics, the bot still refuses to boot the
+  // unsupported combo instead of silently IDENTIFYing every restart.
   if (storeType !== 'ddb') {
     return (
       `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType}'). ` +

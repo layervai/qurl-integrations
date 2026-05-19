@@ -3,7 +3,7 @@
 // `amazon/dynamodb-local` container that `docker-compose.yml` spins up.
 //
 // The bot's only data backend is DynamoDB (SQLite was stripped in PR
-// #?), so a laptop running `npm start` needs every table the
+// #434), so a laptop running `npm start` needs every table the
 // `ddb-store` module touches to exist before any data-plane call. In
 // prod that's handled by terraform; locally we provision via this
 // script.
@@ -40,8 +40,6 @@ const {
   CreateTableCommand,
   DescribeTableCommand,
   UpdateTimeToLiveCommand,
-  ResourceInUseException,
-  ResourceNotFoundException,
 } = require('@aws-sdk/client-dynamodb');
 
 const endpoint = process.env.DDB_TEST_ENDPOINT || 'http://localhost:8000';
@@ -181,7 +179,12 @@ async function ensureTable(spec) {
     }));
     console.log(`created  ${TableName}`);
   } catch (err) {
-    if (err instanceof ResourceInUseException || err.name === 'ResourceInUseException') {
+    // String-name check rather than `instanceof ResourceInUseException`
+    // survives a dual-loaded SDK (two copies of `@aws-sdk/client-dynamodb`
+    // in the require graph would each export their own class identity,
+    // breaking instanceof). The SDK always sets `err.name` to the
+    // service-side exception name, so this is the canonical check.
+    if (err.name === 'ResourceInUseException') {
       console.log(`exists   ${TableName}`);
     } else {
       throw err;
@@ -197,7 +200,7 @@ async function ensureTable(spec) {
         TimeToLiveSpecification: { Enabled: true, AttributeName: spec.ttlAttribute },
       }));
     } catch (err) {
-      if (!/already enabled|TimeToLive is already/i.test(err.message || '')) throw err;
+      if (!/already enabled/i.test(err.message || '')) throw err;
     }
   }
 }
@@ -209,13 +212,14 @@ async function main() {
   try {
     await client.send(new DescribeTableCommand({ TableName: `${prefix}__probe__` }));
   } catch (err) {
-    if (!(err instanceof ResourceNotFoundException) && err.name !== 'ResourceNotFoundException') {
+    // ResourceNotFoundException is the expected "reachable but no
+    // such table" response — keep going. Any other shape (typically
+    // ECONNREFUSED) means the endpoint is wrong or DDB-Local isn't up.
+    if (err.name !== 'ResourceNotFoundException') {
       console.error(`Cannot reach DynamoDB at ${endpoint}: ${err.message}`);
       console.error('Is the docker-compose dynamodb-local service running? Try `docker compose up -d dynamodb-local`.');
       process.exit(1);
     }
-    // ResourceNotFoundException is the expected "reachable but no
-    // such table" response — keep going.
   }
   for (const spec of tables) await ensureTable(spec);
   console.log('Done.');
