@@ -1041,15 +1041,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   let currentBaseMsg = baseMsg;
   let stopped = false;
   let timer = null; // assigned after control object
-  // Snapshot of the last live render, captured inside stop() BEFORE
-  // linkStatus.clear() — `getFullMsg()` returns this in preference to a
-  // re-render once stop() has fired. Without this, callers that read
-  // getFullMsg() post-stop see `0 of N viewed` (linkStatus is empty but
-  // expectedCount is still N) — actively misleading for a send where
-  // recipients had already viewed before the collector's window closed.
-  // Frozen-once-then-stable: subsequent stop() calls are no-ops, so a
-  // double-stop can't overwrite the frozen render with a stale state.
-  let frozenMsg = null;
   const control = {
     addRecipients(count, newResourceIds) {
       expectedCount += count;
@@ -1064,10 +1055,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     stop() {
       if (stopped) return;
       stopped = true;
-      // Snapshot the live render BEFORE clearing linkStatus — otherwise
-      // a post-stop getFullMsg() would render against an empty Map
-      // with the still-set expectedCount, producing `0 of N viewed`.
-      frozenMsg = buildStatusMsg();
       clearInterval(timer);
       activeMonitors.delete(control);
       // Release references on the closures; over many sends these would
@@ -1088,7 +1075,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       currentBaseMsg = msg;
     },
     getFullMsg() {
-      return frozenMsg ?? buildStatusMsg();
+      return buildStatusMsg();
     },
   };
   const expiryMs = expiryToMs(expiresIn);
@@ -1125,37 +1112,23 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
 
   function buildStatusMsg() {
-    let opened = 0, expired = 0;
-    for (const s of linkStatus.values()) {
-      if (s.status === 'opened') opened++;
-      else if (s.status === 'expired') expired++;
-    }
-    // `expectedCount` (= delivered + adds) is the denominator from the
-    // moment the monitor is created, so `0 of N viewed` renders before
-    // the first poll initializes linkStatus. addRecipients() bumps
-    // expectedCount + forces re-init, keeping the two in sync.
+    // View-counter rendering temporarily removed. qurl-service strips
+    // the `qurls` field from `GET /v1/qurls/:id` responses for
+    // type=transit resources (every Discord bot send is transit, since
+    // the connector targets the fileviewer URL). With qurls always
+    // empty, the polling-based counter could only ever render
+    // `0 of N viewed` — actively misleading. Returning the bare
+    // currentBaseMsg until the webhook-based replacement lands
+    // (qurl-service publishes EventQurlAccessed → bot receives →
+    // updates the confirmation directly, no polling). Tracking
+    // issue + webhook plan: qurl-service #596.
     //
-    // Trade-off vs. pre-PR's `linkStatus.size` denominator: in the
-    // tracking-count-mismatch case (qurl-service returns fewer qurls
-    // than expected — warn-logged above), opened can never equal total
-    // and the headline stays at `X of N viewed` instead of reaching
-    // "All N viewed." Acceptable: the case is rare, the warn-log
-    // surfaces it to operators, and the alternative ("All K tracked
-    // viewed (M untrackable)") leaks an internal concept users can't
-    // act on.
-    const total = expectedCount;
-    let msg = currentBaseMsg;
-    if (total === 0) return msg;
-    if (opened === total) {
-      msg += `\n\n\u2705 **All ${total} viewed**`;
-    } else if (opened === 0 && expired === total) {
-      // Distinct from "all viewed" so the failure outcome is unambiguous.
-      msg += `\n\n\u23f0 **All ${total} expired (none viewed)**`;
-    } else {
-      msg += `\n\n\ud83d\udc40 **${opened} of ${total} viewed**`;
-      if (expired > 0) msg += ` \u00b7 \u23f0 ${expired} expired`;
-    }
-    return msg;
+    // `linkStatus`/`expectedCount` machinery is intentionally kept as
+    // scaffolding the webhook handler can populate once the receiver
+    // lands; the monitor setInterval also stays (now a no-op render-
+    // wise, but the polls cost nothing operationally beyond the bot's
+    // existing qurl-service GETs).
+    return currentBaseMsg;
   }
 
   let pollCount = 0;
