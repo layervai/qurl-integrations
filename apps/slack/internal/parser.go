@@ -21,8 +21,9 @@ type Subcommand string
 const (
 	// SubcmdHelp covers both `/qurl` (empty text) and `/qurl help`.
 	SubcmdHelp Subcommand = "help"
-	// SubcmdGet mints an access link for either a raw URL or a
-	// channel-scoped `$alias` configured by an admin.
+	// SubcmdGet mints an access link for a raw URL, a channel-scoped
+	// `$alias` configured by an admin, or a raw `$r_<id>` resource
+	// token copy-pasted from `/qurl list`.
 	SubcmdGet Subcommand = "get"
 	// SubcmdSetAlias binds an alias to a target URL or resource ID.
 	SubcmdSetAlias Subcommand = "setalias"
@@ -61,6 +62,36 @@ const (
 	AdminRevoke AdminAction = "revoke"
 )
 
+// ResourceTokenKind discriminates between the two shapes a `$<token>`
+// argument can take after the sigil: a human-readable alias name or a
+// raw `r_*` resource ID. Lifted to its own typed string so handlers
+// can branch on the parsed shape without re-running regex matches.
+type ResourceTokenKind string
+
+// Recognized resource-token kinds.
+const (
+	// ResourceTokenAlias is a human-readable `$<alias>` like `$prod-db`.
+	// The bare value matches [aliasCharsetPattern].
+	ResourceTokenAlias ResourceTokenKind = "alias"
+	// ResourceTokenResourceID is a raw `$r_<11chars>` shape like
+	// `$r_k8xqp9h2sj9`. The bare value matches [resourceIDPattern]
+	// (including the `r_` prefix — handlers consume the full ID).
+	ResourceTokenResourceID ResourceTokenKind = "resource_id"
+)
+
+// ParsedResourceToken is the shape of a successfully-parsed `$<token>`
+// argument. Returned by [requireResourceToken] so handlers can decide
+// whether to call the alias-resolution path or the by-ID-lookup path
+// without inspecting the value themselves.
+type ParsedResourceToken struct {
+	// Kind is the discriminator — alias vs resource_id.
+	Kind ResourceTokenKind
+	// Value is the bare token. For aliases it's the name without the
+	// `$` sigil; for resource IDs it's the full ID including the `r_`
+	// prefix (handlers pass it directly to a by-ID resource lookup).
+	Value string
+}
+
 // Command is the parsed shape of a `/qurl …` slash command.
 type Command struct {
 	// Subcommand is the first word (or [SubcmdHelp] when text is empty).
@@ -68,8 +99,19 @@ type Command struct {
 	// AdminAction is the second word when [Subcommand] is [SubcmdAdmin];
 	// empty otherwise.
 	AdminAction AdminAction
-	// Alias is the `$alias` argument (sigil stripped) when present.
+	// Alias is the `$alias` argument (sigil stripped) when the parsed
+	// resource-token is an alias. Empty when the user supplied a raw
+	// resource ID instead — see [Command.Resource] for the kind-aware
+	// view. Kept populated for the alias path so verbs that only accept
+	// aliases (`setalias`, `unsetalias`, `admin allow`, `admin
+	// disallow`, `admin revoke`) keep their existing read site.
 	Alias string
+	// Resource is the kind-aware shape of the `$<token>` argument when
+	// the verb accepts both alias and resource-ID forms (currently
+	// `/qurl get`). Zero value when the verb only takes aliases —
+	// callers that want the legacy single-string view should read
+	// [Command.Alias] instead.
+	Resource ParsedResourceToken
 	// Target is the trailing positional arg used by `setalias` (a URL or
 	// raw resource_id) and the legacy `create <url>`.
 	Target string
@@ -197,6 +239,25 @@ var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
 // [aliasCharsetPattern] / [aliasMaxLen] in handler_alias.go for the
 // full doc on internal-`--` deference to qurl-service and the nhp
 // #1825 GSI-key sizing.
+
+// resourceIDPattern matches qurl-service's resource-ID shape: `r_`
+// + 11 base64url chars (lowercased per generateRandomID's
+// DNS-compatibility lowercase). Anchored at both ends so a partial
+// substring like `r_short` or `r_abc...extra` is rejected. Mirrored
+// from `qurl-service/internal/domain/qurl.go::resourceIDPattern` —
+// when that schema changes, this regex changes in lockstep.
+//
+// The `_` in the `r_` prefix is what disambiguates this shape from
+// [aliasCharsetPattern] at parse time: aliases are constrained to
+// `[a-z0-9-]` (no underscore), so any `r_<…>` token is a resource
+// ID by construction. The "resource-ID first" ordering in
+// [requireResourceToken] is harmless rather than load-bearing — the
+// two patterns can't both match the same bare value.
+//
+// TODO(upstream-rebrand): cross-repo lockstep with
+// `qurl-service/internal/domain/qurl.go::resourceIDPattern`. If the
+// upstream regex (charset, length, anchors) changes, mirror it here.
+var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -333,11 +394,22 @@ func tokenize(text string) []string {
 	return out
 }
 
-// parseGet extracts the positional argument (either a `$alias` or a
-// URL) and the optional `dm:` / `reason:` flags. The first positional
-// is treated as a URL when it has an `http://` or `https://` prefix;
-// otherwise it must start with `$`. Surplus positional args after the
-// first are an error.
+// parseGet extracts the positional argument (a raw URL, a `$<alias>`,
+// or a `$r_<id>` resource token) and the optional `dm:` / `reason:`
+// flags. The first positional is treated as a URL when it has an
+// `http://` or `https://` prefix; otherwise it must start with `$`
+// and is routed through [requireResourceToken] so handlers can branch
+// on alias vs resource-ID without re-parsing. Surplus positional args
+// after the first are an error.
+//
+// `get` is the only verb in the grammar that accepts both alias and
+// resource-ID shapes — the alias-mutating verbs (`setalias`,
+// `unsetalias`, admin allow/disallow/revoke) intentionally stay
+// alias-only because their semantics are alias-scoped. Letting `get`
+// take a raw ID closes the gap between `/qurl list` (which surfaces
+// IDs for un-aliased resources) and `/qurl get` (which previously
+// only minted from aliases or URLs) so a list line can be
+// copy-pasted into the next command without a manual lookup step.
 func parseGet(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
@@ -345,11 +417,19 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	if hasASCIIPrefixFold(rest[0], "https://") || hasASCIIPrefixFold(rest[0], "http://") {
 		cmd.Target = rest[0]
 	} else {
-		alias, err := parseAliasToken(rest[0])
+		tok, err := requireResourceToken(rest[0])
 		if err != nil {
 			return nil, err
 		}
-		cmd.Alias = alias
+		cmd.Resource = tok
+		if tok.Kind == ResourceTokenAlias {
+			// Keep [Command.Alias] populated so legacy read-sites in
+			// tests or future shared helpers don't have to
+			// special-case the get verb. The resource-ID branch
+			// leaves Alias empty — handlers that route on Kind use
+			// [Command.Resource] directly.
+			cmd.Alias = tok.Value
+		}
 	}
 	for _, tok := range rest[1:] {
 		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
@@ -552,6 +632,49 @@ func parseAliasToken(tok string) (string, error) {
 		return "", fmt.Errorf("%w: %q (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, alias)
 	}
 	return alias, nil
+}
+
+// requireResourceToken enforces the `$` sigil, strips it, and matches
+// the remaining text against EITHER [resourceIDPattern] (a raw `r_…`
+// resource ID) OR [aliasCharsetPattern] (a human-readable alias).
+// Returns a [ParsedResourceToken] tagged with the kind so handlers
+// can route to the right lookup path without re-running the regex.
+//
+// The resource-ID pattern is checked first so a literal `r_<11chars>`
+// token always wins the disambiguation. Empty after the sigil is an
+// [ErrEmptyResource]; anything matching neither pattern is
+// [ErrInvalidAlias] with a message naming both accepted shapes.
+//
+// Used by verbs that accept both alias and resource-ID forms
+// (currently `/qurl get`). Alias-only verbs (`setalias`, `unsetalias`,
+// `admin allow/disallow/revoke`) use [parseAliasToken] instead.
+func requireResourceToken(tok string) (ParsedResourceToken, error) {
+	if !strings.HasPrefix(tok, "$") {
+		return ParsedResourceToken{}, fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
+	}
+	bare := strings.TrimPrefix(tok, "$")
+	if bare == "" {
+		return ParsedResourceToken{}, ErrEmptyResource
+	}
+	if resourceIDPattern.MatchString(bare) {
+		return ParsedResourceToken{Kind: ResourceTokenResourceID, Value: bare}, nil
+	}
+	// Length cap precedes the charset check on the alias branch so an
+	// over-cap token (>aliasMaxLen runes) reports the cap-specific
+	// error rather than the joint charset-or-resource-id message, which
+	// would be confusing for an otherwise-valid-shape-but-too-long
+	// alias. Mirrors parseAliasToken's order; pinned by parser_test.go's
+	// `alias over 64 chars rejected` case.
+	if len(bare) > aliasMaxLen {
+		return ParsedResourceToken{}, fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, bare, aliasMaxLen)
+	}
+	if aliasCharsetPattern.MatchString(bare) {
+		return ParsedResourceToken{Kind: ResourceTokenAlias, Value: bare}, nil
+	}
+	return ParsedResourceToken{}, fmt.Errorf(
+		"%w: %q — token must be an alias (e.g. `$dev-dashboard`, lowercase a-z/0-9/hyphen, no leading/trailing hyphen) or a resource ID (e.g. `$r_abc123def01`)",
+		ErrInvalidAlias, bare,
+	)
 }
 
 // matchChannel returns the `C…` ID and true when `tok` is a Slack

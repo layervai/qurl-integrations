@@ -459,7 +459,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case pathSlackCommands:
 		// r.Context() is intentionally NOT threaded into the slash-command
-		// dispatch: handleGet/handleList spawn goroutines that outlive
+		// dispatch: handleGet/handleListResources spawn goroutines that outlive
 		// the HTTP response, and r.Context() cancels as soon as ServeHTTP
 		// returns. Async work uses h.baseCtx instead.
 		h.handleSlashCommand(w, body)
@@ -562,10 +562,10 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
 		// them to the list handler) AND `list extra args` (which
-		// processList ignores). Anything other than the bare token
-		// falls through to the unknown-subcommand branch and gets a
-		// help nudge.
-		h.handleList(w, values)
+		// processListResources ignores). Anything other than the
+		// bare token falls through to the unknown-subcommand branch
+		// and gets a help nudge.
+		h.handleListResources(w, values)
 	case text == "get" || strings.HasPrefix(text, "get "):
 		// Exact-token boundary so `getter`, `get-foo` fall through
 		// to the unknown-subcommand branch instead of silently
@@ -650,12 +650,6 @@ func redactSlashCommandText(text string) string {
 		return claimPrefix + "<redacted>"
 	}
 	return text
-}
-
-func (h *Handler) handleList(w http.ResponseWriter, values url.Values) {
-	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
-		h.processList(ctx, log, values)
-	})
 }
 
 // handleSetup mints a workspace-bound state token and replies with the

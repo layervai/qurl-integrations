@@ -422,60 +422,6 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	releaseAll()
 }
 
-// TestHandle_AsyncListPostsResultToResponseURL fences /qurl list's
-// async path including the empty-list and populated-list code paths.
-func TestHandle_AsyncListPostsResultToResponseURL(t *testing.T) {
-	cases := []struct {
-		name     string
-		respJSON string
-		want     string
-	}{
-		{
-			name:     "no qurls",
-			respJSON: `{"data":[]}`,
-			want:     "No qURLs found.",
-		},
-		{
-			name:     "with qurls",
-			respJSON: `{"data":[{"resource_id":"r1","target_url":"https://example.com","status":"active"}]}`,
-			want:     "*Recent qURLs:*",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(tc.respJSON))
-			}))
-			t.Cleanup(qurlSrv.Close)
-
-			t.Setenv("QURL_API_KEY", "test-key")
-
-			rec := newResponseURLRecorder(t)
-			h := newTestHandler(t, qurlSrv)
-			body := url.Values{
-				"command":      {"/qurl"},
-				"text":         {"list"},
-				"team_id":      {"T123"},
-				"trigger_id":   {"trig-list"},
-				"response_url": {rec.URL},
-			}.Encode()
-
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
-			h.Wait()
-
-			posts := rec.Posts()
-			if len(posts) != 1 {
-				t.Fatalf("response_url POST count = %d, want 1", len(posts))
-			}
-			if !strings.Contains(posts[0]["text"], tc.want) {
-				t.Errorf("response_url text = %q, want substring %q", posts[0]["text"], tc.want)
-			}
-		})
-	}
-}
-
 // TestHandle_PanicInAsyncWorkRecovers fences the panic-recovery defer
 // in runAsync. A panicking auth.Provider must not crash the process or
 // leak a wg slot — the goroutine returns cleanly via the recover, sem
@@ -870,10 +816,10 @@ func TestHandle_PostResponseRefusesRedirectsEndToEnd(t *testing.T) {
 
 // TestHandle_ListExactMatchOnly fences the tightened "/qurl list"
 // matcher: the looser HasPrefix(text, "list") form matched `listing`,
-// `lists`, `list-foo` (silently routing them to processList) AND
-// `list extra args` (which processList ignores). Now only the bare
-// token reaches processList — anything else falls through to the
-// unknown-subcommand branch.
+// `lists`, `list-foo` (silently routing them to processListResources)
+// AND `list extra args` (which processListResources ignores). Now
+// only the bare token reaches processListResources — anything else
+// falls through to the unknown-subcommand branch.
 func TestHandle_ListExactMatchOnly(t *testing.T) {
 	cases := []string{
 		"listing",

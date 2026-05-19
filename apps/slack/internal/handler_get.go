@@ -75,6 +75,23 @@ func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }
 
+// notAllowedInChannelMessage is the copy surfaced when a user passes
+// a `$r_<id>` resource token that is not in the channel's allowed-set
+// (the union of `alias_bindings.values()` and `allowed_resource_ids`
+// returned by [Store.AllowedResourceIDsForChannel]). Same posture as
+// [noResourceForAliasMessage]: name the literal token the user
+// typed, plain-English state, point at `/qurl list` so the user can
+// see what IS available without a manual lookup, and route to the
+// admin since only the admin can extend the allow-set.
+//
+// Mirrored copy for the two not-allowed branches so a workspace
+// member probing for valid resource IDs can't distinguish "id doesn't
+// exist" from "id exists but not in this channel" through the wire
+// text.
+func notAllowedInChannelMessage(token string) string {
+	return fmt.Sprintf("`$%s` is not allowed in this channel. Run `/qurl list` to see what's available here, or contact your Slack admin for assistance.", token)
+}
+
 // authFailureMessageGet is the auth-failure copy shown when API-key
 // lookup fails for /qurl get. Same shape as authFailureMessage but
 // distinguished because the get path also needs to gracefully fall
@@ -110,15 +127,18 @@ func userErrorf(format string, args ...any) error {
 // completed the install.
 var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Please contact your Slack admin for assistance."}
 
-// handleGet implements `/qurl get <url|$alias>`:
+// handleGet implements `/qurl get <url|$alias|$r_<id>>`:
 //  1. Parse the slash-command text → [Command]. The positional arg
-//     is either a URL (`http://…` / `https://…`) or a channel-scoped
-//     `$alias` name configured by a workspace admin.
+//     is either a URL (`http://…` / `https://…`), a channel-scoped
+//     `$alias` name configured by a workspace admin, or a raw
+//     `$r_<id>` resource token copy-pasted from `/qurl list`.
 //  2. Ack within 3s via [runAsync] (200 + ackWorkingOnIt).
 //  3. Async goroutine: for URL form, mint directly; for alias form,
 //     resolve alias → resource_id via channel_policies.alias_bindings
-//     then mint. Rate-limit gates both. POSTs the result to
-//     response_url.
+//     then mint; for resource-ID form, gate against the channel's
+//     allow-set (union of alias_bindings + allowed_resource_ids)
+//     then mint by that ID. Rate-limit gates all three. POSTs the
+//     result to response_url.
 //
 // Optional flags:
 //   - `dm:true` → final message via PostDM to the user's DM instead
@@ -139,7 +159,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 		return
 	}
-	if cmd.Alias == "" && cmd.Target == "" {
+	if cmd.Alias == "" && cmd.Target == "" && cmd.Resource.Kind != ResourceTokenResourceID {
 		respondSlack(w, ":warning: Usage: `/qurl get <url>` to mint for a URL, or `/qurl get $name` to mint for a name your Slack admin has configured here.")
 		return
 	}
@@ -200,15 +220,20 @@ type getWorkArgs struct {
 	triggerID string
 }
 
-// getWork runs the inner resolve→rate-limit→mint pipeline for both
-// the URL form (`/qurl get <url>`) and the alias form
-// (`/qurl get $name`). Returns the rendered reply text (without
-// leading `:warning:`) on success, or a [*userError] whose msg routes
-// to the user.
+// getWork runs the inner resolve→rate-limit→mint pipeline for the
+// URL form (`/qurl get <url>`), the alias form (`/qurl get $name`),
+// and the resource-ID form (`/qurl get $r_<id>`). Returns the
+// rendered reply text (without leading `:warning:`) on success, or a
+// [*userError] whose msg routes to the user.
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
 	target := args.cmd.Target
+	resourceID := ""
+	if args.cmd.Resource.Kind == ResourceTokenResourceID {
+		resourceID = args.cmd.Resource.Value
+	}
 	isAliasForm := alias != ""
+	isResourceIDForm := resourceID != ""
 
 	// Refuse `dm:true` early when PostDM is not wired — the user's
 	// intent is "do not leak the link in channel history", and a
@@ -224,33 +249,19 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
-	if isAliasForm {
-		// Refuse early on a no-DDB sandbox deploy. Alias-form requires
-		// the channel-scoped binding store; URL form does not, so this
-		// gate only fires here.
-		if h.cfg.AdminStore == nil {
-			log.Warn("get: AdminStore is nil; alias-form lookup unavailable", "team_id", args.teamID)
-			return "", errAdminStoreNotConfigured
-		}
-		// Resolve alias → resource_id via channel_policies.alias_bindings.
-		// The presence of the binding in THIS channel is itself the
-		// authorization signal — `/qurl setalias` is the admin act that
-		// authorizes a resource for use in the channel.
-		//
-		// NOTE: setalias is the only authorization signal today. If the
-		// orthogonal `admin allow` / `allowed_resource_ids` surface gets
-		// re-wired (currently dropped from this path), the channel-policy
-		// gate goes here, between the binding lookup and `input.ResourceID =`.
-		resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, args.teamID, args.channelID, alias)
+	switch {
+	case isAliasForm:
+		boundResourceID, err := h.resolveAliasForGet(ctx, log, args.teamID, args.channelID, alias)
 		if err != nil {
-			log.Warn("get: alias lookup failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "alias", alias)
-			return "", &userError{msg: serviceUnreachableMessage}
+			return "", err
 		}
-		if !found {
-			return "", &userError{msg: noResourceForAliasMessage(alias)}
+		input.ResourceID = boundResourceID
+	case isResourceIDForm:
+		if err := h.authorizeResourceIDForGet(ctx, log, args.teamID, args.channelID, args.userID, resourceID); err != nil {
+			return "", err
 		}
 		input.ResourceID = resourceID
-	} else {
+	default:
 		// URL-form has no per-channel authorization gate — anyone in the
 		// workspace who can invoke `/qurl get` can mint against any URL on
 		// the workspace's API key (qurl-service's per-key quota is the
@@ -286,7 +297,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// Defensive: a 200 with an empty qurl_link is a server contract
 	// surprise — log loud and surface the generic retry message.
 	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm, "resource_id", input.ResourceID)
+		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm, "resource_id_form", isResourceIDForm, "resource_id", input.ResourceID)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
@@ -295,6 +306,74 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}
 	return message, nil
+}
+
+// resolveAliasForGet resolves a `$<alias>` token to a resource_id via
+// the channel's `channel_policies.alias_bindings` map. The presence of
+// the binding in THIS channel is itself the authorization signal —
+// `/qurl setalias` is the admin act that authorizes a resource for use
+// in the channel.
+//
+// NOTE: setalias is the only authorization signal today. If the
+// orthogonal `admin allow` / `allowed_resource_ids` surface gets
+// re-wired (currently dropped from this path), the channel-policy
+// gate goes between the binding lookup and the return.
+//
+// Returns a [*userError] (no logging at call site needed) on the
+// AdminStore-nil, lookup-failed, and binding-not-found branches.
+func (h *Handler) resolveAliasForGet(ctx context.Context, log *slog.Logger, teamID, channelID, alias string) (string, error) {
+	// Refuse early on a no-DDB sandbox deploy. Alias-form requires
+	// the channel-scoped binding store; URL form does not, so this
+	// gate only fires here.
+	if h.cfg.AdminStore == nil {
+		log.Warn("get: AdminStore is nil; alias-form lookup unavailable", "team_id", teamID)
+		return "", errAdminStoreNotConfigured
+	}
+	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
+	if err != nil {
+		log.Warn("get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return "", &userError{msg: serviceUnreachableMessage}
+	}
+	if !found {
+		return "", &userError{msg: noResourceForAliasMessage(alias)}
+	}
+	return resourceID, nil
+}
+
+// authorizeResourceIDForGet enforces the channel-scoped allow on a
+// `$r_<id>` token. Workspace admins bypass the allow-set so the
+// list-and-get round-trip works in the admin's unfiltered list view;
+// non-admins must have the ID in `AllowedResourceIDsForChannel` (the
+// union of `alias_bindings.values()` and `allowed_resource_ids`),
+// keeping list visibility and mintability aligned for them.
+//
+// Returns nil on allow, [*userError] on AdminStore-nil, allow-set
+// fetch failure, or membership miss.
+func (h *Handler) authorizeResourceIDForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, resourceID string) error {
+	// Resource-ID form needs an AdminStore for the admin probe + the
+	// channel allow-set. Same fail-closed posture as alias-form on a
+	// no-DDB sandbox.
+	if h.cfg.AdminStore == nil {
+		log.Warn("get: AdminStore is nil; resource-id-form lookup unavailable", "team_id", teamID)
+		return errAdminStoreNotConfigured
+	}
+	isAdmin, _, adminErr := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	if adminErr != nil {
+		log.Warn("get: admin probe failed for resource-id form — treating as non-admin", "error", adminErr, "team_id", teamID, "user_id", userID)
+		isAdmin = false
+	}
+	if isAdmin {
+		return nil
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+	if err != nil {
+		log.Warn("get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
+		return &userError{msg: serviceUnreachableMessage}
+	}
+	if _, ok := allowed[resourceID]; !ok {
+		return &userError{msg: notAllowedInChannelMessage(resourceID)}
+	}
+	return nil
 }
 
 // deliverGetDM handles the `dm:true` variant. The link goes to the

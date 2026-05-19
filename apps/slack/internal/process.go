@@ -105,29 +105,6 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 	respondSlack(w, ackWorkingOnIt)
 }
 
-// processList runs the asynchronous /qurl list work: page through the
-// most recent qURLs and POST a formatted summary back via response_url.
-func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.Values) {
-	responseURL := values.Get(fieldResponseURL)
-	teamID := values.Get(fieldTeamID)
-
-	c, err := h.authenticatedClient(ctx, teamID)
-	if err != nil {
-		log.Error("failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authErrorMessage(err))
-		return
-	}
-
-	result, err := c.List(ctx, client.ListInput{Limit: 5})
-	if err != nil {
-		log.Error("failed to list qURLs", "error", err)
-		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to list qURLs"))
-		return
-	}
-
-	h.postResponse(log, responseURL, formatListMessage(result.QURLs))
-}
-
 // sanitizeAPIError builds a user-safe message from a (possibly non-nil)
 // qURL API error. The full *client.APIError is logged at the call site;
 // what reaches Slack is bounded to:
@@ -157,23 +134,6 @@ func sanitizeAPIError(err error, prefix string) string {
 		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
 	}
 	return msg + "."
-}
-
-// formatListMessage renders /qurl list results as Slack mrkdwn.
-func formatListMessage(qurls []client.QURL) string {
-	if len(qurls) == 0 {
-		return "No qURLs found."
-	}
-	lines := make([]string, 0, len(qurls))
-	for i := range qurls {
-		q := &qurls[i]
-		line := fmt.Sprintf("• `%s` → %s [%s]", q.ResourceID, q.TargetURL, q.Status)
-		if q.Description != "" {
-			line = fmt.Sprintf("• *%s* — `%s` → %s [%s]", q.Description, q.ResourceID, q.TargetURL, q.Status)
-		}
-		lines = append(lines, line)
-	}
-	return "*Recent qURLs:*\n" + strings.Join(lines, "\n")
 }
 
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.

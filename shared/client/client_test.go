@@ -832,6 +832,47 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 	})
 }
 
+// TestListResourcesLimitClamp fences the defensive client-side clamp:
+// a caller passing Limit > 100 (server max) gets the request fired at
+// limit=100 rather than letting the server return a 400. The clamp
+// is a boundary check, not a transform — Limit=0 still falls back to
+// the server default by omitting the param.
+func TestListResourcesLimitClamp(t *testing.T) {
+	cases := []struct {
+		name     string
+		inLimit  int
+		wantSent string // "" means the param must not be set
+	}{
+		{name: "below max passes through", inLimit: 50, wantSent: "50"},
+		{name: "at max passes through", inLimit: 100, wantSent: "100"},
+		{name: "above max clamps to 100", inLimit: 500, wantSent: "100"},
+		{name: "zero omits param", inLimit: 0, wantSent: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got := r.URL.Query().Get("limit")
+				if got != tc.wantSent {
+					t.Errorf("limit query param: got %q, want %q", got, tc.wantSent)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data": []map[string]any{},
+					"meta": map[string]string{"request_id": "req_test"},
+				}); err != nil {
+					t.Fatalf("encode: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			c := testClient(srv.URL, "test-key")
+			if _, err := c.ListResources(context.Background(), ListResourcesInput{Limit: tc.inLimit}); err != nil {
+				t.Fatalf("ListResources: %v", err)
+			}
+		})
+	}
+}
+
 // TestCreatePathIsPlural pins the canonical /v1/qurls path as a named
 // regression assertion. TestCreate already asserts the path generically
 // at line 57; the value of this test is the explicit name — any future
