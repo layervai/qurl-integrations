@@ -761,7 +761,7 @@ func (h *Handler) helpMessage() string {
 		lines = append(lines,
 			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
 			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
-			"• `/qurl aliases` — List the aliases configured in this channel (admin only)",
+			"• `/qurl aliases` — List the aliases configured in this channel",
 		)
 	}
 	lines = append(lines,

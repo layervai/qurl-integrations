@@ -139,9 +139,9 @@ func TestHandle_AckIsFastUnderSlowAPI(t *testing.T) {
 	}
 }
 
-// TestHandle_AsyncCreatePostsResultToResponseURL fences the round-trip:
+// TestHandle_AsyncGetPostsResultToResponseURL fences the round-trip:
 // after the ack, the worker POSTs the qURL link via response_url.
-func TestHandle_AsyncCreatePostsResultToResponseURL(t *testing.T) {
+func TestHandle_AsyncGetPostsResultToResponseURL(t *testing.T) {
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"resource_id":"r_abc","qurl_link":"https://qurl.link/at_token"}}`))
@@ -172,12 +172,13 @@ func TestHandle_AsyncCreatePostsResultToResponseURL(t *testing.T) {
 	}
 }
 
-// TestHandle_AsyncCreateSurfacesIdempotencyKey fences the dedup contract:
-// every /qurl create with a fixed team_id+trigger_id MUST carry the same
-// Idempotency-Key. Slack's 3s ack timeout is below typical qURL API
-// latency under load, so Slack-side retries are real — the qURL service
-// uses this header to fold them into a single resource creation.
-func TestHandle_AsyncCreateSurfacesIdempotencyKey(t *testing.T) {
+// TestHandle_AsyncGetSurfacesIdempotencyKey fences the dedup contract:
+// every /qurl get <url> with a fixed team_id+trigger_id MUST carry the
+// same Idempotency-Key. Slack's 3s ack timeout is below typical qURL
+// API latency under load, so Slack-side retries are real — the qURL
+// service uses this header to fold them into a single resource
+// creation.
+func TestHandle_AsyncGetSurfacesIdempotencyKey(t *testing.T) {
 	var seenKey string
 	var keyMu sync.Mutex
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,12 +213,12 @@ func TestHandle_AsyncCreateSurfacesIdempotencyKey(t *testing.T) {
 	}
 }
 
-// TestHandle_ConcurrentCreateSharesIdempotencyKey is the load-bearing
-// dedup integration test: 100 concurrent /qurl create requests with the
-// same trigger_id must all carry the same Idempotency-Key. Anything
+// TestHandle_ConcurrentGetSharesIdempotencyKey is the load-bearing
+// dedup integration test: 100 concurrent /qurl get <url> requests with
+// the same trigger_id must all carry the same Idempotency-Key. Anything
 // less is a regression that re-introduces duplicate qURLs under
 // Slack's retry storm.
-func TestHandle_ConcurrentCreateSharesIdempotencyKey(t *testing.T) {
+func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	const concurrency = 100
 
 	var keys sync.Map

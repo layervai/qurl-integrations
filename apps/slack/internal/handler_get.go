@@ -261,8 +261,6 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 	// Defensive: a 200 with an empty qurl_link is a server contract
 	// surprise — log loud and surface the generic retry message.
-	// resource_id is the alias-form correlation handle (which binding
-	// the user typed); alias_form distinguishes URL-form fires.
 	if out.QURLLink == "" {
 		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm, "resource_id", input.ResourceID)
 		return "", &userError{msg: commonGetMintFailedMessage}

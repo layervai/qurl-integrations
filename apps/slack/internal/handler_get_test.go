@@ -201,6 +201,32 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	}
 }
 
+// TestHandleGet_URLForm_AdminStoreConfigured fences the URL-form
+// happy path under the production config (AdminStore wired): the
+// rate-limit gate runs (today a stubbed always-allow) and the mint
+// proceeds. Locks the contract so a future refactor that inverted
+// the form gate — routing URL-form through errAdminStoreNotConfigured
+// when AdminStore is wired — would be caught here.
+func TestHandleGet_URLForm_AdminStoreConfigured(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/url-form-cfg", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get https://example.com", testAdminTeamID, testAdminUserID)
+	if mintHits.Load() != 1 {
+		t.Errorf("mint hits = %d, want 1 (URL-form must reach mint with AdminStore wired)", mintHits.Load())
+	}
+	if !strings.Contains(async, "https://qurl.link/url-form-cfg") {
+		t.Errorf("async reply missing qURL link: %q", async)
+	}
+}
+
 // TestHandleGet_URLForm_AdminStoreNil fences the symmetric URL-form
 // path on a no-DDB sandbox: `/qurl get <url>` MUST proceed to the
 // mint when AdminStore is nil — the AdminStore gate is alias-form
