@@ -56,6 +56,15 @@ const (
 // listings even though `/qurl get $r_<id>` would mint them.
 // Single-row GetItem; no pagination needed.
 //
+// Known asymmetry vs [ResolvePolicy]: this function does NOT read the
+// legacy scalar `resource_id` attribute. ResolvePolicy falls back to
+// the scalar so a hand-seeded pre-pivot row still resolves at `get`;
+// the same row will not appear in `/qurl list`. The asymmetry is
+// intentional for now — `/qurl list` is being phased toward the
+// post-pivot Map/SS shapes, and unioning the scalar here would
+// re-expose pre-pivot rows that policies-migration is meant to drain.
+// Revisit when the migration completes.
+//
 // Missing row → empty set (no policy = no access, fail-closed).
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {

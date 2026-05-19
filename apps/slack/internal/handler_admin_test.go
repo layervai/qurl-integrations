@@ -23,7 +23,7 @@ import (
 const (
 	testTargetUserID  = "UTARGET01"
 	testTargetMention = "<@UTARGET01>"
-	testOtherAdminID  = "UOTHER01"
+	testOtherAdminID  = "UOTHER001"
 	testAdminListCmd  = "admin list"
 	testRevokeQURLID  = "q_01HXYZ8ABCDEF0123456789AB"
 	testMissingQURLID = "q_01HXYZ8MISS123456789ABCDE"
@@ -288,8 +288,8 @@ func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 // guard: an admin trying to demote the workspace owner sees a clear
 // "transfer via OAuth re-install" copy.
 //
-// Default seedAdmin makes the owner `testAdminOwnerID` (UOWNER01)
-// while the calling admin is `testAdminUserID` (UADMIN01) —
+// Default seedAdmin makes the owner `testAdminOwnerID` (UOWNER001)
+// while the calling admin is `testAdminUserID` (UADMIN001) —
 // distinct users — so the caller can target the owner without
 // tripping the self-remove guard.
 func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {

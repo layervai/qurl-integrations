@@ -101,13 +101,13 @@ const testAdminTeamID = "T_team"
 // Slack-shape (uppercase alphanumeric, no underscore) so the admin
 // add/remove handlers — which parse `<@U…>` mentions through the
 // strict userMentionPattern — can accept it as a mention target.
-const testAdminUserID = "UADMIN01"
+const testAdminUserID = "UADMIN001"
 
 // testAdminOwnerID is the owner ID the workspace_mappings row binds
 // to in tests. Slack-shape ID (see [testAdminUserID]) so the admin
 // remove handler's owner-check path can be exercised against a
 // `<@U…>` mention without tripping the mention validator.
-const testAdminOwnerID = "UOWNER01"
+const testAdminOwnerID = "UOWNER001"
 
 // testWorkspaceConfiguredAt is the canonical `created_at` time the
 // workspace fixture exposes. Matches the legacy

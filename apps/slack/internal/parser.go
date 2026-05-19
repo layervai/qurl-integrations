@@ -214,12 +214,14 @@ var ErrUnexpectedArgument = errors.New("unexpected argument")
 var ErrInvalidFlag = errors.New("invalid flag")
 
 // userMentionPattern matches Slack's encoded user-mention form
-// `<@U12345>` (and `<@U12345|display-name>` when the client includes
-// the optional pipe-delimited display label). Slack user IDs are
-// uppercase alphanumeric — the same charset as channel IDs. The
-// `[A-Z0-9]+` accepts both `U…` (workspace user) and `W…`
-// (Enterprise Grid org-level user) prefixes.
-var userMentionPattern = regexp.MustCompile(`^<@([A-Z0-9]+)(?:\|[^>]*)?>$`)
+// `<@U12345678>` (and `<@U12345678|display-name>` when the client
+// includes the optional pipe-delimited display label). Real Slack
+// user IDs start with `U` (workspace user) or `W` (Enterprise Grid
+// org-level user) followed by 8+ uppercase-alphanumeric characters,
+// per Slack's documented ID grammar — `{8,}` after the prefix
+// rejects toy IDs like `<@A>` at parse time, where a future
+// AddAdmin would otherwise happily store a bogus user ID.
+var userMentionPattern = regexp.MustCompile(`^<@([UW][A-Z0-9]{8,})(?:\|[^>]*)?>$`)
 
 // flagKeyCharset is the shared key-shape contract for flag-style
 // tokens. Used by both [flagPattern] (full key:value parse) and

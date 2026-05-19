@@ -99,6 +99,13 @@ func (h *Handler) requireAdminStoreSync(w http.ResponseWriter) bool {
 	return true
 }
 
+// workspaceUnboundReply is the user-visible reply for the
+// defensive 404-workspace-not-bound branches in handleAdmin{Add,
+// Remove,List}. Lifted to a const so the three copies can't drift
+// if the gate posture ever changes (today requireAdminSync short-
+// circuits before any of those branches fires).
+const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup` first."
+
 // adminGateBudget bounds the sync admin-gate CheckAdmin call so a
 // hung DDB can't out-block Slack's 3s slash-command ack window. The
 // gate is the FIRST upstream call on every sync admin verb; using
@@ -215,7 +222,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 				// Unreachable in practice: requireAdminSync short-
 				// circuits with "admin-only" on a missing workspace
 				// row. Kept for safety against gate refactors.
-				respondSlack(w, "Workspace isn't bound — run `/qurl setup` first.")
+				respondSlack(w, workspaceUnboundReply)
 				return
 			}
 		}
@@ -266,7 +273,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 				// circuits with "admin-only" on a missing workspace
 				// row (CheckAdmin returns isAdmin=false there). Kept
 				// for safety against gate refactors.
-				respondSlack(w, "Workspace isn't bound — run `/qurl setup` first.")
+				respondSlack(w, workspaceUnboundReply)
 				return
 			case se.StatusCode == http.StatusNotFound:
 				respondSlack(w, fmt.Sprintf("<@%s> isn't an admin — nothing to do.", target))
@@ -303,7 +310,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 			// Unreachable in practice: requireAdminSync short-
 			// circuits with "admin-only" on a missing workspace row.
 			// Kept for safety against gate refactors.
-			respondSlack(w, "Workspace isn't bound — run `/qurl setup` first.")
+			respondSlack(w, workspaceUnboundReply)
 			return
 		}
 		slog.Error("list admins failed", "error", err, "team_id", teamID, "user_id", callerUserID)
