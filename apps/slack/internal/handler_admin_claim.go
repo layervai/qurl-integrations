@@ -241,8 +241,17 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 func (h *Handler) surfaceBindError(ctx context.Context, w http.ResponseWriter, userID string, err error) {
 	var ae *slackdata.Error
 	if errors.As(err, &ae) && ae.StatusCode == http.StatusConflict {
-		if ae.Code == slackdata.ErrCodeWorkspaceAlreadyBoundToCaller {
+		switch ae.Code {
+		case slackdata.ErrCodeWorkspaceAlreadyBoundToCaller:
 			respondModalError(w, blockIDClaimCode, "You're already an admin on this workspace. No further action is needed.")
+			return
+		case slackdata.ErrCodeWorkspaceBindUnverified:
+			// Disambiguation read failed — we can't tell same-caller
+			// from different-admin. "Please retry" is the honest copy
+			// (the bootstrap code is already consumed, but a retry
+			// either lands on the caller-already-bound or
+			// different-admin path with a working DDB read).
+			respondModalError(w, blockIDClaimCode, "Workspace state could not be confirmed. Please retry the command — if the problem persists, contact LayerV support.")
 			return
 		}
 		respondModalError(w, blockIDClaimCode, "This workspace is already claimed by a different admin. Ask them to add you instead of using a fresh bootstrap code.")

@@ -618,9 +618,17 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // "use the modal" hint rather than the redeem path, but the slash-
 // command audit log line fires before dispatch. This is the
 // defense-in-depth seam that keeps the secret out of logs regardless.
+//
+// Whitespace tolerance: Slack's UI sends the bootstrap code separated
+// from `admin claim` by a single space, but a hand-crafted POST could
+// substitute a tab or other Unicode whitespace and bypass a
+// space-only prefix check. We tokenize on [strings.Fields] (every
+// Unicode whitespace separator) so the redaction holds regardless of
+// the separator byte.
 func redactSlashCommandText(text string) string {
 	const claimPrefix = "admin claim "
-	if strings.HasPrefix(text, claimPrefix) {
+	fields := strings.Fields(text)
+	if len(fields) >= 3 && fields[0] == "admin" && fields[1] == "claim" {
 		return claimPrefix + "<redacted>"
 	}
 	return text

@@ -232,10 +232,13 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 		}
 	})
 
-	// Also fence the degenerate GetItem-fails fallthrough: even if
-	// the disambiguating Get fails, the function still returns a
-	// 409 (rather than a 503 from the failed Get) — the binding is
-	// still held, just by an unknown admin.
+	// Fence the disambiguation-GetItem-fails path: the binding is
+	// still held (the CCFE confirmed that), but the post-CCFE Get
+	// failed. Surface the [ErrCodeWorkspaceBindUnverified] variant
+	// so the handler can render the "couldn't confirm — please
+	// retry" copy instead of defaulting to "different admin" (which
+	// would tell a same-caller re-entry to ask themselves for
+	// help). Round-17 cr #3.
 	t.Run("disambiguating GetItem fails", func(t *testing.T) {
 		store := newStore(&stubDDB{
 			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
@@ -251,10 +254,10 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 			t.Fatalf("got %v, want *Error", err)
 		}
 		if ae.StatusCode != http.StatusConflict {
-			t.Errorf("StatusCode = %d, want 409 (binding is still held; race only affects message variant)", ae.StatusCode)
+			t.Errorf("StatusCode = %d, want 409 (binding is still held; only the disambig read is uncertain)", ae.StatusCode)
 		}
-		if ae.Code != ErrCodeWorkspaceAlreadyBound {
-			t.Errorf("Code = %q, want %q (default to different-admin variant when caller-id check is uncertain)", ae.Code, ErrCodeWorkspaceAlreadyBound)
+		if ae.Code != ErrCodeWorkspaceBindUnverified {
+			t.Errorf("Code = %q, want %q (disambig read failed → 'couldn't confirm' variant)", ae.Code, ErrCodeWorkspaceBindUnverified)
 		}
 	})
 }

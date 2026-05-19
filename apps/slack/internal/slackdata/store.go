@@ -191,10 +191,10 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	}, nil
 }
 
-// nowOrDefault is the safe clock accessor — NewStore always sets Now,
-// but a bare &Store{} (e.g. for tests that satisfy a type signature
-// without exercising writes) would nil-deref on s.Now(). Defaulting
-// here keeps the bare-struct path safe.
+// nowOrDefault guards against a bare `&Store{}` that didn't set
+// Now — [NewStore] always sets it, but the fallback is cheap
+// insurance against a future caller that constructs the struct
+// directly.
 func (s *Store) nowOrDefault() time.Time {
 	if s.Now != nil {
 		return s.Now()

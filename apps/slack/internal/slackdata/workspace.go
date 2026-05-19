@@ -32,6 +32,16 @@ const (
 const (
 	ErrCodeWorkspaceAlreadyBoundToCaller = "workspace_already_bound_to_caller"
 	ErrCodeWorkspaceAlreadyBound         = "workspace_already_bound"
+	// ErrCodeWorkspaceBindUnverified is the 409 variant surfaced when
+	// the post-CCFE disambiguation GetItem itself fails (timeout,
+	// transport blip). We know the binding is held — that's what
+	// produced the ConditionalCheckFailed — but we couldn't read the
+	// admin set to choose between the caller-already-bound and the
+	// different-admin user copy. Routing to a "couldn't confirm,
+	// please retry" message is more honest than defaulting to
+	// "different admin" (which would tell a same-caller re-entry to
+	// ask themselves for help).
+	ErrCodeWorkspaceBindUnverified = "workspace_bind_unverified"
 )
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
@@ -40,9 +50,14 @@ const (
 // view_submission [interactionAsyncBudget] (2.5s); this sub-budget
 // keeps a slow disambiguating read from consuming whatever budget
 // remains after the failed PutItem and forcing the post-409 PostDM
-// off the wire. Worst case we lose the message variant and fall
-// through to "workspace_already_bound" — bounded impact, matches
-// the race-window posture documented at the call site.
+// off the wire.
+//
+// The wrapping [context.WithTimeout](ctx, budget) clamps against
+// the parent ctx, so the effective budget is `min(300ms, parent
+// remaining)` — a near-expired parent ctx yields a tighter cap.
+// On timeout/transport failure the call surfaces
+// [ErrCodeWorkspaceBindUnverified]; the handler renders a
+// "couldn't confirm — please retry" copy.
 const bindDisambiguationBudget = 300 * time.Millisecond
 
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
@@ -248,12 +263,24 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// response can't push the parent interaction over its 2.5s wall.
 	disambigCtx, disambigCancel := context.WithTimeout(ctx, bindDisambiguationBudget)
 	defer disambigCancel()
-	if check, getErr := s.Client.GetItem(disambigCtx, &dynamodb.GetItemInput{
+	check, getErr := s.Client.GetItem(disambigCtx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(m.TeamID),
 		},
-	}); getErr == nil && len(check.Item) > 0 {
+	})
+	if getErr != nil {
+		// Disambiguation read failed (timeout / transport). Surface
+		// the unverified variant rather than defaulting to
+		// "different admin", which would tell a same-caller re-entry
+		// to ask themselves for help.
+		return &Error{
+			StatusCode: http.StatusConflict,
+			Code:       ErrCodeWorkspaceBindUnverified,
+			Title:      "BindWorkspace: bind held but disambiguation read failed",
+		}
+	}
+	if len(check.Item) > 0 {
 		for _, u := range readStringSet(check.Item, attrAdminSlackUserIDs) {
 			if u == seedAdmin {
 				return &Error{

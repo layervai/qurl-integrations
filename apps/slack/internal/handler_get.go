@@ -166,7 +166,18 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
 	}
 
-	// 1. Resolve alias → resource via the customer API (uses the
+	// 1. Refuse early on a no-DDB sandbox deploy. AdminStore-nil
+	//    means there's no policy gate to enforce, so the result is
+	//    the same regardless of alias resolution — but checking now
+	//    avoids burning a customer-API GetResourceByAlias round-trip
+	//    on a workspace that can't gate it (and lets the user probe
+	//    alias existence ahead of the not-configured signal).
+	if h.cfg.AdminStore == nil {
+		log.Warn("get: AdminStore is nil; refusing to mint without policy gate", "team_id", args.teamID)
+		return "", errAdminStoreNotConfigured
+	}
+
+	// 2. Resolve alias → resource via the customer API (uses the
 	//    workspace's API key).
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
@@ -178,14 +189,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", mapAliasResolutionError(log, alias, err)
 	}
 
-	// 2. Policy + rate-limit checks via the DDB-direct AdminStore.
-	//    A nil store short-circuits to "not configured" — no policy
-	//    gate is enforced, so we refuse to mint rather than silently
-	//    bypassing the channel allow-list.
-	if h.cfg.AdminStore == nil {
-		log.Warn("get: AdminStore is nil; refusing to mint without policy gate", "team_id", args.teamID)
-		return "", errAdminStoreNotConfigured
-	}
+	// 3. Policy + rate-limit checks via the DDB-direct AdminStore.
 	allowed, err := h.cfg.AdminStore.ResolvePolicy(ctx, args.teamID, args.channelID, resource.ResourceID)
 	if err != nil {
 		log.Warn("get: policy check failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "resource_id", resource.ResourceID)
@@ -204,7 +208,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
 	}
 
-	// 3. Mint. Idempotency key derived from (team, channel, user,
+	// 4. Mint. Idempotency key derived from (team, channel, user,
 	//    trigger_id) so a Slack-side retry on the 3s ack budget
 	//    dedupes to the same qURL.
 	idemKey := IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID)

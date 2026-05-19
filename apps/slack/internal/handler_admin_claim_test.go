@@ -177,6 +177,16 @@ func TestRedactSlashCommandText(t *testing.T) {
 		{"admin claim", "admin claim"},
 		{"admin claim BOOT-SECRET", "admin claim <redacted>"},
 		{"admin claim  multi  word  code", "admin claim <redacted>"},
+		// Round-17 cr #1: tab between `claim` and the code MUST also
+		// trigger redaction. The space-only HasPrefix check we used
+		// before would have leaked the code into CloudWatch via the
+		// "default" branch's slog.Info site at handler.go's
+		// dispatcher fallthrough.
+		{"admin claim\tBOOT-SECRET", "admin claim <redacted>"},
+		// Mixed whitespace separators between the two prefix tokens
+		// (tab between `admin` and `claim`) — strings.Fields tokenizes
+		// on every Unicode whitespace, so this also gets caught.
+		{"admin\tclaim BOOT-SECRET", "admin claim <redacted>"},
 		{"list", "list"},
 		{"", ""},
 	}

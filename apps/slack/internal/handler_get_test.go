@@ -235,13 +235,17 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 // posture: a nil AdminStore (sandbox / no-DDB) refuses to mint
 // because the policy gate can't run. The user sees a friendly
 // "Admin features are not configured" message and the customer API
-// is never reached for the mint.
+// is never reached for the mint NOR for the upstream alias
+// resolution (round-17 cr #2: the not-configured check happens
+// before GetResourceByAlias so we don't burn customer-API quota /
+// leak alias-existence on a workspace that can't gate the result).
 func TestHandleGet_AdminStoreNil(t *testing.T) {
 	ts := newAdminTestServers(t)
+	var aliasHits, mintHits atomic.Int32
 	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
+		aliasHits.Add(1)
 		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
 	})
-	var mintHits atomic.Int32
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
@@ -257,6 +261,9 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite nil AdminStore (hits = %d)", mintHits.Load())
+	}
+	if aliasHits.Load() != 0 {
+		t.Errorf("GetResourceByAlias reached despite nil AdminStore (hits = %d) — admin-store-nil check must short-circuit before alias resolution", aliasHits.Load())
 	}
 }
 
