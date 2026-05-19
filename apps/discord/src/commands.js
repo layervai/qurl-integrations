@@ -290,12 +290,10 @@ function effectiveGuildMemberCount(guild) {
 //
 // In-flight de-duplication via the `prewarmInFlight` map below: two
 // concurrent `/qurl send @everyone` invocations in the same guild from
-// a cold cache share the same underlying `members.fetch()` promise.
-// Without coalescing, abuse via concurrent invocations could burn
-// chunk-request budget linearly. discord.js may also coalesce the
-// `GUILD_REQUEST_MEMBERS` chunks internally, but we don't rely on it
-// — the map is keyed by `guild.id` so cross-guild calls still proceed
-// in parallel.
+// a cold cache share the same underlying pagination promise. Without
+// coalescing, abuse via concurrent invocations could burn REST budget
+// linearly. The map is keyed by `guild.id` so cross-guild calls still
+// proceed in parallel.
 const prewarmInFlight = new Map();
 async function prewarmGuildMembersCache(guild, logCtx) {
   // Uniform Promise return shape regardless of which branch the caller
@@ -7722,6 +7720,16 @@ const commands = [
         // REST prewarm helper instead. After it resolves, the cache is
         // the authoritative member set.
         await prewarmGuildMembersCache(guild, { command: '/unlinked' });
+        // Prewarm swallows REST failures (correct for /qurl send
+        // degraded mode). For an admin reporting command an empty
+        // cache is pathological — reporting "all linked" against a
+        // zero-member cache is a silent false positive. Surface the
+        // degraded state explicitly.
+        if (guild.members.cache.size === 0) {
+          return interaction.editReply({
+            content: '⚠️ Could not load member list (Discord API may be degraded). Please retry.',
+          });
+        }
         const contributors = guild.members.cache.filter(
           (m) => m.roles.cache.has(contributorRole.id),
         );

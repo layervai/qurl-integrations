@@ -1120,16 +1120,41 @@ describe('/unlinked command', () => {
     );
   });
 
+  it('prewarm leaves empty cache → user sees explicit degraded message, not silent "all linked"', async () => {
+    // Pre-PR behavior: a fetch() rejection threw out of the try block
+    // and the catch surfaced an error. Post-PR: prewarm swallows REST
+    // failures (correct for /qurl send), which would leave the cache
+    // empty and `/unlinked` would falsely report ✓ All contributors
+    // linked — strictly worse signal than the old failure. Pin the
+    // explicit empty-cache branch to defend against re-introducing
+    // the false positive.
+    const interaction = makeInteraction({
+      commandName: 'unlinked',
+      guild: makeUnlinkedGuild(new Map()),
+    });
+
+    await findCmd().execute(interaction);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Could not load member list') }),
+    );
+  });
+
   it('handles error after prewarm — db query failure surfaces to user', async () => {
     // prewarm swallows REST errors (degraded-mode fallback), so a
     // members.list() rejection no longer reaches the /unlinked
     // try/catch. A db.getLinkedDiscordIds rejection does — pin that
-    // path as the live error surface.
+    // path as the live error surface. Cache must be non-empty to get
+    // past the new empty-cache degraded-message guard.
+    const member1 = {
+      id: 'u1', user: { tag: 'User1' },
+      roles: { cache: { has: jest.fn(() => true) } },
+    };
     mockDb.getLinkedDiscordIds.mockRejectedValue(new Error('db fail'));
 
     const interaction = makeInteraction({
       commandName: 'unlinked',
-      guild: makeUnlinkedGuild(new Map()),
+      guild: makeUnlinkedGuild(new Map([['u1', member1]])),
     });
 
     await findCmd().execute(interaction);
