@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS, TRUST } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -256,14 +256,24 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
 const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
 
+// discord.js `Guild._patch` only sets `memberCount` from the gateway
+// GUILD_CREATE payload. The REST `GET /guilds/:id?with_counts=true`
+// path populates `approximateMemberCount` instead. HTTP-only worker
+// mode never sees GUILD_CREATE, so `memberCount` stays undefined —
+// without this fallback every @everyone render and prewarm gate hits
+// the wrong branch in that tier.
+function effectiveGuildMemberCount(guild) {
+  return guild?.memberCount ?? guild?.approximateMemberCount;
+}
+
 // Helper for the two pre-warm sites. Returns a Promise so the caller
 // can await before reading `guild.members.cache`. Swallows errors —
 // degraded expansion (parser sees a partial cache) is the correct
 // fallback for transient API blips; surfacing the failure to the user
-// would confuse them about a problem they can't act on. Skipped when
-// the cache already reports `memberCount` (defaults to `Infinity` if
-// memberCount is missing so we fail-open and fetch when uncertain) so
-// a hot cache from a prior invocation isn't burned a second time. The
+// would confuse them about a problem they can't act on. Hot-cache
+// short-circuit fires ONLY when `guild.memberCount` is present and
+// matched — see the inline comment at the gate for why
+// `approximateMemberCount` is deliberately not consulted here. The
 // populated cache is intentionally retained — discord.js `Collection`
 // has no LRU and eviction relies on `GUILD_MEMBER_REMOVE` gateway
 // events. Acceptable for our scale; revisit if a future regression in
@@ -271,28 +281,122 @@ const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
 //
 // In-flight de-duplication via the `prewarmInFlight` map below: two
 // concurrent `/qurl send @everyone` invocations in the same guild from
-// a cold cache share the same underlying `members.fetch()` promise.
-// Without coalescing, abuse via concurrent invocations could burn
-// chunk-request budget linearly. discord.js may also coalesce the
-// `GUILD_REQUEST_MEMBERS` chunks internally, but we don't rely on it
-// — the map is keyed by `guild.id` so cross-guild calls still proceed
-// in parallel.
+// a cold cache share the same underlying pagination promise. Without
+// coalescing, abuse via concurrent invocations could burn REST budget
+// linearly. The map is keyed by `guild.id` so cross-guild calls still
+// proceed in parallel.
 const prewarmInFlight = new Map();
+// `logCtx` is spread first in every log payload below so explicit
+// fields after it (`guild_id`, `cache_size`, etc.) override any
+// matching key in the caller's `logCtx`. Don't put `guild_id` in
+// `logCtx` at call sites expecting it to win — it won't.
 async function prewarmGuildMembersCache(guild, logCtx) {
   // Uniform Promise return shape regardless of which branch the caller
   // hits — early-exit paths used to resolve `undefined`, which works
   // for `await prewarmGuildMembersCache(...)` callers but would surprise
   // a future caller that does `.then(...)`.
-  if (!guild || !guild.members || typeof guild.members.fetch !== 'function') return;
+  if (!guild || !guild.members || typeof guild.members.list !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
-  if (cacheSize >= (guild.memberCount ?? Infinity)) return;
+  // Only short-circuit on EXACT `memberCount` (gateway tier). The
+  // `approximateMemberCount` value can underreport by hundreds — if the
+  // cache happened to be partially warmed by per-user `members.fetch(id)`
+  // calls from `resolveRecipientUsers`, an approximate-based gate could
+  // fire prematurely and underresolve @everyone, re-introducing this
+  // PR's original bug in a quieter form. http-only tier (no
+  // `memberCount`) accepts the perf cost of always paginating; the
+  // in-flight dedup below prevents concurrent invocations from stacking.
+  if (guild.memberCount != null && cacheSize >= guild.memberCount) {
+    // Observability hook for the hot-cache short-circuit firing. Without
+    // this, dashboards can't correlate "how often is the cache warm" with
+    // memory growth on large-guild workers.
+    logger.debug('members pre-warm short-circuited (hot cache)', {
+      ...logCtx, guild_id: guild.id, cache_size: cacheSize, member_count: guild.memberCount,
+    });
+    return;
+  }
   const existing = prewarmInFlight.get(guild.id);
   if (existing) return existing;
   const inFlight = (async () => {
     try {
-      await guild.members.fetch({ time: TIMEOUTS.MEMBER_PREFETCH });
+      // REST `GET /guilds/{id}/members` rather than `guild.members.fetch()`
+      // (no args): the latter sends REQUEST_GUILD_MEMBERS over the gateway
+      // WebSocket via `shard.send`, which crashes in http-only worker mode
+      // (no gateway shard). discord.js handles 429 backoff inside `list`
+      // so we don't sleep here.
+      //
+      // No wall-clock deadline on the loop: @everyone must mean EVERYONE,
+      // and a wall-clock cap would silently truncate large-guild expansion
+      // back to the bug this PR fixes (just with a different failure
+      // mode). The reply is deferred so Discord's 3s rule doesn't apply;
+      // user-perceived latency on huge guilds is the accepted trade-off.
+      let after;
+      // `page` is declared outside the loop because the post-loop
+      // safety-cap check (`page === PREWARM_MAX_PAGES`) needs to read
+      // its final value. A future "scope this inside the for" cleanup
+      // would silently disable the safety-cap warn.
+      let page;
+      // `bailed` distinguishes "loop exited cleanly on a partial page"
+      // (success) from "loop bailed on an upstream-bug guard". Without
+      // it, both bail paths would also emit the success info-log below.
+      let bailed = false;
+      for (page = 0; page < PREWARM_MAX_PAGES; page++) {
+        // `cache: true` is the discord.js default, but pin it
+        // explicitly: a future major-version flip of the default
+        // would silently re-degrade @everyone expansion to the bug
+        // this PR fixes, and the cache-merge regression test can't
+        // catch a class of failure where the mock differs from prod.
+        const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after, cache: true });
+        if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
+        // Collection is insertion-ordered against the API response, which
+        // Discord sorts ascending by user_id — lastKey() is the right
+        // `after` cursor for the next page.
+        const nextAfter = batch.lastKey();
+        // Defensive: a non-empty Collection's `lastKey()` always returns
+        // a real key today, but `nextAfter == null` would equal an
+        // undefined `after` on iteration 0 and false-negative the
+        // non-advancement guard below.
+        if (nextAfter == null) {
+          logger.warn('members pre-warm received full page with null cursor; bailing', {
+            ...logCtx, guild_id: guild.id, pages: page + 1,
+          });
+          bailed = true;
+          break;
+        }
+        // If Discord ever returns a full page without advancing the
+        // cursor (upstream bug), bail rather than burn 1000 iterations
+        // re-fetching the same window forever.
+        if (nextAfter === after) {
+          logger.warn('members pre-warm cursor did not advance; bailing', {
+            ...logCtx, guild_id: guild.id, after, pages: page + 1,
+          });
+          bailed = true;
+          break;
+        }
+        after = nextAfter;
+      }
+      if (page === PREWARM_MAX_PAGES) {
+        // `pages: PREWARM_MAX_PAGES` (not `page`) for read-clarity —
+        // they're numerically equal here but the constant makes the
+        // intent obvious vs. the bail/null-cursor warns which use
+        // `page + 1` (the count of completed list() calls at the
+        // point of the break).
+        logger.warn('members pre-warm hit safety cap; @everyone/role expansion may underresolve', {
+          ...logCtx, guild_id: guild.id, pages: PREWARM_MAX_PAGES, cache_size: guild.members.cache?.size,
+        });
+      } else if (!bailed) {
+        // Successful-completion observability. Captures cache footprint
+        // for large-guild memory tracking — paginating a 500k-member
+        // guild persists 500k GuildMember objects in-process until the
+        // worker recycles. Logged at `debug` (not `info`) because high-
+        // traffic http-only workers may fire this thousands of times
+        // per day; warn paths above remain at `warn` so the degraded
+        // signal isn't drowned out.
+        logger.debug('members pre-warm complete', {
+          ...logCtx, guild_id: guild.id, pages: page + 1, cache_size: guild.members.cache?.size,
+        });
+      }
     } catch (err) {
-      logger.warn('members.fetch pre-warm failed; @everyone/role expansion may underresolve', {
+      logger.warn('members pre-warm failed; @everyone/role expansion may underresolve', {
         ...logCtx, guild_id: guild.id, error: err && err.message,
       });
     } finally {
@@ -4011,16 +4115,12 @@ function formatPersonalMessagePreview(message) {
 const everyoneCountMemo = new WeakMap();
 function computeEveryoneDisplayCount(guild) {
   const cache = guild?.members?.cache;
-  // discord.js Guild._patch only sets `memberCount` from the gateway
-  // GUILD_CREATE payload's `member_count` field. The REST
-  // `GET /guilds/:id?with_counts=true` returns `approximate_member_count`
-  // instead, which discord.js stores under a different property
-  // (`approximateMemberCount`). HTTP-only worker mode never sees a
-  // GUILD_CREATE, so `memberCount` stays undefined despite the
-  // event-consumer pre-fetch succeeding. Without this fallback every
-  // @everyone button render in http-tier hits the `displayCount-null`
-  // disable branch (CloudWatch warn-log evidence in sandbox).
-  const memberCount = guild?.memberCount ?? guild?.approximateMemberCount;
+  // Display-only path — `approximateMemberCount` fallback is acceptable
+  // here even though prewarmGuildMembersCache deliberately avoids it.
+  // A render-time label off by a few members is benign; the strict gate
+  // is reserved for the prewarm decision where underresolve would
+  // silently truncate the @everyone recipient set.
+  const memberCount = effectiveGuildMemberCount(guild);
   if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
     const fingerprint = `${cache.size}:${memberCount}`;
     const cached = everyoneCountMemo.get(guild);
@@ -7672,9 +7772,52 @@ const commands = [
           });
         }
 
-        // Get all members with Contributor role
-        const members = await guild.members.fetch();
-        const contributors = members.filter(m => m.roles.cache.has(contributorRole.id));
+        // `guild.members.fetch()` (no args) crashes in http-only worker
+        // mode because it relies on a gateway shard; route through the
+        // REST prewarm helper instead. After it resolves, the cache is
+        // the authoritative member set.
+        await prewarmGuildMembersCache(guild, { command: '/unlinked' });
+        // Prewarm swallows REST failures (correct for /qurl send
+        // degraded mode). For an admin reporting command, an empty
+        // OR partial cache is pathological — reporting "all linked"
+        // against an incomplete member set is a silent false positive.
+        // Mid-pagination failures (e.g. 429 on page 6 of 12) leave a
+        // non-empty cache that's still missing members. Compare against
+        // the expected count with `UNLINKED_CACHE_COMPLETENESS_THRESHOLD`
+        // tolerance to allow approximate-count drift but catch
+        // substantive shortfalls.
+        //
+        // Edge case: when both `memberCount` AND
+        // `approximateMemberCount` are absent (rare in practice — the
+        // guild loaded via REST `?with_counts=true` populates the
+        // latter), this falls back to a `size === 0` check only.
+        // Best-effort under that condition; a guild that fails
+        // mid-pagination with no count metadata available will
+        // currently still surface "all linked" if cache is non-empty.
+        const expectedMembers = effectiveGuildMemberCount(guild);
+        const cacheSize = guild.members.cache?.size ?? 0;
+        // `cacheSize === 0` is a sound proxy for "prewarm produced
+        // nothing" because `GET /guilds/{id}/members` includes the bot
+        // itself — a real guild with the bot present can never
+        // legitimately return zero members. The check defends against
+        // degraded-API silence, not against zero-member guilds.
+        const looksIncomplete = cacheSize === 0
+          || (expectedMembers != null && cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD);
+        if (looksIncomplete) {
+          // Debug-log the trip so dashboards can surface false-positive
+          // patterns (e.g. `approximateMemberCount` over-reporting on
+          // guilds with high churn → healthy run flagged degraded).
+          logger.debug('unlinked surfaced degraded-cache message', {
+            command: '/unlinked', guild_id: guild.id,
+            cache_size: cacheSize, expected_members: expectedMembers,
+          });
+          return interaction.editReply({
+            content: '⚠️ Could not load complete member list (Discord API may be degraded). Please retry.',
+          });
+        }
+        const contributors = guild.members.cache.filter(
+          (m) => m.roles.cache.has(contributorRole.id),
+        );
 
         // Check which ones are not linked (single bulk query, not N+1)
         const linkedIds = await db.getLinkedDiscordIds();

@@ -276,6 +276,14 @@ function makeInteraction({
         }
         const err = new Error('Unknown Member'); err.code = 10007; throw err;
       }),
+      // Prewarm path uses REST `list({ limit, after })`. Default mock
+      // returns an empty Map so the pagination loop breaks on the
+      // partial-page check before ever reading `lastKey()` — required
+      // because a plain Map has no `lastKey()` method. Tests that need
+      // multi-page behavior must reassign `members.list` with a
+      // Collection-shaped object (`{ size, lastKey }`) or a real
+      // discord.js Collection.
+      list: jest.fn(async () => new Map()),
     },
     roles: { cache: new Map() },
     channels: { cache: new Map() },
@@ -3062,29 +3070,33 @@ describe('handleQurlSend — slash entry', () => {
 // ──────────────────────────────────────────────────────────────
 // discord.js v14 leaves `guild.members.cache` empty by default (no
 // `chunkOnStartup`, no `ws.large_threshold` override) on our multi-
-// tenant gateway, so the parser's `@everyone` branch and `role.members`
-// filtering for `<@&id>` both silently collapse to just the interacting
-// user. Pre-warming via `members.fetch()` is the fix; these tests pin
-// the trigger conditions so a future refactor that drops the pre-warm
-// regresses here, not in production.
+// tenant gateway, AND the http-only worker tier has no shard at all.
+// The parser's `@everyone` branch and `role.members` filtering for
+// `<@&id>` both silently collapse to just the interacting user
+// without the cache. Pre-warming via `guild.members.list()` (REST,
+// works in both tiers — was `.fetch({time})` until 2026-05-19 when it
+// crashed in http-only mode with `shard.send` undefined); paginates
+// with `after` cursor to cover @everyone-means-EVERYONE for guilds
+// past Discord's 1000-member page cap. Tests below pin the trigger
+// conditions so a future refactor that drops the pre-warm regresses
+// here, not in production.
 
 // Identifies the pre-warm call by its options-object shape: a bulk
-// chunk fetch carries `{ time }` ONLY — no `user`/`query`/`limit`/
-// `force`. Disambiguates from the per-ID `members.fetch(id)` calls in
-// resolveRecipientUsers AND from a future bounded per-user fetch like
-// `members.fetch({ user: id, time: 2000 })` that would happen to
-// carry a `time` field. Asserting absence of the per-user keys makes
-// the disambiguation explicit so the helper stays accurate as the
-// discord.js API surface grows.
+// list carries `{ limit: DISCORD_MEMBERS_PAGE_SIZE, after? }` with no
+// per-user keys. Disambiguates from the per-ID `members.fetch(id)`
+// calls in resolveRecipientUsers AND from any future per-user `list`
+// shape that might carry a `query` field. Pulling the constant from
+// the source-of-truth module avoids drift if Discord raises the page
+// cap or we back off for memory reasons.
+const { DISCORD_MEMBERS_PAGE_SIZE } = require('../src/constants');
 const isPrewarmCall = ([arg]) =>
   arg && typeof arg === 'object'
-  && typeof arg.time === 'number'
+  && arg.limit === DISCORD_MEMBERS_PAGE_SIZE
   && arg.user === undefined
-  && arg.query === undefined
-  && arg.limit === undefined;
+  && arg.query === undefined;
 
 describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
-  test('@everyone in recipients string → members.fetch() pre-warm fires', async () => {
+  test('@everyone in recipients string → members.list() pre-warm fires', async () => {
     const aliceId = '500000000000000001';
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
@@ -3092,10 +3104,10 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     });
     int.memberPermissions = { has: jest.fn(() => true) };
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+    expect(int.guild.members.list.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
-  test('<@&roleId> in recipients string → members.fetch() pre-warm fires', async () => {
+  test('<@&roleId> in recipients string → members.list() pre-warm fires', async () => {
     // role.members for non-@everyone roles is a filtered view of
     // guild.members.cache, so the trigger has to include arbitrary
     // role-mention wire shapes, not just literal @everyone.
@@ -3109,10 +3121,10 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
     });
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+    expect(int.guild.members.list.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
-  test('plain <@userId> mentions only → members.fetch() pre-warm does NOT fire', async () => {
+  test('plain <@userId> mentions only → members.list() pre-warm does NOT fire', async () => {
     // Defends the common case (a few user mentions) against paying the
     // pre-warm cost. Gate is the mass-mention shape regex, not the
     // existence of any mention.
@@ -3122,17 +3134,17 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       guildMembers: { [aliceId]: {} },
     });
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
-  test('empty recipients string → members.fetch() pre-warm does NOT fire', async () => {
+  test('empty recipients string → members.list() pre-warm does NOT fire', async () => {
     // Defense against a `recipientsRaw` of `null` / `''` triggering the
     // regex via the `|| ''` fallback. Empty input → no mentions → no fetch.
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT }, // no recipients
     });
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
   test('@everyone WITHOUT MENTION_EVERYONE → pre-warm does NOT fire (parser will deny anyway)', async () => {
@@ -3146,7 +3158,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     });
     // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
   test('@everyone + <@&roleId> WITHOUT MENTION_EVERYONE → pre-warm STILL fires (role path)', async () => {
@@ -3165,7 +3177,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     });
     // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+    expect(int.guild.members.list.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
   test('@everyonefoo (no word boundary) → pre-warm does NOT fire', async () => {
@@ -3179,10 +3191,10 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '@everyonefoo' },
     });
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
-  test('cache already at memberCount → members.fetch() pre-warm short-circuits', async () => {
+  test('cache already at memberCount → members.list() pre-warm short-circuits', async () => {
     // Hot-cache short-circuit defends against re-fetching when a prior
     // invocation in the same process lifetime already populated the
     // cache. Without this, every @everyone send burns the full chunk
@@ -3196,7 +3208,28 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     int.memberPermissions = { has: jest.fn(() => true) };
     int.guild.memberCount = 2; // matches cache.size from guildMembers above
     await handleQurlSend(int);
-    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('http-only tier (memberCount undefined) → pre-warm always paginates, NEVER short-circuits on approximateMemberCount', async () => {
+    // Correctness over perf in http-only mode: `approximateMemberCount`
+    // can underreport by hundreds, and per-user `members.fetch(id)`
+    // calls in `resolveRecipientUsers` could leave the cache partially
+    // populated. An approximate-based short-circuit would fire
+    // prematurely on a partial cache and underresolve @everyone — the
+    // exact bug this PR fixes. Pin the strict-memberCount-only gate
+    // so a future "optimization" reverting to approximate breaks here.
+    const aliceId = '500000000000000007';
+    const bobId = '500000000000000008';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone` },
+      guildMembers: { [aliceId]: {}, [bobId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = undefined;
+    int.guild.approximateMemberCount = 2;
+    await handleQurlSend(int);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall).length).toBeGreaterThan(0);
   });
 
   test('concurrent invocations in the same guild share one in-flight fetch', async () => {
@@ -3207,16 +3240,16 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     // linearly. discord.js may also coalesce GUILD_REQUEST_MEMBERS
     // internally, but we don't rely on that.
     const aliceId = '500000000000000010';
-    // A controllable fetch — caller resolves `release` after the
+    // A controllable list — caller resolves `release` after the
     // assertion so both handlers complete cleanly. Without the resolve,
     // the two awaiting `handleQurlSend` calls would leak through to
     // process exit and Jest's `--detectOpenHandles` would surface them.
     let release;
-    const fetchGate = new Promise((r) => { release = r; });
-    const sharedFetch = jest.fn(() => fetchGate);
+    const listGate = new Promise((r) => { release = r; });
+    const sharedList = jest.fn(() => listGate);
     const sharedGuild = {
       id: 'shared-guild',
-      members: { cache: new Map(), fetch: sharedFetch },
+      members: { cache: new Map(), list: sharedList },
       roles: { cache: new Map() },
       channels: { cache: new Map() },
       memberCount: 10,
@@ -3235,16 +3268,17 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     const p2 = handleQurlSend(makeShared());
     // Microtask flush so both handlers reach the prewarm await.
     await new Promise((r) => setImmediate(r));
-    const prewarmCalls = sharedFetch.mock.calls.filter(isPrewarmCall);
+    const prewarmCalls = sharedList.mock.calls.filter(isPrewarmCall);
     expect(prewarmCalls.length).toBe(1);
     // Release the gate so handlers settle and Jest doesn't carry an
-    // open handle past the test.
+    // open handle past the test. Resolve with an empty Map so the
+    // pagination loop exits immediately (size === 0 → break).
     release(new Map());
     await Promise.all([p1, p2]);
   });
 
-  test('members.fetch() rejection is swallowed — flow continues in degraded mode', async () => {
-    // 429 / gateway blip on the pre-warm must not crash the handler.
+  test('members.list() rejection is swallowed — flow continues in degraded mode', async () => {
+    // 429 / REST blip on the pre-warm must not crash the handler.
     // The catch logs a warn and the parser proceeds against whatever
     // the cache currently holds (potentially empty → @everyone silently
     // expands to 0). Worst case the user re-runs.
@@ -3254,19 +3288,200 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       guildMembers: { [aliceId]: {} },
     });
     int.memberPermissions = { has: jest.fn(() => true) };
-    int.guild.members.fetch = jest.fn(async (arg) => {
-      if (isPrewarmCall([arg])) {
-        const err = new Error('rate limited'); err.code = 429; throw err;
-      }
-      return { user: makeUser(arg) };
+    int.guild.members.list = jest.fn(async () => {
+      const err = new Error('rate limited'); err.code = 429; throw err;
     });
     await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const logger = require('../src/logger');
     const warnCall = logger.warn.mock.calls.find(
-      ([msg]) => typeof msg === 'string' && msg.includes('members.fetch pre-warm failed'),
+      ([msg]) => typeof msg === 'string' && msg.includes('members pre-warm failed'),
     );
     expect(warnCall).toBeTruthy();
+  });
+
+  test('pagination: members.list() called with `after` cursor when first page returns full 1000', async () => {
+    // @everyone means EVERYONE. A guild with >1000 members must trigger
+    // a second list() call with `after` = last user id of page 1.
+    // Pin pagination explicitly so a future refactor that drops the
+    // cursor logic (and silently caps @everyone at 1000) fails here.
+    const aliceId = '500000000000000077';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 1500;
+
+    // Page 1: synthesize a Collection-shaped object with size=1000 and
+    // a lastKey() that returns the highest snowflake. The prewarm loop
+    // reads `.size` (advance check) and `.lastKey()` (cursor).
+    const lastIdOfPage1 = '999999999999999999';
+    const page1 = { size: 1000, lastKey: () => lastIdOfPage1 };
+    const page2 = new Map();  // empty → loop breaks
+    int.guild.members.list = jest.fn()
+      .mockResolvedValueOnce(page1)
+      .mockResolvedValueOnce(page2);
+
+    await handleQurlSend(int);
+
+    expect(int.guild.members.list).toHaveBeenCalledTimes(2);
+    // First call: no `after`.
+    expect(int.guild.members.list.mock.calls[0][0]).toEqual(expect.objectContaining({ limit: 1000 }));
+    expect(int.guild.members.list.mock.calls[0][0].after).toBeUndefined();
+    // Second call: `after` is the lastKey of page 1.
+    expect(int.guild.members.list.mock.calls[1][0]).toEqual(expect.objectContaining({ limit: 1000, after: lastIdOfPage1 }));
+  });
+
+  test('pagination: three full pages advance the cursor each time', async () => {
+    // Defends against a regression that captures `after` once outside
+    // the loop instead of updating it from each page's lastKey(). The
+    // two-page test would pass for both correct and broken
+    // implementations (lastKey is read once either way).
+    const aliceId = '500000000000000078';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2500;
+
+    const lastIdOfPage1 = '111111111111111111';
+    const lastIdOfPage2 = '222222222222222222';
+    const page1 = { size: 1000, lastKey: () => lastIdOfPage1 };
+    const page2 = { size: 1000, lastKey: () => lastIdOfPage2 };
+    const page3 = new Map(); // partial → loop breaks
+    int.guild.members.list = jest.fn()
+      .mockResolvedValueOnce(page1)
+      .mockResolvedValueOnce(page2)
+      .mockResolvedValueOnce(page3);
+
+    await handleQurlSend(int);
+
+    expect(int.guild.members.list).toHaveBeenCalledTimes(3);
+    expect(int.guild.members.list.mock.calls[0][0].after).toBeUndefined();
+    expect(int.guild.members.list.mock.calls[1][0].after).toBe(lastIdOfPage1);
+    expect(int.guild.members.list.mock.calls[2][0].after).toBe(lastIdOfPage2);
+  });
+
+  test('pagination: cursor non-advancement bails with warn', async () => {
+    // Upstream bug shape: API returns a full page but lastKey() doesn't
+    // advance. Without the guard we'd spin to PREWARM_MAX_PAGES; with
+    // it we bail after the second call (when nextAfter === after).
+    const aliceId = '500000000000000079';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 5000;
+
+    const stuckCursor = '333333333333333333';
+    const stuckPage = { size: 1000, lastKey: () => stuckCursor };
+    int.guild.members.list = jest.fn().mockResolvedValue(stuckPage);
+
+    await handleQurlSend(int);
+
+    // Call 1: after=undefined → fetch, nextAfter=stuckCursor (advanced)
+    // Call 2: after=stuckCursor → fetch, nextAfter=stuckCursor (NOT advanced) → bail
+    expect(int.guild.members.list).toHaveBeenCalledTimes(2);
+    const logger = require('../src/logger');
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('cursor did not advance'),
+    );
+    expect(warnCall).toBeTruthy();
+    // The bail path MUST NOT also emit the "pre-warm complete" info
+    // log — the `bailed` flag prevents double-logging. Without this
+    // assertion a future refactor could re-introduce the misleading
+    // success log on a degraded run.
+    const successCall = logger.info.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('pre-warm complete'),
+    );
+    expect(successCall).toBeFalsy();
+  });
+
+  test('pagination: safety cap fires warn when full pages persist past PREWARM_MAX_PAGES', async () => {
+    // If lastKey() advances on every page but the API somehow never
+    // returns a partial page (genuine >1M-member guild OR upstream bug),
+    // the loop must exit at exactly PREWARM_MAX_PAGES (1000) and warn —
+    // not spin forever. Distinct from the non-advancement guard.
+    const aliceId = '500000000000000080';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2000000; // > 1M, defeats the hot-cache short-circuit
+
+    let counter = 0;
+    int.guild.members.list = jest.fn(async () => ({
+      size: 1000,
+      lastKey: () => `cursor-${counter++}`, // unique every page
+    }));
+
+    await handleQurlSend(int);
+
+    // Exactly PREWARM_MAX_PAGES iterations; no spin.
+    expect(int.guild.members.list).toHaveBeenCalledTimes(1000);
+    const logger = require('../src/logger');
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('hit safety cap'),
+    );
+    expect(warnCall).toBeTruthy();
+    // cache_size context lives in the payload (debugging signal — what
+    // actually landed in cache before the cap fired).
+    expect(warnCall[1]).toEqual(expect.objectContaining({ cache_size: expect.anything() }));
+    // The cap path MUST NOT also emit the "pre-warm complete" info
+    // log. The `if/else if` branching in commands.js guarantees this;
+    // pin it so a future refactor to two separate `if`s would fail.
+    const successCall = logger.info.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('pre-warm complete'),
+    );
+    expect(successCall).toBeFalsy();
+  });
+
+  test('pagination: each successful list() call merges members into guild.members.cache', async () => {
+    // Coverage gap defense: a future regression where someone routes
+    // prewarm to a non-caching call (e.g. raw REST helper, or
+    // `list({ cache: false })`) would still pass the call-shape tests
+    // above. Simulate discord.js's cache-merge behavior by having the
+    // mock add members to the cache on each call, and assert the cache
+    // ends up populated with the union of all pages.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone` },
+      guildMembers: {},
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2500;
+
+    const page1Ids = ['100', '101', '102'];
+    const page2Ids = ['200', '201'];
+    int.guild.members.list = jest.fn(async ({ after }) => {
+      if (!after) {
+        // Simulate discord.js merging into cache.
+        for (const id of page1Ids) int.guild.members.cache.set(id, { user: { id, bot: false } });
+        // size=1000 keeps the loop going; lastKey() advances the cursor.
+        return { size: 1000, lastKey: () => page1Ids[page1Ids.length - 1] };
+      }
+      for (const id of page2Ids) int.guild.members.cache.set(id, { user: { id, bot: false } });
+      return new Map(); // partial → loop breaks
+    });
+
+    await handleQurlSend(int);
+
+    for (const id of [...page1Ids, ...page2Ids]) {
+      expect(int.guild.members.cache.has(id)).toBe(true);
+    }
+
+    // discord.js's `list({ cache })` defaults to `true` and merges
+    // results into `guild.members.cache`. If a future refactor passes
+    // `cache: false` to reduce memory, the cache-merge behavior this
+    // test simulates would silently break in production while this
+    // test still passes (the mock doesn't honor the flag). Pin that
+    // the production call shape never opts out of caching.
+    for (const call of int.guild.members.list.mock.calls) {
+      expect(call[0].cache).not.toBe(false);
+    }
   });
 });
 
@@ -4737,39 +4952,36 @@ describe('handleConfirmUserSelect', () => {
   // `@everyone` (direct iteration) and arbitrary roles (`role.members`
   // is a filtered view of the same cache). Without the pre-warm, any
   // role pick silently expands to just the interacting user.
-  test('role pick → members.fetch() pre-warm fires', async () => {
+  test('role pick → members.list() pre-warm fires', async () => {
     const role = { id: 'roleA', name: 'team', mentionable: true, members: new Map([[u1, { user: makeUser(u1) }]]) };
     const int = makeSelectInteraction({ users: [], roles: [['roleA', role]] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
-    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+    expect(int.guild.members.list.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
-  test('users-only pick → members.fetch() pre-warm does NOT fire', async () => {
+  test('users-only pick → members.list() pre-warm does NOT fire', async () => {
     // Pure user picks don't touch guild.members.cache — Discord
     // ships the User object directly in interaction.users. Skipping
     // the pre-warm keeps the common-case cost at zero.
     const int = makeSelectInteraction({ users: [makeUser(u1)], roles: [] });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
-    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+    expect(int.guild.members.list.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
-  test('role pick + members.fetch() rejection is swallowed — flow continues', async () => {
+  test('role pick + members.list() rejection is swallowed — flow continues', async () => {
     // Picker analog of the text-path degraded-mode test: a 429 on the
     // pre-warm must not crash the handler. Expansion falls back to
     // whatever the cache currently holds.
     const role = { id: 'roleB', name: 'team', mentionable: true, members: new Map([[u1, { user: makeUser(u1) }]]) };
     const int = makeSelectInteraction({ users: [], roles: [['roleB', role]] });
-    int.guild.members.fetch = jest.fn(async (arg) => {
-      if (isPrewarmCall([arg])) {
-        const err = new Error('rate limited'); err.code = 429; throw err;
-      }
-      return { user: makeUser(arg) };
+    int.guild.members.list = jest.fn(async () => {
+      const err = new Error('rate limited'); err.code = 429; throw err;
     });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     const logger = require('../src/logger');
     const warnCall = logger.warn.mock.calls.find(
-      ([msg]) => typeof msg === 'string' && msg.includes('members.fetch pre-warm failed'),
+      ([msg]) => typeof msg === 'string' && msg.includes('members pre-warm failed'),
     );
     expect(warnCall).toBeTruthy();
   });

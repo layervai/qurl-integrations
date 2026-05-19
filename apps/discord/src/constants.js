@@ -67,13 +67,6 @@ const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
   QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
-  // Bound for `guild.members.fetch()` pre-warm before @everyone / role
-  // expansion. discord.js *rejects* on timeout (not "returns partial"),
-  // but chunks update `guild.members.cache` as they arrive — so the
-  // pre-warm helper's catch lands partial state in the cache before the
-  // rejection fires, and the parser proceeds against whatever arrived.
-  // Degraded expansion beats a stuck slash command.
-  MEMBER_PREFETCH: 8000,
 };
 
 // Limits
@@ -95,6 +88,23 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // Cap on concurrent link-status monitors. Each monitor fires setInterval
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
 const MAX_CONCURRENT_MONITORS = 50;
+
+// Discord's `GET /guilds/{id}/members` page cap (and the maximum value
+// accepted by the `limit` query param).
+const DISCORD_MEMBERS_PAGE_SIZE = 1000;
+// Safety bound on the @everyone prewarm pagination loop. Exceeding
+// Discord's per-guild ceiling (~1M) means an upstream bug is returning
+// steady-state full pages without advancing the `after` cursor.
+const PREWARM_MAX_PAGES = 1000;
+
+// Fraction of `effectiveGuildMemberCount` the cache must reach for
+// `/unlinked` to consider its member set complete. Below this we
+// surface a degraded-API message instead of reporting "all linked" —
+// mid-pagination failures (e.g. 429 on page 6 of 12) otherwise leave
+// a non-empty but incomplete cache that would silent-false-positive.
+// 0.9 absorbs `approximateMemberCount` drift in either direction
+// without letting a substantive shortfall through.
+const UNLINKED_CACHE_COMPLETENESS_THRESHOLD = 0.9;
 
 // GitHub event actions we care about
 const GITHUB_ACTIONS = {
@@ -458,6 +468,9 @@ module.exports = {
   LIMITS,
   MAX_FILE_SIZE,
   MAX_CONCURRENT_MONITORS,
+  DISCORD_MEMBERS_PAGE_SIZE,
+  PREWARM_MAX_PAGES,
+  UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
