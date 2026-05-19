@@ -277,10 +277,8 @@ function makeInteraction({
         const err = new Error('Unknown Member'); err.code = 10007; throw err;
       }),
       // Prewarm path uses REST `list({ limit, after })`. Default mock
-      // returns an empty Map, which makes the prewarm pagination loop
-      // exit on the first iteration (batch.size === 0 → break). Tests
-      // that need specific list behavior reassign `members.list`
-      // explicitly.
+      // returns an empty Map so the pagination loop no-ops; tests that
+      // need specific list behavior reassign `members.list` explicitly.
       list: jest.fn(async () => new Map()),
     },
     roles: { cache: new Map() },

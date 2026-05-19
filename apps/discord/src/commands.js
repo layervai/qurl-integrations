@@ -256,6 +256,25 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
 const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
 
+// Discord's `GET /guilds/{id}/members` page cap (and the maximum value
+// accepted by the `limit` query param).
+const DISCORD_MEMBERS_PAGE_SIZE = 1000;
+// Safety bound on the prewarm pagination loop. Exceeding Discord's
+// per-guild member ceiling (~1M) means an upstream bug is returning
+// steady-state full pages without advancing the `after` cursor; bail
+// out and warn rather than spin.
+const PREWARM_MAX_PAGES = 1000;
+
+// discord.js `Guild._patch` only sets `memberCount` from the gateway
+// GUILD_CREATE payload. The REST `GET /guilds/:id?with_counts=true`
+// path populates `approximateMemberCount` instead. HTTP-only worker
+// mode never sees GUILD_CREATE, so `memberCount` stays undefined —
+// without this fallback every @everyone render and prewarm gate hits
+// the wrong branch in that tier.
+function effectiveGuildMemberCount(guild) {
+  return guild?.memberCount ?? guild?.approximateMemberCount;
+}
+
 // Helper for the two pre-warm sites. Returns a Promise so the caller
 // can await before reading `guild.members.cache`. Swallows errors —
 // degraded expansion (parser sees a partial cache) is the correct
@@ -285,33 +304,30 @@ async function prewarmGuildMembersCache(guild, logCtx) {
   // a future caller that does `.then(...)`.
   if (!guild || !guild.members || typeof guild.members.list !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
-  if (cacheSize >= (guild.memberCount ?? guild.approximateMemberCount ?? Infinity)) return;
+  if (cacheSize >= (effectiveGuildMemberCount(guild) ?? Infinity)) return;
   const existing = prewarmInFlight.get(guild.id);
   if (existing) return existing;
   const inFlight = (async () => {
     try {
-      // REST-based pagination via GET /guilds/{id}/members. The previous
-      // `guild.members.fetch()` (no args) sent REQUEST_GUILD_MEMBERS over
-      // the gateway WebSocket via `shard.send` — http-only worker mode
-      // (no gateway shard) crashes on that path. `list` is REST and
-      // works in both tiers.
-      //
-      // @everyone means EVERYONE: paginate until the API returns a
-      // partial page (Discord's hard page cap is 1000). `after` cursor
-      // uses the highest user-id snowflake from the previous page.
-      // discord.js handles 429 backoff automatically inside `list` →
-      // `client.rest.get`, so we don't sleep here. Safety cap at 1000
-      // pages (~1M members) is paranoia against an upstream bug
-      // returning steady-state full pages without advancing.
+      // REST `GET /guilds/{id}/members` rather than `guild.members.fetch()`
+      // (no args): the latter sends REQUEST_GUILD_MEMBERS over the gateway
+      // WebSocket via `shard.send`, which crashes in http-only worker mode
+      // (no gateway shard). discord.js handles 429 backoff inside `list`
+      // so we don't sleep here.
       let after;
-      for (let page = 0; page < 1000; page++) {
-        const batch = await guild.members.list({ limit: 1000, after });
-        if (batch.size === 0) break;
-        if (batch.size < 1000) break;
-        // lastKey() is the highest snowflake in the Collection (it's
-        // insertion-ordered against the API response, which is sorted
-        // ascending by user_id). Pass it as the next page's `after`.
+      let page;
+      for (page = 0; page < PREWARM_MAX_PAGES; page++) {
+        const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after });
+        if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
+        // Collection is insertion-ordered against the API response, which
+        // Discord sorts ascending by user_id — lastKey() is the right
+        // `after` cursor for the next page.
         after = batch.lastKey();
+      }
+      if (page === PREWARM_MAX_PAGES) {
+        logger.warn('members pre-warm hit safety cap; @everyone/role expansion may underresolve', {
+          ...logCtx, guild_id: guild.id, pages: page,
+        });
       }
     } catch (err) {
       logger.warn('members pre-warm failed; @everyone/role expansion may underresolve', {
@@ -4033,16 +4049,7 @@ function formatPersonalMessagePreview(message) {
 const everyoneCountMemo = new WeakMap();
 function computeEveryoneDisplayCount(guild) {
   const cache = guild?.members?.cache;
-  // discord.js Guild._patch only sets `memberCount` from the gateway
-  // GUILD_CREATE payload's `member_count` field. The REST
-  // `GET /guilds/:id?with_counts=true` returns `approximate_member_count`
-  // instead, which discord.js stores under a different property
-  // (`approximateMemberCount`). HTTP-only worker mode never sees a
-  // GUILD_CREATE, so `memberCount` stays undefined despite the
-  // event-consumer pre-fetch succeeding. Without this fallback every
-  // @everyone button render in http-tier hits the `displayCount-null`
-  // disable branch (CloudWatch warn-log evidence in sandbox).
-  const memberCount = guild?.memberCount ?? guild?.approximateMemberCount;
+  const memberCount = effectiveGuildMemberCount(guild);
   if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
     const fingerprint = `${cache.size}:${memberCount}`;
     const cached = everyoneCountMemo.get(guild);
