@@ -264,4 +264,48 @@ describe('INSTANCE_IP derivation', () => {
       },
     );
   });
+
+  it('skips link-local 169.254.0.0/16 addresses on eth0 (Fargate platform 1.4+)', () => {
+    // Pillar 3 push-handoff regression pin: under Fargate platform
+    // 1.4+, eth0 has 169.254.172.2 (the task metadata endpoint) bound
+    // alongside the real ENI IP, with the link-local listed first.
+    // `addr.internal` is false for link-local (node only sets that
+    // for loopback), so the prior naive `!internal && family==IPv4`
+    // filter picked 169.254.172.2 and the heartbeat row stored an
+    // unroutable address. Pin the post-fix behavior so a future edit
+    // can't quietly re-introduce the bug.
+    withFreshConfig(
+      {
+        env: {},
+        networkInterfaces: {
+          eth0: [
+            { family: 'IPv4', address: '169.254.172.2', internal: false },
+            { family: 'IPv4', address: '172.31.44.139', internal: false },
+          ],
+        },
+      },
+      (config) => {
+        expect(config.INSTANCE_IP).toBe('172.31.44.139');
+      },
+    );
+  });
+
+  it('falls through to non-eth0 when eth0 has only link-local IPv4', () => {
+    // Defense in depth: if a future Fargate platform ships an even
+    // weirder eth0 (only link-local, real IP on a different name),
+    // the second-pass interface scan must also reject link-local
+    // before reaching the real address elsewhere.
+    withFreshConfig(
+      {
+        env: {},
+        networkInterfaces: {
+          eth0: [{ family: 'IPv4', address: '169.254.172.2', internal: false }],
+          eth1: [{ family: 'IPv4', address: '10.0.5.7', internal: false }],
+        },
+      },
+      (config) => {
+        expect(config.INSTANCE_IP).toBe('10.0.5.7');
+      },
+    );
+  });
 });

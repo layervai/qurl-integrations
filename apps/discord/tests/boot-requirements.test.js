@@ -564,6 +564,18 @@ describe('invalidHotStandbyValues', () => {
     expect(problems[0]).toMatch(/must be a valid IPv4/);
   });
 
+  it('flags link-local INSTANCE_IP (paste-error from ECS metadata endpoint URL)', () => {
+    // Mirrors deriveInstanceIp's link-local filter — without this,
+    // an operator pasting `169.254.172.2` (the ECS task metadata
+    // endpoint) into INSTANCE_IP would slip past the shape check
+    // and re-introduce the Pillar 3 push-handoff bug through the
+    // env override path.
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '169.254.172.2' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/link-local/);
+    expect(problems[0]).toContain("'169.254.172.2'");
+  });
+
   it('flags leading-zero IPv4 octets (octal-parse hazard under some resolvers)', () => {
     // `01.02.03.04` parses as octal under glibc's `inet_aton` and a
     // handful of resolvers — a typo'd "010.0.0.1" would resolve as

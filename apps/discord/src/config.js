@@ -50,7 +50,17 @@ function deriveInstanceId() {
 }
 
 function isIPv4(addr) {
-  return (addr.family === 'IPv4' || addr.family === 4) && !addr.internal;
+  // `!addr.internal` rejects loopback (127.0.0.0/8) but NOT link-local
+  // (169.254.0.0/16) — node's `internal` flag only flips for loopback
+  // interfaces. Under Fargate platform 1.4+, eth0 has 169.254.172.2
+  // (the task metadata endpoint) bound alongside the real ENI IP, and
+  // a naive eth0-first walk picks the link-local entry. Writing that
+  // to the peer-heartbeat row breaks push-handoff — the standby
+  // POSTs to a link-local address that isn't routable peer-to-peer.
+  // Filter explicitly so the real awsvpc-assigned private IP wins.
+  return (addr.family === 'IPv4' || addr.family === 4)
+    && !addr.internal
+    && !addr.address.startsWith('169.254.');
 }
 
 function deriveInstanceIp() {
@@ -58,7 +68,8 @@ function deriveInstanceIp() {
   if (envOverride) return envOverride;
   const ifaces = os.networkInterfaces();
   // First pass: eth0 (the awsvpc ENI's stable name) gets priority —
-  // under Fargate this always returns on the first candidate.
+  // under Fargate this returns the real ENI private IP once isIPv4
+  // has filtered out the link-local task-metadata address.
   for (const addr of ifaces.eth0 || []) {
     if (isIPv4(addr)) return addr.address;
   }

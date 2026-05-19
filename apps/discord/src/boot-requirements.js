@@ -296,6 +296,19 @@ function invalidHotStandbyValues(cfg) {
       'If you set INSTANCE_IP as an env override, unset it to fall back to the derivation from os.networkInterfaces().'
     );
   }
+  // Link-local (169.254.0.0/16) is well-formed IPv4 but not routable
+  // peer-to-peer. config.deriveInstanceIp filters it out of the
+  // os.networkInterfaces walk; the override path must reject it for
+  // the same reason. Common operator paste-error: copying the ECS
+  // task-metadata endpoint URL (169.254.170.2 / 169.254.172.2) out
+  // of AWS docs.
+  if (cfg.INSTANCE_IP && IPV4_RE.test(cfg.INSTANCE_IP) && cfg.INSTANCE_IP.startsWith('169.254.')) {
+    problems.push(
+      `INSTANCE_IP is link-local (got '${cfg.INSTANCE_IP}'). ` +
+      '169.254.0.0/16 is RFC 3927 link-local and not routable peer-to-peer; push-handoff would POST to an unreachable address. ' +
+      'Unset the env override so it falls back to the os.networkInterfaces() derivation, or set it to the task\'s awsvpc-assigned private IP.'
+    );
+  }
   return problems;
 }
 
