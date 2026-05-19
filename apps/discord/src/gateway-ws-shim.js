@@ -118,6 +118,14 @@ const MAX_IDENTIFY_ATTEMPTS = 1;
 // "Discord API unreachable" as a fast-fail rather than a hang.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 
+// The @discordjs/ws major.minor range whose WebSocketShard.onMessage
+// dispatch ordering (shard.emit(Ready) BEFORE shard.emit(Dispatch))
+// the Pillar 3 wsConnected mirror depends on. The version-contract
+// test asserts the installed range starts with this string — a
+// minor bump must re-verify the upstream dispatch handler before
+// updating this constant.
+const VERIFIED_DJS_WS_MAJOR_MINOR = '1.2';
+
 function createGatewayWsShim({
   token,
   intents,
@@ -331,6 +339,8 @@ function createGatewayWsShim({
       // it would re-call connect() on a shard whose status is
       // already Ready, throwing "Tried to connect a shard that
       // wasn't idle" upstream as an unhandled rejection.
+      //
+      // Version contract: see VERIFIED_DJS_WS_MAJOR_MINOR above.
       // `stopped` guard mirrors the Dispatch listener: drops late
       // shard events between a failed-start catch and shim.stop().
       manager.on(WebSocketShardEvents.Ready, () => {
@@ -480,9 +490,8 @@ function createGatewayWsShim({
     // with `connect()` + `isConnected()`. @discordjs/ws's
     // WebSocketManager exposes connect() but NOT isConnected() —
     // it has only async fetchStatus(). So the shim itself is the
-    // contract-conforming handle: callers pass `gatewayShim` (not
-    // `gatewayShim.getManager()`) into createGatewayLeader /
-    // createConnectionWatchdog.
+    // contract-conforming handle: callers pass `gatewayShim`
+    // directly into createGatewayLeader / createConnectionWatchdog.
     //
     // `connect()` delegates straight through. `isConnected()`
     // returns a sync mirror flag tracked via shard events
@@ -519,12 +528,12 @@ function createGatewayWsShim({
       return manager !== null;
     },
 
-    // Null until start() constructs the WebSocketManager. Kept for
-    // test introspection only — production callers should use the
-    // shim's connect()/isConnected()/isStarted() above. Exposed as
-    // a getter rather than a stored reference so callers always see
-    // the current value (the field is reassigned inside start()/stop()).
-    getManager() {
+    // Null until start() constructs the WebSocketManager. Name
+    // prefix marks the boundary explicitly: production code uses
+    // connect()/isConnected()/isStarted() above; this exists for
+    // test introspection so suites can interrogate the underlying
+    // manager (e.g. assert listener counts, construction args).
+    _getManagerForTest() {
       return manager;
     },
 
@@ -539,4 +548,5 @@ module.exports = {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
+  VERIFIED_DJS_WS_MAJOR_MINOR,
 };

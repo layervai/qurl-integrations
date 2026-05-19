@@ -22,6 +22,7 @@ const {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
+  VERIFIED_DJS_WS_MAJOR_MINOR,
 } = require('../src/gateway-ws-shim');
 const { WebSocketShardEvents } = require('@discordjs/ws');
 
@@ -233,27 +234,26 @@ describe('start — wiring + connect', () => {
   });
 });
 
-describe('getManager — Pillar 3 leader handle', () => {
+describe('_getManagerForTest — test introspection seam', () => {
   it('returns null before start()', () => {
     const { shim } = makeShim();
-    expect(shim.getManager()).toBeNull();
+    expect(shim._getManagerForTest()).toBeNull();
   });
 
   it('returns the WebSocketManager instance after start()', async () => {
     const { shim, managerInstances } = makeShim();
     await shim.start();
-    expect(shim.getManager()).toBe(managerInstances[0]);
+    expect(shim._getManagerForTest()).toBe(managerInstances[0]);
   });
 
   it('returns the manager after start({ connect: false }) too', async () => {
-    // Critical for the hot-standby wiring path: the leader needs the
-    // manager handle BEFORE driving connect(). If getManager() only
-    // returned non-null after a successful connect, the wiring chain
-    // would deadlock (leader needs manager → manager needs leader to
-    // call connect → loop).
+    // Critical for the hot-standby wiring path: the production
+    // boot guard (isStarted()) and other test assertions depend on
+    // the manager being constructed by the time start() resolves,
+    // regardless of whether connect was driven.
     const { shim, managerInstances } = makeShim();
     await shim.start({ connect: false });
-    expect(shim.getManager()).toBe(managerInstances[0]);
+    expect(shim._getManagerForTest()).toBe(managerInstances[0]);
   });
 });
 
@@ -878,5 +878,26 @@ describe('constants are pinned', () => {
     // in this constant changes the boot-fail latency observably and
     // should require a deliberate test update.
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it('VERIFIED_DJS_WS_MAJOR_MINOR matches the installed @discordjs/ws major.minor', () => {
+    // The wsConnected mirror depends on @discordjs/ws's
+    // WebSocketShard.onMessage emitting Ready/Resumed BEFORE the
+    // Dispatch fan-out — verified against the version captured by
+    // VERIFIED_DJS_WS_MAJOR_MINOR. A node_modules bump past that
+    // range fails this test, forcing whoever bumps the dep to
+    // re-read the upstream dispatch handler before merging.
+    // @discordjs/ws's exports field blocks require('.../package.json'),
+    // so locate the install via require.resolve (works regardless of
+    // whether the dep landed in apps/discord/node_modules or got
+    // hoisted to a parent node_modules).
+    const path = require('node:path');
+    const fs = require('node:fs');
+    const wsEntry = require.resolve('@discordjs/ws');
+    const wsRoot = wsEntry.slice(0, wsEntry.indexOf(`${path.sep}@discordjs${path.sep}ws${path.sep}`))
+      + `${path.sep}@discordjs${path.sep}ws`;
+    const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
+    const installedMajorMinor = djsWsVersion.split('.').slice(0, 2).join('.');
+    expect(installedMajorMinor).toBe(VERIFIED_DJS_WS_MAJOR_MINOR);
   });
 });
