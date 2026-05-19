@@ -117,10 +117,44 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 // header cap, and reveals no PII on transit. Slack guarantees a unique
 // trigger_id per click; matching keys come from Slack's own retry path
 // (3s ack timeout exceeded), so collisions are exactly the dedup target.
-func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values url.Values, targetURL string) {
+func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values url.Values, target string) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
+	channelID := values.Get(fieldChannelID)
 	triggerID := values.Get(fieldTriggerID)
+
+	input := client.CreateInput{
+		IdempotencyKey: idempotencyKeyForCreate(teamID, triggerID),
+	}
+	// `$alias` form resolves to a resource id via the channel's
+	// alias_bindings map — same surface as /qurl get. Lets users mint
+	// against an already-bound resource without needing to know which
+	// verb resolves aliases. Raw URL form is unchanged.
+	isAliasForm := strings.HasPrefix(target, "$")
+	if isAliasForm {
+		alias := strings.TrimPrefix(target, "$")
+		if h.cfg.AdminStore == nil {
+			h.postResponse(log, responseURL, ":warning: Aliases require admin configuration. Run `/qurl create <url>` instead, or ask an admin to wire alias support.")
+			return
+		}
+		if channelID == "" {
+			h.postResponse(log, responseURL, ":warning: This command must be invoked from a channel.")
+			return
+		}
+		resourceID, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
+		if lookupErr != nil {
+			log.Warn("create: alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "alias", alias)
+			h.postResponse(log, responseURL, ":warning: Could not reach qURL. Please try again.")
+			return
+		}
+		if !found {
+			h.postResponse(log, responseURL, fmt.Sprintf(":warning: No resource has alias `$%s`.", alias))
+			return
+		}
+		input.ResourceID = resourceID
+	} else {
+		input.TargetURL = target
+	}
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
@@ -129,17 +163,18 @@ func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values ur
 		return
 	}
 
-	result, err := c.Create(ctx, client.CreateInput{
-		TargetURL:      targetURL,
-		IdempotencyKey: idempotencyKeyForCreate(teamID, triggerID),
-	})
+	result, err := c.Create(ctx, input)
 	if err != nil {
-		log.Error("failed to create qURL", "error", err, "target_url", targetURL)
+		log.Error("failed to create qURL", "error", err, "target", target)
 		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create qURL"))
 		return
 	}
 
-	h.postResponse(log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
+	if isAliasForm {
+		h.postResponse(log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Alias:* `%s`", result.QURLLink, target))
+		return
+	}
+	h.postResponse(log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, target))
 }
 
 // processList runs the asynchronous /qurl list work: page through the

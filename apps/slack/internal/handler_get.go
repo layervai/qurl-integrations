@@ -177,26 +177,27 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", errAdminStoreNotConfigured
 	}
 
-	// 2. Resolve alias → resource via the customer API (uses the
-	//    workspace's API key).
+	// 2. Resolve alias → resource_id via the channel-scoped alias
+	//    bindings (channel_policies.alias_bindings). The presence of
+	//    the binding in THIS channel is itself the authorization
+	//    signal — `/qurl setalias` is the admin act that authorizes
+	//    a resource for use in the channel. The orthogonal
+	//    `allowed_resource_ids` set (admin allow surface) is not wired
+	//    today; when it ships, an id-form `/qurl get r_…` path can
+	//    consult it independently.
+	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, args.teamID, args.channelID, alias)
+	if err != nil {
+		log.Warn("get: alias lookup failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "alias", alias)
+		return "", &userError{msg: serviceUnreachableMessage}
+	}
+	if !found {
+		return "", userErrorf("No resource has alias `$%s`.", alias)
+	}
+
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
 		log.Error("get: API key lookup failed", "error", err)
 		return "", &userError{msg: authErrorMessage(err)}
-	}
-	resource, err := c.GetResourceByAlias(ctx, alias)
-	if err != nil {
-		return "", mapAliasResolutionError(log, alias, err)
-	}
-
-	// 3. Policy + rate-limit checks via the DDB-direct AdminStore.
-	allowed, err := h.cfg.AdminStore.ResolvePolicy(ctx, args.teamID, args.channelID, resource.ResourceID)
-	if err != nil {
-		log.Warn("get: policy check failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "resource_id", resource.ResourceID)
-		return "", &userError{msg: commonGetMintFailedMessage}
-	}
-	if !allowed {
-		return "", userErrorf("Alias `$%s` is not allowed in this channel. Ask an admin to run `/qurl admin allow #channel $%s`.", alias, alias)
 	}
 
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
@@ -213,7 +214,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	//    dedupes to the same qURL.
 	idemKey := IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID)
 	out, err := c.Create(ctx, client.CreateInput{
-		ResourceID:     resource.ResourceID,
+		ResourceID:     resourceID,
 		Reason:         args.cmd.Reason(),
 		IdempotencyKey: idemKey,
 	})
@@ -224,7 +225,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// `:link: *qURL ready:* \n_alias_: …` — useless. Log loud and
 	// surface the generic message so the user retries.
 	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "resource_id", resource.ResourceID)
+		log.Error("get: mint returned empty qurl_link — server contract surprise", "resource_id", resourceID)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
@@ -253,32 +254,6 @@ func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, userID, me
 		return ":warning: Could not DM you the link. Please re-run the command without `dm:true` to receive it in-channel."
 	}
 	return ":incoming_envelope: Sent to your DM."
-}
-
-// mapAliasResolutionError converts an [*client.APIError] from the
-// alias-resolution call into a friendly user-facing message. Known
-// codes get specific text; everything else falls through to
-// [serviceUnreachableMessage]. Uses the caller-supplied request-
-// scoped logger so the failure log carries the same team/channel
-// attribution as the mint path (mapMintError threads `log` too).
-func mapAliasResolutionError(log *slog.Logger, alias string, err error) error {
-	var apiErr *client.APIError
-	if errors.As(err, &apiErr) {
-		switch {
-		case apiErr.StatusCode == http.StatusNotFound:
-			return userErrorf("No resource has alias `$%s`.", alias)
-		case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == "tunnel_disabled":
-			return &userError{msg: tunnelDisabledMessage}
-		case apiErr.StatusCode == http.StatusTooManyRequests:
-			// Mirror mapMintError's 429 handling — the customer API
-			// can rate-limit the resolution call independently of
-			// the mint call.
-			retry := time.Duration(apiErr.RetryAfter) * time.Second
-			return userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
-		}
-	}
-	log.Warn("get: alias resolution failed", "error", err, "alias", alias)
-	return &userError{msg: serviceUnreachableMessage}
 }
 
 // mapMintError converts an [*client.APIError] from the mint into a

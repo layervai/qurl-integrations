@@ -649,15 +649,15 @@ func redactSlashCommandText(text string) string {
 
 func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
-	targetURL := strings.TrimSpace(strings.TrimPrefix(text, "create "))
+	target := strings.TrimSpace(strings.TrimPrefix(text, "create "))
 
-	if targetURL == "" {
-		respondSlack(w, "Usage: `/qurl create <url>`")
+	if target == "" {
+		respondSlack(w, "Usage: `/qurl create <url-or-$alias>`")
 		return
 	}
 
 	h.runAsync(w, "create", values, func(ctx context.Context, log *slog.Logger) {
-		h.processCreate(ctx, log, values, targetURL)
+		h.processCreate(ctx, log, values, target)
 	})
 }
 
@@ -748,6 +748,7 @@ func (h *Handler) helpMessage() string {
 		"*Commands:*",
 		"• `/qurl setup` — Connect qURL to your Slack workspace (workspace admin only)",
 		"• `/qurl create <url>` — Create a qURL for the given URL",
+		"• `/qurl create $alias` — Mint a qURL against the resource bound to `$alias` in this channel",
 		"• `/qurl list` — Show your 5 most recent qURLs",
 		"• `/qurl get $alias` — Mint an access link for an alias-bound resource",
 	}
