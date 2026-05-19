@@ -4038,7 +4038,16 @@ function formatPersonalMessagePreview(message) {
 const everyoneCountMemo = new WeakMap();
 function computeEveryoneDisplayCount(guild) {
   const cache = guild?.members?.cache;
-  const memberCount = guild?.memberCount;
+  // discord.js Guild._patch only sets `memberCount` from the gateway
+  // GUILD_CREATE payload's `member_count` field. The REST
+  // `GET /guilds/:id?with_counts=true` returns `approximate_member_count`
+  // instead, which discord.js stores under a different property
+  // (`approximateMemberCount`). HTTP-only worker mode never sees a
+  // GUILD_CREATE, so `memberCount` stays undefined despite the
+  // event-consumer pre-fetch succeeding. Without this fallback every
+  // @everyone button render in http-tier hits the `displayCount-null`
+  // disable branch (CloudWatch warn-log evidence in sandbox).
+  const memberCount = guild?.memberCount ?? guild?.approximateMemberCount;
   if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
     const fingerprint = `${cache.size}:${memberCount}`;
     const cached = everyoneCountMemo.get(guild);
