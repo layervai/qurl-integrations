@@ -280,12 +280,6 @@ func contextBlock(text string) map[string]any {
 	}
 }
 
-// dividerBlock returns a divider. No payload — just a structural
-// separator between sections.
-func dividerBlock() map[string]any {
-	return map[string]any{"type": "divider"}
-}
-
 // plainTextObj returns a `plain_text` text object. Slack uses two
 // distinct text-object shapes (`plain_text` and `mrkdwn`); the modal
 // title/submit/close fields require `plain_text` specifically.
