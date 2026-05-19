@@ -81,7 +81,7 @@ function largeSendThreshold() {
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
 const { sendDM } = require('./discord');
-const { editDM } = require('./discord-rest');
+const { editDM, sendChannelMessage } = require('./discord-rest');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -1390,6 +1390,11 @@ async function executeSendPipeline(interaction, {
   selfDestructSeconds,
   personalMessage,
   sendNonce,
+  // 'picker' | 'voice' | 'everyone'. Drives the post-send channel
+  // notification (voice + everyone modes only). Optional — defaults
+  // to RECIPIENT_MODE_PICKER via normalizeRecipientMode for legacy
+  // callers and the picker happy path.
+  recipientMode,
 }) {
   // Shared cancel-edit for every entry gate. Fire-and-forget — the
   // throw is the load-bearing signal (test pins + logger.error in
@@ -1858,6 +1863,39 @@ async function executeSendPipeline(interaction, {
     ];
   }
   const response = await interaction.editReply(initialPayload);
+
+  // Non-ephemeral channel notification when sending to @everyone or the
+  // voice-channel population. Recipients on voice or scrolling on mobile
+  // miss the DM ping otherwise — this post is the only chat signal that
+  // a fan-out send happened. Picker-mode skips: recipient list is
+  // explicit and small, DM ping suffices. Routed via REST not
+  // `interaction.channel.send()` because http-only worker mode has an
+  // empty `client.channels.cache` (no GUILD_CREATE without login()), so
+  // the discord.js getter resolves to null and `.send()` would throw.
+  // Logged-and-continued on failure: a missing Send Messages permission
+  // in a customer server must NOT fail a send whose DMs already
+  // delivered. Fire-and-forget so the collector below arms in parallel
+  // with the REST flush.
+  const mode = normalizeRecipientMode(recipientMode);
+  if (delivered > 0 && (mode === RECIPIENT_MODE_EVERYONE || mode === RECIPIENT_MODE_VOICE)) {
+    // sanitizeDisplayName is load-bearing here, not in the DM embed:
+    // public-channel post is a wider blast radius than a DM, so a
+    // U+202E in the nickname would flip the announcement RTL for
+    // every viewer.
+    const safeName = sanitizeDisplayName(senderAlias);
+    const audience = mode === RECIPIENT_MODE_VOICE
+      ? 'everyone in this voice channel'
+      : 'everyone in this server';
+    const notifyMsg = `📩 **${safeName}** shared something with ${audience} via **qURL Bot** — check your DMs from qURL Bot.`;
+    sendChannelMessage(interaction.channelId, { content: notifyMsg })
+      .then((result) => {
+        if (!result.ok) {
+          logger.warn('Failed to send channel notification', {
+            sendId, channelId: interaction.channelId, status: result.status, error: result.error,
+          });
+        }
+      });
+  }
 
   logger.info('qurl send pipeline completed', {
     sender: interaction.user.id, sendId, resourceType, delivered, failed, expiresIn,
@@ -6635,6 +6673,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     selfDestructSeconds: payload.selfDestructSeconds,
     personalMessage: payload.personalMessage,
     sendNonce: payload.sendNonce,
+    recipientMode: payload.recipientMode,
   });
 }
 
