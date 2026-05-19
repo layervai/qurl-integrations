@@ -201,6 +201,36 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	}
 }
 
+// TestHandleGet_URLForm_AdminStoreNil fences the symmetric URL-form
+// path on a no-DDB sandbox: `/qurl get <url>` MUST proceed to the
+// mint when AdminStore is nil — the AdminStore gate is alias-form
+// only, and the rate-limit gate is also alias-store-scoped. This
+// locks the gate asymmetry inside [Handler.getWork] (alias-form
+// refuses, URL-form proceeds) so a refactor that hoisted the
+// AdminStore-nil check above the form split would be caught here.
+func TestHandleGet_URLForm_AdminStoreNil(t *testing.T) {
+	ts := newAdminTestServers(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/url-form", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AdminStore = nil
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get https://example.com", testAdminTeamID, testAdminUserID)
+	if mintHits.Load() != 1 {
+		t.Errorf("mint hits = %d, want 1 (URL-form must reach mint even with nil AdminStore)", mintHits.Load())
+	}
+	if !strings.Contains(async, "https://qurl.link/url-form") {
+		t.Errorf("async reply missing qURL link: %q", async)
+	}
+	if strings.Contains(async, "admin features are not yet configured") {
+		t.Errorf("async reply leaked the alias-form not-configured copy on a URL-form invocation: %q", async)
+	}
+}
+
 // TestHandleGet_DMVariantRefusedWhenPostDMNil fences the privacy-
 // preserving refusal: dm:true asks for the link in a DM (so it does
 // NOT leak into channel history). When PostDM is not wired we

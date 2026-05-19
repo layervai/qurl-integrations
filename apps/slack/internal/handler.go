@@ -759,9 +759,9 @@ func (h *Handler) helpMessage() string {
 		// are admin verbs — the internal "alias" terminology is fine
 		// here because the audience for these lines is admins.
 		lines = append(lines,
-			"• `/qurl setalias $<name> <url-or-resource-id>` — Configure a name in this channel (admin only)",
-			"• `/qurl unsetalias $<name>` — Remove a configured name in this channel (admin only)",
-			"• `/qurl aliases` — List the names configured in this channel (admin only)",
+			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
+			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
+			"• `/qurl aliases` — List the aliases configured in this channel (admin only)",
 		)
 	}
 	lines = append(lines,

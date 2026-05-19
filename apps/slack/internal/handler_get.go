@@ -209,6 +209,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		// The presence of the binding in THIS channel is itself the
 		// authorization signal — `/qurl setalias` is the admin act that
 		// authorizes a resource for use in the channel.
+		//
+		// NOTE: setalias is the only authorization signal today. If the
+		// orthogonal `admin allow` / `allowed_resource_ids` surface gets
+		// re-wired (currently dropped from this path), the channel-policy
+		// gate goes here, between the binding lookup and `input.ResourceID =`.
 		resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, args.teamID, args.channelID, alias)
 		if err != nil {
 			log.Warn("get: alias lookup failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "alias", alias)
@@ -219,6 +224,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		}
 		input.ResourceID = resourceID
 	} else {
+		// URL-form has no per-channel authorization gate — anyone in the
+		// workspace who can invoke `/qurl get` can mint against any URL on
+		// the workspace's API key (qurl-service's per-key quota is the
+		// only enforcer). Same posture the deprecated `/qurl create` had;
+		// the alias path is the surface that adds binding-scoped auth.
 		input.TargetURL = target
 	}
 
@@ -248,8 +258,10 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 	// Defensive: a 200 with an empty qurl_link is a server contract
 	// surprise — log loud and surface the generic retry message.
+	// resource_id is the alias-form correlation handle (which binding
+	// the user typed); alias_form distinguishes URL-form fires.
 	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm)
+		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm, "resource_id", input.ResourceID)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 

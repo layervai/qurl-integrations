@@ -89,7 +89,7 @@ func TestHandleAliases_ChannelWithNoAliasBindingsShowsNone(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No names are configured for this channel") {
+	if !strings.Contains(async, "No aliases are configured for this channel") {
 		t.Errorf("async reply missing empty-state hint: %q", async)
 	}
 }
@@ -103,7 +103,7 @@ func TestHandleAliases_NoEntries(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No names are configured for this channel") {
+	if !strings.Contains(async, "No aliases are configured for this channel") {
 		t.Errorf("async reply missing empty-state hint: %q", async)
 	}
 }
