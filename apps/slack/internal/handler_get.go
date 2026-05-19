@@ -365,7 +365,7 @@ func (h *Handler) resolveAliasForGet(ctx context.Context, log *slog.Logger, team
 
 // authorizeResourceIDForGet enforces the channel-scoped allow on a
 // `$r_<id>` token. Workspace admins bypass the allow-set so the
-// list-and-get round-trip works in the admin's unfiltered list view;
+// list-and-get round-trip works against the unfiltered list view;
 // non-admins must have the ID in `AllowedResourceIDsForChannel` (the
 // union of `alias_bindings.values()` and `allowed_resource_ids`).
 //
