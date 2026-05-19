@@ -66,15 +66,13 @@ func TestHandleGet_HappyPath(t *testing.T) {
 	if !strings.Contains(async, "https://qurl.link/abc") {
 		t.Errorf("async reply missing link: %q", async)
 	}
-	if !strings.Contains(async, "`$prod-db`") {
-		t.Errorf("async reply missing alias: %q", async)
-	}
 }
 
 // TestHandleGet_AliasNotFound fences the no-binding path: when the
 // channel's alias_bindings map has no entry for the requested alias
-// (no row, missing map, or missing key), getWork surfaces "No
-// resource has alias `$X`" and never reaches the mint.
+// (no row, missing map, or missing key), getWork surfaces the
+// "not configured for this channel" copy that points the user at
+// their Slack admin, and never reaches the mint.
 func TestHandleGet_AliasNotFound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -87,8 +85,11 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $missing", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No resource has alias `$missing`") {
-		t.Errorf("async reply missing not-found message: %q", async)
+	if !strings.Contains(async, "`$missing` is not configured for this channel") {
+		t.Errorf("async reply missing not-configured message: %q", async)
+	}
+	if !strings.Contains(async, "contact your Slack admin") {
+		t.Errorf("async reply missing admin-contact fallback: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite alias-not-found (hits = %d)", mintHits.Load())
@@ -171,11 +172,11 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 }
 
 // TestHandleGet_AdminStoreNil fences the fail-closed posture when
-// AdminStore is nil (sandbox / no-DDB deployment): the channel-scoped
-// alias lookup can't run, so the user sees a friendly "Admin features
-// are not configured" message and the customer API is never reached
-// for the mint. The short-circuit happens before the DDB lookup so we
-// don't depend on DDB state to render the not-configured signal.
+// AdminStore is nil (sandbox / no-DDB deployment) and the user
+// requested the alias form: the channel-scoped lookup can't run, so
+// the user sees the "qURL admin features are not yet configured"
+// message that routes them to a workspace admin. The customer API is
+// never reached for the mint.
 func TestHandleGet_AdminStoreNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	var mintHits atomic.Int32
@@ -189,8 +190,11 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Admin features are not configured") {
+	if !strings.Contains(async, "qURL admin features are not yet configured") {
 		t.Errorf("async reply missing not-configured message: %q", async)
+	}
+	if !strings.Contains(async, "contact your Slack admin") {
+		t.Errorf("async reply missing admin-contact fallback: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite nil AdminStore (hits = %d)", mintHits.Load())

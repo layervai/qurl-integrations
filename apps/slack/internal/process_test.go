@@ -52,17 +52,31 @@ func newResponseURLRecorder(t *testing.T) *responseURLRecorder {
 	return rec
 }
 
-// createCommandBody builds a /slack/commands form payload for a
-// /qurl create call. response_url is parameterized so a test can wire
-// it at the recorder it controls.
-func createCommandBody(targetURL, teamID, triggerID, responseURL string) string {
+// getURLCommandBody builds a /slack/commands form payload for a
+// `/qurl get <url>` call. response_url is parameterized so a test
+// can wire it at the recorder it controls. user_id is set so the
+// async worker's IdempotencyKey derivation has the same input the
+// production handler sees from Slack.
+// getURLCommandTestChannelID / getURLCommandTestUserID are the
+// channel / user identifiers stamped on every test slash-command
+// body. Lifted so test assertions that derive the expected
+// IdempotencyKey from `(team, channel, user, trigger)` reference the
+// same constant the body carries — a typo on one side would otherwise
+// fail the test for the wrong reason.
+const (
+	getURLCommandTestChannelID = "C123"
+	getURLCommandTestUserID    = "U_test"
+)
+
+func getURLCommandBody(targetURL, teamID, triggerID, responseURL string) string {
 	return url.Values{
-		"command":      {"/qurl"},
-		"text":         {"create " + targetURL},
-		"team_id":      {teamID},
-		"channel_id":   {"C123"},
-		"trigger_id":   {triggerID},
-		"response_url": {responseURL},
+		fieldCommand:     {testSlashCmd},
+		fieldText:        {"get " + targetURL},
+		fieldTeamID:      {teamID},
+		fieldChannelID:   {getURLCommandTestChannelID},
+		fieldUserID:      {getURLCommandTestUserID},
+		fieldTriggerID:   {triggerID},
+		fieldResponseURL: {responseURL},
 	}.Encode()
 }
 
@@ -103,7 +117,7 @@ func TestHandle_AckIsFastUnderSlowAPI(t *testing.T) {
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, slowSrv)
 
-	body := createCommandBody("https://example.com", "T123", "trig-fast", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-fast", rec.URL)
 
 	start := time.Now()
 	w := httptest.NewRecorder()
@@ -139,7 +153,7 @@ func TestHandle_AsyncCreatePostsResultToResponseURL(t *testing.T) {
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
 
-	body := createCommandBody("https://example.com", "T123", "trig-create", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-create", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -181,7 +195,7 @@ func TestHandle_AsyncCreateSurfacesIdempotencyKey(t *testing.T) {
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
 
-	body := createCommandBody("https://example.com", "T999", "trig-dedup", rec.URL)
+	body := getURLCommandBody("https://example.com", "T999", "trig-dedup", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 	h.Wait()
@@ -192,7 +206,7 @@ func TestHandle_AsyncCreateSurfacesIdempotencyKey(t *testing.T) {
 	if got == "" {
 		t.Fatal("upstream saw no Idempotency-Key header")
 	}
-	want := idempotencyKeyForCreate("T999", "trig-dedup")
+	want := IdempotencyKey("T999", getURLCommandTestChannelID, getURLCommandTestUserID, "trig-dedup")
 	if got != want {
 		t.Errorf("Idempotency-Key = %q, want %q", got, want)
 	}
@@ -235,7 +249,7 @@ func TestHandle_ConcurrentCreateSharesIdempotencyKey(t *testing.T) {
 	h.validateResponseURLFn = url.Parse
 	t.Cleanup(h.Wait)
 
-	body := createCommandBody("https://example.com", "T-concurrent", "trig-shared", rec.URL)
+	body := getURLCommandBody("https://example.com", "T-concurrent", "trig-shared", rec.URL)
 	// Sign once on the test goroutine. Doing it inside each spawned
 	// goroutine would mean 100 redundant HMAC computations and would
 	// expose us to t.Helper / t.Fatalf inside non-test goroutines —
@@ -266,18 +280,20 @@ func TestHandle_ConcurrentCreateSharesIdempotencyKey(t *testing.T) {
 	}
 }
 
-// TestHandle_AsyncCreateSanitizesAPIError fences the sanitization
-// contract: a qURL API error reaches the user as the safe Title +
-// RequestID, and the unsafe Detail (which can leak server internals)
-// stays out of the user-facing payload.
-func TestHandle_AsyncCreateSanitizesAPIError(t *testing.T) {
+// TestHandle_AsyncGetSurfacesGenericMessageOn500 fences the no-leak
+// contract on the /qurl get path: a 500 from upstream carries a
+// representative Detail string that MUST NOT reach the user. The
+// mapMintError 5xx branch surfaces the generic service-unreachable
+// copy instead.
+func TestHandle_AsyncGetSurfacesGenericMessageOn500(t *testing.T) {
+	const titleText = "Internal Server Error"
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		// `detail` carries a representative server-side internal — a
 		// regression that surfaced this string to users would leak
 		// implementation details (here: a synthetic stack hint).
-		_, _ = fmt.Fprint(w, `{"error":{"type":"about:blank","title":"Internal Server Error","status":500,"detail":"db: connection to internal-host:5432 refused (stack: ...)","code":"SECRET_LEAK_HOOK"},"meta":{"request_id":"req_abc123"}}`)
+		_, _ = fmt.Fprintf(w, `{"error":{"type":"about:blank","title":%q,"status":500,"detail":"db: connection to internal-host:5432 refused (stack: ...)","code":"SECRET_LEAK_HOOK"},"meta":{"request_id":"req_abc123"}}`, titleText)
 	}))
 	t.Cleanup(qurlSrv.Close)
 
@@ -298,7 +314,7 @@ func TestHandle_AsyncCreateSanitizesAPIError(t *testing.T) {
 	h.validateResponseURLFn = url.Parse
 	t.Cleanup(h.Wait)
 
-	body := createCommandBody("https://example.com", "T123", "trig-err", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-err", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 	h.Wait()
@@ -309,17 +325,15 @@ func TestHandle_AsyncCreateSanitizesAPIError(t *testing.T) {
 	}
 	text := posts[0]["text"]
 
-	// Detail must NOT appear — it carries server internals.
-	if strings.Contains(text, "internal-host") || strings.Contains(text, "stack") {
-		t.Errorf("sanitization leak: response contains Detail substring: %q", text)
+	// Detail / Title / RequestID must NOT appear — the get path's
+	// 5xx mapping collapses to the generic copy below.
+	for _, leak := range []string{"internal-host", "stack", titleText, "req_abc123"} {
+		if strings.Contains(text, leak) {
+			t.Errorf("leak on 5xx: response contains %q: %q", leak, text)
+		}
 	}
-	// Title is safe and informative.
-	if !strings.Contains(text, "Internal Server Error") {
-		t.Errorf("expected Title in user-facing text, got: %q", text)
-	}
-	// RequestID is the operator-correlation handle.
-	if !strings.Contains(text, "req_abc123") {
-		t.Errorf("expected RequestID in user-facing text, got: %q", text)
+	if !strings.Contains(text, "Could not reach qURL") {
+		t.Errorf("expected service-unreachable copy on 5xx, got: %q", text)
 	}
 }
 
@@ -359,7 +373,7 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	t.Cleanup(h.Wait)
 
 	send := func(triggerID string) string {
-		body := createCommandBody("https://example.com", "T123", triggerID, rec.URL)
+		body := getURLCommandBody("https://example.com", "T123", triggerID, rec.URL)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 		var ack map[string]string
@@ -467,7 +481,7 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
 
-	body := createCommandBody("https://example.com", "T123", "trig-panic", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-panic", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -645,30 +659,6 @@ func TestSanitizeAPIError(t *testing.T) {
 	}
 }
 
-// TestIdempotencyKeyForCreate fences the key construction: deterministic
-// for a given (team_id, trigger_id), distinct across teams or triggers.
-func TestIdempotencyKeyForCreate(t *testing.T) {
-	cases := []struct {
-		teamA, trigA, teamB, trigB string
-		wantEqual                  bool
-	}{
-		{"T1", "trig1", "T1", "trig1", true},
-		{"T1", "trig1", "T2", "trig1", false},
-		{"T1", "trig1", "T1", "trig2", false},
-		{"T1", "trig1", "T1trig1", "", false}, // ensure colon framing isn't ambiguous
-	}
-	for i, tc := range cases {
-		a := idempotencyKeyForCreate(tc.teamA, tc.trigA)
-		b := idempotencyKeyForCreate(tc.teamB, tc.trigB)
-		if (a == b) != tc.wantEqual {
-			t.Errorf("case %d: equal=%v, want %v (a=%q b=%q)", i, a == b, tc.wantEqual, a, b)
-		}
-		if len(a) != 64 {
-			t.Errorf("case %d: key length = %d, want 64 (sha256 hex)", i, len(a))
-		}
-	}
-}
-
 // TestHandle_AsyncWorkObservesBaseContextCancellation fences the
 // shutdown-cancellation contract: when h.baseCtx is canceled, an
 // in-flight worker exits promptly rather than blocking shutdown.
@@ -694,7 +684,7 @@ func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
 
-	body := createCommandBody("https://example.com", "T123", "trig-cancel", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-cancel", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -745,7 +735,7 @@ func TestHandle_OrphanAckPreventionOnBaseContextCancel(t *testing.T) {
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
 
-	body := createCommandBody("https://example.com", "T123", "trig-orphan", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-orphan", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -759,8 +749,8 @@ func TestHandle_OrphanAckPreventionOnBaseContextCancel(t *testing.T) {
 	if len(posts) != 1 {
 		t.Fatalf("response_url POST count = %d, want 1 (failure follow-up must reach Slack on shutdown)", len(posts))
 	}
-	if !strings.Contains(posts[0]["text"], "Failed to create qURL") {
-		t.Errorf("expected sanitized failure text in follow-up, got: %q", posts[0]["text"])
+	if !strings.Contains(posts[0]["text"], "Could not reach qURL") {
+		t.Errorf("expected service-unreachable failure text in follow-up, got: %q", posts[0]["text"])
 	}
 }
 
@@ -786,7 +776,7 @@ func TestHandler_WaitTimeout(t *testing.T) {
 	// blocks on the parked worker and t.Cleanup deadlocks.
 	t.Cleanup(func() { close(block) })
 
-	body := createCommandBody("https://example.com", "T123", "trig-waittimeout", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-waittimeout", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -809,7 +799,7 @@ func TestHandler_WaitTimeout_DrainsOnSuccess(t *testing.T) {
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
 
-	body := createCommandBody("https://example.com", "T123", "trig-waittimeout-ok", rec.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-waittimeout-ok", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -849,7 +839,7 @@ func TestHandle_PostResponseRefusesRedirectsEndToEnd(t *testing.T) {
 	t.Cleanup(responseSrv.Close)
 
 	h := newTestHandler(t, qurlSrv)
-	body := createCommandBody("https://example.com", "T123", "trig-redir-e2e", responseSrv.URL)
+	body := getURLCommandBody("https://example.com", "T123", "trig-redir-e2e", responseSrv.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 	h.Wait()

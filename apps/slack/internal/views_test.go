@@ -61,18 +61,18 @@ func TestHelpResponse_MentionsSubcommands(t *testing.T) {
 	}
 	body := string(raw)
 	// Every Subcommand + AdminAction from parser.go must surface.
+	// `admin allow` / `admin disallow` are parser-known but not wired
+	// in the dispatcher today; the help body omits them so users don't
+	// see verbs they can't run.
 	for _, want := range []string{
 		"qurl get",
 		"qurl setalias",
 		"qurl unsetalias",
 		"qurl aliases",
 		"qurl admin claim",
-		"qurl admin allow",
-		"qurl admin disallow",
 		"qurl admin policies",
 		"qurl admin status",
 		"qurl admin revoke",
-		"qurl create",
 		"qurl list",
 		"qurl help",
 	} {

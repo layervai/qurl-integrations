@@ -35,13 +35,6 @@ import (
 // The qURL API server requires `Idempotency-Key` to be at least 32
 // chars (verified at qurl-service/internal/api/handlers/apikey_handlers.go:151).
 // 64 hex chars from sha256 satisfies that floor with margin.
-//
-// Note: a second helper, `idempotencyKeyForCreate` in process.go,
-// computes a 2-field (team, trigger) key for the legacy `create`
-// flow. Kept separate here so this PR stays purely additive — the
-// `create` handler's call site will migrate to `IdempotencyKey`
-// (using its in-account channel/user fields too) when the
-// alias-aware dispatcher in PR-3c.3+ replaces `processCreate`.
 func IdempotencyKey(teamID, channelID, userID, triggerOrViewID string) string {
 	// Length-prefix each field with a fixed-width 4-byte big-endian
 	// uint32 before its bytes. This makes the encoding unambiguous

@@ -135,9 +135,9 @@ func TestSlashCommandHelp(t *testing.T) {
 	}
 }
 
-func TestSlashCommandCreate_AcksWithWorkingOnIt(t *testing.T) {
-	// Ack contract for /qurl create: the synchronous response is the
-	// ephemeral working-on-it message. The actual qURL link is
+func TestSlashCommandGetURL_AcksWithWorkingOnIt(t *testing.T) {
+	// Ack contract for /qurl get <url>: the synchronous response is
+	// the ephemeral working-on-it message. The actual qURL link is
 	// delivered later via response_url (covered in process_test.go).
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -158,12 +158,7 @@ func TestSlashCommandCreate_AcksWithWorkingOnIt(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	h := newTestHandler(t, qurlSrv)
-	body := url.Values{
-		"command":    {"/qurl"},
-		"text":       {"create https://example.com"},
-		"team_id":    {"T123"},
-		"trigger_id": {"trig-1"},
-	}.Encode()
+	body := getURLCommandBody("https://example.com", "T123", "trig-1", "https://hooks.slack.com/services/x")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
@@ -181,6 +176,43 @@ func TestSlashCommandCreate_AcksWithWorkingOnIt(t *testing.T) {
 	}
 	if result["text"] != ackWorkingOnIt {
 		t.Errorf("ack text = %q, want %q", result["text"], ackWorkingOnIt)
+	}
+}
+
+// TestSlashCommandCreate_DeprecationHint fences the redirect copy
+// surfaced when a user types `/qurl create …` after the consolidation
+// to `/qurl get`. The reply is synchronous (no ack-then-async needed —
+// nothing to mint) and points the user at the new verb. Both the bare
+// verb and the with-tail forms route to the same hint — that way an
+// existing user typing the old grammar gets the redirect, not an
+// "unknown subcommand" reply.
+func TestSlashCommandCreate_DeprecationHint(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	const createWithURL = "create https://example.com"
+	cases := []string{"create", createWithURL}
+	for _, text := range cases {
+		body := url.Values{
+			fieldCommand:     {"/qurl"},
+			fieldText:        {text},
+			fieldTeamID:      {"T123"},
+			fieldChannelID:   {"C123"},
+			fieldTriggerID:   {"trig-deprecation"},
+			fieldResponseURL: {"https://hooks.slack.com/services/x"},
+		}.Encode()
+
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+		var result map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatalf("text=%q unmarshal: %v", text, err)
+		}
+		if !strings.Contains(result["text"], "no longer supported") {
+			t.Errorf("text=%q: deprecation copy missing: %q", text, result["text"])
+		}
+		if !strings.Contains(result["text"], "/qurl get") {
+			t.Errorf("text=%q: redirect to /qurl get missing: %q", text, result["text"])
+		}
 	}
 }
 
@@ -578,7 +610,7 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "qurl create") {
+	if !strings.Contains(result["text"], "/qurl get") {
 		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }

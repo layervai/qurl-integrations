@@ -33,18 +33,19 @@ const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
 // channelRequiredMessage is the user-facing copy surfaced when a
 // slash command that requires channel context (`/qurl get`,
-// `/qurl create $alias`, `/qurl aliases`) is invoked from a payload
-// without a channel_id. Slack always sends channel_id on real slash
-// commands; an empty value is a synthetic payload (test harness or
-// future channel-less surface), so fail-closed.
+// `/qurl aliases`) is invoked from a payload without a channel_id.
+// Slack always sends channel_id on real slash commands; an empty
+// value is a synthetic payload (test harness or future channel-less
+// surface), so fail-closed.
 const channelRequiredMessage = "This command must be invoked from a channel."
 
 // noResourceForAliasMessage formats the "no binding" copy surfaced
 // when a channel's alias_bindings map has no entry for the requested
-// alias. Shared between the `/qurl get` and `/qurl create $alias`
-// paths so users see the same wording regardless of verb.
+// alias. Phrased for an end user who doesn't know what an "alias" is —
+// names the literal token the user typed, says plainly what state it's
+// in, and points them at the only person who can fix it.
 func noResourceForAliasMessage(alias string) string {
-	return fmt.Sprintf("No resource has alias `$%s`.", alias)
+	return fmt.Sprintf("`$%s` is not configured for this channel. Please contact your Slack admin for assistance.", alias)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key
@@ -75,17 +76,22 @@ func userErrorf(format string, args ...any) error {
 	return &userError{msg: fmt.Sprintf(format, args...)}
 }
 
-// errAdminStoreNotConfigured is returned by getWork's policy/
-// rate-limit gates when the handler's AdminStore is nil (sandbox /
-// no-DDB deployment). Surfaces as a friendly user-facing message
-// rather than a stack-trace.
-var errAdminStoreNotConfigured = &userError{msg: "Admin features are not configured for this deployment."}
+// errAdminStoreNotConfigured is returned by getWork when the handler's
+// AdminStore is nil (sandbox / no-DDB deployment). Surfaces as a user-
+// facing message that doesn't expose the "AdminStore" implementation
+// term — it points the user at the workspace admin who would have
+// completed the install.
+var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Please contact your Slack admin for assistance."}
 
-// handleGet implements `/qurl get $<alias>`:
-//  1. Parse the slash-command text → [Command].
+// handleGet implements `/qurl get <url|$alias>`:
+//  1. Parse the slash-command text → [Command]. The positional arg
+//     is either a URL (`http://…` / `https://…`) or a channel-scoped
+//     `$alias` name configured by a workspace admin.
 //  2. Ack within 3s via [runAsync] (200 + ackWorkingOnIt).
-//  3. Async goroutine resolves alias → resource_id → policy check →
-//     rate-limit → mint, and POSTs the result to response_url.
+//  3. Async goroutine: for URL form, mint directly; for alias form,
+//     resolve alias → resource_id via channel_policies.alias_bindings
+//     then mint. Rate-limit gates both. POSTs the result to
+//     response_url.
 //
 // Optional flags:
 //   - `dm:true` → final message via PostDM to the user's DM instead
@@ -106,8 +112,8 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 		return
 	}
-	if cmd.Alias == "" {
-		respondSlack(w, ":warning: missing $alias argument. Usage: `/qurl get $alias`.")
+	if cmd.Alias == "" && cmd.Target == "" {
+		respondSlack(w, ":warning: Usage: `/qurl get <url>` to mint for a URL, or `/qurl get $name` to mint for a name your Slack admin has configured here.")
 		return
 	}
 
@@ -167,11 +173,15 @@ type getWorkArgs struct {
 	triggerID string
 }
 
-// getWork runs the inner alias→policy→rate-limit→mint pipeline.
-// Returns the rendered reply text (without leading `:warning:`) on
-// success, or a [*userError] whose msg routes to the user.
+// getWork runs the inner resolve→rate-limit→mint pipeline for both
+// the URL form (`/qurl get <url>`) and the alias form
+// (`/qurl get $name`). Returns the rendered reply text (without
+// leading `:warning:`) on success, or a [*userError] whose msg routes
+// to the user.
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
+	target := args.cmd.Target
+	isAliasForm := alias != ""
 
 	// Refuse `dm:true` early when PostDM is not wired — the user's
 	// intent is "do not leak the link in channel history", and a
@@ -182,32 +192,34 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
 	}
 
-	// 1. Refuse early on a no-DDB sandbox deploy. AdminStore-nil
-	//    means there's no policy gate to enforce, so the result is
-	//    the same regardless of alias resolution — but checking now
-	//    avoids burning a customer-API GetResourceByAlias round-trip
-	//    on a workspace that can't gate it (and lets the user probe
-	//    alias existence ahead of the not-configured signal).
-	if h.cfg.AdminStore == nil {
-		log.Warn("get: AdminStore is nil; refusing to mint without policy gate", "team_id", args.teamID)
-		return "", errAdminStoreNotConfigured
+	input := client.CreateInput{
+		Reason:         args.cmd.Reason(),
+		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
-	// 2. Resolve alias → resource_id via the channel-scoped alias
-	//    bindings (channel_policies.alias_bindings). The presence of
-	//    the binding in THIS channel is itself the authorization
-	//    signal — `/qurl setalias` is the admin act that authorizes
-	//    a resource for use in the channel. The orthogonal
-	//    `allowed_resource_ids` set (admin allow surface) is not wired
-	//    today; when it ships, an id-form `/qurl get r_…` path can
-	//    consult it independently.
-	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, args.teamID, args.channelID, alias)
-	if err != nil {
-		log.Warn("get: alias lookup failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "alias", alias)
-		return "", &userError{msg: serviceUnreachableMessage}
-	}
-	if !found {
-		return "", &userError{msg: noResourceForAliasMessage(alias)}
+	if isAliasForm {
+		// Refuse early on a no-DDB sandbox deploy. Alias-form requires
+		// the channel-scoped binding store; URL form does not, so this
+		// gate only fires here.
+		if h.cfg.AdminStore == nil {
+			log.Warn("get: AdminStore is nil; alias-form lookup unavailable", "team_id", args.teamID)
+			return "", errAdminStoreNotConfigured
+		}
+		// Resolve alias → resource_id via channel_policies.alias_bindings.
+		// The presence of the binding in THIS channel is itself the
+		// authorization signal — `/qurl setalias` is the admin act that
+		// authorizes a resource for use in the channel.
+		resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, args.teamID, args.channelID, alias)
+		if err != nil {
+			log.Warn("get: alias lookup failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "alias", alias)
+			return "", &userError{msg: serviceUnreachableMessage}
+		}
+		if !found {
+			return "", &userError{msg: noResourceForAliasMessage(alias)}
+		}
+		input.ResourceID = resourceID
+	} else {
+		input.TargetURL = target
 	}
 
 	c, err := h.authenticatedClient(ctx, args.teamID)
@@ -216,38 +228,32 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: authErrorMessage(err)}
 	}
 
-	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
-	if err != nil {
-		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-		return "", &userError{msg: commonGetMintFailedMessage}
-	}
-	if !ok {
-		return "", userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
+	// Rate-limit gate only fires when an AdminStore is wired; URL-form
+	// on a no-DDB sandbox is unguarded (qurl-service's per-key quota is
+	// the only enforcer in that mode).
+	if h.cfg.AdminStore != nil {
+		ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
+		if err != nil {
+			log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+			return "", &userError{msg: commonGetMintFailedMessage}
+		}
+		if !ok {
+			return "", userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
+		}
 	}
 
-	// 4. Mint. Idempotency key derived from (team, channel, user,
-	//    trigger_id) so a Slack-side retry on the 3s ack budget
-	//    dedupes to the same qURL.
-	idemKey := IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID)
-	out, err := c.Create(ctx, client.CreateInput{
-		ResourceID:     resourceID,
-		Reason:         args.cmd.Reason(),
-		IdempotencyKey: idemKey,
-	})
+	out, err := c.Create(ctx, input)
 	if err != nil {
 		return "", mapMintError(log, err)
 	}
-	// Defensive: a 200 with an empty qurl_link would render as
-	// `:link: *qURL ready:* \n_alias_: …` — useless. Log loud and
-	// surface the generic message so the user retries.
+	// Defensive: a 200 with an empty qurl_link is a server contract
+	// surprise — log loud and surface the generic retry message.
 	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "resource_id", resourceID)
+		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// 5. Surface. dm:true routes through PostDM; default is the
-	//    channel ephemeral (response_url).
-	message := fmt.Sprintf(":link: *qURL ready:* %s\n_alias_: `$%s`", out.QURLLink, alias)
+	message := ":link: *qURL ready:* " + out.QURLLink
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}

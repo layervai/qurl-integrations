@@ -21,7 +21,8 @@ type Subcommand string
 const (
 	// SubcmdHelp covers both `/qurl` (empty text) and `/qurl help`.
 	SubcmdHelp Subcommand = "help"
-	// SubcmdGet mints an access link for an alias-bound resource.
+	// SubcmdGet mints an access link for either a raw URL or a
+	// channel-scoped `$alias` configured by an admin.
 	SubcmdGet Subcommand = "get"
 	// SubcmdSetAlias binds an alias to a target URL or resource ID.
 	SubcmdSetAlias Subcommand = "setalias"
@@ -32,8 +33,6 @@ const (
 	// SubcmdAdmin is the umbrella for admin-only operations; see
 	// [Command.AdminAction] for the specific verb.
 	SubcmdAdmin Subcommand = "admin"
-	// SubcmdCreate is the legacy free-form-URL mint (pre-alias world).
-	SubcmdCreate Subcommand = "create"
 	// SubcmdList is the legacy listing of recent qURLs.
 	SubcmdList Subcommand = "list"
 )
@@ -248,9 +247,6 @@ func Parse(text string) (*Command, error) {
 	case SubcmdAdmin:
 		cmd.Subcommand = SubcmdAdmin
 		return parseAdmin(cmd, rest)
-	case SubcmdCreate:
-		cmd.Subcommand = SubcmdCreate
-		return parseCreate(cmd, rest)
 	case SubcmdList:
 		cmd.Subcommand = SubcmdList
 		if len(rest) > 0 {
@@ -337,17 +333,24 @@ func tokenize(text string) []string {
 	return out
 }
 
-// parseGet extracts the `$alias` argument and the optional `dm:` /
-// `reason:` flags. Surplus positional args after the alias are an error.
+// parseGet extracts the positional argument (either a `$alias` or a
+// URL) and the optional `dm:` / `reason:` flags. The first positional
+// is treated as a URL when it has an `http://` or `https://` prefix;
+// otherwise it must start with `$`. Surplus positional args after the
+// first are an error.
 func parseGet(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource
 	}
-	alias, err := parseAliasToken(rest[0])
-	if err != nil {
-		return nil, err
+	if hasASCIIPrefixFold(rest[0], "https://") || hasASCIIPrefixFold(rest[0], "http://") {
+		cmd.Target = rest[0]
+	} else {
+		alias, err := parseAliasToken(rest[0])
+		if err != nil {
+			return nil, err
+		}
+		cmd.Alias = alias
 	}
-	cmd.Alias = alias
 	for _, tok := range rest[1:] {
 		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
 		// `get $alias junk` reads as a typo (matches the strict
@@ -517,21 +520,6 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 	if cmd.Alias == "" {
 		return nil, ErrEmptyResource
 	}
-	return cmd, nil
-}
-
-// parseCreate keeps the legacy free-form-URL grammar working through
-// PR-3c.3 (the cutover to alias-only mints). Strict-posture like
-// every other verb: exactly one target token. URLs containing spaces
-// must be quoted so [tokenize] keeps them as one token.
-func parseCreate(cmd *Command, rest []string) (*Command, error) {
-	if len(rest) == 0 {
-		return nil, ErrMissingTarget
-	}
-	if len(rest) > 1 {
-		return nil, fmt.Errorf("%w: %q (quote the target if it contains spaces)", ErrUnexpectedArgument, rest[1])
-	}
-	cmd.Target = rest[0]
 	return cmd, nil
 }
 

@@ -86,7 +86,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		h.postResponse(log, responseURL, ":mag: No aliases are allowed in this channel. Ask a workspace admin to run `/qurl admin allow #channel $alias`.")
+		h.postResponse(log, responseURL, ":mag: No names are configured for this channel yet. Run `/qurl setalias $<name> <url-or-resource-id>` to add one.")
 		return
 	}
 
@@ -96,7 +96,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := fanoutAliasRows(ctx, log, c, entries, aliasesResourceFanoutLimit)
 	sort.Strings(lines)
 
-	body := "*Aliases allowed in this channel:*\n" + strings.Join(lines, "\n")
+	body := "*Names configured for this channel:*\n" + strings.Join(lines, "\n")
 	h.postResponse(log, responseURL, body)
 }
 

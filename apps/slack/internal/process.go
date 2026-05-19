@@ -3,8 +3,6 @@ package internal
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
-	"strconv"
 	"strings"
 
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -108,85 +105,6 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 	respondSlack(w, ackWorkingOnIt)
 }
 
-// processCreate runs the asynchronous /qurl create work: resolve the
-// per-workspace API key, call the qURL API with an idempotency key, and
-// POST the result back via response_url.
-//
-// Idempotency-Key construction: sha256("slack:" + team_id + ":" +
-// trigger_id) hex-encoded — 64 ASCII bytes, well under the 256-byte
-// header cap, and reveals no PII on transit. Slack guarantees a unique
-// trigger_id per click; matching keys come from Slack's own retry path
-// (3s ack timeout exceeded), so collisions are exactly the dedup target.
-func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values url.Values, target string) {
-	responseURL := values.Get(fieldResponseURL)
-	teamID := values.Get(fieldTeamID)
-	channelID := values.Get(fieldChannelID)
-	triggerID := values.Get(fieldTriggerID)
-
-	input := client.CreateInput{
-		IdempotencyKey: idempotencyKeyForCreate(teamID, triggerID),
-	}
-	// `$alias` form resolves to a resource id via the channel's
-	// alias_bindings map — same surface as /qurl get. Lets users mint
-	// against an already-bound resource without needing to know which
-	// verb resolves aliases. Raw URL form is unchanged.
-	isAliasForm := strings.HasPrefix(target, "$")
-	if isAliasForm {
-		alias := strings.TrimPrefix(target, "$")
-		if alias == "" {
-			// Bare `$` — `handleCreate`'s ad-hoc parser doesn't run
-			// the full grammar that fences this on /qurl get, so
-			// catch it here before LookupChannelAlias surfaces it as
-			// a generic 400 ("alias_name is required" via DDB
-			// validation) that the user would otherwise see as
-			// "Could not reach qURL" — wrong disposition.
-			h.postResponse(log, responseURL, ":warning: missing alias name after `$`. Usage: `/qurl create $alias`.")
-			return
-		}
-		if h.cfg.AdminStore == nil {
-			h.postResponse(log, responseURL, ":warning: Aliases require admin configuration. Run `/qurl create <url>` instead, or ask an admin to wire alias support.")
-			return
-		}
-		if channelID == "" {
-			h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
-			return
-		}
-		resourceID, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
-		if lookupErr != nil {
-			log.Warn("create: alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "alias", alias)
-			h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
-			return
-		}
-		if !found {
-			h.postResponse(log, responseURL, ":warning: "+noResourceForAliasMessage(alias))
-			return
-		}
-		input.ResourceID = resourceID
-	} else {
-		input.TargetURL = target
-	}
-
-	c, err := h.authenticatedClient(ctx, teamID)
-	if err != nil {
-		log.Error("failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authErrorMessage(err))
-		return
-	}
-
-	result, err := c.Create(ctx, input)
-	if err != nil {
-		log.Error("failed to create qURL", "error", err, "target", target)
-		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create qURL"))
-		return
-	}
-
-	if isAliasForm {
-		h.postResponse(log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Alias:* `%s`", result.QURLLink, target))
-		return
-	}
-	h.postResponse(log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, target))
-}
-
 // processList runs the asynchronous /qurl list work: page through the
 // most recent qURLs and POST a formatted summary back via response_url.
 func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.Values) {
@@ -208,21 +126,6 @@ func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.
 	}
 
 	h.postResponse(log, responseURL, formatListMessage(result.QURLs))
-}
-
-// idempotencyKeyForCreate hashes the workspace + trigger so the qURL
-// service dedupes Slack-side retries.
-//
-// Inputs are length-framed before hashing so a future rev of Slack's
-// ID format that introduced a colon couldn't collide distinct (team,
-// trigger) pairs into the same key. Today's IDs (T-prefixed alphanum
-// teams; UUID-shaped trigger IDs) don't contain colons, but pinning
-// the contract via length-framing is cheap and removes the assumption.
-func idempotencyKeyForCreate(teamID, triggerID string) string {
-	pre := "slack:" + strconv.Itoa(len(teamID)) + ":" + teamID +
-		":" + strconv.Itoa(len(triggerID)) + ":" + triggerID
-	sum := sha256.Sum256([]byte(pre))
-	return hex.EncodeToString(sum[:])
 }
 
 // sanitizeAPIError builds a user-safe message from a (possibly non-nil)
