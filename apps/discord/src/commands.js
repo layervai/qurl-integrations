@@ -286,6 +286,10 @@ function effectiveGuildMemberCount(guild) {
 // linearly. The map is keyed by `guild.id` so cross-guild calls still
 // proceed in parallel.
 const prewarmInFlight = new Map();
+// `logCtx` is spread FIRST in every log payload below so a local
+// `guild_id` (or any explicit field) wins over a caller's logCtx with
+// the same key. Don't add `guild_id` to logCtx at call sites expecting
+// it to override; it won't.
 async function prewarmGuildMembersCache(guild, logCtx) {
   // Uniform Promise return shape regardless of which branch the caller
   // hits — early-exit paths used to resolve `undefined`, which works
@@ -301,7 +305,15 @@ async function prewarmGuildMembersCache(guild, logCtx) {
   // PR's original bug in a quieter form. http-only tier (no
   // `memberCount`) accepts the perf cost of always paginating; the
   // in-flight dedup below prevents concurrent invocations from stacking.
-  if (guild.memberCount != null && cacheSize >= guild.memberCount) return;
+  if (guild.memberCount != null && cacheSize >= guild.memberCount) {
+    // Observability hook for the hot-cache short-circuit firing. Without
+    // this, dashboards can't correlate "how often is the cache warm" with
+    // memory growth on large-guild workers.
+    logger.debug('members pre-warm short-circuited (hot cache)', {
+      ...logCtx, guild_id: guild.id, cache_size: cacheSize, member_count: guild.memberCount,
+    });
+    return;
+  }
   const existing = prewarmInFlight.get(guild.id);
   if (existing) return existing;
   const inFlight = (async () => {
@@ -328,7 +340,12 @@ async function prewarmGuildMembersCache(guild, logCtx) {
       // it, both bail paths would also emit the success info-log below.
       let bailed = false;
       for (page = 0; page < PREWARM_MAX_PAGES; page++) {
-        const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after });
+        // `cache: true` is the discord.js default, but pin it
+        // explicitly: a future major-version flip of the default
+        // would silently re-degrade @everyone expansion to the bug
+        // this PR fixes, and the cache-merge regression test can't
+        // catch a class of failure where the mock differs from prod.
+        const batch = await guild.members.list({ limit: DISCORD_MEMBERS_PAGE_SIZE, after, cache: true });
         if (batch.size < DISCORD_MEMBERS_PAGE_SIZE) break;
         // Collection is insertion-ordered against the API response, which
         // Discord sorts ascending by user_id — lastKey() is the right
