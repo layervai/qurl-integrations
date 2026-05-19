@@ -633,9 +633,8 @@ func splitUpdateClauses(expr string) []updateClause {
 }
 
 // applySetClause handles `<attr> = <value>[, <attr> = <value>]*`.
-// Values are either `:vN` tokens (literal substitutions from
-// ExpressionAttributeValues) or `if_not_exists(<attr>, :vN)` —
-// the latter preserves the existing item attribute when present.
+// Values are `:vN` tokens (literal substitutions from
+// ExpressionAttributeValues).
 func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
 	pairs := splitTopLevelCommas(body)
 	for _, p := range pairs {
@@ -645,30 +644,6 @@ func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 		}
 		attr := strings.TrimSpace(p[:eq])
 		valTok := strings.TrimSpace(p[eq+1:])
-		// `if_not_exists(<attr>, :val)` — short-circuits the SET when
-		// the named attribute already exists on the item. Production
-		// AllowResource uses this on `created_at` so the row-creation
-		// path stamps the timestamp once and subsequent allow-on-same-
-		// channel calls preserve it.
-		if strings.HasPrefix(valTok, "if_not_exists(") && strings.HasSuffix(valTok, ")") {
-			inner := strings.TrimSuffix(strings.TrimPrefix(valTok, "if_not_exists("), ")")
-			comma := strings.Index(inner, ",")
-			if comma < 0 {
-				return fmt.Errorf("fakeDDB SET: malformed if_not_exists in %q", valTok)
-			}
-			refAttr := strings.TrimSpace(inner[:comma])
-			refVal := strings.TrimSpace(inner[comma+1:])
-			if _, present := item[refAttr]; present {
-				// Existing attribute wins — leave it alone.
-				continue
-			}
-			v, ok := vals[refVal]
-			if !ok {
-				return fmt.Errorf("fakeDDB SET if_not_exists: unknown value %q", refVal)
-			}
-			item[attr] = v
-			continue
-		}
 		v, ok := vals[valTok]
 		if !ok {
 			return fmt.Errorf("fakeDDB SET: unknown value %q", valTok)
@@ -679,7 +654,7 @@ func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 }
 
 // applyAddClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) merge form used by AllowResource.
+// SS (string-set) merge form used by AddAdmin.
 func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
 	body = strings.TrimSpace(body)
 	parts := strings.Fields(body)
@@ -702,7 +677,7 @@ func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 }
 
 // applyDeleteClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) remove form used by DisallowResource. Removing the
+// SS (string-set) remove form used by RemoveAdmin. Removing the
 // last element of the set drops the attribute, matching DDB's
 // "empty set is not allowed" rule.
 func applyDeleteClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {

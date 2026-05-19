@@ -67,9 +67,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// AdminClaim is short-circuited above so its case here is
 	// unreachable in practice — but the `exhaustive` linter requires
 	// it to be listed explicitly (a `default:` arm doesn't satisfy
-	// the check when an enumerated value is omitted). The arm logs
-	// at slog.Error so a defensive misroute surfaces in CloudWatch
-	// instead of being swallowed by the normal-traffic claim path.
+	// the check when an enumerated value is omitted).
 	switch cmd.AdminAction {
 	case AdminClaim: // unreachable in practice — short-circuited above
 		// Warn (not Error) so a synthetic test or a misroute is
@@ -344,11 +342,10 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// explicitly instead of rendering a malformed `<@>` mrkdwn link,
 	// and log at Error so on-call sees the corruption signal directly
 	// rather than reconstructing from user reports.
-	ownerCopy := "(unknown — workspace_mappings missing owner_id)"
+	ownerCopy := fmt.Sprintf("<@%s>", ownerID)
 	if ownerID == "" {
 		slog.Error("admin list: workspace_mappings row missing owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID)
-	} else {
-		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
+		ownerCopy = "(unknown — workspace_mappings missing owner_id)"
 	}
 	// Filter the owner out of the admins line so it doesn't duplicate
 	// the owner line. The owner is on the admin set by construction
