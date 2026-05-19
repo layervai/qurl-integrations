@@ -6,8 +6,10 @@
 // contract method — because flow_state's lifecycle is tightly
 // coupled to the SQS event-shipper architecture and shouldn't be
 // reachable from code paths that legitimately depend on the Store
-// abstraction (those run identically against SQLite for local dev;
-// flow_state is DDB-only).
+// abstraction. Local dev requires this table to be provisioned
+// separately from the Store-contract tables (the `scripts/provision-
+// ddb-local.js` provisioner covers the latter; `flow_state` and the
+// gateway-* tables live in their own modules and are out of scope).
 //
 // Three correctness primitives:
 //

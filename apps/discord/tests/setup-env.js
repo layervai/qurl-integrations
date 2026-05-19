@@ -29,12 +29,14 @@ process.env.DDB_TABLE_PREFIX = process.env.DDB_TABLE_PREFIX || 'jest-test-';
 process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 
 // Spawn-test caveat: `tests/store-contract.test.js`'s `spawnStoreBoot`
-// helper pins DDB_TABLE_PREFIX + AWS_REGION explicitly in the child
-// env (insulating those specific values from sentinel changes here),
-// but every OTHER module-load guard a child inherits (e.g.
-// KEY_ENCRYPTION_KEY from individual specs that set it before
-// `require('../src/store')`) flows through `{...process.env}`. If
-// you ever trim this file's sentinel set, audit the spawn tests
+// helper pins DDB_TABLE_PREFIX (sentinel `'jest-spawn-'`) + AWS_REGION
+// explicitly in the child env (insulating those specific values from
+// sentinel changes here), but every OTHER module-load guard a child
+// inherits (e.g. KEY_ENCRYPTION_KEY from individual specs that set it
+// before `require('../src/store')`) flows through `{...process.env}`.
+// The `'jest-spawn-'` sentinel is named explicitly here so a future
+// grep for either sentinel finds both sides of the env contract.
+// If you ever trim this file's sentinel set, audit the spawn tests
 // first — a silent regression where the child suddenly fails to
 // boot would show up as a `result.status !== 0` mismatch with no
 // hint at the culprit env var.

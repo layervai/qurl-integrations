@@ -20,6 +20,19 @@
 // provisions them so an operator can exercise OpenNHP code paths
 // without flipping ENABLE_OPENNHP_FEATURES off first.
 //
+// SCOPE: this provisioner covers the Store-contract tables only (those
+// in `src/store/ddb-store.js`'s TABLES map). Other modules use their
+// own dedicated tables that this script does NOT create:
+//   - `src/flow-state.js` → `${DDB_TABLE_PREFIX}flow_state`
+//   - `src/gateway-session-store.js` → `${DDB_TABLE_PREFIX}gateway-session`
+//   - `src/gateway-lock.js` → `${DDB_TABLE_PREFIX}gateway-lock`
+//   - `src/gateway-peer-heartbeat.js` → `${DDB_TABLE_PREFIX}gateway-peer-heartbeat`
+// Running locally with `ENABLE_EVENT_SHIPPER=true` or
+// `ENABLE_GATEWAY_RESUME=true` will hit `ResourceNotFoundException` on
+// these tables. If you need to exercise those code paths locally,
+// provision them via terraform against localhost or `aws dynamodb
+// create-table --endpoint-url http://localhost:8000`.
+//
 // Drift caveat: this is a parallel schema source from the terraform
 // module. If `ddb-store.js` adds a new GSI / changes a key, this
 // script must follow. The contract test in `tests/ddb-store.test.js`

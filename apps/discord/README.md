@@ -130,7 +130,10 @@ DDB_TEST_ENDPOINT=http://localhost:8000 \
 
 (The fake AWS creds keep the SDK happy without provisioning real IAM.
 `DDB_TEST_ENDPOINT` is the env-var hook `ddb-store.js` already supports
-for re-pointing the SDK at a local endpoint.)
+for re-pointing the SDK at a local endpoint. Use the same
+`DDB_TABLE_PREFIX` for the provisioner and `npm start` — the
+provisioner defaults to `qurl-bot-discord-local-` if unset, and a
+mismatched prefix lands `npm start` against tables that don't exist.)
 
 `npm test` does NOT need DDB Local — every test mocks the AWS SDK via
 `aws-sdk-client-mock`. The local-dev workflow is only required for

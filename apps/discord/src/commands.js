@@ -2696,8 +2696,9 @@ async function handleRevokeSelect(interaction, { flow_id }) {
 //       → editReply(success)
 //
 // The OAuth path (when AUTH0_* is configured) is NOT flow-state-
-// backed — its persistence is the signed state token + pending_links
-// SQLite table, and there's no `await*` in process to convert.
+// backed — its persistence is the signed state token + the
+// pending_links DDB table, and there's no `await*` in process to
+// convert.
 const SETUP_STAGE_AWAITING_BUTTON = 'awaiting_setup_button';
 const SETUP_STAGE_AWAITING_MODAL = 'awaiting_setup_modal';
 const SETUP_BUTTON_CUSTOM_ID = 'qurl_setup_button';
@@ -6911,8 +6912,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     }
     if (editTargets.size === 0) {
       // Surface the silent-skip path so a developer running locally
-      // against SQLite (where DM refs are intentionally not persisted
-      // — see #365) can tell the edit is being skipped on purpose
+      // (where DM refs are intentionally not persisted on revoke —
+      // see #365) can tell the edit is being skipped on purpose
       // rather than chasing a phantom bug. Debug level so it doesn't
       // surface in prod logs by default.
       logger.debug('Revoke succeeded but no editable DM targets', {

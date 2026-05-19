@@ -68,6 +68,15 @@ async function sweepOnce() {
         backoffMs = Math.min(backoffMs * 2, 60_000);
         await new Promise(r => setTimeout(r, backoffMs));
         break;
+      } else {
+        // Non-rate-limit failure (e.g. 401 expired creds, 5xx GitHub
+        // outage). Row stays in queue for the next sweep. Log at warn
+        // level so a sustained outage shows up in monitoring — silent
+        // skip would let an expired DELETE token sit indefinitely
+        // without operator signal.
+        logger.warn('Orphan sweep revoke failed (non-rate-limit)', {
+          id, status: result.status,
+        });
       }
     } catch (err) {
       // Catch fires when `revokeOneDetailed` (most often
