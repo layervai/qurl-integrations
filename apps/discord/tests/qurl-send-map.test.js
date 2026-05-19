@@ -7582,6 +7582,45 @@ describe('computeEveryoneDisplayCount', () => {
     expect(computeEveryoneDisplayCount(guild)).toEqual({ count: null, accurate: false });
   });
 
+  // discord.js Guild._patch sets `memberCount` ONLY from gateway
+  // GUILD_CREATE's `member_count`. The REST `?with_counts=true` shape
+  // returns `approximate_member_count`, stored as
+  // `approximateMemberCount`. HTTP-only worker mode has no gateway, so
+  // the pre-fetched guild has approximateMemberCount set but
+  // memberCount undefined — pre-fix, every http-tier @everyone button
+  // rendered disabled. CloudWatch sandbox evidence (2026-05-19):
+  // displayCount-null branch firing on every http-tier render.
+  test('http-tier shape (memberCount undefined + approximateMemberCount set) → falls back to approximate count', () => {
+    const guild = {
+      id: 'g-http-tier',
+      approximateMemberCount: 42,
+      members: { cache: new Map([['bot', { user: { id: 'bot', bot: true } }]]) },
+      // memberCount intentionally absent — mirrors what discord.js stores
+      // after client.guilds.fetch(id) when withCounts defaults to true.
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 42, accurate: false });
+  });
+
+  test('memberCount wins over approximateMemberCount when both are set (gateway mode preserves precedence)', () => {
+    // Gateway mode populates `memberCount` from GUILD_CREATE; the REST
+    // pre-fetch path may have also fired earlier and set
+    // `approximateMemberCount`. The live gateway value is more
+    // current — pin precedence so a future refactor doesn't accidentally
+    // swap the fallback order.
+    const guild = {
+      id: 'g-both',
+      memberCount: 10,            // live (from gateway)
+      approximateMemberCount: 9,  // stale (from earlier REST fetch)
+      members: { cache: new Map([['u1', { user: { id: 'u1', bot: false } }]]) },
+    };
+    _everyoneCountMemo.delete(guild);
+    // Cold-cache branch (cache.size=1 < memberCount=10) returns the
+    // memberCount value with accurate=false. Pin that the count is 10
+    // (memberCount), not 9 (approximateMemberCount).
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 10, accurate: false });
+  });
+
   test('partial-cache row (no .user) does not inflate count', () => {
     // The `m?.user && !isBotMember(m)` guard aligns the render-time
     // count with the click-time partition filter — a degraded row
