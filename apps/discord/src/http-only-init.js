@@ -102,6 +102,35 @@ function formatInterval(ms) {
  */
 async function initHttpOnly({ client, config, refreshCache, logger }) {
   client.rest.setToken(config.DISCORD_TOKEN);
+  // Populate `client.user` from REST GET /users/@me. The Pillar 1
+  // worker tier reconstructs INTERACTION_CREATE dispatches via
+  // `client.actions.InteractionCreate.handle(data)` — the same code
+  // path the legacy Client's WebSocketShard runs on a real gateway
+  // dispatch. discord.js's Action.getChannel reads
+  // `this.client.user.id` to filter the bot itself out of an
+  // interaction's recipient list (discord.js src/client/actions/
+  // Action.js: `if (recipient.id !== this.client.user.id)`). In
+  // gateway mode the READY handler populates `client.user` (READY.js:
+  // `client.user = new ClientUser(client, data.user)`); in http-only
+  // mode `client.login()` is intentionally skipped (Discord admits
+  // exactly one active Gateway connection per bot token, so http-only
+  // replicas must NOT collide with the gateway singleton), so READY
+  // never fires here. Without this REST seed, every interaction
+  // replayed through the worker tier throws "Cannot read properties
+  // of null (reading 'id')" on `client.user.id`.
+  //
+  // Crash-loop on failure (matches the module's fatal-on-REST-error
+  // posture): a worker that can't identify itself can't safely
+  // service interactions. Better to surface the misconfig at boot
+  // than to fail every interaction silently.
+  const ClientUser = require('discord.js').ClientUser;
+  const { Routes } = require('discord-api-types/v10');
+  const me = await client.rest.get(Routes.user('@me'));
+  client.user = new ClientUser(client, me);
+  logger.info('http-only mode: client.user seeded from REST GET /users/@me', {
+    userId: client.user.id,
+    username: client.user.username,
+  });
   // Falsy check is intentional and aligned with config.js's GUILD_ID
   // normalization: anything that isn't a 17-20 digit Discord snowflake
   // (unset env, "PLACEHOLDER", whitespace-only, etc.) lands as `null`
