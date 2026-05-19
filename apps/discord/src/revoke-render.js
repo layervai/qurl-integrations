@@ -10,8 +10,8 @@ const REVOKE_TRUNC_LIMIT = 5;
 // Discord message content cap is 2000 chars. Leave headroom for the
 // header + "Revoked for: " prefix; force truncation in renderRevokeContent
 // even when showAll=true if the full names list would push the total
-// over this. Without it, a Show All on ~80+ recipients would exceed
-// Discord's limit and the editReply would error.
+// over this. Without it, a Show Recipients click on ~80+ recipients
+// would exceed Discord's limit and the editReply would error.
 const REVOKE_CONTENT_SAFE_MAX = 1900;
 
 const REVOKE_FOR_PREFIX = '\nRevoked for: ';
@@ -31,8 +31,8 @@ function buildRevokeHeader(success, total) {
 // site). Returns `attachmentText` (newline-joined full list) when the
 // inline rendering would exceed Discord's 2000-char content cap —
 // caller wraps in an AttachmentBuilder. In attachment mode
-// `needsExpand=false` so the caller suppresses the Show All button
-// (the file IS the full list).
+// `needsExpand=false` so the caller suppresses the Show Recipients
+// button (the file IS the full list).
 //
 // `success` defaults to `names.length`. Pass it explicitly when the
 // authoritative count (e.g. DDB strict-success) may exceed the names
@@ -59,7 +59,7 @@ function renderRevokeContent({ names, total, showAll, success = names.length }) 
     return { content, needsExpand: false, attachmentText: names.join('\n') };
   }
 
-  // Full list fits inline — current Show All / Show Less behavior.
+  // Full list fits inline — current Show Recipients / Hide Recipients behavior.
   if (showAll || names.length <= REVOKE_TRUNC_LIMIT) {
     content += fullLine;
   } else {
