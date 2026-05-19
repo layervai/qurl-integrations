@@ -257,6 +257,14 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 			case se.StatusCode == http.StatusConflict && se.Code == slackdata.ErrCodeAdminAlreadyExists:
 				respondSlack(w, fmt.Sprintf("<@%s> is already an admin — nothing to do.", target))
 				return
+			case se.StatusCode == http.StatusConflict && se.Code == slackdata.ErrCodeAdminAddUnverified:
+				// Conditional fired but the post-CCFE disambiguation
+				// read can't confirm membership — likely a storage-
+				// corruption signal. "Retry" is the right user copy;
+				// the slog.Error below carries the triage detail.
+				slog.Error("add admin: conditional fired but disambiguation read can't confirm membership", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+				respondSlack(w, ":warning: couldn't confirm admin add — please retry. If this persists, contact your Slack admin.")
+				return
 			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
 				// Unreachable in practice: requireAdminSync short-
 				// circuits with "admin-only" on a missing workspace

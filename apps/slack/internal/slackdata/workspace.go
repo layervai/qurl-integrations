@@ -49,6 +49,14 @@ const (
 	// target user is already on the admin set — idempotent no-op
 	// surface at the handler.
 	ErrCodeAdminAlreadyExists = "admin_already_exists"
+	// ErrCodeAdminAddUnverified is surfaced by AddAdmin when the
+	// post-CCFE disambiguation read sees the workspace row but
+	// admin_slack_user_ids is missing or wrong-typed (so the target
+	// can't be confirmed as a current member). Distinct from
+	// admin_already_exists because the user-visible copy should be
+	// "couldn't confirm, please retry" rather than the misleading
+	// "already an admin" surface.
+	ErrCodeAdminAddUnverified = "admin_add_unverified"
 	// ErrCodeAdminNotFound is surfaced by RemoveAdmin when the target
 	// user isn't on the admin set — idempotent no-op surface at the
 	// handler.
@@ -321,10 +329,26 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 			Title:      "AddAdmin: workspace is not bound",
 		}
 	}
+	// Confirm the target is actually on the admin set before
+	// returning the "already an admin" code. If the row exists but
+	// admin_slack_user_ids is missing or the wrong type
+	// (readStringSet returns empty/nil for both), the conditional
+	// somehow fired without the target being a member — surface a
+	// distinct unverified 409 so the handler can render a "retry"
+	// hint instead of misleading "already an admin" copy.
+	for _, u := range readStringSet(out.Item, attrAdminSlackUserIDs) {
+		if u == targetUserID {
+			return &Error{
+				StatusCode: http.StatusConflict,
+				Code:       ErrCodeAdminAlreadyExists,
+				Title:      "AddAdmin: target user is already an admin",
+			}
+		}
+	}
 	return &Error{
 		StatusCode: http.StatusConflict,
-		Code:       ErrCodeAdminAlreadyExists,
-		Title:      "AddAdmin: target user is already an admin",
+		Code:       ErrCodeAdminAddUnverified,
+		Title:      "AddAdmin: conditional fired but target not confirmed on admin set",
 	}
 }
 

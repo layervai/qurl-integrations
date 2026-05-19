@@ -212,6 +212,40 @@ func TestHandleAdminAdd_WorkspaceNotBound(t *testing.T) {
 	}
 }
 
+// TestAddAdmin_DisambiguationCantConfirmMembership fences the
+// ErrCodeAdminAddUnverified surface: when the conditional UpdateItem
+// fires (CCFE) but the post-CCFE disambiguation read sees a workspace
+// row without the target on admin_slack_user_ids, AddAdmin must NOT
+// misreport "already an admin" — that copy would be misleading. The
+// store layer returns a distinct unverified code; the handler renders
+// a retry hint.
+//
+// Hits the seam by injecting a CCFE on UpdateItem and seeding a row
+// without the target on the SS, so the disambig read returns the row
+// with the target absent.
+func TestAddAdmin_DisambiguationCantConfirmMembership(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t) // target NOT on admin_slack_user_ids
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("injected CCFE")})
+
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+	if err == nil {
+		t.Fatal("AddAdmin returned nil error; expected unverified surface")
+	}
+	var se *slackdata.Error
+	if !errors.As(err, &se) {
+		t.Fatalf("expected *slackdata.Error, got %T", err)
+	}
+	if se.StatusCode != http.StatusConflict || se.Code != slackdata.ErrCodeAdminAddUnverified {
+		t.Errorf("status=%d code=%q, want 409 / %q", se.StatusCode, se.Code, slackdata.ErrCodeAdminAddUnverified)
+	}
+}
+
+// stringPtr is a tiny test helper for taking the address of a string
+// literal (DDB SDK exception types use pointer-string fields).
+func stringPtr(s string) *string { return &s }
+
 // TestHandleAdminAdd_NonAdminCaller fences the admin-only gate on
 // add. A non-admin caller is denied before any mutation.
 func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
