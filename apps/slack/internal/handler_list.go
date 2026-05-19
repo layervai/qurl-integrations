@@ -32,20 +32,6 @@ const listResourcesPageLimit = 10
 // what to do next.
 const listResourcesEmptyMessage = ":mag: No qURL resources found in this workspace. Create one with `/qurl create <url>` first."
 
-// listResourcesNonAdminPaginationGapMessage is the user-facing copy
-// for the case where a non-admin's filtered set is empty AND the
-// master list reports has_more=true. Without this distinct copy a
-// non-admin in a heavy workspace whose allow-listed resources sit
-// past the first page would see "Create one with /qurl create"
-// (wrong advice — the issue is pagination scope, not absence).
-//
-// "Allow specific resources" is the right verb for the common
-// case: an empty filtered set most often means no allow-list rows
-// for this channel yet, not an over-broad one that needs narrowing.
-// The hint nudges toward an admin escalation path rather than a
-// duplicate-resource workflow.
-const listResourcesNonAdminPaginationGapMessage = ":mag: No allowed resources on the first page of this workspace's listing. Resources allowed in this channel may exist past the first page — ask an admin to allow specific resources in this channel, or check `/qurl aliases` to see if a specific alias is set."
-
 // resourceTypeTunnel is the wire-level discriminator for tunnel
 // resources. Lifted to a constant so the list renderer keys on the
 // upstream type rather than guessing from empty `target_url` — a
@@ -53,24 +39,16 @@ const listResourcesNonAdminPaginationGapMessage = ":mag: No allowed resources on
 // partially-populated row) must NOT be silently re-labeled "(tunnel)".
 const resourceTypeTunnel = "tunnel"
 
-// handleListResources implements the refactored `/qurl list`. Pivots
-// the legacy "5 most recent qURLs" output to "10 most recent
-// Resources" so each line is a copy-paste-ready `$<alias>` (when
-// bound) or `$<resource_id>` token the user can pipe into
+// handleListResources implements `/qurl list`. Returns the 10 most
+// recent Resources rendered as copy-paste-ready `$<alias>` (when
+// bound) or `$<resource_id>` tokens — each line pipes straight into
 // `/qurl get $<token>` without a manual alias-resolution step.
 //
-// Channel scoping:
-//   - workspace admins see every resource in the master listing.
-//   - non-admins see only resources allowed in the current channel
-//     via channel_policies → resource_id set membership.
-//   - non-admin + empty channel_id is fail-closed (returns empty).
-//   - non-admin + policy-fetch failure is fail-closed (returns
-//     empty); under-show beats leak.
-//
-// DM channels: Slack DMs use `D…` channel IDs that almost certainly
-// have no policy entries, so a non-admin running `/qurl list` from a
-// DM hits the "filtered to empty" branch. Intentional — DMs aren't
-// an admin-controlled scope.
+// The list is unscoped: every workspace member sees the same master
+// listing. Capability gating on individual resources happens at mint
+// time — `/qurl get $r_<id>` still enforces the channel allow set
+// for non-admins (see handler_get.go), so dropping the list-side
+// filter widens disclosure within a workspace but not capability.
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processListResources(ctx, log, values)
@@ -81,8 +59,6 @@ func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) 
 func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, values url.Values) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
-	channelID := values.Get(fieldChannelID)
-	userID := values.Get(fieldUserID)
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
@@ -97,25 +73,8 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return
 	}
 
-	resources, isAdmin := h.scopeResourcesForUser(ctx, log, teamID, channelID, userID, page.Resources)
-
+	resources := page.Resources
 	if len(resources) == 0 {
-		// Pagination-gap copy only fires when (a) the user is a
-		// non-admin, (b) we had channel context to filter against,
-		// AND (c) the master list reports has_more. The
-		// has-channel guard distinguishes "filtered set is empty
-		// because the channel has no allow-list rows on the first
-		// page" from "we never had a channel" (fail-closed branch
-		// in scopeResourcesForUser). Without it, the empty-channel
-		// fail-closed path would surface "ask an admin to allow
-		// specific resources in *this channel*" — misleading,
-		// because by construction there's no channel.
-		if !isAdmin && channelID != "" && page.HasMore {
-			log.Warn("list: non-admin filtered set is empty but master list has_more — allow-listed resources may sit past first page",
-				"team_id", teamID, "channel_id", channelID, "user_id", userID, "page_limit", listResourcesPageLimit)
-			h.postResponse(log, responseURL, listResourcesNonAdminPaginationGapMessage)
-			return
-		}
 		h.postResponse(log, responseURL, listResourcesEmptyMessage)
 		return
 	}
@@ -135,104 +94,9 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	body := "*qURL Resources:*\n" + strings.Join(lines, "\n") +
 		"\n\n_Copy any `$token` and run `/qurl get $token` to mint a qURL link._"
 	if page.HasMore {
-		// Footer copy depends on whether the user's view is filtered.
-		// Admins see the master list directly, so "more past first N"
-		// matches what they'd expect. Non-admins see the filtered
-		// subset — additional allow-listed resources may sit past the
-		// first master-page-N scan, which the admin-copy footer
-		// understates ("more past first N" reads as "more of the same
-		// kind"). Distinct non-admin copy makes the gap explicit so
-		// users don't assume the rendered rows are exhaustive.
-		if isAdmin {
-			body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $alias` or ask an admin._", listResourcesPageLimit)
-		} else {
-			body += fmt.Sprintf("\n_Showing allow-listed resources from the first %d-row scan; others may sit past it. Ask an admin to allow more in this channel, or narrow with `/qurl get $alias`._", listResourcesPageLimit)
-		}
+		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $alias` or ask an admin._", listResourcesPageLimit)
 	}
 	h.postResponse(log, responseURL, body)
-}
-
-// scopeResourcesForUser narrows the master resource list to what the
-// requesting user can see in the current channel:
-//
-//   - workspace admins see the full list (no filter).
-//   - non-admins see only resources allowed in `channelID` —
-//     [Store.AllowedResourceIDsForChannel] unions both surfaces on
-//     the channel_policies row (`allowed_resource_ids` SS and the
-//     `alias_bindings` Map values) so a resource visible via either
-//     `/qurl get $r_<id>` or `/qurl get $alias` shows up here.
-//   - non-admin + empty channelID is fail-closed (returns empty);
-//     a real Slack slash-command payload always carries channel_id
-//     (DMs use D… IDs), so a missing value is malformed and must
-//     NOT leak the master list.
-//   - non-admin + policy-fetch failure is fail-closed (returns
-//     empty); under-show beats leak.
-func (h *Handler) scopeResourcesForUser(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, resources []client.Resource) ([]client.Resource, bool) {
-	if h.cfg.AdminStore == nil {
-		// No AdminStore → no admin probe, no policy fetch. Fail-closed
-		// for non-admins because we can't determine allow-listed
-		// resources. Production wires AdminStore from QURL_*_TABLE
-		// env vars; sandbox/no-DDB deployments get the empty list.
-		log.Warn("list: AdminStore is nil; treating user as non-admin and returning empty list (fail-closed)",
-			"team_id", teamID, "user_id", userID)
-		return nil, false
-	}
-	isAdmin := h.userIsWorkspaceAdmin(ctx, log, teamID, userID)
-	if isAdmin {
-		return resources, true
-	}
-	if channelID == "" {
-		log.Warn("list: empty channel_id for non-admin — returning empty list (fail-closed)",
-			"team_id", teamID, "user_id", userID)
-		return nil, false
-	}
-	allowed, allowErr := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
-	if allowErr != nil {
-		log.Warn("list: allowed-resource fetch failed — falling back to empty allow set (fail-closed)",
-			"error", allowErr, "team_id", teamID, "channel_id", channelID)
-		return nil, false
-	}
-	return filterResourcesByAllowedSet(resources, allowed), false
-}
-
-// userIsWorkspaceAdmin probes Store.CheckAdmin for the (team, user)
-// pair. Returns false on any error — the non-admin branch is the
-// safe default ("under-show, don't leak"). Panics or network failures
-// are surfaced through the err and folded into the false return;
-// callers don't need to distinguish "definitely not admin" from
-// "couldn't check".
-//
-// teamID == "" or userID == "" returns false — synthetic test
-// payloads or wire-shape regressions should under-show rather than
-// leak the master list.
-func (h *Handler) userIsWorkspaceAdmin(ctx context.Context, log *slog.Logger, teamID, userID string) bool {
-	if teamID == "" || userID == "" {
-		return false
-	}
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
-	if err != nil {
-		log.Debug("list: admin check failed — treating as non-admin",
-			"error", err, "team_id", teamID, "user_id", userID)
-		return false
-	}
-	return isAdmin
-}
-
-// filterResourcesByAllowedSet returns the subset of resources whose
-// ResourceID appears in the allowed set. Empty allow set returns an
-// empty slice — non-admin in a channel with zero policies should see
-// zero resources, not the full list.
-func filterResourcesByAllowedSet(resources []client.Resource, allowed map[string]struct{}) []client.Resource {
-	if len(allowed) == 0 {
-		return []client.Resource{}
-	}
-	out := make([]client.Resource, 0, len(resources))
-	for i := range resources {
-		if _, ok := allowed[resources[i].ResourceID]; ok {
-			out = append(out, resources[i])
-		}
-	}
-	return out
 }
 
 // resourceSortKey returns the token used to order rows in the
