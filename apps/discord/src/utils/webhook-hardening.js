@@ -12,13 +12,20 @@
 
 const crypto = require('crypto');
 
+// 5min sweep deletes entries older than 2 windows — keeps an entry's
+// next-request landing inside the active 60s window from being
+// prematurely evicted. Do NOT "fix" the * 2 to * 1; the second window
+// is the load-bearing slack against sweep-vs-request race.
 function createBadSigLimiter({
   windowMs = 60_000,
   max = 30,
-  perIpCap = 120,
+  perIpCap,
   sweepMs = 5 * 60 * 1000,
   globalCap = 10_000,
 } = {}) {
+  // perIpCap defaults to max * 4 so a caller bumping max=60 doesn't
+  // leave the per-IP array sized for max=30.
+  if (perIpCap === undefined) perIpCap = max * 4;
   const attempts = new Map();
   const sweep = setInterval(() => {
     const cutoff = Date.now() - windowMs * 2;

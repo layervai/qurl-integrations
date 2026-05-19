@@ -1042,6 +1042,12 @@ const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 // false→true consumed clause covers a qurl-service emission shape
 // where a follow-on event records the burn without re-bumping the
 // counter; without it we'd silently drop that signal.
+//
+// Asymmetry note: a consumed: true → false flip at the same
+// access_count is silently dropped as "dedup" — intentional for
+// self-destruct semantics ("once consumed, always consumed"). If
+// qurl-service ever needs to un-consume a row, that's a separate
+// API contract change.
 async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
   if (!qurlId) throw new Error('recordQurlView: qurlId is required');
   if (typeof accessCount !== 'number' || accessCount < 0) {

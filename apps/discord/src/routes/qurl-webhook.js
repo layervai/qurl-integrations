@@ -21,6 +21,11 @@ const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hard
 const router = express.Router();
 
 const SIGNATURE_HEADER = 'qurl-signature';
+// Lowercase only by design: Node's crypto.digest('hex') and Go's
+// hex.EncodeToString both emit lowercase. A future cross-language
+// emitter defaulting to uppercase hex would silently 401 every
+// webhook — make the regex flag the regression instead of the /i flag
+// silently absorbing it.
 const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/;
 
 const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
@@ -68,10 +73,21 @@ router.post('/qurl', async (req, res) => {
   const eventType = req.body?.type;
   const data = req.body?.data;
   const eventId = req.body?.id;
-  if (!eventId) {
-    logger.warn('qURL webhook missing body.id (per-event replay key)');
+  // typeof guard (not just falsy): a payload with `id: { weird: true }`
+  // would otherwise pass through DDB's UpdateExpression and persist a
+  // non-scalar replay key — silent corruption of dedup semantics.
+  if (typeof eventId !== 'string' || !eventId) {
+    logger.warn('qURL webhook missing or non-string body.id (per-event replay key)');
     return res.status(200).json({ status: 'invalid-payload' });
   }
+
+  // TODO(freshness): the signature pins payload integrity but not
+  // freshness. A captured event with a never-seen `id` and a
+  // sufficiently-advanced access_count would still be accepted long
+  // after capture. qurl-service includes a signed `timestamp` field;
+  // adding a `now() - body.timestamp > N` rejection would close the
+  // replay window. Out of scope for this PR (qurl-service is the only
+  // valid emitter today).
 
   if (eventType !== QURL_WEBHOOK_EVENTS.ACCESSED) {
     logger.debug('qURL webhook event ignored', { type: eventType });
@@ -79,24 +95,34 @@ router.post('/qurl', async (req, res) => {
   }
 
   if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
-    logger.warn('qURL webhook qurl.accessed missing qurl_id', { data });
+    // Limit logged fields — `data` is post-trust but unbounded in shape
+    // and may include attacker-influenced src_ip/user_agent for non-
+    // transit resources. Log only the keys the pipeline actually reads.
+    logger.warn('qURL webhook qurl.accessed missing qurl_id', { qurl_id: data?.qurl_id, resource_id: data?.resource_id });
     return res.status(200).json({ status: 'invalid-payload' });
   }
 
-  const accessCount = Number(data.access_count);
-  if (!Number.isFinite(accessCount) || accessCount < 0) {
+  // Strict typeof — Number(null) === 0 would otherwise let `null` slip
+  // through as accessCount=0, costing a DDB write per such event.
+  if (typeof data.access_count !== 'number' || !Number.isFinite(data.access_count) || data.access_count < 0) {
     logger.warn('qURL webhook access_count not a non-negative number', { qurl_id: data.qurl_id, access_count: data.access_count });
     return res.status(200).json({ status: 'invalid-payload' });
   }
+  const accessCount = data.access_count;
+
+  // Strict equality — Boolean(data.consumed) would coerce the string
+  // "false" to true. Pinning to the boolean catches a future emit-side
+  // regression that JSON-encodes the field as a string.
+  const consumed = data.consumed === true;
 
   try {
     const result = await db.recordQurlView({
       qurlId: data.qurl_id,
       accessCount,
-      consumed: Boolean(data.consumed),
+      consumed,
       eventId,
     });
-    logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed: Boolean(data.consumed), result });
+    logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result });
     return res.status(200).json({ status: result });
   } catch (err) {

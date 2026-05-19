@@ -344,7 +344,7 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
       'send-1', makeInteraction(),
       TWO_LINK_SET,
       [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
-      '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      '1m', 'Sent to 2 users', { components: [] }, 2,
     );
     expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 0 viewed / 2 pending');
     monitor.stop();
@@ -356,7 +356,7 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
       'send-1', interaction,
       TWO_LINK_SET,
       [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
-      '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      '1m', 'Sent to 2 users', { components: [] }, 2,
     );
 
     // First tick: one of the two has been viewed (webhook landed via
@@ -377,7 +377,7 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
       'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
 
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
@@ -399,7 +399,7 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
       'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
@@ -427,7 +427,7 @@ describe('monitorLinkStatus — empty-qurl_id boundary guard', () => {
       'send-1', makeInteraction(),
       mixed,
       [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
-      '1m', 'Sent to 2 users', { components: [] }, 2, 'apikey',
+      '1m', 'Sent to 2 users', { components: [] }, 2,
     );
     expect(monitor.getFullMsg()).toBe('Sent to 2 users');
     expect(monitor.getFullMsg()).not.toMatch(/viewed|pending|👀/);
@@ -453,7 +453,7 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
     await jest.advanceTimersByTimeAsync(2500);
     expect(mockDb.getQurlViews).not.toHaveBeenCalled();
@@ -467,7 +467,7 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
 
     await jest.advanceTimersByTimeAsync(3000);
@@ -492,7 +492,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
 
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
@@ -518,7 +518,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       'send-resolve-add', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent to 1 user', { components: [] }, 1, 'apikey',
+      '1m', 'Sent to 1 user', { components: [] }, 1,
     );
 
     // Initial recipient views — triggers allDone + clearInterval.
@@ -533,12 +533,14 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     const callsBeforeAdd = mockDb.getQurlViews.mock.calls.length;
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
 
-    // The re-armed setInterval picks up Eve's view on the next tick.
+    // Re-arm uses the FIRST_POLL_DELAY_MS (3s) fast-tick pattern,
+    // mirroring construction. Eve's view should land within a few
+    // seconds of /qurl add, not pollInterval later.
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
       ['q_aaaaaaaaaa9', { accessCount: 1, consumed: false }],
     ]));
-    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    await jest.advanceTimersByTimeAsync(3500);
 
     // The post-allDone tick must actually have fired — a missing
     // re-arm would leave callsBeforeAdd == calls.length and the
@@ -558,7 +560,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       'send-add-bug', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent to 1 user', { components: [] }, 1, 'apikey',
+      '1m', 'Sent to 1 user', { components: [] }, 1,
     );
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
@@ -578,7 +580,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
     // Same ID already tracked — should be a no-op insertion-wise.
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa1', username: 'Alice' }]);
@@ -599,7 +601,7 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     monitor.stop();
@@ -614,19 +616,26 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
   });
 });
 
-describe('monitorLinkStatus — interaction-token TTL channel-edit fallback', () => {
+describe('monitorLinkStatus — edits always go through interaction.editReply (ephemeral-safe)', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('edits via interaction.editReply before 14min cutover', async () => {
+  it('never falls back to editDM — the confirm message is ephemeral and ephemeral edits are interaction-token-only', async () => {
+    // Pre-refactor the monitor switched to editDM (bot-token PATCH)
+    // past the 14-min cutover to bypass the interaction-token TTL.
+    // That fallback is broken on ephemeral messages (executeSendPipeline
+    // deferReplies ephemeral, and ephemeral messages can only be edited
+    // via the interaction webhook token). The monitor cap was lowered
+    // to 14 min so we don't run setIntervals past the usable window.
+    // This test pins the contract: no editDM call from the monitor
+    // path, no matter what.
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-1', interaction,
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1h', 'Sent', { components: [] }, 1, 'apikey',
+      '1h', 'Sent', { components: [] }, 1,
     );
-    monitor.setMessageId('msg-1');
 
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
@@ -636,59 +645,21 @@ describe('monitorLinkStatus — interaction-token TTL channel-edit fallback', ()
     expect(mockEditDM).not.toHaveBeenCalled();
     monitor.stop();
   });
-
-  it('edits via editDM (bot-token PATCH) once past the 14min cutover', async () => {
-    const interaction = makeInteraction();
-    const startedAt = Date.now();
-    const monitor = monitorLinkStatus(
-      'send-2', interaction,
-      ONE_LINK_SET,
-      [{ id: 'r1', username: 'Alice' }],
-      '1h', 'Sent', { components: [] }, 1, 'apikey',
-    );
-    monitor.setMessageId('msg-2');
-
-    // SCENARIO: fresh monitor whose first tick happens to land past
-    // the 14-min cutover (e.g. a long-tail Discord-edge stall before
-    // the initial editReply settles). NOT a model of a monitor that
-    // already ran 14 minutes of normal ticks — that path's pollCount
-    // would have crossed the % 2 throttle and skipped odd ticks, which
-    // setSystemTime sidesteps by bypassing intervening fires entirely.
-    // A future refactor that moves the throttle below an early-running
-    // tick should add a separate test for the "ran through the
-    // throttle then crossed cutover" scenario.
-    jest.setSystemTime(startedAt + 14 * 60 * 1000 + 5000);
-    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
-      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
-    ]));
-    // Fast-tick is FIRST_POLL_DELAY_MS = 3000 — by the time the
-    // intervening setSystemTime jump has happened, the setTimeout is
-    // still pending, so the very next advanceTimersByTimeAsync(3000)
-    // fires the first tick. The runTick reads Date.now() AFTER our
-    // setSystemTime above, so the cutover check sees >14min and
-    // routes through editDM.
-    await jest.advanceTimersByTimeAsync(3000);
-    expect(mockEditDM).toHaveBeenCalledWith(
-      'ch-1', 'msg-2',
-      expect.objectContaining({ content: expect.stringContaining('👀') }),
-    );
-    monitor.stop();
-  });
 });
 
 describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  it('stops + posts final after MAX_MONITOR_DURATION_MS (1h cap on long expiries)', async () => {
+  it('stops + posts final after MAX_MONITOR_DURATION_MS (14min cap matches interaction-token TTL)', async () => {
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '7d', 'Sent', { components: [] }, 1, 'apikey',
+      '7d', 'Sent', { components: [] }, 1,
     );
-    // Skip ~1h+1min so the cap branch fires.
-    await jest.advanceTimersByTimeAsync(60 * 60 * 1000 + 60 * 1000);
+    // Skip ~14min+1min so the cap branch fires.
+    await jest.advanceTimersByTimeAsync(14 * 60 * 1000 + 60 * 1000);
     monitor.stop();
   });
 
@@ -700,25 +671,24 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
         `send-${i}`, makeInteraction(),
         [{ resourceId: `res-${i}`, qurlId: `q_aaaaaaaaaa${i}`, qurlLink: `https://q.test/${i}`, recipientId: `r${i}` }],
         [{ id: `r${i}`, username: `User${i}` }],
-        '1m', 'Sent', { components: [] }, 1, 'apikey',
+        '1m', 'Sent', { components: [] }, 1,
       ));
     }
     expect(activeMonitors.size).toBe(before + 5);
     for (const m of monitors) m.stop();
   });
 
-  it('exposes control surface: addRecipients, stop, updateBaseMsg, getFullMsg, setMessageId', () => {
+  it('exposes control surface: addRecipients, stop, updateBaseMsg, getFullMsg', () => {
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1, 'apikey',
+      '1m', 'Sent', { components: [] }, 1,
     );
     expect(typeof monitor.addRecipients).toBe('function');
     expect(typeof monitor.stop).toBe('function');
     expect(typeof monitor.updateBaseMsg).toBe('function');
     expect(typeof monitor.getFullMsg).toBe('function');
-    expect(typeof monitor.setMessageId).toBe('function');
 
     monitor.updateBaseMsg('New base');
     expect(monitor.getFullMsg()).toContain('New base');

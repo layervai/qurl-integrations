@@ -1107,23 +1107,23 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
 // the original message).
 const activeMonitors = new Set();
 
-// Interaction tokens (webhook tokens) expire 15 minutes after the
-// originating interaction. The monitor outlives that for any send with
-// expiry > 15 min (capped at 1h), so we capture the channel message ID
-// after the initial editReply and switch to bot-token PATCH edits once
-// we're inside the TTL danger zone. 14-minute cutover leaves slack for
-// clock drift between this process and Discord's edge.
-const INTERACTION_TOKEN_TTL_CUTOVER_MS = 14 * 60 * 1000;
+// Discord ephemeral messages can ONLY be edited via the interaction
+// webhook token (which expires 15 min after the interaction is created),
+// not via bot-token channel PATCH. Both /qurl send and /qurl map
+// deferReply ephemeral, so the confirmation is unreachable once the
+// token expires. There's no cross-token fallback — we just cap the
+// monitor below the 15-min cliff so we don't waste setIntervals
+// against a dead token.
 
 function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered) {
   // Rebind params as closure-mutable so stop() can null them out for GC.
-  // Long-running monitors (up to 1h × MAX_CONCURRENT_MONITORS=50) otherwise
-  // pin interaction/recipients/buttonRow in the setInterval closure.
+  // Long-running monitors (up to MAX_MONITOR_DURATION_MS ×
+  // MAX_CONCURRENT_MONITORS=50) otherwise pin interaction/recipients/
+  // buttonRow in the setInterval closure.
   let interaction = interactionArg;
   let qurlLinks = qurlLinksArg;
   let recipients = recipientsArg;
   let buttonRow = buttonRowArg;
-  let messageId = null;
   let currentBaseMsg = baseMsg;
   let stopped = false;
   let timer = null;
@@ -1180,19 +1180,27 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       // If the monitor had already settled (all initial recipients viewed
       // → setInterval cleared), re-arm it so the new recipients' views
       // get a chance to flip. Without this, /qurl add on an already-
-      // resolved send leaves the counter frozen for the rest of the 1h
+      // resolved send leaves the counter frozen for the rest of the
       // monitor lifetime. Reset pollCount too — the throttling decay
       // (every-other / every-4th) is meant for an idle send; /qurl add
       // is the explicit signal that the send is NOT steady-state.
+      // Re-uses the construction-time setTimeout→setInterval pattern
+      // so the first post-add tick fires at FIRST_POLL_DELAY_MS (3s),
+      // not at pollInterval (15-60s) — the same sub-second-click
+      // catching rationale applies to /qurl add recipients too.
       if (allDone && !stopped) {
         allDone = false;
         pollCount = 0;
         clearInterval(timer);
-        timer = setInterval(runTick, pollInterval);
+        timer = setTimeout(async () => {
+          await runTick();
+          if (isTerminated()) return;
+          timer = setInterval(runTick, pollInterval);
+          if (timer && timer.unref) timer.unref();
+        }, FIRST_POLL_DELAY_MS);
         if (timer && timer.unref) timer.unref();
       }
     },
-    setMessageId(id) { messageId = id; },
     stop() {
       if (stopped) return;
       stopped = true;
@@ -1210,9 +1218,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   };
 
   const expiryMs = expiryToMs(expiresIn);
-  // 1h cap regardless of link expiry — avoids multi-day setIntervals
-  // for 7d expiries. Links themselves still expire at the API level.
-  const MAX_MONITOR_DURATION_MS = 60 * 60 * 1000;
+  // 14-min cap matches the practical edit window. The interaction
+  // webhook token expires at ~15 min from interaction creation; both
+  // /qurl send + /qurl map deferReply ephemeral, and ephemeral
+  // messages can't be edited via any other token. Past the cap the
+  // setInterval would only burn cycles against a dead token. Store-
+  // side view recording (recordQurlView) is unaffected — webhooks
+  // keep landing for the link's full lifetime; the sender's confirm-
+  // message counter just freezes after the cap. Links themselves
+  // still expire at the API level regardless of the monitor cap.
+  const MAX_MONITOR_DURATION_MS = 14 * 60 * 1000;
   const maxMonitorMs = Math.min(expiryMs + 60000, MAX_MONITOR_DURATION_MS);
 
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
@@ -1222,19 +1237,13 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   const startTime = Date.now();
   const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
 
-  // Bot-token PATCH (editDM) bypasses the 15-min interaction-token TTL.
-  // Null messageId is bounded by FIRST_POLL_DELAY_MS (3s) <
-  // INTERACTION_TOKEN_TTL_CUTOVER_MS (14min), so a tick before
-  // setMessageId resolves always falls through to interaction.editReply
-  // — safe by construction. Best-effort: Discord errors don't crash
-  // the setInterval (recipients see status from their DM).
+  // Best-effort edit through the interaction webhook token. After the
+  // 14-min monitor cap, this would 401 against an expired token —
+  // logIgnoredDiscordErr swallows it. Recipients see status from
+  // their DM, so the sender's frozen counter past cap is just a
+  // dashboard nicety, not a load-bearing surface.
   async function safeEdit(payload) {
     if (!interaction) return;
-    const useChannelEdit = Date.now() - startTime >= INTERACTION_TOKEN_TTL_CUTOVER_MS;
-    if (useChannelEdit && messageId && interaction.channelId) {
-      await editDM(interaction.channelId, messageId, payload).catch(logIgnoredDiscordErr);
-      return;
-    }
     await interaction.editReply(payload).catch(logIgnoredDiscordErr);
   }
 
@@ -1256,11 +1265,21 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   }
 
   let pollCount = 0;
+  // Concurrent-tick safety: runTick has one `await` (db.getQurlViews).
+  // Two ticks queued from setInterval can both be in-flight, both
+  // iterating `views` after their respective resolves. The
+  // `if (current.status === 'opened') continue;` guard at the flip
+  // site is synchronous JS, so the second tick observes the first
+  // tick's flip and no-ops — `viewed++` doesn't double-count, the
+  // BatchGet path is idempotent on already-flipped status.
   const runTick = async () => {
     pollCount++;
-    // Decay tick rate after the first 5 / 20 ticks to bound the
-    // sustained cost of an idle 1h monitor (5 fast, then every-other,
-    // then every-4th).
+    // Decay tick rate to bound sustained cost of an idle monitor.
+    //   pollCount 1–5:    every tick fires (fast ramp)
+    //   pollCount 6–20:   every other tick (even-only)
+    //   pollCount 21+:    every 4th tick (multiple-of-4)
+    // The else-if chain reads in the same order: 21+ throttle first,
+    // then 6–20 throttle.
     if (pollCount > 20 && pollCount % 4 !== 0) return;
     else if (pollCount > 5 && pollCount % 2 !== 0) return;
     if (isTerminated()) {
@@ -1965,8 +1984,6 @@ async function executeSendPipeline(interaction, {
     if (monitor) monitor.stop();
     throw err;
   }
-  // Channel message ID for the >14min interaction-token-TTL fallback.
-  if (monitor && response && response.id) monitor.setMessageId(response.id);
 
   // Non-ephemeral channel notification when sending to @everyone or the
   // voice-channel population. Recipients on voice or scrolling on mobile

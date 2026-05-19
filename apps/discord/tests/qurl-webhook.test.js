@@ -214,22 +214,75 @@ describe('POST /webhooks/qurl — payload handling', () => {
       eventId: 'evt-1',
     }));
   });
+
+  it('rejects body.id that is not a string (e.g., an object slipped through)', async () => {
+    // Regression guard for the receiver's typeof guard. Without it the
+    // non-scalar would persist as the DDB replay key — silent corruption
+    // of dedup semantics for downstream events with that id.
+    const payload = { ...VALID_PAYLOAD, id: { weird: true } };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'invalid-payload' });
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+  });
+
+  it('rejects access_count=null (Number(null)===0 must not slip through)', async () => {
+    const payload = { ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, access_count: null } };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'invalid-payload' });
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+  });
+
+  it('treats consumed as boolean-only — the string "false" does NOT coerce to true', async () => {
+    // Regression guard for strict === true vs Boolean() coercion.
+    // If qurl-service ever JSON-encodes consumed as a string, the
+    // receiver must NOT silently flip the wrong way.
+    const payload = { ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, consumed: 'false' } };
+    const raw = JSON.stringify(payload);
+    await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(mockRecordQurlView).toHaveBeenCalledWith(expect.objectContaining({ consumed: false }));
+  });
 });
 
+// Each describe re-loads the module so the per-instance rate-limit Map
+// doesn't accumulate bad-sig counts from earlier suites. jest.isolateModules
+// would also work; resetModules + reset of the audit-payload mock is the
+// minimal-surface choice.
 describe('POST /webhooks/qurl — bad-signature rate limit', () => {
+  let isolatedApp;
+  beforeAll(() => {
+    jest.resetModules();
+    // eslint-disable-next-line global-require
+    isolatedApp = require('../src/server').app;
+  });
   it('returns 429 once an IP crosses BAD_SIG_MAX failed-signature attempts', async () => {
     const raw = JSON.stringify(VALID_PAYLOAD);
     // 30 failed attempts crosses the BAD_SIG_MAX threshold.
     for (let i = 0; i < 30; i++) {
       // eslint-disable-next-line no-await-in-loop
-      await request(app)
+      await request(isolatedApp)
         .post('/webhooks/qurl')
         .set('Content-Type', 'application/json')
         .set('QURL-Signature', signBody(raw, 'wrong-secret'))
         .send(raw);
     }
     // 31st request hits the rate limit before signature check.
-    const res = await request(app)
+    const res = await request(isolatedApp)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(raw))
