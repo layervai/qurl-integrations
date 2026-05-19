@@ -405,6 +405,45 @@ func TestHandleAdminList_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHandleAdminList_OwnerOnAdminSet fences the owner-filter path
+// when the owner is on the admin set alongside other admins. The
+// rendered "Admins:" line must NOT include the owner (filtered out
+// to avoid `Owner: <@X>\nAdmins: <@X>, <@Y>, <@Z>` duplication).
+func TestHandleAdminList_OwnerOnAdminSet(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Seed with the owner as one of the admins (the canonical post-
+	// BindWorkspace shape), plus two additional admins.
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	if err := store.AddAdmin(context.Background(), testAdminTeamID, testAdminUserID); err != nil {
+		t.Fatalf("seed admin 1: %v", err)
+	}
+	if err := store.AddAdmin(context.Background(), testAdminTeamID, testOtherAdminID); err != nil {
+		t.Fatalf("seed admin 2: %v", err)
+	}
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Owner: <@"+testAdminOwnerID+">") {
+		t.Errorf("reply missing owner line: %q", reply)
+	}
+	// Both non-owner admins must appear on the Admins line.
+	for _, a := range []string{testAdminUserID, testOtherAdminID} {
+		if !strings.Contains(reply, "<@"+a+">") {
+			t.Errorf("reply missing admin <@%s>: %q", a, reply)
+		}
+	}
+	// Owner mention must NOT appear on the "Admins:" line — locate
+	// the line and assert.
+	for _, line := range strings.Split(reply, "\n") {
+		if strings.HasPrefix(line, "Admins:") && strings.Contains(line, "<@"+testAdminOwnerID+">") {
+			t.Errorf("owner duplicated on Admins line: %q", line)
+		}
+	}
+}
+
 // TestHandleAdminList_OwnerOnly fences the single-admin variant: a
 // workspace with no admins beyond the owner renders the owner line
 // only (no redundant "Admins: <@owner>" follow-up).

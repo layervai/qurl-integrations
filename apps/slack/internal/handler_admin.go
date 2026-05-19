@@ -44,8 +44,11 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// parser ever drifts and emits a different subcommand here,
 	// cmd.AdminAction will land empty and the switch's `default:`
 	// arm renders the same "unknown" copy a guard would have.
-	teamID := values.Get(fieldTeamID)
-	userID := values.Get(fieldUserID)
+	// TrimSpace mirrors handleSlashCommand's other entry points — a
+	// whitespace-only team_id or user_id otherwise sneaks past
+	// requireAdminSync's `== ""` check.
+	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	userID := strings.TrimSpace(values.Get(fieldUserID))
 	// `admin claim` is routed to [Handler.handleAdminClaim] directly
 	// by handleSlashCommand BEFORE this dispatcher (see handler.go).
 	// It never reaches handleAdmin in normal Slack traffic. The
@@ -90,7 +93,15 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	case AdminList:
 		h.handleAdminList(w, teamID, userID)
 	default:
-		respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
+		// Empty AdminAction lands here on parser drift (today the
+		// parser returns ErrUnknownAdminAction before reaching this
+		// dispatcher, but the case is kept for refactor safety).
+		// Render a tidy copy in either shape.
+		if cmd.AdminAction == "" {
+			respondSlack(w, "Unknown admin action. Try `/qurl help`.")
+		} else {
+			respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
+		}
 	}
 }
 
@@ -365,6 +376,13 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// defensive against a future contract change).
 	otherAdmins := make([]string, 0, len(admins))
 	for _, a := range admins {
+		if a == "" {
+			// DDB SS doesn't permit empty members, so this is
+			// defensive against a future contract change in
+			// readStringSet. Skipping avoids rendering `<@>`
+			// mrkdwn (which Slack renders as a malformed mention).
+			continue
+		}
 		if ownerID != "" && a == ownerID {
 			continue
 		}
