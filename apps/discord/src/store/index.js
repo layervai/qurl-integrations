@@ -57,10 +57,14 @@ switch (BACKEND) {
     store = require('./ddb-store');
     break;
   default:
-    // Unreachable given VALID_BACKENDS check above; defense-in-depth
-    // so a future contributor adding a backend to VALID_BACKENDS but
-    // forgetting the switch arm gets a loud "not wired" error
-    // instead of a silent null-store.
+    // Defense-in-depth canary, symmetric with the
+    // `unsupportedRoleResumeCombo`'s `storeType !== 'ddb'` branch in
+    // `boot-requirements.js`: unreachable given VALID_BACKENDS today
+    // (one element), but kept so a future contributor who adds a new
+    // backend to VALID_BACKENDS without wiring it here gets a loud
+    // "not wired" error instead of a silent null-store. Pair the
+    // additions: VALID_BACKENDS entry + switch arm + matching
+    // backend module that passes `assertStoreShape`.
     throw new Error(`STORE_TYPE '${BACKEND}' is listed in VALID_BACKENDS but has no switch arm in src/store/index.js. Add the require call for the backend implementation.`);
 }
 

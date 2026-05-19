@@ -90,14 +90,25 @@ describe('orphan token sweeper', () => {
   });
 
   it('deletes tokens that GitHub successfully revokes', async () => {
-    await db.recordOrphanedToken('gho_ok_1');
-    await db.recordOrphanedToken('gho_ok_2');
-    globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
+    // Fake timers skip the per-iteration `await new Promise(r =>
+    // setTimeout(r, backoffMs))` between rows. Real-time wait buys
+    // no fidelity here — the test only asserts on fetch call count
+    // + queue depth.
+    jest.useFakeTimers();
+    try {
+      await db.recordOrphanedToken('gho_ok_1');
+      await db.recordOrphanedToken('gho_ok_2');
+      globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
 
-    await sweepOnce();
+      const promise = sweepOnce();
+      await jest.advanceTimersByTimeAsync(60_000);
+      await promise;
 
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
-    expect(await db.countOrphanedTokens()).toBe(0);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(await db.countOrphanedTokens()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('treats 404 (already-revoked) as success', async () => {
@@ -137,16 +148,25 @@ describe('orphan token sweeper', () => {
     // next hourly sweep can retry. Without this test, a regression
     // that drops the `break` would silently amplify the rate-limit
     // hit by churning through the full batch on every sweep.
-    await db.recordOrphanedToken('gho_first');
-    await db.recordOrphanedToken('gho_second');
-    globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 429 });
+    // Fake timers skip the 200ms backoff sleep — the test only
+    // asserts on fetch call count + queue depth.
+    jest.useFakeTimers();
+    try {
+      await db.recordOrphanedToken('gho_first');
+      await db.recordOrphanedToken('gho_second');
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 429 });
 
-    await sweepOnce();
+      const promise = sweepOnce();
+      await jest.advanceTimersByTimeAsync(60_000);
+      await promise;
 
-    // Batch aborted after the first row hits 429 — second row was
-    // never attempted. Both rows survive for the next sweep.
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-    expect(await db.countOrphanedTokens()).toBe(2);
+      // Batch aborted after the first row hits 429 — second row was
+      // never attempted. Both rows survive for the next sweep.
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(await db.countOrphanedTokens()).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('aborts the batch on 403 rate limit (secondary rate-limit shape)', async () => {
@@ -155,13 +175,20 @@ describe('orphan token sweeper', () => {
     // above — pinned separately so a future refactor that
     // accidentally narrows the check to just `status === 429` is
     // caught.
-    await db.recordOrphanedToken('gho_403');
-    globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 403 });
+    jest.useFakeTimers();
+    try {
+      await db.recordOrphanedToken('gho_403');
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 403 });
 
-    await sweepOnce();
+      const promise = sweepOnce();
+      await jest.advanceTimersByTimeAsync(60_000);
+      await promise;
 
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-    expect(await db.countOrphanedTokens()).toBe(1);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(await db.countOrphanedTokens()).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('skips a row whose decrypt throws and leaves it in place (will retry next sweep)', async () => {

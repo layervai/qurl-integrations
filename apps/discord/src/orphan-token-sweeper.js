@@ -75,7 +75,11 @@ async function sweepOnce() {
     } catch (err) {
       // Catch fires when `revokeOneDetailed` or `db.deleteOrphanedToken`
       // throws — `accessToken` is always set at that point because both
-      // throw sites run BEFORE the `finally` below nulls it. (The
+      // throw sites run BEFORE the `finally` below nulls it. The most
+      // common production-throw shape is `revokeOneDetailed`'s
+      // `AbortSignal.timeout(5000)` raising `AbortError` after a 5s
+      // GitHub timeout — that hits this branch with `accessToken`
+      // still bound, so the hash compute below is safe. (The
       // rate-limit branch's `await new Promise(r => setTimeout(...))`
       // resolves rather than rejects, so it's not a throw site.) Hash
       // the plaintext for log-correlation only (first 8 hex chars;

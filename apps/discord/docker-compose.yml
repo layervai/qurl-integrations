@@ -20,6 +20,13 @@ services:
     # bash `/dev/tcp` healthcheck below stays valid — a tag-only pin
     # could silently land on an image revision without bash and the
     # healthcheck would fail forever without surfacing the cause.
+    #
+    # When bumping this image, re-verify bash presence inside the
+    # container: `docker run --rm --entrypoint sh
+    # amazon/dynamodb-local:<new-tag> -c 'command -v bash'`. The
+    # `/dev/tcp` redirection in the healthcheck below is a
+    # bash-only feature; without bash the probe will exit non-zero
+    # forever and `docker compose up --wait` won't unblock.
     image: amazon/dynamodb-local:2.5.4@sha256:cf8cebd061f988628c02daff10fdb950a54478feff9c52f6ddf84710fe3c3906
     container_name: qurl-bot-discord-ddb-local
     # `-sharedDb` collapses every region/credential combo into one
