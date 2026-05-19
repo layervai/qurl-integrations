@@ -167,7 +167,7 @@ npm run dev   # node --watch
 
 Useful scripts:
 
-- `npm test` — jest (80/70/80/80 coverage threshold)
+- `npm test` — jest (78/68/78/78 coverage threshold)
 - `npm run lint` — ESLint with `--max-warnings 0`
 - `npm run register` — register slash commands with Discord
 

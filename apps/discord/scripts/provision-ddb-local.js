@@ -79,9 +79,13 @@ if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
   // matching: an attacker who controls mDNS or hosts-file resolution
   // could otherwise route `attacker.local` through the guard.
   // Realistic local-dev hostnames beyond loopback are `0.0.0.0`
-  // (docker-compose bind) and `host.docker.internal` (bot-in-
-  // container reaching a docker-compose service on the host). If a
-  // new hostname becomes legitimate, add it here explicitly.
+  // (some operators set `DDB_TEST_ENDPOINT=http://0.0.0.0:8000`
+  // since docker-compose binds 0.0.0.0:8000 by default — clients
+  // technically connect to 127.0.0.1, but the OS accepts the
+  // literal 0.0.0.0 as the destination and routes locally) and
+  // `host.docker.internal` (bot-in-container reaching a docker-
+  // compose service on the host). If a new hostname becomes
+  // legitimate, add it here explicitly.
   const LOCAL_HOSTNAMES = new Set([
     'localhost',
     '127.0.0.1',
