@@ -1031,15 +1031,14 @@ describe('qurl views', () => {
     expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
       ':n': 3, ':c': false, ':eid': 'evt-1', ':false': false, ':true': true,
     }));
-    // TTL refresh on every write — 30 days from now. The window must
-    // be longer than the longest monitor lifetime (1h cap) + longest
-    // link expiry (7d) + DDB TTL's ~48h precision slop. 30d gives
-    // ~3 weeks of buffer.
-    expect(input.UpdateExpression).toMatch(/#ttl = :ttl/);
-    expect(input.ExpressionAttributeNames).toEqual(expect.objectContaining({ '#ttl': 'ttl' }));
+    // TTL refresh on every write — 30 days from now, written to
+    // `expires_at` (the canonical TTL-attribute name across every
+    // table in this module). Numeric epoch seconds; DDB silently
+    // refuses to expire rows whose TTL attribute is the wrong type.
+    expect(input.UpdateExpression).toMatch(/expires_at = :exp/);
     const THIRTY_DAYS = 30 * 24 * 60 * 60;
-    expect(input.ExpressionAttributeValues[':ttl']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
-    expect(input.ExpressionAttributeValues[':ttl']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
+    expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
+    expect(input.ExpressionAttributeValues[':exp']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
   });
 
   test('recordQurlView: ConditionalCheckFailedException → "dedup" (replay path, NOT a failure)', async () => {

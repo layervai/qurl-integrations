@@ -1025,9 +1025,10 @@ async function recordQURLSendBatch(sends) {
 
 // ── QURL views (webhook-fed view counter for /qurl send + /qurl map) ──
 
-// 30d TTL refreshed on every write. Safely past the longest monitor
-// lifetime (1h cap) + longest link expiry (7d) + DDB's ~48h TTL
-// precision — no monitor will ever read a row about to reap.
+// 30d TTL on `expires_at` (peer attribute name across every TTL table
+// in qurl-bot-ddb), refreshed on every write. Safely past the longest
+// monitor lifetime (1h cap) + longest link expiry (7d) + DDB's ~48h
+// TTL precision — no monitor will ever read a row about to reap.
 const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 // `consumed` is persisted + returned by getQurlViews but not yet
@@ -1058,14 +1059,15 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
         + 'last_event_id <> :eid AND ('
         + 'access_count < :n OR (access_count = :n AND consumed = :false AND :c = :true)'
         + '))',
-      UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now, #ttl = :ttl',
-      ExpressionAttributeNames: { '#ttl': 'ttl' },
+      UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now, expires_at = :exp',
       ExpressionAttributeValues: {
         ':n': accessCount,
         ':c': consumedBool,
         ':eid': eventId,
         ':now': new Date(nowMs).toISOString(),
-        ':ttl': Math.floor(nowMs / 1000) + QURL_VIEW_TTL_SECONDS,
+        // DDB silently refuses to expire rows whose TTL attribute isn't
+        // a Number — keep this as epoch seconds (integer), not a string.
+        ':exp': Math.floor(nowMs / 1000) + QURL_VIEW_TTL_SECONDS,
         ':false': false,
         ':true': true,
       },
