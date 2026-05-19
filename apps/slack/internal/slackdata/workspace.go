@@ -372,17 +372,15 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 // installer, and removing them via the bot would leave the workspace
 // in a half-claimed state where no one can re-promote (the new admin
 // set has no relationship to the OAuth identity). The owner check is
-// a read-before-write: a GetItem precedes the conditional UpdateItem
-// so the 400 cannot_remove_owner surfaces before any mutation
-// attempt. The read isn't strongly consistent because owner_id is
-// currently immutable post-bind (BindWorkspace is the only writer).
+// a read-before-write: a GetItem (ConsistentRead=true) precedes the
+// conditional UpdateItem so the 400 cannot_remove_owner surfaces
+// before any mutation attempt.
 //
 // TODO(ownership-transfer): if/when an OAuth-re-install path lands
-// that mutates owner_id, this read needs ConsistentRead=true OR the
-// owner check needs to fold into the conditional UpdateItem
-// (`AND owner_id <> :uid`). Today the cross-replica lag window only
-// matters during the seconds between BindWorkspace and the user's
-// first RemoveAdmin call.
+// that mutates owner_id, consider folding the owner check into the
+// conditional UpdateItem (`AND owner_id <> :uid`) to save the
+// extra round-trip. The strong-read above already keeps the safety
+// margin intact in the meantime.
 //
 // CCFE on the UpdateItem maps to 404 admin_not_found — either the row
 // vanished (race with a concurrent OAuth re-install) or the target
@@ -395,13 +393,22 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 			Title:      "RemoveAdmin: team_id and target_user_id are required",
 		}
 	}
-	// Owner-check read precedes the mutation. Use the same GetItem as
-	// ListAdmins so the 404 path is identical — row missing surfaces
+	// Owner-check read precedes the mutation. Row missing surfaces
 	// as workspace_not_bound rather than racing into the UpdateItem's
 	// CCFE-classified-as-admin_not_found (which would render the
 	// wrong copy).
+	//
+	// ConsistentRead=true defends against a future writer that
+	// mutates owner_id (none today; BindWorkspace's
+	// `attribute_not_exists(slack_team_id)` conditional makes the
+	// row immutable post-bind). The cost is 2x RCUs on a low-volume
+	// path; the benefit is that the safety doesn't depend on a code
+	// invariant that lives in a different file. If an OAuth
+	// re-install path ever rewrites owner_id, this read won't
+	// miss it.
 	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.WorkspaceMappingsName),
+		TableName:      aws.String(s.WorkspaceMappingsName),
+		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
