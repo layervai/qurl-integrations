@@ -53,8 +53,13 @@ services:
     # release it anyway at process exit, but explicit close keeps the
     # probe clean if the interval is ever tightened or the same shape
     # is copied into a longer-running context.
+    # `2>/dev/null` removed so a future bash-less image bump surfaces
+    # `bash: command not found` (or `/dev/tcp: No such file or
+    # directory`) in `docker compose logs` instead of "unhealthy with
+    # no signal." The image-bump verification comment above points
+    # at the same failure mode.
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8000 && exec 3<&-' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8000 && exec 3<&-' || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 5

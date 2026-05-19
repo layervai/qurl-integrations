@@ -16,12 +16,12 @@
 // allow data-plane verbs on the specific table ARNs + GSI ARNs —
 // scoping happens infra-side, not here.
 //
-// Encryption parity with SqliteStore: the three sensitive fields
+// App-layer encryption: the three sensitive fields
 // (`guild_configs.qurl_api_key`, `orphaned_oauth_tokens.access_token`,
-// `qurl_send_configs.attachment_url`) are envelope-encrypted at the
-// app layer via `utils/crypto.encrypt`. Ciphertext is stored as a
-// regular `S` string. DDB server-side encryption (AWS-managed
-// aws/dynamodb CMK, configured at the table level) is defense-in-
+// `qurl_send_configs.attachment_url`) are envelope-encrypted via
+// `utils/crypto.encrypt`. Ciphertext is stored as a regular `S` string.
+// DDB server-side encryption (AWS-managed aws/dynamodb CMK,
+// configured at the table level) is defense-in-
 // depth — the primary encryption is the app-layer envelope.
 //
 // Composite key encoding — two tables flatten a SQLite UNIQUE into
@@ -66,8 +66,8 @@ const config = require('../config');
 const logger = require('../logger');
 const { DM_STATUS } = require('../constants');
 
-// Badge taxonomy — same values as SqliteStore so callers that
-// compare across envs see identical enum values.
+// Badge taxonomy — stable string enum values so callers that
+// compare or persist them across boots stay consistent.
 const BADGE_TYPES = {
   FIRST_PR: 'first_pr',
   FIRST_ISSUE: 'first_issue',
@@ -138,19 +138,21 @@ if (!AWS_REGION) {
   throw new Error('AWS_REGION is required when STORE_TYPE=ddb. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
 }
 
-// Allow tests to inject a pre-configured mock client via
-// `process.env.DDB_TEST_ENDPOINT` (used by integration tests against
-// a local DynamoDB) or a stubbed DocumentClient. Production path
-// constructs the real client once at module load.
+// Allow tests + local-dev to inject a pre-configured endpoint via
+// `process.env.DDB_TEST_ENDPOINT` (DDB-Local at http://localhost:8000,
+// or aws-sdk-client-mock interception). Production path constructs
+// the real client once at module load. The prod-only refusal lives
+// in `config.js` (loaded first), so by the time this constructor
+// runs in production, DDB_TEST_ENDPOINT is guaranteed unset.
 const rawClient = new DynamoDBClient({
   region: AWS_REGION,
   ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
 });
 const ddb = DynamoDBDocumentClient.from(rawClient, {
   marshallOptions: {
-    // Remove undefined values (default is to throw), matching
-    // SQLite's "NULL goes in, NULL comes out" tolerance for
-    // optional columns the bot doesn't always populate.
+    // Remove undefined values (default is to throw) so optional
+    // fields the bot doesn't always populate flow through as
+    // absent attributes rather than per-call errors.
     removeUndefinedValues: true,
     // Preserve `""` as a distinct value (default behavior is
     // fine — DDB v3 SDK handles this correctly). Noted for
@@ -322,8 +324,9 @@ async function deleteLink(discordId) {
   }));
   const deleted = !!res.Attributes;
   logger.info('Deleted GitHub link', { discordId, deleted });
-  // Match SqliteStore's `result.changes` shape so callers can
-  // continue to check `result.changes > 0`.
+  // Return shape: `{ changes: 0 | 1 }` so callers can check
+  // `result.changes > 0` uniformly without branching on `undefined`
+  // for the not-found case.
   return { changes: deleted ? 1 : 0 };
 }
 
@@ -776,11 +779,11 @@ async function awardFirstIssueBadge(discordId) {
 // ── Streaks ──
 
 async function getStreak(discordId) {
-  // Public Store contract: eventually-consistent GetItem, matching
-  // SqliteStore's signature. updateStreak's CCFE-recurse path needs
-  // a ConsistentRead but issues that GetCommand inline (see comment
-  // there) so this function stays uniform across backends — no
-  // backend-specific options leaking onto the contract.
+  // Public Store contract: eventually-consistent GetItem. The
+  // signature stays free of ConsistentRead opts — updateStreak's
+  // CCFE-recurse path issues its own GetCommand with the strong-read
+  // flag inline (see that comment), so backend-specific options
+  // don't leak onto the contract.
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.streaks,
     Key: { discord_id: discordId },
@@ -1185,7 +1188,7 @@ async function flipRevokedAt(sendId, senderDiscordId) {
 }
 
 async function markSendRevoked(sendId, senderDiscordId) {
-  // Mirror SqliteStore's two-branch logic:
+  // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
   // (b) Legacy path: config row doesn't exist — insert minimal row.
   // Scoped to senderDiscordId for defense-in-depth.
@@ -1448,9 +1451,9 @@ async function listOrphanedTokens(limit = 50) {
   // we sort those 50. The actually-oldest tokens may never appear
   // in that arbitrary subset — and the sweeper depends on
   // oldest-first to retry tokens before the 7-day TTL purges
-  // them. SqliteStore returns true oldest-N via
-  // `ORDER BY recorded_at ASC LIMIT ?`; matching that requires a
-  // full-table read here. Bounded by ORPHAN_TOKEN_RETENTION_DAYS
+  // them. True oldest-N requires a full-table read here (sort then
+  // slice) since DDB Scan doesn't sort. Bounded by
+  // ORPHAN_TOKEN_RETENTION_DAYS
   // × write rate; per the module-header projection this stays
   // small. If the queue ever grows past a few thousand, swap in a
   // `pk='__all__', sk=recorded_at` GSI and Query it.
@@ -1485,9 +1488,8 @@ async function deleteOrphanedToken(id) {
 // orchestrator replaces the container.
 //
 // Why not Scan/getStats(): /health is hit at LB cadence (10–30s).
-// SqliteStore's old getStats() probe was constant-time aggregation
-// against indexed COUNT(*); the DDB equivalent would be a paginated
-// full-table Scan. Using getStats() at health-check cadence would
+// `getStats()` against DDB is a paginated full-table Scan. Using
+// it at health-check cadence would
 // scale RCU cost with table size and amplify cost-per-instance in
 // any fleet. /metrics keeps the full aggregation — that's the right
 // home for it.
@@ -1517,7 +1519,7 @@ async function healthCheck() {
 async function close() {
   // DDB client has no persistent connection to close; AWS SDK v3
   // manages sockets internally via keep-alive. The method exists
-  // for Store contract parity with SqliteStore.close().
+  // for Store contract parity (other backends may need real cleanup).
   logger.info('DDB store closed (no-op)');
 }
 

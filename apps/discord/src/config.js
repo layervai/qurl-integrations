@@ -1,5 +1,20 @@
 const os = require('os');
 
+// Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
+// NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
+// hook honored by `ddb-store.js`, `flow-state.js`, and
+// `gateway-session-store.js`; a stale value leaking into a production
+// env (CI variable copied across envs, dev `.env` accidentally
+// shipped, container template propagating the local-dev block) would
+// silently redirect every DDB call to whatever the endpoint resolves
+// to — the same kind of silent-redirect footgun the DDB_TABLE_PREFIX
+// guard in `ddb-store.js` closes. Guarding here in `config.js` (the
+// first module loaded) fires before any DDB client constructor in
+// the require graph.
+if (process.env.NODE_ENV === 'production' && process.env.DDB_TEST_ENDPOINT) {
+  throw new Error(`DDB_TEST_ENDPOINT='${process.env.DDB_TEST_ENDPOINT}' is set under NODE_ENV=production. This env var is for local-dev / aws-sdk-client-mock only — unset it in the production deployment template before booting.`);
+}
+
 // Sync derivation for INSTANCE_ID / INSTANCE_IP (hot-standby identity).
 // Each helper runs once at module-load and is cached into the exported
 // config object — readers of `config.INSTANCE_ID` see a frozen value,

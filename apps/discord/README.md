@@ -135,6 +135,15 @@ for re-pointing the SDK at a local endpoint. Use the same
 provisioner defaults to `qurl-bot-discord-local-` if unset, and a
 mismatched prefix lands `npm start` against tables that don't exist.)
 
+The DDB-Local container runs `-inMemory`, so a `docker compose down`
+flushes every table. Re-run `node scripts/provision-ddb-local.js`
+after each fresh `docker compose up` (the provisioner is idempotent
+on existing tables, so a re-run against the same container is a
+no-op — but a new container starts empty and needs the create pass).
+For sticky local data across restarts, drop `-inMemory` and add
+`-dbPath ./data` to the compose command (see the `docker-compose.yml`
+header comment).
+
 `npm test` does NOT need DDB Local — every test mocks the AWS SDK via
 `aws-sdk-client-mock`. The local-dev workflow is only required for
 `npm start`.
