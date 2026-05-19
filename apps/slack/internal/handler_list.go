@@ -45,11 +45,17 @@ const resourceTypeTunnel = "tunnel"
 // `/qurl get $<token>` without a manual alias-resolution step.
 //
 // The list is unscoped: every workspace member sees the same master
-// listing. Capability gating on individual resources happens at mint
+// listing. This includes DM channels (`D…` channel IDs) — pre-#234
+// behavior was unscoped, #234 had filtered DMs to empty (no
+// channel_policies row), and this revert restores the unscoped
+// shape, so a user running /qurl list in a 1:1 now sees URLs and
+// aliases bound in any channel of the workspace.
+//
+// Capability gating on individual resources happens at mint
 // time — `/qurl get $r_<id>` still enforces the channel allow set
 // for non-admins via [Handler.authorizeResourceIDForGet], and
 // `/qurl get $<alias>` resolves through the per-channel
-// `alias_bindings` Map via slackdata.Store.LookupChannelAlias. So dropping
+// `alias_bindings` Map via [slackdata.Store.LookupChannelAlias]. So dropping
 // the list-side filter widens disclosure within a workspace but not
 // capability.
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
