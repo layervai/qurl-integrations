@@ -47,11 +47,16 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	userID := values.Get(fieldUserID)
 	// `admin claim` is routed to [Handler.handleAdminClaim] directly
 	// by handleSlashCommand BEFORE this dispatcher (see handler.go).
-	// It never reaches handleAdmin in normal Slack traffic. The branch
-	// here catches a defensive misroute (e.g. a synthetic test that
-	// posts `text=admin claim` through this entry point) — we re-route
-	// to the real claim handler rather than emitting a stub so the
-	// behavior matches what the slash-command path does.
+	// It never reaches handleAdmin in normal Slack traffic. The
+	// short-circuit here catches a defensive misroute (e.g. a
+	// synthetic test that posts `text=admin claim` through this entry
+	// point) AND bypasses requireAdminStoreSync — the whole point of
+	// the claim flow is to create the first admin from a bootstrap
+	// code on a workspace where CheckAdmin returns (false, "") and
+	// AdminStore presence is irrelevant to the modal-open call.
+	// The matching `case AdminClaim` arm inside the switch is dead
+	// code that only exists to satisfy the `exhaustive` lint; the
+	// short-circuit above is the load-bearing branch.
 	if cmd.AdminAction == AdminClaim {
 		h.handleAdminClaim(w, values)
 		return
@@ -75,10 +80,8 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	case AdminRevokeAll:
 		h.handleAdminRevokeAll(w, values, teamID, userID, cmd)
 	case AdminClaim:
-		// Unreachable: handled by the short-circuit branch above so the
-		// AdminStore guard is skipped. Kept in the switch to satisfy
-		// exhaustive-switch lint and so a future contributor adding a
-		// sibling const sees every branch in one place.
+		// Dead code — short-circuited above so the AdminStore guard
+		// is skipped. Present only to satisfy the `exhaustive` lint.
 		h.handleAdminClaim(w, values)
 	default:
 		respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
@@ -460,7 +463,17 @@ func renderPolicies(list *slackdata.PolicyList) string {
 			aliasFragment = "_(no alias bound)_"
 		}
 		line := fmt.Sprintf("• <#%s> ← %s (`%s`)\n", e.ChannelID, aliasFragment, e.ResourceID)
-		if rows.Len()+len(line) > adminPoliciesReplyByteCap {
+		// Always emit at least one row before honoring the byte cap.
+		// A pathologically long single entry (alias or resource id
+		// pushing the first line past adminPoliciesReplyByteCap) would
+		// otherwise render `*Channel policies (0 of N):*` with an
+		// empty body — the operator gets a "more not shown" hint
+		// with nothing to see. The first row may push the rendered
+		// envelope past the cap, but the 256-byte Grow headroom on
+		// the outer builder and Slack's 4000-byte hard ceiling
+		// absorb a single long line. The cap then takes over for
+		// subsequent rows.
+		if rendered > 0 && rows.Len()+len(line) > adminPoliciesReplyByteCap {
 			break
 		}
 		rows.WriteString(line)
@@ -542,10 +555,14 @@ type revokeAllResult struct {
 // (context.DeadlineExceeded and context.Canceled) are the only
 // values ctx.Err() ever returns, so the explicit branches are
 // exhaustive for that input. An "other error" lands at the
-// slog.Warn branch instead of silently being classified as a
+// log.Warn branch instead of silently being classified as a
 // cancellation — that surfaces the bug in CloudWatch the moment a
-// future patch accidentally passes a non-ctx error.
-func recordCtxErr(err error, r *revokeAllResult) {
+// future patch accidentally passes a non-ctx error. The logger is
+// the runAsync-derived `slog.Logger` so the violation-warn line
+// inherits the workflow's team_id/user_id/trigger_id attrs (a
+// bare slog.Warn would surface the violation without context — the
+// case where you most want it).
+func recordCtxErr(log *slog.Logger, err error, r *revokeAllResult) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		r.deadlineExceeded = true
@@ -556,7 +573,7 @@ func recordCtxErr(err error, r *revokeAllResult) {
 		// ctx.Err(). Default to canceled so the best-effort
 		// revoke-all walk surfaces SOME terminal state, but log
 		// the violation loudly so it's audit-greppable.
-		slog.Warn("recordCtxErr: caller passed non-ctx error; classifying as canceled", "error", err)
+		log.Warn("recordCtxErr: caller passed non-ctx error; classifying as canceled", "error", err)
 		r.canceled = true
 	}
 }
@@ -568,7 +585,7 @@ func recordCtxErr(err error, r *revokeAllResult) {
 func (h *Handler) deletePage(ctx context.Context, log *slog.Logger, c *client.Client, teamID, userID, resourceID string, qurls []client.QURL, r *revokeAllResult) bool {
 	for i := range qurls {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			recordCtxErr(ctxErr, r)
+			recordCtxErr(log, ctxErr, r)
 			return false
 		}
 		id := qurls[i].ResourceID
@@ -613,7 +630,7 @@ func (h *Handler) runRevokeAllWalk(ctx context.Context, log *slog.Logger, c *cli
 	cursor := ""
 	for page := 0; page < adminRevokeAllMaxPages; page++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			recordCtxErr(ctxErr, &r)
+			recordCtxErr(log, ctxErr, &r)
 			break
 		}
 		out, err := c.ListByResource(ctx, client.ListByResourceInput{
@@ -632,7 +649,7 @@ func (h *Handler) runRevokeAllWalk(ctx context.Context, log *slog.Logger, c *cli
 			// ctx.Err() guard catches deadlines that fire BEFORE the
 			// call; this catches the ones that fire DURING.
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				recordCtxErr(ctxErr, &r)
+				recordCtxErr(log, ctxErr, &r)
 				return r
 			}
 			log.Error("list by resource failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)

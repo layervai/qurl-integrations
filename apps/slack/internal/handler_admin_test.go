@@ -248,6 +248,38 @@ func TestDisallowResource_ConcurrentDisallowsExactlyOneWins(t *testing.T) {
 	}
 }
 
+// TestAllowResource_FirstAllowStampsCreatedAt fences the row-creation
+// branch of [slackdata.Store.AllowResource]: the conditional
+// UpdateItem is also the row-creation path for the first allow against
+// a channel, so the SET expression carries
+// `created_at = if_not_exists(created_at, :now)`. Without that clause
+// the row lands with no created_at attribute and ListPolicies later
+// renders the zero time into the audit/UI surface. A second allow on
+// the same channel preserves the original timestamp because
+// if_not_exists short-circuits the SET on existing attributes.
+func TestAllowResource_FirstAllowStampsCreatedAt(t *testing.T) {
+	ts := newAdminTestServers(t)
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	const (
+		teamID     = "T_first"
+		channelID  = "C_first"
+		resourceID = "r_first_xyz"
+	)
+	if err := store.AllowResource(context.Background(), teamID, channelID, resourceID); err != nil {
+		t.Fatalf("AllowResource: %v", err)
+	}
+	list, err := store.ListPolicies(context.Background(), teamID, "", 50)
+	if err != nil {
+		t.Fatalf("ListPolicies: %v", err)
+	}
+	if len(list.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(list.Entries))
+	}
+	if list.Entries[0].CreatedAt.IsZero() {
+		t.Errorf("CreatedAt is zero; AllowResource did not stamp created_at on first allow")
+	}
+}
+
 // TestHandleAdminAllow_MissingSigil fences the parser path: an
 // alias missing the `$` sigil routes to a parser-error reply, not to
 // the dispatch fan-out. AllowResource is never called.
@@ -1012,6 +1044,30 @@ func TestRenderPolicies_HasMoreSurface(t *testing.T) {
 	})
 	if !strings.Contains(got, "more pages available") {
 		t.Errorf("missing has_more hint: %q", got)
+	}
+}
+
+// TestRenderPolicies_AlwaysEmitsFirstRow fences a renderPolicies
+// edge case: a pathologically long single entry (alias or resource
+// id pushing the first line past adminPoliciesReplyByteCap) used to
+// render `*Channel policies (0 of N):*` with an empty body because
+// the loop bailed before emitting any row. The first-row carve-out
+// guarantees the operator always sees at least one entry, even if
+// it pushes the envelope a few bytes past the cap (Slack's 4000-byte
+// ceiling absorbs the overflow).
+func TestRenderPolicies_AlwaysEmitsFirstRow(t *testing.T) {
+	long := strings.Repeat("a", adminPoliciesReplyByteCap+100)
+	got := renderPolicies(&slackdataPolicyList{
+		Entries: []slackdataPolicyEntry{
+			{ChannelID: "C1", Alias: long, ResourceID: "r_long_xyz"},
+			{ChannelID: "C2", Alias: "b", ResourceID: "r_two"},
+		},
+	})
+	if !strings.Contains(got, "r_long_xyz") {
+		t.Errorf("first row dropped despite carve-out: %q", got[:200])
+	}
+	if strings.Contains(got, "(0 of") {
+		t.Errorf("rendered the 0-of-N empty-body shape: %q", got[:200])
 	}
 }
 

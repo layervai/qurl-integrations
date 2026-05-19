@@ -175,7 +175,18 @@ func (s *Store) AllowResource(ctx context.Context, teamID, channelID, resourceID
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-		UpdateExpression: aws.String("ADD allowed_resource_ids :rids SET updated_at = :now"),
+		// `if_not_exists(created_at, :now)` is load-bearing: this
+		// UpdateItem is also the row-creation path for the first
+		// `/qurl admin allow` against a channel (the
+		// `attribute_not_exists(allowed_resource_ids)` clause below
+		// passes when no row exists yet, and ADD creates the row).
+		// Without if_not_exists, the row would land with no
+		// created_at attribute and ListPolicies would later render
+		// the zero time into the audit/UI surface. A second allow on
+		// the same channel preserves the original created_at because
+		// if_not_exists short-circuits the SET on existing
+		// attributes.
+		UpdateExpression: aws.String("ADD allowed_resource_ids :rids SET updated_at = :now, created_at = if_not_exists(created_at, :now)"),
 		// "attribute_not_exists(allowed_resource_ids) OR NOT
 		// contains(...)" passes when the row is brand new (no set
 		// yet) AND when the existing set lacks the target. Either
