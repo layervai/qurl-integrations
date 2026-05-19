@@ -213,11 +213,16 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			Title:      "BindWorkspace: seed_admin user_id is required",
 		}
 	}
+	// Capture `now` once: the same logical bind action's CreatedAt
+	// fallback and updated_at attribute should reflect the same
+	// instant rather than two sub-microsecond-apart readings of
+	// time.Now.
+	now := s.nowOrDefault().UTC()
+	nowISO := now.Format(time.RFC3339)
 	created := m.CreatedAt
 	if created.IsZero() {
-		created = s.nowOrDefault().UTC()
+		created = now
 	}
-	now := s.nowOrDefault().UTC().Format(time.RFC3339)
 
 	// Conditional PutItem: refuse to overwrite any existing row. The
 	// single-use bootstrap code means we can't legitimately re-enter
@@ -235,7 +240,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 				Value: []string{seedAdmin},
 			},
 			attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
-			attrUpdatedAt: stringAttr(now),
+			attrUpdatedAt: stringAttr(nowISO),
 		},
 		ConditionExpression: aws.String("attribute_not_exists(slack_team_id)"),
 	})
@@ -268,6 +273,13 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(m.TeamID),
 		},
+		// ConsistentRead pairs with the PutItem-CCFE that just fired:
+		// the row exists, but an eventually-consistent read on a
+		// stale replica could miss it and send a same-caller re-entry
+		// down the "different admin holds this workspace" branch.
+		// Strong read avoids the cross-replica race; 2x RCUs on a
+		// rare unhappy path.
+		ConsistentRead: aws.Bool(true),
 	})
 	if getErr != nil {
 		// Disambiguation read failed (timeout / transport). Surface

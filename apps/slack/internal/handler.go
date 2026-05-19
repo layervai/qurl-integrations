@@ -755,9 +755,17 @@ func (h *Handler) helpMessage() string {
 	if h.cfg.OpenView != nil {
 		lines = append(lines, "• `/qurl admin claim` — Open the bootstrap-code modal to claim this workspace")
 	}
+	if h.aliasStore != nil {
+		// setalias/unsetalias verbs reply ":warning: not configured"
+		// on a sandbox deploy without an aliasStore; mirror the
+		// PostDM / OpenView gates above so help doesn't advertise
+		// verbs whose reply tells the user they can't be used.
+		lines = append(lines,
+			"• `/qurl setalias $<alias> <url-or-resource-id>` — Bind an alias to this channel (admin only)",
+			"• `/qurl unsetalias $<alias>` — Clear this channel's alias (admin only)",
+		)
+	}
 	lines = append(lines,
-		"• `/qurl setalias $<alias> <url-or-resource-id>` — Bind an alias to this channel (admin only)",
-		"• `/qurl unsetalias $<alias>` — Clear this channel's alias (admin only)",
 		"• `/qurl help` — Show this help message",
 	)
 	return strings.Join(lines, "\n")

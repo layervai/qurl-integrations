@@ -82,7 +82,12 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 		}
 	}
 	codeHash := hashBootstrapCode(code)
-	nowEpoch := s.nowOrDefault().Unix()
+	// Capture `now` once so the same logical action's
+	// expires_at-compare, redeemed_at, and CreatedAt all see the same
+	// instant — otherwise production traces would show sub-microsecond
+	// drift across three timestamps that are conceptually one event.
+	now := s.nowOrDefault().UTC()
+	nowEpoch := now.Unix()
 
 	// Conditional UpdateItem:
 	//   - attribute_exists(code_hash)    → row must exist
@@ -104,7 +109,7 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 			":true":    boolAttr(true),
 			":false":   boolAttr(false),
 			exprNow:    &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
-			":now_iso": stringAttr(s.nowOrDefault().UTC().Format(time.RFC3339)),
+			":now_iso": stringAttr(now.Format(time.RFC3339)),
 			":user":    stringAttr(slackUserID),
 		},
 		ReturnValues: ddbtypes.ReturnValueAllNew,
@@ -148,7 +153,7 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 	mapping := &WorkspaceMapping{
 		TeamID:    teamID,
 		OwnerID:   ownerID,
-		CreatedAt: s.nowOrDefault().UTC(),
+		CreatedAt: now,
 	}
 
 	// Step 2 (call qurl-service POST /v1/external-identity-bindings

@@ -617,10 +617,10 @@ func TestUnsetAlias_NoStoreWired(t *testing.T) {
 
 func TestHelpListsNewVerbs(t *testing.T) {
 	// CR feedback fence from old #230: /qurl help must surface
-	// setalias and unsetalias. The old PR had a stale helpMessage()
-	// that listed only create/list/help even after the alias verbs
-	// landed. This test pins the help copy includes both.
-	h := newTestHandler(t, noopQURLServer(t))
+	// setalias and unsetalias when the alias store is wired. The
+	// old PR had a stale helpMessage() that listed only
+	// create/list/help even after the alias verbs landed.
+	h, _ := newAliasTestHandler(t)
 	body, sign := aliasSlashRequest(t, "help", testAliasTeamID, testAliasChannelID)
 
 	w := httptest.NewRecorder()
@@ -632,6 +632,36 @@ func TestHelpListsNewVerbs(t *testing.T) {
 	}
 	if !strings.Contains(got, "unsetalias") {
 		t.Errorf("/qurl help = %q, missing unsetalias", got)
+	}
+}
+
+// TestHelpHidesAliasVerbsWhenAliasStoreNil fences round-19 cr #2:
+// on a sandbox deploy without an aliasStore the setalias / unsetalias
+// verbs reply "not configured" — help text must not advertise them.
+// Mirrors the PostDM / OpenView gates above. Without this gate, a
+// regression that re-advertised the verbs unconditionally would
+// confuse users into running a command whose only reply is the
+// not-configured error.
+func TestHelpHidesAliasVerbsWhenAliasStoreNil(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	// newTestHandler doesn't wire an aliasStore — the not-configured
+	// state we're fencing.
+	body, sign := aliasSlashRequest(t, "help", testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	got := decodeSlackText(t, w.Body.Bytes())
+	if strings.Contains(got, "setalias") {
+		t.Errorf("/qurl help = %q, leaked setalias verb on unwired aliasStore", got)
+	}
+	if strings.Contains(got, "unsetalias") {
+		t.Errorf("/qurl help = %q, leaked unsetalias verb on unwired aliasStore", got)
+	}
+	// help itself MUST still appear — the gate only hides the
+	// alias-bearing verbs, not the help line.
+	if !strings.Contains(got, "/qurl help") {
+		t.Errorf("/qurl help = %q, missing help line", got)
 	}
 }
 
