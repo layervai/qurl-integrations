@@ -1,0 +1,136 @@
+# Rollback-safety guard. Part of the daily-deploy + auto-rollback
+# pipeline (design doc:
+# ~/Documents/discord_bot_canary_daily_deployment_plan.md, piece 6/6).
+#
+# Why: the rollback Lambda swaps the prod ECS service back to the
+# previous task-definition revision when a canary fails. That swap
+# only works if the previous binary can still run against current
+# infra. PRs that change DB schema in a non-additive way, rename SSM
+# parameters, or break downstream API contracts all violate that
+# assumption — rolling back to the previous binary then crashes
+# (missing column / SSM param / response-shape mismatch).
+#
+# What this guard does: scan the PR diff for paths that historically
+# correlate with rollback-unsafe changes. If any are touched, require
+# the PR body to declare `Rollback-Safe: yes` (or `yes - <reason>`).
+# A `no` value is rejected with a clear message; missing marker is
+# also rejected.
+#
+# The marker can be embedded in any common Markdown formatting —
+# bold, blockquote, list item, heading — since contributors copy
+# from PR templates that may render it any of those ways.
+#
+# Inert until the canary pipeline lands. The check still runs on every
+# PR, but the marker requirement is set to "warn-only" mode by default
+# (see ENFORCE below); flip to "blocking" once the canary + rollback
+# Lambda are live in prod.
+
+name: Rollback-Safety Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  rollback-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect rollback-sensitive paths
+        id: detect
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Patterns that historically correlate with rollback-unsafe
+          # changes. Keep this list narrow — every false-positive
+          # forces an unnecessary marker on a routine PR.
+          PATTERNS=(
+            'apps/discord/src/store/'
+            'apps/discord/src/database\.js$'
+            'apps/discord/src/connector\.js$'
+            'apps/discord/src/qurl\.js$'
+            'apps/.*/migrations/'
+            'shared/schema/'
+            # NOTE: Terraform SSM resources live in the sibling
+            # qurl-integrations-infra repo; the equivalent guard
+            # there is its own workflow.
+          )
+
+          # `git fetch origin $BASE_REF` happened in the checkout step.
+          MERGE_BASE=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          CHANGED=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")
+
+          MATCHED=""
+          for pattern in "${PATTERNS[@]}"; do
+            if echo "$CHANGED" | grep -E "$pattern" > /dev/null; then
+              MATCHED="$MATCHED${MATCHED:+ }$pattern"
+            fi
+          done
+
+          if [ -z "$MATCHED" ]; then
+            echo "No rollback-sensitive paths touched. Skipping marker check."
+            echo "sensitive=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Rollback-sensitive paths touched: $MATCHED"
+          echo "sensitive=true" >> "$GITHUB_OUTPUT"
+          echo "matched=$MATCHED" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Rollback-Safe marker in PR body
+        if: steps.detect.outputs.sensitive == 'true'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          MATCHED: ${{ steps.detect.outputs.matched }}
+          # ENFORCE=true blocks merge on missing/no marker.
+          # ENFORCE=false (default until canary pipeline ships) just warns.
+          ENFORCE: ${{ vars.ROLLBACK_SAFETY_ENFORCE || 'false' }}
+        run: |
+          set -euo pipefail
+          # Match the marker in any common Markdown formatting:
+          #   Rollback-Safe: yes
+          #   **Rollback-Safe:** yes
+          #   - Rollback-Safe: yes
+          #   > Rollback-Safe: yes
+          #   ## Rollback-Safe: yes
+          #   * Rollback-Safe: yes - <reason>
+          # Optional leading list/blockquote/heading/asterisk markers
+          # before "Rollback-Safe", optional asterisks around the
+          # label itself (bold), case-insensitive on yes/no. Marker
+          # name "Rollback-Safe" stays canonical.
+          MARKER=$(printf '%s\n' "$PR_BODY" | grep -iE '^[#>*[:space:]\-]*\**Rollback-Safe\**:\s*(yes|no)\b' | head -1 || true)
+
+          if [ -z "$MARKER" ]; then
+            echo "::error::PR touched rollback-sensitive paths ($MATCHED) but lacks a 'Rollback-Safe: yes' marker in the PR body."
+            echo "::error::Add one of (any common Markdown formatting OK — bold, list, blockquote, heading):"
+            echo "::error::  Rollback-Safe: yes"
+            echo "::error::  Rollback-Safe: yes - <one-line reason explaining why the previous binary still runs>"
+            echo "::error::  Rollback-Safe: no   (blocks merge; require an admin to override via branch-protection bypass)"
+            if [ "$ENFORCE" = "true" ]; then
+              exit 1
+            else
+              echo "::warning::ROLLBACK_SAFETY_ENFORCE is unset; failing soft. Flip the repo variable to 'true' once the canary pipeline is live in prod."
+              exit 0
+            fi
+          fi
+
+          if echo "$MARKER" | grep -iE '\bno\b' > /dev/null; then
+            echo "::error::PR is marked Rollback-Safe: no. The author has explicitly declared this PR is rollback-unsafe — auto-rollback to the previous binary may crash the bot. Merge requires an admin to bypass branch protection (or restructure the PR to be rollback-safe)."
+            if [ "$ENFORCE" = "true" ]; then
+              exit 1
+            else
+              echo "::warning::ROLLBACK_SAFETY_ENFORCE is unset; failing soft."
+              exit 0
+            fi
+          fi
+
+          echo "Rollback-Safe marker present and set to yes. ✓"
