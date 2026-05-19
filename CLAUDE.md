@@ -26,7 +26,7 @@ type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore |
 scope: slack | teams | discord | cli | zapier | shared | ci
 ```
 
-> Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml`. Convention only (not CI-enforced); add a new scope to both places in the same PR. The dropdown's `other` option is a reporter-UX escape hatch — do NOT add it here (not a valid commit scope).
+> Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml` and the `scopes:` block in `.github/workflows/pr-title.yml`. The workflow has `requireScope: false` so a scope is optional in PR titles, but when one is present `amannn/action-semantic-pull-request` validates it against the allowed list — so adding a new scope requires touching all three places in the same PR. The dropdown's `other` option is a reporter-UX escape hatch — do NOT add it here (not a valid commit scope).
 
 ## Brand spelling
 

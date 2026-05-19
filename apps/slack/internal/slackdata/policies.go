@@ -55,6 +55,13 @@ const (
 // needed.
 //
 // Missing row → empty set (no policy = no access, fail-closed).
+//
+// TODO: rename when next touched. The function was named in an era
+// where both /qurl list (non-admin disclosure) and /qurl get $r_<id>
+// (mint-time capability) consumed it. Post-revert of #234 in #459
+// only the latter survives, so a name like
+// `ChannelMintableResourceIDs` would better reflect today's role.
+// Out of scope for #459 — flagged for the next visitor here.
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{

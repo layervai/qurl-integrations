@@ -76,7 +76,16 @@ func TestHandleList_RendersResources(t *testing.T) {
 // disclosure semantics: every workspace member sees the same master
 // alias list regardless of admin status or channel-policy state. A
 // non-admin invoking /qurl list from a channel with no alias_bindings
-// still sees aliases bound elsewhere in the workspace.
+// still sees the upstream master listing as-is.
+//
+// Load-bearing assertions are the two below: (a) the prod-db row
+// renders straight off the upstream payload, and (b) none of the
+// removed pagination-gap copy strings ("past the first page",
+// "ask an admin to allow", "allow specific resources") reappear.
+// Together they catch both a full filter reintroduction (row would
+// be filtered out) and a partial reintroduction that gates only the
+// empty-state copy (gap copy would reappear without the row
+// disappearing).
 //
 // Capability gating still happens at mint time — /qurl get $alias
 // from a channel without that binding returns the alias-not-found
