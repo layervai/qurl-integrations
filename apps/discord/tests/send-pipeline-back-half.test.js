@@ -509,6 +509,40 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     monitor.stop();
   });
 
+  it('addRecipients() re-arms the monitor after allDone so post-resolve adds still see views', async () => {
+    // cr-flagged repro: send to N → all view → setInterval clears
+    // (allDone) → /qurl add M more → without the re-arm, the counter
+    // stays frozen for the rest of the 1h cap.
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-resolve-add', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent to 1 user', { components: [] }, 1, 'apikey',
+    );
+
+    // Initial recipient views — triggers allDone + clearInterval.
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
+
+    // /qurl add a new recipient AFTER the monitor settled.
+    monitor.updateBaseMsg('Sent to 2 users');
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+    // The re-armed setInterval picks up Eve's view on the next tick.
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+      ['q_aaaaaaaaaa9', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 2 viewed / 0 pending');
+    monitor.stop();
+  });
+
   it('addRecipients() seeds linkStatus so views on newly-added recipients flip pending → viewed', async () => {
     // Regression guard for the cr-flagged bug: extending trackedQurlIds
     // without also seeding linkStatus left the new recipients invisible

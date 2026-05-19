@@ -1177,6 +1177,17 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         }
       }
       trackingGeneration++;
+      // If the monitor had already settled (all initial recipients viewed
+      // → setInterval cleared), re-arm it so the new recipients' views
+      // get a chance to flip. Without this, /qurl add on an already-
+      // resolved send leaves the counter frozen at `N viewed / M pending`
+      // for the rest of the 1h monitor lifetime.
+      if (allDone && !stopped) {
+        allDone = false;
+        clearInterval(timer);
+        timer = setInterval(runTick, pollInterval);
+        if (timer && timer.unref) timer.unref();
+      }
     },
     setMessageId(id) { messageId = id; },
     stop() {

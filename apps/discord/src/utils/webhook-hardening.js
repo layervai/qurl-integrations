@@ -3,8 +3,9 @@
 // Both routes need the same anti-abuse machinery (per-IP bad-signature
 // counter with sweep + cap) and the same constant-time HMAC compare.
 // Keeping the two implementations in lockstep by hand drifted at least
-// once (GitHub's sweep wasn't unref'd before this extraction); a shared
-// module makes that class of drift impossible.
+// once (GitHub's sweep had no clearInterval handle so graceful shutdown
+// leaked the timer; the qURL copy added one); a shared module makes
+// that class of drift impossible.
 //
 // SCALING: single-instance only. Move to Redis if the bot runs
 // horizontally.
