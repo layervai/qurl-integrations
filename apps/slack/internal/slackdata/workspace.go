@@ -337,9 +337,13 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 // set has no relationship to the OAuth identity). The owner check is
 // a read-before-write: a GetItem precedes the conditional UpdateItem
 // so the 400 cannot_remove_owner surfaces before any mutation
-// attempt. The read isn't strongly consistent because the
-// owner_id field doesn't mutate post-bind (BindWorkspace is the
-// only writer).
+// attempt. The read isn't strongly consistent because owner_id is
+// currently immutable post-bind (BindWorkspace is the only writer).
+// Revisit this read — and consider folding the owner check into the
+// conditional UpdateItem — if/when an ownership-transfer writer
+// lands; until then the cross-replica lag window only matters during
+// the seconds between BindWorkspace and the user's first
+// RemoveAdmin call.
 //
 // CCFE on the UpdateItem maps to 404 admin_not_found — either the row
 // vanished (race with a concurrent OAuth re-install) or the target

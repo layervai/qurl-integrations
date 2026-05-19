@@ -474,6 +474,69 @@ func TestAddAdmin_Concurrent(t *testing.T) {
 	}
 }
 
+// TestRemoveAdmin_Concurrent is the symmetric fence to
+// [TestAddAdmin_Concurrent] for the `contains(...)` half of the
+// conditional UpdateItem shape. N racers each attempt to remove the
+// same target; exactly one observes the member-present condition
+// (success), the rest see a CCFE classified as admin_not_found (404,
+// idempotent). Failure mode is benign — both racers can race-to-DELETE
+// without a double-delete because DDB's conditional UpdateItem is
+// item-locked — but pinning the assertion guards against a future
+// refactor of the condition shape.
+func TestRemoveAdmin_Concurrent(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	// Seed the target onto the admin set so RemoveAdmin's
+	// `contains(admin_slack_user_ids, :uid)` finds them on first read.
+	if err := store.AddAdmin(context.Background(), testAdminTeamID, testTargetUserID); err != nil {
+		t.Fatalf("seed target as admin: %v", err)
+	}
+
+	const racers = 8
+
+	results := make(chan error, racers)
+	start := make(chan struct{})
+	for range racers {
+		go func() {
+			<-start
+			results <- store.RemoveAdmin(context.Background(), testAdminTeamID, testTargetUserID)
+		}()
+	}
+	close(start)
+
+	var (
+		successes  int
+		notFounds  int
+		unexpected []error
+	)
+	for range racers {
+		err := <-results
+		if err == nil {
+			successes++
+			continue
+		}
+		var se *slackdata.Error
+		if errors.As(err, &se) && se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeAdminNotFound {
+			notFounds++
+			continue
+		}
+		unexpected = append(unexpected, err)
+	}
+	if len(unexpected) > 0 {
+		t.Fatalf("unexpected error(s) from concurrent RemoveAdmin: %v", unexpected)
+	}
+	if successes != 1 {
+		t.Errorf("successes = %d, want exactly 1 (TOCTOU regression)", successes)
+	}
+	if notFounds != racers-1 {
+		t.Errorf("not-founds = %d, want %d", notFounds, racers-1)
+	}
+	if ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testTargetUserID) {
+		t.Error("admin set still carries the target after concurrent RemoveAdmin")
+	}
+}
+
 // --- Dispatch-shell tests ---
 
 // TestHandleAdmin_BareAdminVerb fences the bare `admin` form — a
@@ -534,12 +597,12 @@ func TestResolvePolicy_LegacySingleRowShape(t *testing.T) {
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(testAdminTeamID),
 		fAttrSlackChannelID: stringMember("C_legacy"),
-		fAttrResourceID:     stringMember("r_legacy_xyz"),
+		fAttrResourceID:     stringMember("r_legacyxyz1"),
 		fAttrCreatedAt:      stringMember("2026-04-20T12:00:00Z"),
 	})
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 
-	allowed, err := store.ResolvePolicy(context.Background(), testAdminTeamID, "C_legacy", "r_legacy_xyz")
+	allowed, err := store.ResolvePolicy(context.Background(), testAdminTeamID, "C_legacy", "r_legacyxyz1")
 	if err != nil {
 		t.Fatalf("ResolvePolicy: %v", err)
 	}

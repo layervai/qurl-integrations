@@ -21,10 +21,15 @@ import (
 // ack window without the async runAsync hop. Async verbs were retired
 // with the v1 admin-surface scope cut.
 //
-// Admin commands are rejected with a graceful message when
-// `Config.AdminStore` is unset — production wires one in cmd/main.go;
-// sandbox configs without the three QURL_*_TABLE env vars stay
-// crash-free on `/qurl admin`.
+// Parse runs first, then `admin claim` short-circuits, then
+// requireAdminStoreSync gates the rest. So on a sandbox deploy without
+// the three QURL_*_TABLE env vars: malformed/unknown admin text
+// surfaces as a parser error (`:warning: unknown admin action`,
+// `:warning: missing @user mention`, etc.); parser-valid verbs other
+// than `claim` reply with "Admin features are not configured". The
+// distinction is intentional — parser errors are useful feedback
+// regardless of DDB wiring, and reordering the checks would mask
+// shape errors behind the not-configured surface.
 func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
@@ -62,19 +67,21 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// AdminClaim is short-circuited above so its case here is
 	// unreachable in practice — but the `exhaustive` linter requires
 	// it to be listed explicitly (a `default:` arm doesn't satisfy
-	// the check when an enumerated value is omitted). The body
-	// re-enters handleAdminClaim for defensive parity.
+	// the check when an enumerated value is omitted). The arm logs
+	// at slog.Error so a defensive misroute surfaces in CloudWatch
+	// instead of being swallowed by the normal-traffic claim path.
 	switch cmd.AdminAction {
 	case AdminClaim: // unreachable in practice — short-circuited above
+		slog.Error("admin claim reached dispatcher switch — defensive misroute (short-circuit above should have caught it)", "team_id", teamID, "user_id", userID)
 		h.handleAdminClaim(w, values)
 	case AdminRevoke:
-		h.handleAdminRevoke(w, values, teamID, userID, cmd)
+		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:
-		h.handleAdminAdd(w, values, teamID, userID, cmd)
+		h.handleAdminAdd(w, teamID, userID, cmd)
 	case AdminRemove:
-		h.handleAdminRemove(w, values, teamID, userID, cmd)
+		h.handleAdminRemove(w, teamID, userID, cmd)
 	case AdminList:
-		h.handleAdminList(w, values, teamID, userID)
+		h.handleAdminList(w, teamID, userID)
 	default:
 		respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
 	}
@@ -149,7 +156,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string)
 // customer-facing DELETE so quota/audit logs reflect the action. 404
 // surfaces as a friendly "already revoked or typo'd?" message; other
 // failures surface a generic upstream-error.
-func (h *Handler) handleAdminRevoke(w http.ResponseWriter, _ url.Values, teamID, userID string, cmd *Command) {
+func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string, cmd *Command) {
 	if !h.requireAdminSync(w, teamID, userID) {
 		return
 	}
@@ -186,7 +193,7 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, _ url.Values, teamID,
 //   - 404 workspace_not_bound  → "run /qurl setup first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
-func (h *Handler) handleAdminAdd(w http.ResponseWriter, _ url.Values, teamID, callerUserID string, cmd *Command) {
+func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
 	if !h.requireAdminSync(w, teamID, callerUserID) {
 		return
 	}
@@ -232,7 +239,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, _ url.Values, teamID, ca
 //   - 404 workspace_not_bound → "run /qurl setup first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
-func (h *Handler) handleAdminRemove(w http.ResponseWriter, _ url.Values, teamID, callerUserID string, cmd *Command) {
+func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
 	if !h.requireAdminSync(w, teamID, callerUserID) {
 		return
 	}
@@ -283,7 +290,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, _ url.Values, teamID,
 //   - 404 workspace_not_bound → "run /qurl setup first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
-func (h *Handler) handleAdminList(w http.ResponseWriter, _ url.Values, teamID, callerUserID string) {
+func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID string) {
 	if !h.requireAdminSync(w, teamID, callerUserID) {
 		return
 	}

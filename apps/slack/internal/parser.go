@@ -278,13 +278,13 @@ var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
 var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
 
 // qurlIDPattern is the shape of a qurl_id passed to `admin revoke`.
-// qurl-service emits `q_<alphanumeric>` (a ULID-style 26-char suffix);
-// the regex is conservative — anything that doesn't match this gets
-// surfaced as a parser error rather than letting `client.Delete`
-// produce an opaque 404 from the backend. Operators paste these
-// IDs out of an audit trail or a previous mint reply, so a
-// fat-fingered space or an injected character is the most common
-// failure mode this catches.
+// qurl-service emits `q_<UPPERCASE_ALPHANUMERIC>` (a ULID-style
+// 26-char suffix; ULIDs are uppercase by spec); the regex is
+// conservative — anything that doesn't match this gets surfaced as a
+// parser error rather than letting `client.Delete` produce an opaque
+// 404 from the backend. Operators paste these IDs out of an audit
+// trail or a previous mint reply, so a fat-fingered space or an
+// injected character is the most common failure mode this catches.
 //
 // The {16,64} length floor rejects obviously-truncated IDs (`q_abc`
 // can't reach a real qURL) at parse time so the user gets a parser
@@ -294,11 +294,11 @@ var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
 // generous enough to absorb a one-off shape change without an SDK
 // pin; widen further if the suffix grammar shifts.
 //
-// TODO(upstream-rebrand): the [A-Za-z0-9]-only character class will
-// refuse legitimate IDs if qurl-service ever emits suffixes with
-// hyphens/underscores. The qurl-service ID grammar lives in the
+// TODO(upstream-rebrand): the [A-Z0-9]-only character class will
+// refuse legitimate IDs if qurl-service ever emits lowercase,
+// hyphens, or underscores. The qurl-service ID grammar lives in the
 // resource-mint path; widen this set in lockstep with that contract.
-var qurlIDPattern = regexp.MustCompile(`^q_[A-Za-z0-9]{16,64}$`)
+var qurlIDPattern = regexp.MustCompile(`^q_[A-Z0-9]{16,64}$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
