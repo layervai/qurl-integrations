@@ -148,6 +148,22 @@ header comment).
 `aws-sdk-client-mock`. The local-dev workflow is only required for
 `npm start`.
 
+The provisioner covers the **Store-contract** tables (those in
+`src/store/ddb-store.js`'s `TABLES` map). Other modules use their own
+dedicated tables that this script does NOT create — `flow-state`,
+`gateway-session`, `gateway-lock`, `gateway-peer-heartbeat`. Running
+locally with `ENABLE_EVENT_SHIPPER=true` or `ENABLE_GATEWAY_RESUME=true`
+will hit `ResourceNotFoundException` on these unless you also provision
+them via terraform-against-localhost or `aws dynamodb create-table
+--endpoint-url http://localhost:8000`.
+
+Linux note: `host.docker.internal` only resolves inside Docker
+Desktop. If you're running Docker Engine on bare Linux, either start
+the container with `--add-host=host.docker.internal:host-gateway`
+or use `127.0.0.1` from the container side (and bind the
+docker-compose `dynamodb-local` port to the host loopback rather
+than to the container's network).
+
 ## Architecture
 
 - `src/index.js` — boot validation + graceful shutdown
