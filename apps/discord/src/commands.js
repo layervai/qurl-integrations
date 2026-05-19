@@ -283,16 +283,38 @@ async function prewarmGuildMembersCache(guild, logCtx) {
   // hits — early-exit paths used to resolve `undefined`, which works
   // for `await prewarmGuildMembersCache(...)` callers but would surprise
   // a future caller that does `.then(...)`.
-  if (!guild || !guild.members || typeof guild.members.fetch !== 'function') return;
+  if (!guild || !guild.members || typeof guild.members.list !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
-  if (cacheSize >= (guild.memberCount ?? Infinity)) return;
+  if (cacheSize >= (guild.memberCount ?? guild.approximateMemberCount ?? Infinity)) return;
   const existing = prewarmInFlight.get(guild.id);
   if (existing) return existing;
   const inFlight = (async () => {
     try {
-      await guild.members.fetch({ time: TIMEOUTS.MEMBER_PREFETCH });
+      // REST-based pagination via GET /guilds/{id}/members. The previous
+      // `guild.members.fetch()` (no args) sent REQUEST_GUILD_MEMBERS over
+      // the gateway WebSocket via `shard.send` — http-only worker mode
+      // (no gateway shard) crashes on that path. `list` is REST and
+      // works in both tiers.
+      //
+      // @everyone means EVERYONE: paginate until the API returns a
+      // partial page (Discord's hard page cap is 1000). `after` cursor
+      // uses the highest user-id snowflake from the previous page.
+      // discord.js handles 429 backoff automatically inside `list` →
+      // `client.rest.get`, so we don't sleep here. Safety cap at 1000
+      // pages (~1M members) is paranoia against an upstream bug
+      // returning steady-state full pages without advancing.
+      let after;
+      for (let page = 0; page < 1000; page++) {
+        const batch = await guild.members.list({ limit: 1000, after });
+        if (batch.size === 0) break;
+        if (batch.size < 1000) break;
+        // lastKey() is the highest snowflake in the Collection (it's
+        // insertion-ordered against the API response, which is sorted
+        // ascending by user_id). Pass it as the next page's `after`.
+        after = batch.lastKey();
+      }
     } catch (err) {
-      logger.warn('members.fetch pre-warm failed; @everyone/role expansion may underresolve', {
+      logger.warn('members pre-warm failed; @everyone/role expansion may underresolve', {
         ...logCtx, guild_id: guild.id, error: err && err.message,
       });
     } finally {
