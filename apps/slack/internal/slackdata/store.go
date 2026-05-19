@@ -365,14 +365,3 @@ func readTime(item map[string]ddbtypes.AttributeValue, key string) time.Time {
 // expires_at > :now read across multiple UpdateExpression callers.
 // Lifted to a constant to satisfy goconst.
 const exprNow = ":now"
-
-// notFoundError is the canonical 404 shape — emitted by the GetItem-
-// returns-empty paths and the conditional-check-failed paths that
-// mean "no such row to act on".
-func notFoundError(title string) *Error {
-	return &Error{
-		StatusCode: http.StatusNotFound,
-		Code:       "not_found",
-		Title:      title,
-	}
-}

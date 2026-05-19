@@ -59,7 +59,14 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
+	// AdminClaim is short-circuited above so its case here is
+	// unreachable in practice — but the `exhaustive` linter requires
+	// it to be listed explicitly (a `default:` arm doesn't satisfy
+	// the check when an enumerated value is omitted). The body
+	// re-enters handleAdminClaim for defensive parity.
 	switch cmd.AdminAction {
+	case AdminClaim:
+		h.handleAdminClaim(w, values)
 	case AdminRevoke:
 		h.handleAdminRevoke(w, values, teamID, userID, cmd)
 	case AdminAdd:
@@ -69,8 +76,6 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	case AdminList:
 		h.handleAdminList(w, values, teamID, userID)
 	default:
-		// AdminClaim is short-circuited above; any unknown action
-		// (parser drift or a future-but-unwired verb) lands here.
 		respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
 	}
 }
