@@ -254,6 +254,16 @@ describe('unsupportedRoleResumeCombo', () => {
     // We pass the literal string 'sqlite' here because it surfaces
     // the most realistic regression — an operator carrying over an
     // env file from before the DDB-only world.
+    //
+    // Unreachable-in-real-boot caveat: `src/store/index.js`'s
+    // validator throws on any non-`ddb` STORE_TYPE before this
+    // function ever sees the value (config.STORE_TYPE === 'ddb' is
+    // the only outcome of a successful boot). The test exercises
+    // the function in isolation so the defense-in-depth message
+    // contract stays pinned for a hypothetical future backend
+    // addition that updates VALID_BACKENDS without thinking through
+    // the cross-process resume semantics. Do not "simplify" by
+    // deleting this test — it's intentionally dead-defense coverage.
     const msg = unsupportedRoleResumeCombo('gateway', true, true, 'sqlite');
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/STORE_TYPE=ddb/);

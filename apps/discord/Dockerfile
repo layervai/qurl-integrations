@@ -7,15 +7,16 @@ WORKDIR /app
 # key off this value.
 ENV NODE_ENV=production
 
-# Run `npm ci` directly as the non-root `node` user (`USER node` below
-# WORKDIR + chown of /app) so npm writes a node-owned node_modules tree
-# without a post-install `chown -R` pass. Possible now that the last
-# native-compile dep (better-sqlite3) is gone — `--ignore-scripts`
-# is safe because every remaining dependency is pure-JS with no
-# postinstall steps. `--omit=dev` keeps jest + aws-sdk-client-mock out
-# of the runtime image; `npm cache clean --force` shaves the ~/.npm
-# cache layer the prior two-stage build dropped incidentally via the
-# `COPY --from=build node_modules` carry-over.
+# `RUN chown node:node /app` + `USER node` below let `npm ci` run as
+# the non-root `node` user and write a node-owned node_modules tree
+# directly — neither a build-stage chown nor a post-install chown -R
+# is needed. Possible now that the last native-compile dep
+# (better-sqlite3) is gone: `--ignore-scripts` is safe because every
+# remaining dependency is pure-JS with no postinstall steps.
+# `--omit=dev` keeps jest + aws-sdk-client-mock out of the runtime
+# image; `npm cache clean --force` shaves the ~/.npm cache layer
+# (the prior two-stage build dropped this incidentally via the
+# `COPY --from=build node_modules` carry-over).
 RUN chown node:node /app
 USER node
 COPY --chown=node:node package*.json ./

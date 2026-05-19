@@ -18,10 +18,20 @@
 //
 // Encrypt / decrypt parity is intentionally NOT exercised here: the mock
 // stores plaintext directly, so a corrupt-ciphertext-shape regression in
-// `utils/crypto.js` won't surface in this suite. That parity lives in
-// `tests/crypto.test.js` (algorithm-level) and `tests/ddb-store.test.js`
-// (recordOrphanedToken / decryptOrphanedToken round-trip via the real
-// `encryptStrict` / `decrypt` calls).
+// `utils/crypto.js` won't surface in this suite. Coverage split:
+//   - `tests/crypto.test.js` — algorithm-level round-trip with a real
+//     KEK, including fail-closed behavior when KEK is unset.
+//   - `tests/ddb-store.test.js` — confirms `recordOrphanedToken` calls
+//     `encryptStrict` on the access_token and `listOrphanedTokens` /
+//     `decryptOrphanedToken` round-trip through the encryption shim.
+//     The shim itself is jest.mock'd to pass-through (see lines 36-45
+//     of that file), so the integration of (real cipher × ddb-store ×
+//     sweeper) is not exercised anywhere in unit tests by design —
+//     that's deliberate integration-test territory (`ddb-store.test.js`
+//     comment: "Real encryption ... exercised by crypto.test.js").
+// The sweeper's decrypt-failure catch branch is exercised via
+// `decryptOrphanedToken.mockRejectedValueOnce` in the corresponding
+// test below.
 const mockOrphanedTokens = new Map();
 
 jest.mock('../src/config', () => ({
