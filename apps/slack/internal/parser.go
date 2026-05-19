@@ -58,8 +58,15 @@ const (
 	AdminPolicies AdminAction = "policies"
 	// AdminStatus reports per-workspace bot health/admin info.
 	AdminStatus AdminAction = "status"
-	// AdminRevoke revokes a previously minted access link by alias.
+	// AdminRevoke revokes a single previously minted qURL by its
+	// `qurl_id` (no `$` sigil — operators paste the ID directly out
+	// of an audit trail or a previous mint reply).
 	AdminRevoke AdminAction = "revoke"
+	// AdminRevokeAll revokes every active qURL bound to an alias.
+	// Distinct from [AdminRevoke] so operators can't fat-finger a
+	// fleet-wide kill when they meant to revoke a single link — the
+	// `-all` suffix is intentional friction.
+	AdminRevokeAll AdminAction = "revoke-all"
 )
 
 // ResourceTokenKind discriminates between the two shapes a `$<token>`
@@ -185,6 +192,10 @@ var ErrMissingTarget = errors.New("missing target argument")
 // punting an obviously-bogus alias to qurl-service.
 var ErrInvalidAlias = errors.New("invalid alias")
 
+// ErrInvalidQURLID is returned when `admin revoke <id>` receives a
+// token that isn't shaped like a qurl_id (`q_<alnum>`).
+var ErrInvalidQURLID = errors.New("invalid qurl_id")
+
 // ErrUnexpectedArgument is returned when a verb that takes no
 // positional arguments receives one (e.g. `admin policies extra`).
 // Catches user-facing typos earlier than the handler dispatch.
@@ -258,6 +269,21 @@ var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
 // `qurl-service/internal/domain/qurl.go::resourceIDPattern`. If the
 // upstream regex (charset, length, anchors) changes, mirror it here.
 var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
+
+// qurlIDPattern is the shape of a qurl_id passed to `admin revoke`.
+// qurl-service emits `q_<alphanumeric>` (a ULID-style suffix); the
+// regex is conservative — anything that doesn't match this gets
+// surfaced as a parser error rather than letting `client.Delete`
+// produce an opaque 404 from the backend. Operators paste these
+// IDs out of an audit trail or a previous mint reply, so a
+// fat-fingered space or an injected character is the most common
+// failure mode this catches.
+//
+// The {1,64} length cap fails a fat-paste at parse time rather than
+// shipping a kilobyte URL path to qurl-service. Current qurl-service
+// IDs are well under that bound (ULID suffix = 26 chars), so the cap
+// is conservative; if the suffix shape ever changes, bump here.
+var qurlIDPattern = regexp.MustCompile(`^q_[A-Za-z0-9]{1,64}$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -493,9 +519,11 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 // takes no positional args (the code is collected via modal — see
 // Blocker #3 in the plan and [AdminClaimModal]); `allow`/`disallow`
 // take a `#channel` and a `$alias`; `policies`/`status` take no
-// args; `revoke` takes a `$alias`. Verbs that take no args fail
-// [ErrUnexpectedArgument] when given any — surfacing a typo like
-// `admin policies extra` early instead of silently routing it.
+// args; `revoke` takes a `q_<id>` qurl_id; `revoke-all` takes a
+// `$alias` and revokes every active qURL bound to it. Verbs that take
+// no args fail [ErrUnexpectedArgument] when given any — surfacing a
+// typo like `admin policies extra` early instead of silently routing
+// it.
 func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrMissingAdminAction
@@ -519,6 +547,33 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 		}
 		return cmd, nil
 	case AdminRevoke:
+		// `revoke` takes a single positional `q_<id>` qurl_id (no
+		// `$` sigil). The deliberate error distinction with
+		// [AdminRevokeAll]: revoke uses [ErrMissingTarget] (missing
+		// positional arg) while revoke-all uses [ErrEmptyResource]
+		// (missing `$alias` after the sigil) — the two err types
+		// drive different user-facing hints. A `$alias` token here
+		// surfaces an [ErrUnexpectedArgument] with a hint to use
+		// `revoke-all $alias` instead, the most common typo class.
+		if len(tail) == 0 {
+			return nil, ErrMissingTarget
+		}
+		if strings.HasPrefix(tail[0], "$") {
+			return nil, fmt.Errorf("%w: %q (use `admin revoke-all $alias` to revoke every qURL bound to an alias)", ErrUnexpectedArgument, tail[0])
+		}
+		if !qurlIDPattern.MatchString(tail[0]) {
+			return nil, fmt.Errorf("%w: %q (expected `q_<id>`)", ErrInvalidQURLID, tail[0])
+		}
+		cmd.Target = tail[0]
+		if len(tail) > 1 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[1])
+		}
+		return cmd, nil
+	case AdminRevokeAll:
+		// `revoke-all $alias` — alias-scoped kill switch. Walks
+		// qURLs bound to the alias and deletes each. The `-all`
+		// suffix is intentional friction so a fat-fingered admin
+		// can't fleet-kill when they meant to revoke a single link.
 		if len(tail) == 0 {
 			return nil, ErrEmptyResource
 		}

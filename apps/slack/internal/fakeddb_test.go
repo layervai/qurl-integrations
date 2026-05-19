@@ -839,6 +839,81 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		}
 		_, ok := item[attr]
 		return !ok, nil
+	case strings.HasPrefix(term, "NOT contains("):
+		// `NOT contains(<attr>, :val)` — true iff the SS attribute
+		// at <attr> does NOT contain :val. Used by AllowResource's
+		// "is :rid already in the set?" guard to fold the membership
+		// check into the conditional UpdateItem.
+		inner := strings.TrimSuffix(strings.TrimPrefix(term, "NOT contains("), ")")
+		comma := strings.Index(inner, ",")
+		if comma < 0 {
+			return false, fmt.Errorf("fakeDDB condition: malformed NOT contains term %q", term)
+		}
+		attr := strings.TrimSpace(inner[:comma])
+		valTok := strings.TrimSpace(inner[comma+1:])
+		if !present {
+			return true, nil
+		}
+		raw, ok := item[attr]
+		if !ok {
+			return true, nil
+		}
+		ss, ok := raw.(*ddbtypes.AttributeValueMemberSS)
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: NOT contains target %q is not SS", attr)
+		}
+		rhs, ok := vals[valTok]
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: unknown value %q", valTok)
+		}
+		want, ok := rhs.(*ddbtypes.AttributeValueMemberS)
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: NOT contains :val %q is not S", valTok)
+		}
+		for _, m := range ss.Value {
+			if m == want.Value {
+				return false, nil
+			}
+		}
+		return true, nil
+	case strings.HasPrefix(term, "contains("):
+		// `contains(<attr>, :val)` — true iff the SS attribute at
+		// <attr> contains :val. Used by DisallowResource's guard
+		// (membership-required-for-removal) and any future verb
+		// that needs a positive membership check inside the
+		// conditional UpdateItem.
+		inner := strings.TrimSuffix(strings.TrimPrefix(term, "contains("), ")")
+		comma := strings.Index(inner, ",")
+		if comma < 0 {
+			return false, fmt.Errorf("fakeDDB condition: malformed contains term %q", term)
+		}
+		attr := strings.TrimSpace(inner[:comma])
+		valTok := strings.TrimSpace(inner[comma+1:])
+		if !present {
+			return false, nil
+		}
+		raw, ok := item[attr]
+		if !ok {
+			return false, nil
+		}
+		ss, ok := raw.(*ddbtypes.AttributeValueMemberSS)
+		if !ok {
+			return false, nil
+		}
+		rhs, ok := vals[valTok]
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: unknown value %q", valTok)
+		}
+		want, ok := rhs.(*ddbtypes.AttributeValueMemberS)
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: contains :val %q is not S", valTok)
+		}
+		for _, m := range ss.Value {
+			if m == want.Value {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	// Binary comparison: `<attr> <op> :val`. The only operators in
 	// production use are `=` and `>`.

@@ -603,6 +603,15 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// route it through the redactSlashCommandText sanitizer
 		// before logging on this path.
 		respondSlack(w, ":warning: Do not pass the bootstrap code on the slash-command line — it shows up in our logs. Run `/qurl admin claim` (no arguments) and enter the code in the modal.")
+	case text == "admin" || strings.HasPrefix(text, "admin "):
+		// Catch-all for the non-claim admin verbs (allow / disallow /
+		// policies / status / revoke / revoke-all). The `admin claim`
+		// cases above run first so the bootstrap-code-redaction
+		// branch is preserved; this case is the broader fallback
+		// that routes the rest into [Handler.handleAdmin] for parse +
+		// dispatch. Bare `admin` lands here too so the parser can
+		// emit the `missing admin action` error.
+		h.handleAdmin(w, values)
 	case text == "setalias" || strings.HasPrefix(text, "setalias "):
 		// Bare `setalias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
@@ -756,6 +765,22 @@ func (h *Handler) helpMessage() string {
 			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
 			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
 			"• `/qurl aliases` — List the aliases configured in this channel",
+		)
+	}
+	if h.cfg.AdminStore != nil {
+		// allow/disallow/policies/status/revoke/revoke-all all
+		// require AdminStore — on sandbox deploys without the three
+		// QURL_*_TABLE env vars (see cmd/main.go), AdminStore is nil
+		// and these verbs render "Admin features are not configured".
+		// Gate the help lines on the same condition so the listing
+		// stays consistent with what the verbs will actually do.
+		lines = append(lines,
+			"• `/qurl admin allow <#channel> $<alias>` — Allow an alias in a channel (admin only)",
+			"• `/qurl admin disallow <#channel> $<alias>` — Remove an alias from a channel (admin only)",
+			"• `/qurl admin policies` — List channel/alias policies (admin only)",
+			"• `/qurl admin status` — Workspace config sanity check (admin only)",
+			"• `/qurl admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
+			"• `/qurl admin revoke-all $<alias>` — Revoke every qURL bound to an alias (admin only)",
 		)
 	}
 	lines = append(lines,

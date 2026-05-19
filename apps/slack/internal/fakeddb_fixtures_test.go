@@ -67,15 +67,33 @@ func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.Attribute
 }
 
 // seedChannelPolicySingle returns a channel_policies row with a
-// single alias+resource_id binding. Mirrors the legacy single-row
-// shape ListPolicies flattens.
+// single alias→resource_id binding. Writes both the post-pivot
+// shape (`alias_bindings` Map + `allowed_resource_ids` SS) AND the
+// legacy single-row scalar (`alias` + `resource_id`) so the same
+// fixture exercises:
+//
+//   - `/qurl admin policies` ListPolicies flatten path (reads
+//     alias_bindings Map then aliasless SS members).
+//   - ResolvePolicy gate (`/qurl get`) which checks both the
+//     allowed_resource_ids SS and the legacy resource_id scalar.
+//
+// A row built by this helper resolves at /qurl get AND lists at
+// /qurl admin policies — the consistency seam between the two
+// pinned by TestResolvePolicy_LegacySingleRowShape and the
+// TestHandleAdminPolicies_* fixtures.
 func seedChannelPolicySingle(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(teamID),
 		fAttrSlackChannelID: stringMember(channelID),
 		fAttrAlias:          stringMember(alias),
 		fAttrResourceID:     stringMember(resourceID),
-		fAttrCreatedAt:      stringMember("2026-04-20T12:00:00Z"),
+		fAttrAliasBindings: &ddbtypes.AttributeValueMemberM{
+			Value: map[string]ddbtypes.AttributeValue{
+				alias: stringMember(resourceID),
+			},
+		},
+		fAttrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+		fAttrCreatedAt:          stringMember("2026-04-20T12:00:00Z"),
 	}
 }
 
@@ -126,6 +144,25 @@ func seedChannelPolicyAliasBindings(teamID, channelID string, bindings map[strin
 		fAttrAliasBindings:  &ddbtypes.AttributeValueMemberM{Value: m},
 		fAttrCreatedAt:      stringMember("2026-04-20T12:00:00Z"),
 	}
+}
+
+// seedChannelPolicyWithBindings is the same shape as
+// [seedChannelPolicyAliasBindings] plus an auto-populated
+// `allowed_resource_ids` SS containing every binding's resource_id.
+// Mirrors what a real `allow + alias-bind` sequence would land — useful
+// for tests that exercise ListPolicies's flatten path (one entry per
+// binding plus any extra aliasless SS members the caller overrides).
+func seedChannelPolicyWithBindings(teamID, channelID string, bindings map[string]string) map[string]ddbtypes.AttributeValue {
+	item := seedChannelPolicyAliasBindings(teamID, channelID, bindings)
+	if len(bindings) == 0 {
+		return item
+	}
+	rids := make([]string, 0, len(bindings))
+	for _, rid := range bindings {
+		rids = append(rids, rid)
+	}
+	item[fAttrAllowedResourceIDs] = &ddbtypes.AttributeValueMemberSS{Value: rids}
+	return item
 }
 
 // seedBootstrapCode returns a bootstrap_codes row keyed by the

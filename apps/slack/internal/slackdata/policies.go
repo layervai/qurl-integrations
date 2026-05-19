@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -32,6 +33,16 @@ const (
 	attrSlackChannelID     = "slack_channel_id"
 	attrAliasBindings      = "alias_bindings"
 	attrAllowedResourceIDs = "allowed_resource_ids"
+	// attrResourceID is the legacy per-row scalar shape that pre-pivot
+	// rows carry. Net-new mutations write through AllowResource into
+	// the `allowed_resource_ids` SS instead, but hand-seeded rows or
+	// any row that escapes the bot's mutation path may still carry the
+	// scalar. ResolvePolicy falls back to the scalar so a row that's
+	// listed by `/qurl admin policies` (which now flattens both shapes)
+	// also resolves at `/qurl get`. Without this fallback the listing
+	// vs resolve paths would diverge — exactly the foot-gun pinned by
+	// TestResolvePolicy_LegacySingleRowShape.
+	attrResourceID = "resource_id"
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
@@ -116,6 +127,16 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 	if len(out.Item) == 0 {
 		return false, nil
 	}
+	// Legacy single-row shape: per-row `resource_id` scalar. Hand-seeded
+	// rows that escaped the bot's mutation path may carry the grant
+	// only in the scalar — ListPolicies's flatten path already surfaces
+	// these, so ResolvePolicy must too or `/qurl admin policies` and
+	// `/qurl get` produce inconsistent answers for the same row.
+	if rid := readString(out.Item, attrResourceID); rid == resourceID {
+		return true, nil
+	}
+	// Post-pivot multi-resource shape: SS membership. This is the
+	// shape AllowResource / DisallowResource mutate.
 	for _, rid := range readStringSet(out.Item, attrAllowedResourceIDs) {
 		if rid == resourceID {
 			return true, nil
@@ -182,9 +203,19 @@ func (s *Store) AllowResource(ctx context.Context, teamID, channelID, resourceID
 }
 
 // DisallowResource removes `resourceID` from the (teamID, channelID)
-// row's allowed_resource_ids set. Returns 404 (via *Error) if no
-// matching row/member exists — the handler maps 404 to the
-// idempotent "nothing to remove" copy.
+// row's allowed_resource_ids set via a single conditional UpdateItem.
+// Returns 404 (via *Error) if no matching row/member exists — the
+// handler maps 404 to the idempotent "nothing to remove" copy.
+//
+// The conditional `contains(allowed_resource_ids, :rid)` folds the
+// "is this resource currently allowed?" check into the same DDB
+// item-lock as the mutation. Without that fence, the prior
+// probe-then-DELETE shape had a TOCTOU window where two concurrent
+// disallows on the same channel/resource would BOTH see "yes it's
+// in the set" on the probe and BOTH render success; only one
+// actually mutated the set. The single conditional UpdateItem now
+// produces exactly one success and N-1 deterministic 404s for N
+// concurrent disallows. Closes #355.
 func (s *Store) DisallowResource(ctx context.Context, teamID, channelID, resourceID string) error {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return &Error{
@@ -192,46 +223,29 @@ func (s *Store) DisallowResource(ctx context.Context, teamID, channelID, resourc
 			Title:      "DisallowResource: team_id, channel_id, resource_id are required",
 		}
 	}
-	// Probe the existing membership so the no-op path surfaces as
-	// 404 (handler maps to "nothing to remove"). DDB's DELETE on a
-	// set is silent on absent members — without the probe we'd
-	// render the success copy on a no-op.
-	get, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-	})
-	if err != nil {
-		return ddbToError("DisallowResource(probe)", err)
-	}
-	if len(get.Item) == 0 {
-		return notFoundError("DisallowResource: no policy for channel")
-	}
-	found := false
-	for _, rid := range readStringSet(get.Item, attrAllowedResourceIDs) {
-		if rid == resourceID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return notFoundError("DisallowResource: resource_id not in allowed set")
-	}
-	_, err = s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-		UpdateExpression: aws.String("DELETE allowed_resource_ids :rids SET updated_at = :now"),
+		UpdateExpression:    aws.String("DELETE allowed_resource_ids :rids SET updated_at = :now"),
+		ConditionExpression: aws.String("contains(allowed_resource_ids, :rid)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			":rid":  stringAttr(resourceID),
 			exprNow: stringAttr(s.nowOrDefault().UTC().Format(timeFormat)),
 		},
 	})
 	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			// Either the row doesn't exist OR the resource_id isn't
+			// in the allowed set. Either way, "nothing to remove" —
+			// surface as 404 so the handler maps to the idempotent
+			// "was not allowed" copy.
+			return notFoundError("DisallowResource: no matching policy member")
+		}
 		return ddbToError("DisallowResource", err)
 	}
 	return nil
@@ -290,14 +304,49 @@ func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit i
 	for _, item := range out.Items {
 		channelID := readString(item, attrSlackChannelID)
 		createdAt := readTime(item, attrCreatedAt)
-		// One PolicyEntry per alias_bindings binding. Rows without
-		// an alias_bindings Map (or with an empty one) contribute
-		// zero entries — `/qurl aliases` renders the empty-state
-		// hint when the post-filter slice is empty.
-		for alias, rid := range readStringMap(item, attrAliasBindings) {
+		bindings := readStringMap(item, attrAliasBindings)
+		// Sort alias names ascending so the listing is deterministic
+		// across calls — operators audit-via-diff against prior pastes.
+		aliasNames := make([]string, 0, len(bindings))
+		for name := range bindings {
+			aliasNames = append(aliasNames, name)
+		}
+		sort.Strings(aliasNames)
+		// Track resource_ids already emitted as alias bindings so the
+		// aliasless SS pass below doesn't double-list the same
+		// (channel, resource).
+		boundResources := make(map[string]struct{}, len(bindings))
+		for _, name := range aliasNames {
+			rid := bindings[name]
+			if rid == "" {
+				continue
+			}
+			boundResources[rid] = struct{}{}
 			list.Entries = append(list.Entries, PolicyEntry{
 				ChannelID:  channelID,
-				Alias:      alias,
+				Alias:      name,
+				ResourceID: rid,
+				CreatedAt:  createdAt,
+			})
+		}
+		// Aliasless resources: members of `allowed_resource_ids` SS
+		// not covered by any alias binding. `/qurl admin policies`
+		// surfaces these as "(no alias bound)" entries so operators
+		// see the whole allow-set, not just the alias-decorated subset.
+		// Sorted deterministically for the same audit-diff reason as
+		// the alias names above.
+		aliasless := make([]string, 0)
+		for _, rid := range readStringSet(item, attrAllowedResourceIDs) {
+			if _, bound := boundResources[rid]; bound {
+				continue
+			}
+			aliasless = append(aliasless, rid)
+		}
+		sort.Strings(aliasless)
+		for _, rid := range aliasless {
+			list.Entries = append(list.Entries, PolicyEntry{
+				ChannelID:  channelID,
+				Alias:      "",
 				ResourceID: rid,
 				CreatedAt:  createdAt,
 			})
