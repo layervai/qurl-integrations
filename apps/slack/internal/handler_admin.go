@@ -39,10 +39,13 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, ":warning: "+err.Error())
 		return
 	}
-	if cmd.Subcommand != SubcmdAdmin {
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
-		return
-	}
+	// No `cmd.Subcommand != SubcmdAdmin` guard: this entry point is
+	// only reached from the `text == "admin"` / `HasPrefix("admin ")`
+	// branches in handleSlashCommand, and the parser's parseAdmin
+	// dispatch produces SubcmdAdmin for that input class. If the
+	// parser ever drifts and emits a different subcommand here,
+	// cmd.AdminAction will land empty and the switch's `default:`
+	// arm renders the same "unknown" copy a guard would have.
 	teamID := values.Get(fieldTeamID)
 	userID := values.Get(fieldUserID)
 	// `admin claim` is routed to [Handler.handleAdminClaim] directly
@@ -220,7 +223,11 @@ type adminPolicyMutation struct {
 	successVerb      string
 	idempotentStatus int
 	idempotentMsgFmt string
-	call             func(ctx context.Context, s *slackdata.Store, teamID, channelID, resourceID string) error
+	// call is a closure that captures the slackdata.Store from the
+	// handler's receiver — runAdminPolicyMutation already holds it on
+	// h.cfg.AdminStore, so threading it through as a parameter would
+	// be redundant.
+	call func(ctx context.Context, teamID, channelID, resourceID string) error
 }
 
 // runAdminPolicyMutation factors the gate / auth / resolve / mutate
@@ -249,7 +256,7 @@ func (h *Handler) runAdminPolicyMutation(w http.ResponseWriter, teamID, userID s
 	if !ok {
 		return
 	}
-	if err := m.call(ctx, h.cfg.AdminStore, teamID, cmd.ChannelID, res.ResourceID); err != nil {
+	if err := m.call(ctx, teamID, cmd.ChannelID, res.ResourceID); err != nil {
 		var se *slackdata.Error
 		if errors.As(err, &se) && se.StatusCode == m.idempotentStatus {
 			respondSlack(w, fmt.Sprintf(m.idempotentMsgFmt, cmd.Alias, cmd.ChannelID))
@@ -281,8 +288,8 @@ func (h *Handler) handleAdminAllow(w http.ResponseWriter, _ url.Values, teamID, 
 		successVerb:      "Allowed",
 		idempotentStatus: http.StatusConflict,
 		idempotentMsgFmt: "`$%s` is already allowed in <#%s> — nothing to do.",
-		call: func(ctx context.Context, s *slackdata.Store, teamID, channelID, resourceID string) error {
-			return s.AllowResource(ctx, teamID, channelID, resourceID)
+		call: func(ctx context.Context, teamID, channelID, resourceID string) error {
+			return h.cfg.AdminStore.AllowResource(ctx, teamID, channelID, resourceID)
 		},
 	})
 }
@@ -298,8 +305,8 @@ func (h *Handler) handleAdminDisallow(w http.ResponseWriter, _ url.Values, teamI
 		successVerb:      "Disallowed",
 		idempotentStatus: http.StatusNotFound,
 		idempotentMsgFmt: "`$%s` was not allowed in <#%s> — nothing to remove.",
-		call: func(ctx context.Context, s *slackdata.Store, teamID, channelID, resourceID string) error {
-			return s.DisallowResource(ctx, teamID, channelID, resourceID)
+		call: func(ctx context.Context, teamID, channelID, resourceID string) error {
+			return h.cfg.AdminStore.DisallowResource(ctx, teamID, channelID, resourceID)
 		},
 	})
 }
@@ -600,6 +607,17 @@ func (h *Handler) deletePage(ctx context.Context, log *slog.Logger, c *client.Cl
 		}
 		id := qurls[i].ResourceID
 		if err := c.Delete(ctx, id); err != nil {
+			// Symmetric with the post-ListByResource reclassify in
+			// runRevokeAllWalk: a deadline that fires INSIDE c.Delete
+			// gets wrapped as a transport error, and without this
+			// check it would land in r.failed++ rather than
+			// r.deadlineExceeded. Same load-bearing reason — the
+			// reply renderer's "budget elapsed" branch is the right
+			// surface for ctx exhaustion, not a fictitious failure.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				recordCtxErr(log, ctxErr, r)
+				return false
+			}
 			var apiErr *client.APIError
 			if errors.As(err, &apiErr) {
 				// 404 mid-walk is the expected outcome when a qURL

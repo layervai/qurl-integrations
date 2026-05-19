@@ -283,6 +283,11 @@ var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
 // shipping a kilobyte URL path to qurl-service. Current qurl-service
 // IDs are well under that bound (ULID suffix = 26 chars), so the cap
 // is conservative; if the suffix shape ever changes, bump here.
+//
+// TODO(upstream-rebrand): the [A-Za-z0-9]-only character class will
+// refuse legitimate IDs if qurl-service ever emits suffixes with
+// hyphens/underscores. The qurl-service ID grammar lives in the
+// resource-mint path; widen this set in lockstep with that contract.
 var qurlIDPattern = regexp.MustCompile(`^q_[A-Za-z0-9]{1,64}$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
