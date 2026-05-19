@@ -56,6 +56,8 @@ type fakeDDB struct {
 	getItemErrs map[string]error
 	// updateItemErrs maps tableName → injected UpdateItem error.
 	updateItemErrs map[string]error
+	// putItemErrs maps tableName → injected PutItem error.
+	putItemErrs map[string]error
 	// queryErrs maps tableName → injected Query error.
 	queryErrs map[string]error
 	// getItemCounts tracks call counts per table for the
@@ -113,6 +115,20 @@ func (f *fakeDDB) SetUpdateItemErr(table string, err error) {
 		f.updateItemErrs = map[string]error{}
 	}
 	f.updateItemErrs[table] = err
+}
+
+// SetPutItemErr injects an error returned on every PutItem against
+// `table`. Used to simulate the BindWorkspace non-409 path (a
+// transport / throttling failure that isn't ConditionalCheckFailed),
+// which surfaces the "code redeemed but binding failed — contact
+// support" copy.
+func (f *fakeDDB) SetPutItemErr(table string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.putItemErrs == nil {
+		f.putItemErrs = map[string]error{}
+	}
+	f.putItemErrs[table] = err
 }
 
 // SetQueryErr injects an error returned on every Query against `table`.
@@ -295,6 +311,9 @@ func (f *fakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...fun
 	defer f.mu.Unlock()
 	if f.putHook != nil {
 		f.putHook(in)
+	}
+	if injected, ok := f.putItemErrs[aws.ToString(in.TableName)]; ok {
+		return nil, injected
 	}
 	table, schema, err := f.tableAndSchema(aws.ToString(in.TableName))
 	if err != nil {

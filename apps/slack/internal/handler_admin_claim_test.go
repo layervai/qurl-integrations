@@ -363,7 +363,7 @@ func TestHandleAdminClaimSubmit_BindFailsAfterRedeem(t *testing.T) {
 	if !strings.Contains(got, "different admin") {
 		t.Errorf("user copy missing different-admin signal: %q", got)
 	}
-	if strings.Contains(got, "Ask them to add you") == false {
+	if !strings.Contains(got, "Ask them to add you") {
 		t.Errorf("user copy missing actionable next step: %q", got)
 	}
 }
@@ -402,6 +402,70 @@ func TestHandleAdminClaimSubmit_BindFailsSameCaller(t *testing.T) {
 	}
 	if strings.Contains(got, "Ask the existing admin") || strings.Contains(got, "different admin") {
 		t.Errorf("user copy wrongly told the existing admin to ask the existing admin (i.e. themselves): %q", got)
+	}
+}
+
+// TestHandleAdminClaimSubmit_BindFailsGenericNon409 fences the
+// post-redeem bind-failure non-409 path: when RedeemBootstrap
+// succeeds (the bootstrap code is consumed) but BindWorkspace's
+// PutItem fails with a transport-class error (anything that isn't
+// ConditionalCheckFailedException), the user sees the
+// "Code redeemed but binding failed — contact LayerV support" copy
+// rather than the workspace-conflict copy. The bootstrap code is
+// still burned, so the user can't retry the same code.
+//
+// Without this fence, a refactor that swallows the support-copy
+// branch (e.g., collapsing surfaceBindError back into surfaceClaimError)
+// would silently route the user to a misleading "code invalid"
+// message after their code was already consumed.
+func TestHandleAdminClaimSubmit_BindFailsGenericNon409(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.ddb.seedItem(t, ts.tableNames.bootstrapCodes,
+		seedBootstrapCode(t, "BOOT-BIND-FAIL", testAdminOwnerID, "k_bindfail", time.Now().Add(time.Hour), false))
+	// No pre-existing workspace row → BindWorkspace would normally
+	// succeed; the injected PutItem error forces the ddbToError
+	// (503 + ddb_error) path instead.
+	ts.ddb.SetPutItemErr(ts.tableNames.workspace, errors.New("ddb unavailable"))
+
+	var dmCalls atomic.Int32
+	var dmMessages []string
+	h := newAdminTestHandler(t, ts)
+	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+		dmCalls.Add(1)
+		dmMessages = append(dmMessages, text)
+		return nil
+	}
+
+	status, reply := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-BIND-FAIL"))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	// Single-signal contract: DM lands, modal closes (no
+	// response_action="errors" in the reply).
+	if dmCalls.Load() != 1 {
+		t.Fatalf("PostDM calls = %d, want 1 (single-signal contract on bind-failure path)", dmCalls.Load())
+	}
+	if _, ok := reply[modalKeyResponseAction]; ok {
+		t.Errorf("reply carried response_action despite DM landing: %v (contradictory signal!)", reply)
+	}
+	// User-visible copy must point at the support escalation path
+	// and explicitly say the code was already redeemed — otherwise
+	// the user might assume their code is still usable.
+	got := dmMessages[0]
+	if !strings.Contains(got, "redeemed") || !strings.Contains(got, "contact LayerV support") {
+		t.Errorf("DM copy missing support-escalation signal: %q", got)
+	}
+	// Distinguishing-test: the workspace-conflict copy MUST NOT leak
+	// onto this path — that's the misroute we're fencing against.
+	if strings.Contains(got, "already claimed") || strings.Contains(got, "already an admin") {
+		t.Errorf("DM copy leaked workspace-conflict copy onto bind-failure path: %q", got)
+	}
+
+	// Negative-control: no workspace row was written (BindWorkspace
+	// failed before the PutItem succeeded), so CheckAdmin should
+	// still report not-admin for the would-be claimer.
+	if ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testAdminUserID) {
+		t.Errorf("workspace_mappings row was written despite bind failure — defeats the post-failure invariant")
 	}
 }
 

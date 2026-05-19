@@ -25,6 +25,15 @@ const (
 	attrAPIKeyFingerprint  = "api_key_fingerprint"
 )
 
+// Error codes surfaced on [*Error.Code] by [Store.BindWorkspace]'s
+// 409 paths. Exported so handlers pattern-match the field instead of
+// redeclaring the literal — a future rename breaks the type-checker
+// rather than silently desynchronizing the producer and consumer.
+const (
+	ErrCodeWorkspaceAlreadyBoundToCaller = "workspace_already_bound_to_caller"
+	ErrCodeWorkspaceAlreadyBound         = "workspace_already_bound"
+)
+
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
 //
 // Workspace not yet bound to an owner → (false, "", nil) — the
@@ -217,6 +226,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// user copy. A same-caller re-entry surfaces a distinct error
 	// code so the handler can short-circuit to "you're already the
 	// admin" instead of telling the user to ask themselves for help.
+	//
+	// Race: another admin could mutate admin_slack_user_ids between
+	// the failed Put and this Get. The race is on which 409 *message*
+	// the user sees (caller-already-bound vs different-admin); the
+	// binding itself stays correctly held by the existing admin set
+	// either way. Bounded impact → no extra locking.
 	if check, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -227,7 +242,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			if u == seedAdmin {
 				return &Error{
 					StatusCode: http.StatusConflict,
-					Code:       "workspace_already_bound_to_caller",
+					Code:       ErrCodeWorkspaceAlreadyBoundToCaller,
 					Title:      "BindWorkspace: caller is already on this workspace's admin set",
 				}
 			}
@@ -235,7 +250,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	}
 	return &Error{
 		StatusCode: http.StatusConflict,
-		Code:       "workspace_already_bound",
+		Code:       ErrCodeWorkspaceAlreadyBound,
 		Title:      "BindWorkspace: workspace is already claimed by a different admin",
 	}
 }

@@ -2,10 +2,12 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
@@ -161,6 +163,96 @@ func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
 	// observed — but the dispatcher MUST not have queued all three.
 	if hits.Load() >= 3 {
 		t.Errorf("dispatcher dispatched %d/3 rows despite pre-canceled ctx", hits.Load())
+	}
+}
+
+// TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak fences the
+// worst-case budget posture on /qurl aliases: a channel with many
+// alias_bindings and a slow upstream resource API. The combined
+// wallclock of sequential fetches (N × per-call latency) can blow
+// past asyncWorkTimeout; the dispatcher must:
+//
+//   - return one line per entry (no entry silently dropped),
+//   - return within ctx.Deadline() + a small grace (no goroutine
+//     leak that holds onto the worker pool past timeout),
+//   - degrade un-dispatched and slow-fetched rows to id-only
+//     fallbacks (the user sees a complete list, just with some
+//     `$alias` → `r_xxx` lines instead of `$alias` → https://...).
+//
+// Without this fence, a refactor that swallows ctx in
+// [fanoutAliasRows]'s per-row goroutine (e.g., dropping the
+// ctx-canceled branch in the error switch) would leave the
+// dispatcher waiting on wg.Wait() past the response_url deadline,
+// silently failing the entire `/qurl aliases` reply.
+func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
+	const numEntries = 80
+	entries := make([]slackdata.PolicyEntry, numEntries)
+	for i := range entries {
+		entries[i] = slackdata.PolicyEntry{
+			Alias:      fmt.Sprintf("alias-%02d", i),
+			ResourceID: fmt.Sprintf("r_%02d", i),
+			ChannelID:  "C",
+		}
+	}
+
+	ts := newAdminTestServers(t)
+	// Every resource fetch blocks until ctx is canceled — simulates a
+	// slow customer API where per-call latency is on the order of the
+	// remaining ctx budget. The handler's ctx is propagated through
+	// the SDK; the handler.go semaphore-and-ctx logic must observe it.
+	ts.addCustomerPrefix("GET", "/v1/resources/by-alias/", func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		// Reply doesn't matter — ctx-canceled errors surface to the
+		// caller via the SDK's request layer, not from the response
+		// body.
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	h := newAdminTestHandler(t, ts)
+	c, err := h.authenticatedClient(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	log := slogTestLogger(t)
+
+	// 150ms deadline keeps the test cheap while still letting the
+	// dispatcher fan out the first batch of 8 workers (limit) before
+	// ctx fires. The remaining 72 entries hit the ctx-aware semaphore
+	// branch and fall back to id-only fallbacks.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	lines := fanoutAliasRows(ctx, log, c, entries, aliasesResourceFanoutLimit)
+	elapsed := time.Since(start)
+
+	if len(lines) != numEntries {
+		t.Fatalf("lines len = %d, want %d (every entry must produce one line, even fallback)", len(lines), numEntries)
+	}
+	// Grace window: dispatched workers wait on ctx-canceled, then
+	// rendering takes a few ms. 1s is generously above the deadline
+	// and well below asyncWorkTimeout (25s) — a regression that
+	// blocks on wg.Wait() would blow past this.
+	if elapsed > time.Second {
+		t.Errorf("fanout exceeded grace window: elapsed=%s, want ≤1s (deadline=150ms)", elapsed)
+	}
+	// Every line must be present and non-empty — the contract is
+	// "one line per entry, fallback rather than drop".
+	for i, l := range lines {
+		if l == "" {
+			t.Errorf("line[%d] empty — entry was dropped, not fallback-rendered", i)
+		}
+	}
+	// At least the tail of the list (the un-dispatched majority) MUST
+	// have rendered as id-only `r_xx` fallbacks, never as upstream
+	// targets (the upstream never returned anything other than 503).
+	idOnly := 0
+	for _, l := range lines {
+		if strings.Contains(l, "`r_") {
+			idOnly++
+		}
+	}
+	if idOnly < numEntries-aliasesResourceFanoutLimit {
+		t.Errorf("id-only fallback count = %d, want ≥%d (un-dispatched rows must fall back)", idOnly, numEntries-aliasesResourceFanoutLimit)
 	}
 }
 

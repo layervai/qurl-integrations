@@ -103,7 +103,14 @@ const maxRequestBodyBytes = 1 << 20
 // of a richer payload fails (unreachable for current callers).
 const internalErrorEnvelope = `{"error":"internal"}`
 
-// Config holds the Slack handler configuration.
+// Config carries the runtime wiring for [NewHandler]. Every field is
+// captured by value into [Handler.cfg] once and then read on the
+// request hot path without synchronization — callers MUST NOT mutate
+// the originating Config after the call. Wiring that has to be
+// (re)set after NewHandler returns goes through a SetX setter with an
+// explicit double-wire panic (see [Handler.SetAliasStore] /
+// [Handler.SetOAuthSetup]); do not add a "swap PostDM / OpenView at
+// runtime" path without that same posture.
 type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string

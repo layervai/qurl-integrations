@@ -38,6 +38,13 @@ const modalOpenFailureMessage = "Could not open the modal. Please retry the comm
 // async-defer would fire after the trigger_id has expired (Slack
 // rotates trigger IDs after one use). Sync dispatch is the only
 // correct shape.
+//
+// No pre-modal auth gate by design: claim IS how a workspace
+// transitions from "no admin" to "first admin", so there's no admin
+// set to gate against. Knowledge of the bootstrap code IS the auth;
+// the modal collects it and [Handler.handleAdminClaimSubmit] redeems
+// it atomically. Do not add a CheckAdmin gate here — it would
+// deadlock the first-claim flow.
 func (h *Handler) handleAdminClaim(w http.ResponseWriter, values url.Values) {
 	if h.cfg.OpenView == nil {
 		// Bot token isn't wired — surface a friendly message rather
@@ -150,12 +157,14 @@ func (h *Handler) handleAdminClaimSubmit(ctx context.Context, w http.ResponseWri
 //   - 410 (gone — code expired/already used) + code=`bootstrap_code_invalid`
 //     get the user-facing "invalid or expired" copy in a field-level
 //     modal error.
-//   - 409 (conflict) gets the "this workspace already has an admin
-//     claimed" copy in a field-level modal error.
 //   - 404 (almost always a deployment misroute, NOT user input) falls
 //     through to the generic + DM path so the user gets one signal
 //     and the operator sees the misroute via slog.
 //   - Everything else falls through to the generic path.
+//
+// Workspace-conflict 409s come from [Store.BindWorkspace], NOT
+// RedeemBootstrap, and route through [Handler.surfaceBindError] —
+// they do not appear here.
 //
 // Single-signal contract: when PostDM is wired we DM ONE :warning:
 // AND close the modal (empty 200). When PostDM is not wired we keep
@@ -165,15 +174,9 @@ func (h *Handler) handleAdminClaimSubmit(ctx context.Context, w http.ResponseWri
 // submission was rejected; DM saying it failed = redundant).
 func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, userID string, err error) {
 	var ae *slackdata.Error
-	if errors.As(err, &ae) {
-		switch {
-		case ae.Code == slackdata.ErrCodeBootstrapInvalid, ae.StatusCode == http.StatusGone:
-			respondModalError(w, blockIDClaimCode, "Code is invalid or expired.")
-			return
-		case ae.StatusCode == http.StatusConflict:
-			respondModalError(w, blockIDClaimCode, "This workspace already has an admin claimed.")
-			return
-		}
+	if errors.As(err, &ae) && (ae.Code == slackdata.ErrCodeBootstrapInvalid || ae.StatusCode == http.StatusGone) {
+		respondModalError(w, blockIDClaimCode, "Code is invalid or expired.")
+		return
 	}
 	logUnmappedClaimError(err, userID)
 
@@ -218,7 +221,7 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 func (h *Handler) surfaceBindError(ctx context.Context, w http.ResponseWriter, userID string, err error) {
 	var ae *slackdata.Error
 	if errors.As(err, &ae) && ae.StatusCode == http.StatusConflict {
-		if ae.Code == "workspace_already_bound_to_caller" {
+		if ae.Code == slackdata.ErrCodeWorkspaceAlreadyBoundToCaller {
 			respondModalError(w, blockIDClaimCode, "You're already an admin on this workspace. No further action is needed.")
 			return
 		}
