@@ -10,7 +10,7 @@ jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
 }));
 
-jest.mock('../src/database', () => ({
+jest.mock('../src/store', () => ({
   getPendingLink: jest.fn(),
   deletePendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
@@ -44,7 +44,7 @@ process.env.BASE_URL = 'http://localhost:3000';
 
 const request = require('supertest');
 const { app } = require('../src/server');
-const db = require('../src/database');
+const db = require('../src/store');
 const discord = require('../src/discord');
 
 const originalFetch = globalThis.fetch;

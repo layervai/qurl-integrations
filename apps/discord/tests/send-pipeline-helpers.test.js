@@ -1,11 +1,10 @@
 /**
  * Tests for shared send-pipeline helpers used by /qurl send + /qurl map:
- * helper functions, the qURL client, connector client, places client, and
- * database methods. The polling/back-half coverage lives in
- * send-pipeline-back-half.test.js.
+ * helper functions, the qURL client, connector client, and places client.
+ * The polling/back-half coverage lives in send-pipeline-back-half.test.js;
+ * the data-layer roundtrip coverage lives in tests/ddb-store.test.js
+ * (which exercises the qurl_sends + qurl_send_configs DDB tables).
  */
-
-const Database = require('better-sqlite3');
 
 // ---------------------------------------------------------------------------
 // Mocks — set up BEFORE requiring modules under test
@@ -19,7 +18,6 @@ jest.mock('../src/config', () => ({
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: [],
 }));
@@ -104,9 +102,11 @@ jest.mock('discord.js', () => ({
   })),
 }));
 
-// We do NOT want database.js to open a real file or start intervals
-jest.mock('../src/database', () => {
-  // Return a thin stub — the real DB tests below use a fresh in-memory SQLite
+// Thin stub of the Store contract — the helpers under test only need the
+// qURL-send methods, and a no-op stub avoids constructing the real DDB
+// client at module-load time (which would otherwise issue zero network
+// calls but still allocates SDK objects this suite doesn't need).
+jest.mock('../src/store', () => {
   return {
     recordQURLSend: jest.fn(),
     recordQURLSendBatch: jest.fn(),
@@ -958,347 +958,9 @@ describe('Places client', () => {
   });
 });
 
-// =========================================================================
-// 5. Database qurl_sends methods (in-memory SQLite)
-// =========================================================================
-
-describe('Database qurl_sends methods', () => {
-  let testDb;
-
-  // Helper methods that mirror the real database module's qurl_sends methods
-  let recordQURLSend;
-  let updateSendDMStatus;
-  let getRecentSends;
-  let getSendResourceIds;
-  let cleanupOldSends;
-
-  beforeEach(() => {
-    testDb = new Database(':memory:');
-    testDb.exec(`
-      CREATE TABLE IF NOT EXISTS qurl_sends (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        send_id TEXT NOT NULL,
-        sender_discord_id TEXT NOT NULL,
-        recipient_discord_id TEXT NOT NULL,
-        resource_id TEXT NOT NULL,
-        resource_type TEXT NOT NULL,
-        qurl_link TEXT NOT NULL,
-        expires_in TEXT,
-        channel_id TEXT,
-        target_type TEXT NOT NULL,
-        dm_status TEXT DEFAULT 'pending',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-      CREATE INDEX IF NOT EXISTS idx_qurl_sends_sender ON qurl_sends(sender_discord_id);
-      CREATE INDEX IF NOT EXISTS idx_qurl_sends_send_id ON qurl_sends(send_id);
-    `);
-
-    // Mirror database module methods using the in-memory db
-    recordQURLSend = (sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType) => {
-      const stmt = testDb.prepare(`
-        INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      stmt.run(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType);
-    };
-
-    updateSendDMStatus = (sendId, recipientDiscordId, status) => {
-      const stmt = testDb.prepare('UPDATE qurl_sends SET dm_status = ? WHERE send_id = ? AND recipient_discord_id = ?');
-      stmt.run(status, sendId, recipientDiscordId);
-    };
-
-    getRecentSends = (senderDiscordId, limit = 10) => {
-      const stmt = testDb.prepare(`
-        SELECT send_id, resource_type, target_type, channel_id, expires_in, created_at,
-               COUNT(*) as recipient_count,
-               SUM(CASE WHEN dm_status = 'sent' THEN 1 ELSE 0 END) as delivered_count
-        FROM qurl_sends
-        WHERE sender_discord_id = ?
-        GROUP BY send_id
-        ORDER BY created_at DESC
-        LIMIT ?
-      `);
-      return stmt.all(senderDiscordId, limit);
-    };
-
-    getSendResourceIds = (sendId) => {
-      const stmt = testDb.prepare('SELECT resource_id FROM qurl_sends WHERE send_id = ?');
-      return stmt.all(sendId).map(r => r.resource_id);
-    };
-
-    cleanupOldSends = () => {
-      const result = testDb.prepare(`
-        DELETE FROM qurl_sends
-        WHERE datetime(created_at) < datetime('now', '-30 days')
-      `).run();
-      return result.changes;
-    };
-  });
-
-  afterEach(() => {
-    testDb.close();
-  });
-
-  describe('recordQURLSend + getSendResourceIds roundtrip', () => {
-    it('inserts a row and retrieves the resource_id by send_id', () => {
-      recordQURLSend('send-1', 'sender-1', 'rcpt-1', 'res-1', 'url', 'https://q.test/1', '24h', 'ch-1', 'user');
-
-      const ids = getSendResourceIds('send-1');
-      expect(ids).toEqual(['res-1']);
-    });
-
-    it('returns multiple resource IDs for multi-recipient send', () => {
-      recordQURLSend('send-2', 'sender-1', 'rcpt-1', 'res-a', 'url', 'https://q.test/a', '1h', 'ch-1', 'channel');
-      recordQURLSend('send-2', 'sender-1', 'rcpt-2', 'res-b', 'url', 'https://q.test/b', '1h', 'ch-1', 'channel');
-      recordQURLSend('send-2', 'sender-1', 'rcpt-3', 'res-c', 'url', 'https://q.test/c', '1h', 'ch-1', 'channel');
-
-      const ids = getSendResourceIds('send-2');
-      expect(ids).toHaveLength(3);
-      expect(ids).toContain('res-a');
-      expect(ids).toContain('res-b');
-      expect(ids).toContain('res-c');
-    });
-
-    it('returns empty array for non-existent send_id', () => {
-      expect(getSendResourceIds('does-not-exist')).toEqual([]);
-    });
-  });
-
-  describe('updateSendDMStatus', () => {
-    it('updates dm_status from pending to sent', () => {
-      recordQURLSend('send-3', 'sender-1', 'rcpt-1', 'res-1', 'url', 'https://q.test/1', '24h', 'ch-1', 'user');
-
-      // Verify initial status
-      const before = testDb.prepare('SELECT dm_status FROM qurl_sends WHERE send_id = ? AND recipient_discord_id = ?').get('send-3', 'rcpt-1');
-      expect(before.dm_status).toBe('pending');
-
-      updateSendDMStatus('send-3', 'rcpt-1', 'sent');
-
-      const after = testDb.prepare('SELECT dm_status FROM qurl_sends WHERE send_id = ? AND recipient_discord_id = ?').get('send-3', 'rcpt-1');
-      expect(after.dm_status).toBe('sent');
-    });
-
-    it('updates dm_status to failed', () => {
-      recordQURLSend('send-4', 'sender-1', 'rcpt-2', 'res-2', 'file', 'https://q.test/2', '6h', 'ch-1', 'voice');
-
-      updateSendDMStatus('send-4', 'rcpt-2', 'failed');
-
-      const row = testDb.prepare('SELECT dm_status FROM qurl_sends WHERE send_id = ? AND recipient_discord_id = ?').get('send-4', 'rcpt-2');
-      expect(row.dm_status).toBe('failed');
-    });
-
-    it('only updates the targeted recipient in a multi-recipient send', () => {
-      recordQURLSend('send-5', 'sender-1', 'rcpt-1', 'res-1', 'url', 'https://q.test/1', '24h', 'ch-1', 'channel');
-      recordQURLSend('send-5', 'sender-1', 'rcpt-2', 'res-2', 'url', 'https://q.test/2', '24h', 'ch-1', 'channel');
-
-      updateSendDMStatus('send-5', 'rcpt-1', 'sent');
-
-      const rcpt1 = testDb.prepare('SELECT dm_status FROM qurl_sends WHERE send_id = ? AND recipient_discord_id = ?').get('send-5', 'rcpt-1');
-      const rcpt2 = testDb.prepare('SELECT dm_status FROM qurl_sends WHERE send_id = ? AND recipient_discord_id = ?').get('send-5', 'rcpt-2');
-
-      expect(rcpt1.dm_status).toBe('sent');
-      expect(rcpt2.dm_status).toBe('pending');
-    });
-  });
-
-  describe('getRecentSends', () => {
-    it('groups by send_id and counts recipients', () => {
-      recordQURLSend('send-6', 'sender-1', 'rcpt-1', 'res-1', 'url', 'https://q.test/1', '24h', 'ch-1', 'channel');
-      recordQURLSend('send-6', 'sender-1', 'rcpt-2', 'res-2', 'url', 'https://q.test/2', '24h', 'ch-1', 'channel');
-
-      updateSendDMStatus('send-6', 'rcpt-1', 'sent');
-
-      const sends = getRecentSends('sender-1');
-      expect(sends).toHaveLength(1);
-      expect(sends[0].send_id).toBe('send-6');
-      expect(sends[0].recipient_count).toBe(2);
-      expect(sends[0].delivered_count).toBe(1);
-      expect(sends[0].resource_type).toBe('url');
-      expect(sends[0].target_type).toBe('channel');
-    });
-
-    it('orders by created_at descending', () => {
-      // Insert older send
-      testDb.prepare(`
-        INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run('send-old', 'sender-1', 'rcpt-1', 'res-1', 'url', 'link1', '24h', 'ch-1', 'user', '2026-01-01T00:00:00Z');
-
-      // Insert newer send
-      testDb.prepare(`
-        INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run('send-new', 'sender-1', 'rcpt-2', 'res-2', 'file', 'link2', '1h', 'ch-2', 'voice', '2026-04-01T00:00:00Z');
-
-      const sends = getRecentSends('sender-1');
-      expect(sends).toHaveLength(2);
-      expect(sends[0].send_id).toBe('send-new');
-      expect(sends[1].send_id).toBe('send-old');
-    });
-
-    it('respects the limit parameter', () => {
-      for (let i = 0; i < 5; i++) {
-        recordQURLSend(`send-${i}`, 'sender-1', 'rcpt-1', `res-${i}`, 'url', `link-${i}`, '24h', 'ch-1', 'user');
-      }
-
-      const sends = getRecentSends('sender-1', 3);
-      expect(sends).toHaveLength(3);
-    });
-
-    it('returns empty array when no sends exist', () => {
-      const sends = getRecentSends('no-sends-user');
-      expect(sends).toEqual([]);
-    });
-
-    it('only returns sends for the requested sender', () => {
-      recordQURLSend('send-a', 'sender-1', 'rcpt-1', 'res-1', 'url', 'link1', '24h', 'ch-1', 'user');
-      recordQURLSend('send-b', 'sender-2', 'rcpt-1', 'res-2', 'url', 'link2', '24h', 'ch-1', 'user');
-
-      const sender1Sends = getRecentSends('sender-1');
-      expect(sender1Sends).toHaveLength(1);
-      expect(sender1Sends[0].send_id).toBe('send-a');
-    });
-  });
-
-  describe('cleanupOldSends', () => {
-    it('deletes rows older than 30 days', () => {
-      // Insert a row with old created_at
-      testDb.prepare(`
-        INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-31 days'))
-      `).run('old-send', 'sender-1', 'rcpt-1', 'res-1', 'url', 'link1', '24h', 'ch-1', 'user');
-
-      // Insert a recent row
-      recordQURLSend('recent-send', 'sender-1', 'rcpt-1', 'res-2', 'url', 'link2', '24h', 'ch-1', 'user');
-
-      const deleted = cleanupOldSends();
-      expect(deleted).toBe(1);
-
-      // Verify the recent one still exists
-      const remaining = testDb.prepare('SELECT COUNT(*) as count FROM qurl_sends').get();
-      expect(remaining.count).toBe(1);
-    });
-
-    it('does nothing when no old rows exist', () => {
-      recordQURLSend('fresh', 'sender-1', 'rcpt-1', 'res-1', 'url', 'link1', '24h', 'ch-1', 'user');
-
-      const deleted = cleanupOldSends();
-      expect(deleted).toBe(0);
-    });
-  });
-});
 
 // =========================================================================
-// 6. Database saveSendConfig + getSendConfig roundtrip (in-memory SQLite)
-// =========================================================================
-
-describe('Database saveSendConfig + getSendConfig', () => {
-  let testDb;
-  let saveSendConfig;
-  let getSendConfig;
-
-  beforeEach(() => {
-    testDb = new Database(':memory:');
-    testDb.exec(`
-      CREATE TABLE IF NOT EXISTS qurl_send_configs (
-        send_id TEXT PRIMARY KEY,
-        sender_discord_id TEXT NOT NULL,
-        resource_type TEXT NOT NULL,
-        connector_resource_id TEXT,
-        actual_url TEXT,
-        expires_in TEXT NOT NULL,
-        personal_message TEXT,
-        location_name TEXT,
-        attachment_name TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    saveSendConfig = (sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName) => {
-      const stmt = testDb.prepare(`
-        INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName);
-    };
-
-    getSendConfig = (sendId, senderDiscordId) => {
-      const stmt = testDb.prepare('SELECT * FROM qurl_send_configs WHERE send_id = ? AND sender_discord_id = ?');
-      return stmt.get(sendId, senderDiscordId);
-    };
-  });
-
-  afterEach(() => {
-    testDb.close();
-  });
-
-  it('saves and retrieves a URL send config with all fields', () => {
-    saveSendConfig('send-100', 'user-A', 'url', null, 'https://example.com', '24h', 'Check this out', null, null);
-
-    const config = getSendConfig('send-100', 'user-A');
-    expect(config).toBeDefined();
-    expect(config.send_id).toBe('send-100');
-    expect(config.sender_discord_id).toBe('user-A');
-    expect(config.resource_type).toBe('url');
-    expect(config.connector_resource_id).toBeNull();
-    expect(config.actual_url).toBe('https://example.com');
-    expect(config.expires_in).toBe('24h');
-    expect(config.personal_message).toBe('Check this out');
-    expect(config.location_name).toBeNull();
-    expect(config.attachment_name).toBeNull();
-    expect(config.created_at).toBeDefined();
-  });
-
-  it('saves and retrieves a file send config', () => {
-    saveSendConfig('send-101', 'user-A', 'file', 'conn-res-99', null, '6h', null, null, 'report.pdf');
-
-    const config = getSendConfig('send-101', 'user-A');
-    expect(config).toBeDefined();
-    expect(config.resource_type).toBe('file');
-    expect(config.connector_resource_id).toBe('conn-res-99');
-    expect(config.actual_url).toBeNull();
-    expect(config.attachment_name).toBe('report.pdf');
-  });
-
-  it('saves and retrieves a maps send config', () => {
-    saveSendConfig('send-102', 'user-A', 'maps', null, 'https://www.google.com/maps/place/Eiffel+Tower', '1h', 'Meet here', 'Eiffel Tower', null);
-
-    const config = getSendConfig('send-102', 'user-A');
-    expect(config).toBeDefined();
-    expect(config.resource_type).toBe('maps');
-    expect(config.actual_url).toBe('https://www.google.com/maps/place/Eiffel+Tower');
-    expect(config.location_name).toBe('Eiffel Tower');
-    expect(config.personal_message).toBe('Meet here');
-  });
-
-  it('enforces ownership — user B cannot read user A config', () => {
-    saveSendConfig('send-103', 'user-A', 'url', null, 'https://secret.com', '24h', null, null, null);
-
-    const configA = getSendConfig('send-103', 'user-A');
-    expect(configA).toBeDefined();
-
-    const configB = getSendConfig('send-103', 'user-B');
-    expect(configB).toBeUndefined();
-  });
-
-  it('returns undefined for non-existent send_id', () => {
-    const config = getSendConfig('nonexistent', 'user-A');
-    expect(config).toBeUndefined();
-  });
-
-  it('upserts on duplicate send_id (INSERT OR REPLACE)', () => {
-    saveSendConfig('send-104', 'user-A', 'url', null, 'https://old.com', '24h', null, null, null);
-    saveSendConfig('send-104', 'user-A', 'url', null, 'https://new.com', '1h', 'updated', null, null);
-
-    const config = getSendConfig('send-104', 'user-A');
-    expect(config.actual_url).toBe('https://new.com');
-    expect(config.expires_in).toBe('1h');
-    expect(config.personal_message).toBe('updated');
-  });
-});
-
-// =========================================================================
-// 7. handleAddRecipients logic
+// 5. handleAddRecipients logic
 // =========================================================================
 
 describe('handleAddRecipients', () => {
@@ -1322,7 +984,6 @@ describe('handleAddRecipients', () => {
       GOOGLE_MAPS_API_KEY: 'test-google-key',
       QURL_SEND_COOLDOWN_MS: 30000,
       QURL_SEND_MAX_RECIPIENTS: 50,
-      DATABASE_PATH: ':memory:',
       PENDING_LINK_EXPIRY_MINUTES: 30,
       ADMIN_USER_IDS: [],
     }));
@@ -1426,7 +1087,7 @@ describe('handleAddRecipients', () => {
       getRecentSends: jest.fn(() => []),
       getSendResourceIds: jest.fn(() => []),
     };
-    jest.mock('../src/database', () => mockDb);
+    jest.mock('../src/store', () => mockDb);
 
     // Mock discord helper
     mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
@@ -1982,7 +1643,7 @@ describe('handleAddRecipients', () => {
 });
 
 // =========================================================================
-// 8. Additional isGoogleMapsURL tests (URL parsing edge cases)
+// 6. Additional isGoogleMapsURL tests (URL parsing edge cases)
 // =========================================================================
 
 describe('isGoogleMapsURL — additional URL parsing', () => {

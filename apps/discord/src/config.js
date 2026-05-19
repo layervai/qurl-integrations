@@ -1,5 +1,19 @@
-const path = require('path');
 const os = require('os');
+
+// Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
+// NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
+// hook honored by `ddb-store.js`, `flow-state.js`, and
+// `gateway-session-store.js`; a stale value leaking into a production
+// env (CI variable copied across envs, dev `.env` accidentally
+// shipped, container template propagating the local-dev block) would
+// silently redirect every DDB call to whatever the endpoint resolves
+// to — the same kind of silent-redirect footgun the DDB_TABLE_PREFIX
+// guard in `ddb-store.js` closes. Guarding here in `config.js` (the
+// first module loaded) fires before any DDB client constructor in
+// the require graph.
+if (process.env.NODE_ENV === 'production' && process.env.DDB_TEST_ENDPOINT) {
+  throw new Error(`DDB_TEST_ENDPOINT='${process.env.DDB_TEST_ENDPOINT}' is set under NODE_ENV=production. This env var is for local-dev / aws-sdk-client-mock only — unset it in the production deployment template before booting.`);
+}
 
 // Sync derivation for INSTANCE_ID / INSTANCE_IP (hot-standby identity).
 // Each helper runs once at module-load and is cached into the exported
@@ -370,15 +384,6 @@ module.exports = {
   // a leaked/shoulder-surfed state token to be replayed by an attacker.
   PENDING_LINK_EXPIRY_MINUTES: intEnv('PENDING_LINK_EXPIRY_MINUTES', 10),
 
-  // Database — absolute path so the DB is anchored to the bot's source tree
-  // regardless of the cwd the process was launched from.
-  DATABASE_PATH: process.env.DATABASE_PATH
-    ? path.resolve(process.env.DATABASE_PATH)
-    // Keep the 'opennhp-bot.db' filename: it matches the mounted EFS volume
-    // for existing deployments. Migrating requires a rename operation in
-    // infra. Set DATABASE_PATH env to override for new deployments.
-    : path.resolve(__dirname, '..', 'data', 'opennhp-bot.db'),
-
   // Admin Discord user IDs (comma-separated) — can use /forcelink, /bulklink,
   // /unlinked. Each entry is validated to look like a Discord snowflake
   // (17–20 digits) so a typo like "1234, 5678 " (stray space or non-numeric)
@@ -599,9 +604,17 @@ module.exports = {
   // Persistence backend selector. Lifted from raw env into config
   // so the boot-guard (`unsupportedRoleResumeCombo`) and the
   // gateway-shim wiring both read through the same parsed shape.
-  // Unset / empty / whitespace-only falls back to 'sqlite', matching
+  // Unset / empty / whitespace-only falls back to 'ddb', matching
   // src/store/index.js's selection precedence.
-  STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'sqlite',
+  //
+  // `src/store/index.js` is the source of truth for STORE_TYPE
+  // validation — it throws on unknown values at module load (which
+  // runs before any consumer reads this config field). This field
+  // is retained solely so the downstream guard `unsupportedRole-
+  // ResumeCombo` and other config-level checks can read a normalized
+  // string instead of re-parsing the env. Don't add validation
+  // logic here; surface it in store/index.js where it belongs.
+  STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'ddb',
 
   // DDB table-name prefix shared by every per-table consumer
   // (ddb-store.js + gateway-session-store.js construction in

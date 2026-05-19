@@ -107,7 +107,6 @@ jest.mock('../src/config', () => ({
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  DATABASE_PATH: ':memory:',
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: [],
   BASE_URL: 'http://localhost:3000',
@@ -121,7 +120,7 @@ jest.mock('../src/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
 }));
 
-jest.mock('../src/database', () => ({
+jest.mock('../src/store', () => ({
   getGuildApiKey: jest.fn(), setGuildApiKey: jest.fn(),
   recordQURLSendBatch: jest.fn(), recordQURLSend: jest.fn(),
   updateSendDMStatus: jest.fn(), getSendByPrefix: jest.fn(),

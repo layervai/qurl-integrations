@@ -100,11 +100,10 @@ app.get('/health', async (req, res) => {
   // Cheap data-layer probe — fails the check if the backend is
   // blocked/locked so the orchestrator replaces the container.
   // Uses db.healthCheck() (constant cost) instead of db.getStats()
-  // (scan + aggregation). On the SQLite backend the historical
-  // getStats() probe was indexed COUNT(*) and constant-time, but on
-  // the DDB backend getStats() is a full-table Scan — at LB
-  // health-check cadence (10–30s) that's real RCU and grows with
-  // table size. healthCheck() is O(1) on every backend.
+  // (scan + aggregation). On DDB, getStats() is a full-table Scan
+  // — at LB health-check cadence (10–30s) that's real RCU and
+  // grows with table size. healthCheck() is O(1) (single GetItem
+  // on a sentinel key).
   try {
     await db.healthCheck();
     res.status(200).json({ status: 'ok' });

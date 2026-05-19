@@ -351,7 +351,7 @@ describe('handleCommand dispatch-time filter', () => {
     delete process.env.ENABLE_OPENNHP_FEATURES;
 
     // Mock dependencies that commands.js transitively pulls in
-    jest.doMock('../src/database', () => ({
+    jest.doMock('../src/store', () => ({
       getLinkByDiscord: jest.fn(), getLinkByGithub: jest.fn(),
       createPendingLink: jest.fn(), getContributions: jest.fn(() => []),
       getBadges: jest.fn(() => []), getStats: jest.fn(() => ({})),
@@ -392,7 +392,7 @@ describe('handleCommand dispatch-time filter', () => {
     process.env.GUILD_ID = '123456789012345678';
     process.env.ENABLE_OPENNHP_FEATURES = 'true';
 
-    jest.doMock('../src/database', () => ({
+    jest.doMock('../src/store', () => ({
       getLinkByDiscord: jest.fn().mockReturnValue({ github_username: 'existing' }),
       createPendingLink: jest.fn(),
       getLinkByGithub: jest.fn(), getContributions: jest.fn(() => []),
@@ -468,7 +468,7 @@ describe('multi-tenant mode — server.js route mounting', () => {
       notifyPRMerge: jest.fn(),
       sendDM: jest.fn(),
     }));
-    jest.doMock('../src/database', () => ({
+    jest.doMock('../src/store', () => ({
       getPendingLink: jest.fn(),
       getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
     }));
@@ -485,7 +485,7 @@ describe('multi-tenant mode — server.js route mounting', () => {
       notifyPRMerge: jest.fn(),
       postStarMilestone: jest.fn(),
     }));
-    jest.doMock('../src/database', () => ({
+    jest.doMock('../src/store', () => ({
       getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
     }));
     const request = require('supertest');

@@ -7,28 +7,25 @@
 // backend drops a method — so a missing implementation surfaces as a
 // clear boot-time error, not as `TypeError: store.xMethod is not a
 // function` deep in a request path. Under Jest the boot-time assertion
-// is intentionally skipped so partial `jest.mock('../src/database', …)`
+// is intentionally skipped so partial `jest.mock('../src/store', …)`
 // stubs keep working; the invariant is instead enforced by
 // `tests/store-contract.test.js`, which calls `assertStoreShape`
 // directly against both a complete fixture AND the real default
 // backend AND a `child_process.spawnSync` of the real boot path.
 //
-// Backend lifecycle: a Store may keep synchronous or asynchronous
-// implementations as long as it preserves the method names and return
-// shapes. Today the SQLite backend is synchronous (better-sqlite3 is
-// sync). When a Promise-returning backend lands, flip the contract to
-// async atomically (contract + every call site in one change) so the
-// sync→async migration is a single reviewable flag-day rather than
-// two entangled concerns.
+// Backend lifecycle: every Store *method* (everything in `STORE_METHODS`
+// below) returns a Promise. ddb-store (the only supported backend) is
+// async-native. If a sync backend is ever re-added, it must still
+// expose Promise-returning methods so callers can `await` uniformly
+// across backends. The `STORE_CONSTANTS` block (e.g. `BADGE_TYPES`,
+// `BADGE_INFO`) is exempt — those are plain-value exports, not
+// methods, and `assertStoreShape` honors the distinction.
 //
 // Scope of `assertStoreShape`: name-level only. A backend that exports
 // `createPendingLink` with a wrong arity / wrong return shape passes
 // this check happily, then crashes at the first call site. Parameter
 // and return-shape parity between backends is the test suite's job
-// (run the same behavioral tests against each backend's :memory: or
-// mock instance). Particularly relevant for future sync→async flips:
-// the assertion won't catch "method still exists but now returns a
-// Promise" drift — behavioral tests will.
+// (run the same behavioral tests against each backend's mock instance).
 //
 // Adding / removing a method:
 //   1. Update `STORE_METHODS` below.
@@ -115,9 +112,9 @@ const STORE_METHODS = Object.freeze([
   'close',
   // Cheap "is the data layer functional" probe — called by /health
   // at LB-cadence (10–30s typical). Backends must keep this O(1):
-  // SQLite uses a trivial query against an indexed table, DDB uses
-  // a single GetItem on a sentinel key. NEVER use this for
-  // aggregation / scan work; /metrics is the right home for that.
+  // ddb-store uses a single GetItem on a sentinel key. NEVER use
+  // this for aggregation / scan work; /metrics is the right home
+  // for that.
   'healthCheck',
 ]);
 

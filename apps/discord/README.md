@@ -91,8 +91,6 @@ without them, see `src/index.js`):
 **Optional operational knobs:**
 
 - `PORT` (default 3000)
-- `DATABASE_PATH` (default `./data/opennhp-bot.db`, kept for legacy EFS
-  mounts — override for new deployments)
 - `ADMIN_USER_IDS` — comma-separated Discord IDs with access to
   `/forcelink`, `/bulklink`, `/backfill-milestones`, `/unlinked`
 - `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS` — OAuth + webhook
@@ -114,17 +112,64 @@ On each repo you want to track:
 
 ### 5. Run
 
+Local dev needs a DynamoDB-Local container — the bot has no in-process
+data store, so the SDK has to reach a real DDB endpoint somewhere. The
+`docker-compose.yml` here spins up `amazon/dynamodb-local` on port 8000;
+the one-shot provisioner creates every table `ddb-store` expects.
+
 ```bash
-npm ci
-npm start
+npm ci                                  # provisioner needs @aws-sdk/client-dynamodb
+docker compose up -d dynamodb-local
+node scripts/provision-ddb-local.js     # idempotent, re-run after every `compose up`
+DDB_TEST_ENDPOINT=http://localhost:8000 \
+  DDB_TABLE_PREFIX=qurl-bot-discord-local- \
+  AWS_REGION=us-east-1 \
+  AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
+  npm start
 ```
+
+(The fake AWS creds keep the SDK happy without provisioning real IAM.
+`DDB_TEST_ENDPOINT` is the env-var hook `ddb-store.js` already supports
+for re-pointing the SDK at a local endpoint. Use the same
+`DDB_TABLE_PREFIX` for the provisioner and `npm start` — the
+provisioner defaults to `qurl-bot-discord-local-` if unset, and a
+mismatched prefix lands `npm start` against tables that don't exist.)
+
+The DDB-Local container runs `-inMemory`, so a `docker compose down`
+flushes every table. Re-run `node scripts/provision-ddb-local.js`
+after each fresh `docker compose up` (the provisioner is idempotent
+on existing tables, so a re-run against the same container is a
+no-op — but a new container starts empty and needs the create pass).
+For sticky local data across restarts, drop `-inMemory` and add
+`-dbPath ./data` to the compose command (see the `docker-compose.yml`
+header comment).
+
+`npm test` does NOT need DDB Local — every test mocks the AWS SDK via
+`aws-sdk-client-mock`. The local-dev workflow is only required for
+`npm start`.
+
+The provisioner covers the **Store-contract** tables (those in
+`src/store/ddb-store.js`'s `TABLES` map). Other modules use their own
+dedicated tables that this script does NOT create — `flow-state`,
+`gateway-session`, `gateway-lock`, `gateway-peer-heartbeat`. Running
+locally with `ENABLE_EVENT_SHIPPER=true` or `ENABLE_GATEWAY_RESUME=true`
+will hit `ResourceNotFoundException` on these unless you also provision
+them via terraform-against-localhost or `aws dynamodb create-table
+--endpoint-url http://localhost:8000`.
+
+Linux note: `host.docker.internal` only resolves inside Docker
+Desktop. If you're running Docker Engine on bare Linux, either start
+the container with `--add-host=host.docker.internal:host-gateway`
+or use `127.0.0.1` from the container side (and bind the
+docker-compose `dynamodb-local` port to the host loopback rather
+than to the container's network).
 
 ## Architecture
 
 - `src/index.js` — boot validation + graceful shutdown
 - `src/commands.js` — all slash-command handlers (split tracked in #55)
 - `src/discord.js` — discord.js client + role/channel cache
-- `src/database.js` — SQLite (better-sqlite3, WAL) + encrypted guild keys
+- `src/store/` — DynamoDB-backed data layer (encrypted guild keys + per-table CRUD)
 - `src/connector.js` — qurl-s3-connector client (SSRF-guarded CDN fetch)
 - `src/qurl.js` — qURL API client (private-IP blocklist on target URLs)
 - `src/routes/oauth.js` — GitHub OAuth (atomic state consumption,
@@ -150,7 +195,7 @@ npm run dev   # node --watch
 
 Useful scripts:
 
-- `npm test` — jest (80/70/80/80 coverage threshold)
+- `npm test` — jest (78/68/78/78 coverage threshold)
 - `npm run lint` — ESLint with `--max-warnings 0`
 - `npm run register` — register slash commands with Discord
 

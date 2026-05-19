@@ -1,9 +1,12 @@
 // Background job: retry revocation of GitHub OAuth tokens that failed their
 // initial `finally`-block revoke. Runs every hour. On success (or GitHub
 // 404 "already revoked"), the row is deleted; on failure, it's left for the
-// next sweep. cleanupOrphanedTokens in database.js purges anything older
-// than 7 days regardless, so a GitHub API outage doesn't leak tokens
-// forever — GitHub's own session TTL still applies on their side.
+// next sweep. The orphaned_oauth_tokens DDB table carries a TTL attribute
+// set on insert by ddb-store (default: 7 days in production, 1 day
+// otherwise, override via `ORPHAN_TOKEN_RETENTION_DAYS`), so a GitHub API
+// outage doesn't leak tokens forever — GitHub's own session TTL still
+// applies on their side, and DDB reaps the row at TTL expiry regardless
+// of sweep outcome.
 
 const crypto = require('crypto');
 const config = require('./config');
@@ -64,13 +67,29 @@ async function sweepOnce() {
         });
         backoffMs = Math.min(backoffMs * 2, 60_000);
         await new Promise(r => setTimeout(r, backoffMs));
-        accessToken = null;
         break;
+      } else {
+        // Non-rate-limit failure (e.g. 401 expired creds, 5xx GitHub
+        // outage). Row stays in queue for the next sweep. Log at warn
+        // level so a sustained outage shows up in monitoring — silent
+        // skip would let an expired DELETE token sit indefinitely
+        // without operator signal.
+        logger.warn('Orphan sweep revoke failed (non-rate-limit)', {
+          id, status: result.status,
+        });
       }
     } catch (err) {
-      // Only log a real token hash. If accessToken was already nulled out
-      // (e.g. rate-limit abort path above set it null before break), emit
-      // a sentinel instead of a misleading "hash of empty string".
+      // Catch fires when `revokeOneDetailed` (most often
+      // `AbortSignal.timeout(5000)` raising `AbortError` after a 5s
+      // GitHub timeout) or `db.deleteOrphanedToken` throws. Today
+      // `accessToken` is always set at that point — both throw sites
+      // run BEFORE the `finally` below nulls it. The ternary below
+      // is structural defense against a future contributor adding a
+      // throw-after-null statement (a metric emit, an
+      // `await db.X()` etc.); the `(already-released)` sentinel
+      // surfaces clearly in logs instead of degrading to a hash of
+      // the empty string. Hash the plaintext for log-correlation
+      // only (first 8 hex chars; SHA-256 is one-way).
       const tokenHash8 = accessToken
         ? crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8)
         : '(already-released)';

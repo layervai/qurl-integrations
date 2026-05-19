@@ -4,7 +4,6 @@
  */
 
 jest.mock('../src/config', () => ({
-  DATABASE_PATH: ':memory:',
   GITHUB_CLIENT_ID: 'client',
   GITHUB_CLIENT_SECRET: 'test-client-secret',
   ALLOWED_GITHUB_ORGS: ['opennhp'],

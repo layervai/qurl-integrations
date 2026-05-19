@@ -33,5 +33,6 @@ apps/discord/.claude/
 apps/discord/scripts/*
 !apps/discord/scripts/loadtest-standalone.js
 !apps/discord/scripts/gateway-resume-spike.js
+!apps/discord/scripts/provision-ddb-local.js
 apps/discord/.github/
 apps/discord/railway.json

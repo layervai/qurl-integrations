@@ -1,0 +1,66 @@
+# Local dev infra for the qURL Discord bot. Today the only service is
+# `dynamodb-local` — the bot has no in-process data store (SQLite was
+# stripped along with `database.js`), so the AWS SDK has to reach a
+# real DDB endpoint somewhere even when running `npm start` on a
+# laptop.
+#
+# After `docker compose up -d dynamodb-local`, run
+# `node scripts/provision-ddb-local.js` once to create the tables
+# `ddb-store` expects. The provisioner is idempotent — re-running
+# after a fresh `up` is fine and no-ops on existing tables.
+#
+# DDB-Local is in-memory only when `-inMemory` is set (no `-dbPath`),
+# so a `docker compose down` flushes every table. That matches
+# `:memory:` SQLite behavior the bot relied on previously; for sticky
+# local data, drop `-inMemory`, mount a volume, and add `-dbPath
+# ./data` to the command line.
+services:
+  dynamodb-local:
+    # Pinned by SHA digest (not just `:2.5.4`, which floats) so the
+    # bash `/dev/tcp` healthcheck below stays valid — a tag-only pin
+    # could silently land on an image revision without bash and the
+    # healthcheck would fail forever without surfacing the cause.
+    #
+    # When bumping this image, re-verify bash presence inside the
+    # container: `docker run --rm --entrypoint sh
+    # amazon/dynamodb-local:<new-tag> -c 'command -v bash'`. The
+    # `/dev/tcp` redirection in the healthcheck below is a
+    # bash-only feature; without bash the probe will exit non-zero
+    # forever and `docker compose up --wait` won't unblock.
+    image: amazon/dynamodb-local:2.5.4@sha256:cf8cebd061f988628c02daff10fdb950a54478feff9c52f6ddf84710fe3c3906
+    container_name: qurl-bot-discord-ddb-local
+    # `-sharedDb` collapses every region/credential combo into one
+    # backing store so the bot can use any (or no) AWS_REGION /
+    # AWS_ACCESS_KEY_ID without the SDK silently picking a different
+    # in-process database file. Without it, an SDK request with
+    # AWS_ACCESS_KEY_ID=local lands in a different DB than one with
+    # AWS_ACCESS_KEY_ID=test, which is a classic local-dev confusion
+    # source.
+    command: -jar DynamoDBLocal.jar -inMemory -sharedDb
+    ports:
+      - "8000:8000"
+    # Healthcheck pings the DDB endpoint with a TCP probe — the
+    # service is "up" only when the JVM is accepting requests, not
+    # just when the container started. Lets `docker compose up
+    # --wait` block until DDB is actually reachable.
+    #
+    # `bash`'s `/dev/tcp/<host>/<port>` redirection is the only probe
+    # primitive the `amazon/dynamodb-local:2.5.4` base image ships
+    # (the image is a slim openjdk runtime with bash but no `wget`,
+    # `curl`, or `nc`). Empirically verified: `command -v wget /
+    # curl / nc` all return non-zero inside the container.
+    # `exec 3<&-` closes the opened FD before bash exits — bash would
+    # release it anyway at process exit, but explicit close keeps the
+    # probe clean if the interval is ever tightened or the same shape
+    # is copied into a longer-running context.
+    # `2>/dev/null` removed so a future bash-less image bump surfaces
+    # `bash: command not found` (or `/dev/tcp: No such file or
+    # directory`) in `docker compose logs` instead of "unhealthy with
+    # no signal." The image-bump verification comment above points
+    # at the same failure mode.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8000 && exec 3<&-' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
