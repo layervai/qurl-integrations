@@ -502,11 +502,6 @@ function setCooldown(userId) {
   // LRU-ish behavior: delete first so set() re-inserts at the end of the
   // Map's insertion order. Combined with the bulk 10%-drop eviction below,
   // active users stay resident while stale entries roll out.
-  //
-  // CAUTION: softenCooldown (below) rides on the same insertion-order
-  // contract — if the eviction strategy ever changes (priority-based,
-  // TTL-based, etc.), softenCooldown's iteration-order test will fail
-  // loudly and both helpers will need rethinking together.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
   if (sendCooldowns.size > 10000) {
@@ -529,26 +524,6 @@ function setCooldown(userId) {
 
 function clearCooldown(userId) {
   sendCooldowns.delete(userId);
-}
-
-// Soften an existing cooldown so `residualMs` remain. Monotonic SHRINK
-// — only reduces remaining time, never extends. Used by Cancel paths
-// so a legitimate "I changed my mind" doesn't lock the full window
-// out, but rapid /qurl send → Cancel → /qurl send → Cancel spam still
-// pays a small throttle on each iteration (preventing supersedeOrCreate
-// + interaction-reply abuse).
-function softenCooldown(userId, residualMs) {
-  if (!sendCooldowns.has(userId)) return;
-  const target = Date.now() - Math.max(0, config.QURL_SEND_COOLDOWN_MS - residualMs);
-  const existing = sendCooldowns.get(userId);
-  if (target < existing) {
-    // delete-then-set re-inserts at the end of Map iteration order so
-    // the bulk eviction in setCooldown (line ~248) preserves active
-    // users. Matches the same LRU pattern setCooldown uses; a bare
-    // `set` on an existing key would NOT re-order.
-    sendCooldowns.delete(userId);
-    sendCooldowns.set(userId, target);
-  }
 }
 
 async function batchSettled(items, fn, batchSize = 5) {
@@ -3369,12 +3344,6 @@ const SEND_NOTE_MODAL_FIELD_ID = 'message_value';
 // to review the confirm card and click Send/Cancel after invoking
 // /qurl send or /qurl map.
 const SEND_FLOW_TTL_SECONDS = 180;
-
-// On a successful Cancel, soften (don't clear) the cooldown so 5s of
-// throttle remain — defuses the rapid /qurl send → Cancel → /qurl send
-// → Cancel spam vector (which would otherwise rack up supersedeOrCreate
-// DDB writes with zero throttle).
-const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
@@ -6883,12 +6852,16 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
 //     surfaces that as the dedup-loser path (user re-clicks Cancel on
 //     the new row if they still want to abort).
 //
-// On a successful Cancel, `softenCooldown` retains 5s of throttle
-// instead of fully clearing — a full clear would let a user spam
-// /qurl send → Cancel → /qurl send → Cancel and rack up
-// supersedeOrCreate DDB writes + Discord interactions with zero
-// throttle. The cooldown-loser branch leaves cooldown untouched
-// (Send is mid-fanout; bypassing is the abuse vector).
+// On a successful Cancel, the cooldown is CLEARED so a user who hits
+// "wrong file, retry" doesn't run into a "Please wait before sending
+// again" message on their next /qurl send. The cancel-loser branch
+// (deleted=false) leaves cooldown untouched — Send won the race and is
+// mid-fanout; bypassing it is the abuse vector. Earlier versions used
+// a 5s-residual "soften" to defend against /qurl send → Cancel → /qurl
+// send spam, but the rapid-cancel-spam scenario is bounded by Discord's
+// own slash-command rate limiting AND requires a deliberate human click
+// loop; the UX cost of false-positive blocks on legitimate retries
+// outweighed the abuse defense.
 async function handleConfirmCancelClick(interaction, { flow_id, row }) {
   // Defer-ack within the 3s window. The single deleteFlow call below
   // is fast in the happy path, but a DDB blip or slow region could
@@ -6928,7 +6901,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  softenCooldown(interaction.user.id, CANCEL_SOFTEN_RESIDUAL_MS);
+  clearCooldown(interaction.user.id);
   return interaction.editReply({
     content: 'Send cancelled.',
     components: [],
@@ -8919,7 +8892,6 @@ module.exports = {
       _resetAutocompleteFailureBurst: () => { autocompleteFailureBurst = 0; },
       AUTOCOMPLETE_FAILURE_LOG_BURST,
       safeDecodeURIComponent,
-      softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
       // Every confirm-card customId is exported so the contract test
       // in qurl-send-map.test.js can pin every wire value — a typo
