@@ -162,12 +162,19 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string)
 // false when the worker should bail (a reply has already been
 // posted to response_url via `post`). The same audit-vs-wire
 // asymmetry applies.
+//
+// The gate is bounded by adminGateBudget independently of the
+// worker's asyncWorkTimeout so a hung CheckAdmin can't pin a worker
+// for the full 25s. With defaultMaxConcurrentAsync=50, a sustained
+// DDB blip on workspace_mappings would otherwise exhaust the pool.
 func (h *Handler) requireAdminAsync(ctx context.Context, log *slog.Logger, post func(string), teamID, userID string) bool {
 	if teamID == "" || userID == "" {
 		post(":warning: missing team_id or user_id in slash command payload")
 		return false
 	}
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 	if err != nil {
 		log.Error("admin check failed", "error", err, "team_id", teamID, "user_id", userID)
 		post(":warning: failed to verify admin status (upstream error; see logs).")
@@ -449,7 +456,10 @@ func renderPolicies(list *slackdata.PolicyList) string {
 		return "No channel policies configured. Use `/qurl admin allow #channel $alias` to add one."
 	}
 	var rows strings.Builder
-	rows.Grow(len(list.Entries) * 64)
+	// 80B/entry × 50 = 4000B, just over adminPoliciesReplyByteCap=3500
+	// so a worst-case page fits without a re-grow. Was *64 (3200B),
+	// which forced one realloc on a full 50-row page.
+	rows.Grow(len(list.Entries) * 80)
 	rendered := 0
 	for i := range list.Entries {
 		e := &list.Entries[i]

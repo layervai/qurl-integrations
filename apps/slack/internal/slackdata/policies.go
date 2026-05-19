@@ -192,6 +192,15 @@ func (s *Store) AllowResource(ctx context.Context, teamID, channelID, resourceID
 		// yet) AND when the existing set lacks the target. Either
 		// case is a legitimate add. A repeat add fails the
 		// condition → ConditionalCheckFailedException → 409.
+		//
+		// Note on legacy single-scalar rows: pre-multi-resource rows
+		// carry the grant only in the `resource_id` scalar (see
+		// ResolvePolicy's fallback). For those rows
+		// `allowed_resource_ids` is absent, so this condition passes
+		// and AllowResource writes the SS — intended migration
+		// toward the post-pivot shape, not a missing condition leg.
+		// ResolvePolicy reads both shapes, so the dual-write window
+		// is correctness-safe.
 		ConditionExpression: aws.String("attribute_not_exists(allowed_resource_ids) OR NOT contains(allowed_resource_ids, :rid)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},

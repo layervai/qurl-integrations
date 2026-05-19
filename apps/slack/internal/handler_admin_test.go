@@ -998,6 +998,36 @@ func TestRenderRevokeAllReply_TruncatedAndServerPaginationBug(t *testing.T) {
 	}
 }
 
+// TestRenderRevokeAllReply_RateLimitedAndTruncatedCoSet locks the
+// joined-reasons copy for the rare-but-renderable combo where both
+// bools land on the result. In production the outer-loop `break`
+// after deletePage flags rateLimited should make the truncated
+// branch unreachable on the same walk, but a future refactor that
+// changes the break ordering shouldn't silently drop or reorder
+// reason fragments — this test pins the joined-reasons separator
+// and the rate-limited-first ordering.
+func TestRenderRevokeAllReply_RateLimitedAndTruncatedCoSet(t *testing.T) {
+	got := renderRevokeAllReply("alias", &revokeAllResult{
+		revoked:     2,
+		rateLimited: true,
+		truncated:   true,
+	})
+	if !strings.Contains(got, "rate-limited") {
+		t.Errorf("missing rate-limited reason: %q", got)
+	}
+	if !strings.Contains(got, "page limit") {
+		t.Errorf("missing truncated reason: %q", got)
+	}
+	// Rate-limited must lead — its "wait then re-run" action is
+	// qualitatively different from the immediate-retry shapes.
+	if rlIdx, trIdx := strings.Index(got, "rate-limited"), strings.Index(got, "page limit"); rlIdx > trIdx {
+		t.Errorf("expected rate-limited reason before truncated; got: %q", got)
+	}
+	if !strings.Contains(got, "; ") {
+		t.Errorf("expected joined-reasons separator `; ` between reasons; got: %q", got)
+	}
+}
+
 func TestRenderRevokeAllReply_DeadlineAndCanceled(t *testing.T) {
 	gotDeadline := renderRevokeAllReply("alias", &revokeAllResult{revoked: 1, deadlineExceeded: true})
 	if !strings.Contains(gotDeadline, "budget elapsed") {
