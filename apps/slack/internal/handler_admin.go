@@ -93,15 +93,14 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	case AdminList:
 		h.handleAdminList(w, teamID, userID)
 	default:
-		// Empty AdminAction lands here on parser drift (today the
-		// parser returns ErrUnknownAdminAction before reaching this
-		// dispatcher, but the case is kept for refactor safety).
-		// Render a tidy copy in either shape.
-		if cmd.AdminAction == "" {
-			respondSlack(w, "Unknown admin action. Try `/qurl help`.")
-		} else {
-			respondSlack(w, fmt.Sprintf("Unknown admin action: `%s`. Try `/qurl help`.", cmd.AdminAction))
-		}
+		// Unreachable in practice — the parser returns
+		// ErrUnknownAdminAction before reaching this dispatcher. Kept
+		// for refactor safety. The reply intentionally OMITS
+		// cmd.AdminAction; even though it's parser-enumerated today,
+		// a future parser drift could land an arbitrary string here,
+		// and echoing it back risks confusing copy on already-confused
+		// input. The user already knows what they typed.
+		respondSlack(w, "Unknown admin action. Try `/qurl help`.")
 	}
 }
 
@@ -128,10 +127,15 @@ const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup` first
 // hung DDB can't out-block Slack's 3s slash-command ack window. The
 // gate is the FIRST upstream call on every sync admin verb; using
 // `context.Background()` here would let a misbehaving upstream
-// silently consume the entire user-visible budget. 1s leaves
-// adminSyncVerbBudget (1.5s) for the verb body and ~500ms for the
-// JSON-encode of the reply.
-const adminGateBudget = 1 * time.Second
+// silently consume the entire user-visible budget.
+//
+// 800ms covers a healthy DDB GetItem with ample tail-latency margin
+// (warm-path p99 is well under 100ms; 800ms is ~10x that). The
+// remainder of the 3s Slack window is split between the verb body
+// (adminSyncVerbBudget=1.2s) and ~1s of network+encode headroom so
+// a transient DDB spike or AWS-network blip can absorb without
+// missing the ack.
+const adminGateBudget = 800 * time.Millisecond
 
 // adminSyncVerbBudget bounds the verb-body work for sync admin
 // verbs (revoke / add / remove / list) so the full gate + body +
@@ -140,9 +144,13 @@ const adminGateBudget = 1 * time.Second
 // body wedge past 3s and the user would see no reply at all (Slack
 // drops slash-command responses that miss the ack).
 //
-// 1.5s leaves ~1s of the 3s window for the gate (adminGateBudget=1s)
-// and ~500ms for response_encode + write.
-const adminSyncVerbBudget = 1500 * time.Millisecond
+// 1.2s + adminGateBudget=800ms = 2s of upstream work — leaves ~1s of
+// the 3s window for response_encode + write + the Slack-side network
+// hop. Generous compared to typical timings (verb is one DDB
+// UpdateItem or one qurl-service DELETE, both well under 100ms warm)
+// but the headroom is the point: missing Slack's ack costs the user
+// any visible reply at all.
+const adminSyncVerbBudget = 1200 * time.Millisecond
 
 // requireAdminSync centralizes the admin-only gate for sync handlers.
 // Returns true when the caller may proceed; false when the request
