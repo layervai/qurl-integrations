@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-// Shared alias-name fixtures used across the /qurl list test cases.
-// Lifted to constants to satisfy goconst (min-occurrences=3) and to
-// keep the resource-row builder lines visually aligned. Assertion
-// sites read these names too, so a rename surfaces every site at
-// once.
+// Shared alias-name + resource-id fixtures used across the /qurl
+// list test cases. Lifted to constants to keep the resource-row
+// builder lines visually aligned and so a rename surfaces every
+// assertion site at once. The same alias name + ID pair flows
+// through the upstream payload, the rendered row, and the
+// assertion strings.
 const (
 	testListAliasProdDB = "prod-db"
-	testListAliasAlpha  = "alpha"
 	testListResIDProdDB = "r_prod_db_aa"
 )
 
@@ -304,7 +304,7 @@ func TestHandleList_StableSortBetweenAliasAndResourceID(t *testing.T) {
 		// sort.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_zzz_aaaaa", testKeyTargetURL: "https://zzz"},
-			{testKeyResourceID: "r_aaa_xxxxx", fAttrAlias: testListAliasAlpha, testKeyTargetURL: "https://alpha"},
+			{testKeyResourceID: "r_aaa_xxxxx", fAttrAlias: "alpha", testKeyTargetURL: "https://alpha"},
 			{testKeyResourceID: "r_mmm_yyyyy", fAttrAlias: "middle", testKeyTargetURL: "https://mid"},
 		}, "", false)
 	})

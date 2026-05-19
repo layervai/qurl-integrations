@@ -11,11 +11,16 @@
 // `/internal/v1/admin/*` returns 404.
 //
 // This package exposes a `Store` facade with the same method shapes
-// the old AdminClient had (CheckAdmin, ResolvePolicy, AllowResource,
-// DisallowResource, ListPolicies, GetWorkspaceConfig, RedeemBootstrap)
-// so the slash-command handlers in apps/slack/internal change as
-// little as possible — same call sites, same error-shape contract
-// (`*Error` with a StatusCode that handlers branch on via errors.As).
+// the old AdminClient had (CheckAdmin, AllowedResourceIDsForChannel,
+// AllowResource, DisallowResource, ListPolicies, GetWorkspaceConfig,
+// RedeemBootstrap) so the slash-command handlers in
+// apps/slack/internal change as little as possible — same call sites,
+// same error-shape contract (`*Error` with a StatusCode that handlers
+// branch on via errors.As).
+//
+// `ResolvePolicy` was carried over with the same migration but
+// dropped in #459 — `AllowedResourceIDsForChannel` (the multi-resource
+// surface) subsumes the per-resource probe.
 //
 // Three env vars wire the tables on Fargate (set by
 // qurl-bot-slack/terraform via modules/qurl-slack-ddb's outputs):
