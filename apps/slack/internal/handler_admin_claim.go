@@ -200,20 +200,29 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 // the user CAN'T retry the same code. Operators must mint a fresh
 // one and reissue.
 //
-//   - 409 (workspace already bound) → "workspace is already claimed"
-//     copy; the redeemer should ask whoever holds the existing
-//     binding rather than rotating. Single-signal contract: modal
-//     stays open with a field-level error if PostDM isn't wired,
-//     else DM + close modal.
+//   - 409 + code=`workspace_already_bound_to_caller` → "you're
+//     already the admin" copy. The redeemer was already on the
+//     admin set; the fresh bootstrap code was unnecessary.
+//   - 409 + everything else → "workspace already claimed by a
+//     different admin" copy. The user should reach out to the
+//     existing admin instead of rotating.
 //   - Everything else → "Code redeemed but binding failed — contact
 //     LayerV support" so the user pings the right escalation path.
 //     Logged at Error level (not Warn) because a transient bind
 //     failure leaves the workspace half-installed and needs human
 //     follow-up.
+//
+// Single-signal contract is preserved across all branches: either a
+// modal-error envelope (modal stays open with the field-level copy)
+// OR a DM + empty 200 (modal closes), never both.
 func (h *Handler) surfaceBindError(ctx context.Context, w http.ResponseWriter, userID string, err error) {
 	var ae *slackdata.Error
 	if errors.As(err, &ae) && ae.StatusCode == http.StatusConflict {
-		respondModalError(w, blockIDClaimCode, "This workspace is already claimed. Ask the existing admin to add you instead of using a fresh bootstrap code.")
+		if ae.Code == "workspace_already_bound_to_caller" {
+			respondModalError(w, blockIDClaimCode, "You're already an admin on this workspace. No further action is needed.")
+			return
+		}
+		respondModalError(w, blockIDClaimCode, "This workspace is already claimed by a different admin. Ask them to add you instead of using a fresh bootstrap code.")
 		return
 	}
 	slog.Error("admin claim bind failed AFTER bootstrap-code consume — workspace is half-installed; needs operator follow-up", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.

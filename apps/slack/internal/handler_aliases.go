@@ -31,6 +31,15 @@ const aliasesResourceFanoutLimit = 8
 //  2. Goroutine reads channel_policies via the DDB-direct AdminStore,
 //     fans out customer-API resource fetches to render human-readable
 //     target/alias fields, and POSTs the result to response_url.
+//
+// TODO: rate-limit. /qurl aliases is read-amplified — one DDB
+// GetItem plus N customer-API reads (N = the channel's
+// `alias_bindings` size, capped only by the channel's own size).
+// A user spamming the verb amplifies upstream load by ~N. The in-bot
+// rate-limit gate (slackdata.CheckRateLimit) is a stub today for
+// /qurl get; once that lands, the same gate should cover /qurl
+// aliases. Tracked alongside the /qurl get rate-limit TODO in
+// SLACK_QURL_ROLLOUT.md.
 func (h *Handler) handleAliases(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "aliases", values, func(ctx context.Context, log *slog.Logger) {
 		h.processAliases(ctx, log, values)

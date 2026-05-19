@@ -260,28 +260,36 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMVariantFallback fences the dm:true flag falling
-// back to channel ephemeral when PostDM is nil. The user still gets
-// their link; the message carries a "DM is not configured" warning.
-func TestHandleGet_DMVariantFallback(t *testing.T) {
+// TestHandleGet_DMVariantRefusedWhenPostDMNil fences the privacy-
+// preserving refusal: dm:true asks for the link in a DM (so it does
+// NOT leak into channel history). When PostDM is not wired we
+// refuse the mint with a user-facing "DM is not configured" copy —
+// silently posting the link in-channel would violate the user's
+// explicit intent. The mint is NOT burned (no POST /v1/qurls).
+func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceFixture(t, w, testResourceIDFix, "prod-db")
 	})
+	var mintCalls atomic.Int32
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
-		writeCreateFixture(t, w, "https://qurl.link/dm-test", testResourceIDFix)
+		mintCalls.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not-be-minted", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
 	// PostDM is nil by default.
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "DM is not configured") {
-		t.Errorf("async reply missing DM-not-configured warning: %q", async)
+	if !strings.Contains(async, "DM delivery is not configured") {
+		t.Errorf("async reply missing DM-not-configured refusal: %q", async)
 	}
-	if !strings.Contains(async, "https://qurl.link/dm-test") {
-		t.Errorf("async fallback should still include link: %q", async)
+	if strings.Contains(async, "https://qurl.link/should-not-be-minted") {
+		t.Errorf("async response leaked the link into channel despite dm:true privacy intent: %q", async)
+	}
+	if mintCalls.Load() != 0 {
+		t.Errorf("mint was burned (POST /v1/qurls calls = %d) despite refusal at the dm:true gate; the user paid a quota for a request we couldn't honor", mintCalls.Load())
 	}
 }
 

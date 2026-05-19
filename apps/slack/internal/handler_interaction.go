@@ -11,16 +11,13 @@ import (
 	"time"
 )
 
-// callbackIDAdminClaim is the modal callback ID for the bootstrap-
-// code claim flow. Distinct from any future modal callback so a
-// single submission router can dispatch by ID. Mirrors the constant
-// in views.go (Go-package-internal — duplicated here so the
-// dispatcher can match without a views import).
-
 // interactionAsyncBudget bounds the view_submission handler. Slack
 // gives view_submission a 3s ack budget (same as slash commands).
-// 2s leaves headroom for the JSON encode + write.
-const interactionAsyncBudget = 2 * time.Second
+// 2.5s leaves headroom for the JSON encode + write while covering
+// the redeem chain (RedeemBootstrap + BindWorkspace + PostDM —
+// `chat.postMessage` alone can spike toward ~1s on a bad Slack edge,
+// so 2s was uncomfortably close to the wire).
+const interactionAsyncBudget = 2500 * time.Millisecond
 
 // handleInteraction routes Slack interaction POSTs (button clicks,
 // modal submissions) to the right inner handler. Today only the

@@ -110,6 +110,12 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 	}
 
 	ownerID := readString(out.Attributes, attrOwnerID)
+	// CreatedAt is "when the workspace was claimed" — the moment
+	// the bootstrap code was redeemed — NOT the time the bootstrap
+	// code was originally minted. BindWorkspace propagates this onto
+	// the workspace_mappings row's `created_at` attribute so the row
+	// timestamps reflect first-claim time. The bootstrap_codes row's
+	// own minted-at lives on a separate column and isn't surfaced.
 	mapping := &WorkspaceMapping{
 		TeamID:    teamID,
 		OwnerID:   ownerID,
@@ -137,6 +143,14 @@ func (s *Store) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID s
 // hashBootstrapCode is sha256-hex of the plaintext bootstrap code.
 // Matches the schema fenced in modules/qurl-slack-ddb/main.tf:
 // `code_hash = SHA-256(plaintext)`; plaintext is never persisted.
+//
+// Salting is intentionally omitted: the security posture relies on
+// the plaintext code itself carrying ≥80 bits of CSPRNG entropy
+// (minted by the bootstrap-code issuer, NOT by this bot). At that
+// entropy floor the hash is rainbow-table-resistant on its own.
+// If a future refactor swaps in a lower-entropy code shape (e.g. a
+// 6-digit OTP), this hash WILL need a salt — fenced here so the
+// regression isn't silent.
 func hashBootstrapCode(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])

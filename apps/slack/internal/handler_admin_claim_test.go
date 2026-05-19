@@ -322,46 +322,86 @@ func TestHandleAdminClaimSubmit_PersistsAdminMapping(t *testing.T) {
 }
 
 // TestHandleAdminClaimSubmit_BindFailsAfterRedeem fences the
-// post-redeem error path: when BindWorkspace fails AFTER the
-// bootstrap code has been atomically consumed, the user gets a
-// distinct "redeemed but bind failed — contact support" copy
-// instead of the generic "Could not redeem code, please try again."
-// This is the difference between "retry with a fresh code" (clear
-// support-actionable signal) and "retry forever with a dead code"
-// (silent infinite loop).
+// different-admin conflict path: when BindWorkspace returns 409
+// because another admin holds the workspace, the user gets a copy
+// that points them at the existing admin — NOT a "contact support"
+// escalation. The bootstrap code is still burned (single-use), but
+// the user has a clear next step.
 //
 // Setup: pre-seed a workspace_mappings row under the same team but
-// a DIFFERENT owner so BindWorkspace's
-// `attribute_not_exists(slack_team_id)` condition fails with 409.
-// RedeemBootstrap still succeeds because it's keyed on code_hash,
-// not team — so we exercise the exact "code burned, bind failed"
-// gap.
+// a DIFFERENT seed admin so BindWorkspace's distinguish-by-caller
+// branch returns the "different admin" 409. RedeemBootstrap still
+// succeeds because it's keyed on code_hash, not team.
 func TestHandleAdminClaimSubmit_BindFailsAfterRedeem(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.ddb.seedItem(t, ts.tableNames.bootstrapCodes,
 		seedBootstrapCode(t, "BOOT-CONFLICT", testAdminOwnerID, "k_conflict", time.Now().Add(time.Hour), false))
-	// Pre-existing workspace row under a different owner — the bind
-	// condition will fire 409.
+	// Pre-existing workspace row whose admin set does NOT include
+	// the incoming caller → distinguish-by-caller resolves to
+	// "different admin".
 	ts.seedWorkspace(t, testAdminTeamID, "u_other_owner", "U_other_admin", testWorkspaceConfiguredAt)
 
 	var dmCalls atomic.Int32
-	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+	h.cfg.PostDM = func(_ context.Context, _, _ string) error {
 		dmCalls.Add(1)
-		dmText = text
 		return nil
 	}
 
-	status, _ := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-CONFLICT"))
+	status, reply := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-CONFLICT"))
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	// 409 path: DM the "already claimed" copy, close the modal.
+	// 409 path uses respondModalError, not DM.
 	if dmCalls.Load() != 0 {
-		// 409 routes to modal-error, not DM. Only the generic post-
-		// redeem failure DMs.
-		t.Errorf("PostDM called on 409 path: got %d calls, dm=%q", dmCalls.Load(), dmText)
+		t.Errorf("PostDM called on different-admin 409 path: got %d calls", dmCalls.Load())
+	}
+	// Assert the user-visible copy: should point at the existing
+	// admin, NOT tell them to ask themselves to add themselves.
+	errs, _ := reply[modalKeyErrors].(map[string]any)
+	got, _ := errs[blockIDClaimCode].(string)
+	if !strings.Contains(got, "different admin") {
+		t.Errorf("user copy missing different-admin signal: %q", got)
+	}
+	if strings.Contains(got, "Ask them to add you") == false {
+		t.Errorf("user copy missing actionable next step: %q", got)
+	}
+}
+
+// TestHandleAdminClaimSubmit_BindFailsSameCaller fences the
+// same-caller re-entry path: a user who already holds the admin
+// set on the workspace runs `/qurl admin claim` again with a fresh
+// bootstrap code. BindWorkspace's distinguish-by-caller branch
+// returns 409 + `workspace_already_bound_to_caller`, and the
+// handler renders "you're already the admin" instead of the
+// confusing "ask the existing admin to add you" copy (the existing
+// admin IS the caller — they can't ask themselves).
+func TestHandleAdminClaimSubmit_BindFailsSameCaller(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.ddb.seedItem(t, ts.tableNames.bootstrapCodes,
+		seedBootstrapCode(t, "BOOT-REENTRY", testAdminOwnerID, "k_reentry", time.Now().Add(time.Hour), false))
+	// Pre-existing workspace row whose admin set DOES include the
+	// incoming caller (testAdminUserID).
+	ts.seedAdmin(t)
+
+	var dmCalls atomic.Int32
+	h := newAdminTestHandler(t, ts)
+	h.cfg.PostDM = func(_ context.Context, _, _ string) error {
+		dmCalls.Add(1)
+		return nil
+	}
+
+	_, reply := invokeInteraction(t, h, buildClaimSubmission(testAdminTeamID, testAdminUserID, "BOOT-REENTRY"))
+	if dmCalls.Load() != 0 {
+		t.Errorf("PostDM called on same-caller 409 path: got %d calls", dmCalls.Load())
+	}
+	errs, _ := reply[modalKeyErrors].(map[string]any)
+	got, _ := errs[blockIDClaimCode].(string)
+	if !strings.Contains(got, "already an admin") {
+		t.Errorf("user copy missing same-caller signal: %q", got)
+	}
+	if strings.Contains(got, "Ask the existing admin") || strings.Contains(got, "different admin") {
+		t.Errorf("user copy wrongly told the existing admin to ask the existing admin (i.e. themselves): %q", got)
 	}
 }
 

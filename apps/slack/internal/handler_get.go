@@ -149,6 +149,15 @@ type getWorkArgs struct {
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
 
+	// Refuse `dm:true` early when PostDM is not wired — the user's
+	// intent is "do not leak the link in channel history", and a
+	// silent channel-fallback violates that intent. Fail-fast here
+	// avoids burning a mint quota on a request that can't be
+	// delivered the way the user asked.
+	if args.cmd.DM() && h.cfg.PostDM == nil {
+		return "", &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
+	}
+
 	// 1. Resolve alias → resource via the customer API (uses the
 	//    workspace's API key).
 	c, err := h.authenticatedClient(ctx, args.teamID)
@@ -218,16 +227,18 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 
 // deliverGetDM handles the `dm:true` variant. The link goes to the
 // user's DM via PostDM; the response_url ephemeral confirms (without
-// leaking the link in channel history). If PostDM isn't wired we
-// fall back to the channel ephemeral with a friendly warning so the
-// user still gets their link.
+// leaking the link in channel history).
+//
+// PostDM-nil is rejected earlier in getWork — the dm:true contract
+// is privacy ("do not leak the link in channel history") and a
+// silent channel-fallback violates that. If PostDM is wired but the
+// call itself fails, we surface the failure without re-posting the
+// link (the user can retry without dm:true if they want it
+// in-channel).
 func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, userID, message string) string {
-	if h.cfg.PostDM == nil {
-		return ":warning: DM is not configured for this workspace; here is your link in-channel.\n" + message
-	}
 	if err := h.cfg.PostDM(ctx, userID, message); err != nil {
-		log.Warn("get: DM post failed; falling back to channel ephemeral", "error", err)
-		return ":warning: DM failed; here is your link in-channel.\n" + message
+		log.Warn("get: DM post failed", "error", err)
+		return ":warning: Could not DM you the link. Please re-run the command without `dm:true` to receive it in-channel."
 	}
 	return ":incoming_envelope: Sent to your DM."
 }
@@ -287,24 +298,23 @@ func mapMintError(log *slog.Logger, err error) error {
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code)
 			return &userError{msg: serviceUnreachableMessage}
+		default:
+			// Unmapped 5xx (e.g. 500, 599) is server-side trouble —
+			// same retry-friendly disposition as 502/503/504 above.
+			// Falling through to commonGetMintFailedMessage on a 500
+			// would tell the user "permanent failure, do not retry"
+			// when the upstream is actually transient.
+			if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
+				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code)
+				return &userError{msg: serviceUnreachableMessage}
+			}
+			// Other unmapped statuses (401, 404, 422, etc.) are
+			// permanent-class — log loud so the operator sees the
+			// contract surprise, surface the generic message so the
+			// user isn't told to retry forever.
+			log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)
+			return &userError{msg: commonGetMintFailedMessage}
 		}
-		// Unmapped 5xx (e.g. 500, 599) is server-side trouble — same
-		// retry-friendly disposition as 502/503/504 above. Falling
-		// through to commonGetMintFailedMessage on a 500 would tell
-		// the user "permanent failure, do not retry" when the
-		// upstream is actually transient. The unmapped non-5xx case
-		// (401, 404, 422, etc.) IS a permanent-class failure and
-		// falls through below.
-		if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
-			log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code)
-			return &userError{msg: serviceUnreachableMessage}
-		}
-		// Other unmapped statuses (401, 404, 422, etc.) are
-		// permanent-class — log loud so the operator sees the
-		// contract surprise, surface the generic message so the user
-		// isn't told to retry forever.
-		log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)
-		return &userError{msg: commonGetMintFailedMessage}
 	}
 	// No APIError → wrapped network/dial failure. Same retry-friendly
 	// disposition as 5xx above.

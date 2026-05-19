@@ -207,16 +207,35 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	if err == nil {
 		return nil
 	}
-	// ConditionalCheckFailed here means the row already exists —
-	// surface as 409 so the handler can render the "this workspace
-	// already has an admin" copy.
 	var ccfe *ddbtypes.ConditionalCheckFailedException
-	if errors.As(err, &ccfe) {
-		return &Error{
-			StatusCode: http.StatusConflict,
-			Code:       "workspace_already_bound",
-			Title:      "BindWorkspace: workspace is already claimed",
+	if !errors.As(err, &ccfe) {
+		return ddbToError("BindWorkspace", err)
+	}
+	// ConditionalCheckFailed here means the row already exists.
+	// Distinguish "this caller is already the admin" from "another
+	// admin holds this workspace" so the handler renders the right
+	// user copy. A same-caller re-entry surfaces a distinct error
+	// code so the handler can short-circuit to "you're already the
+	// admin" instead of telling the user to ask themselves for help.
+	if check, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(m.TeamID),
+		},
+	}); getErr == nil && len(check.Item) > 0 {
+		for _, u := range readStringSet(check.Item, attrAdminSlackUserIDs) {
+			if u == seedAdmin {
+				return &Error{
+					StatusCode: http.StatusConflict,
+					Code:       "workspace_already_bound_to_caller",
+					Title:      "BindWorkspace: caller is already on this workspace's admin set",
+				}
+			}
 		}
 	}
-	return ddbToError("BindWorkspace", err)
+	return &Error{
+		StatusCode: http.StatusConflict,
+		Code:       "workspace_already_bound",
+		Title:      "BindWorkspace: workspace is already claimed by a different admin",
+	}
 }
