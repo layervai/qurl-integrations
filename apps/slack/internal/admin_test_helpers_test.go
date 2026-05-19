@@ -160,7 +160,8 @@ func (ts *adminTestServers) seedPolicySingle(t *testing.T, teamID, channelID, al
 }
 
 // seedPolicySet seeds a channel_policies row carrying an
-// allowed_resource_ids SS attribute. Used for ResolvePolicy tests.
+// allowed_resource_ids SS attribute. Used for `$r_<id>` mint-gate
+// tests (authorizeResourceIDForGet → AllowedResourceIDsForChannel).
 // If alias is non-empty, also seeds a single-binding alias_bindings
 // Map so /qurl aliases lists the channel — convenient for tests
 // that exercise both surfaces against the same row.

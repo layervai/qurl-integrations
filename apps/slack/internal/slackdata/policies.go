@@ -23,9 +23,8 @@ import (
 //     `/qurl get $r_<id>` checks via AllowedResourceIDsForChannel
 //     (handler_get.go's authorizeResourceIDForGet). Orthogonal to
 //     the alias map — a resource can be in the allowed set without
-//     an alias,
-//     and an alias can be bound without being in the allowed set
-//     (the two surfaces serve different commands).
+//     an alias, and an alias can be bound without being in the
+//     allowed set (the two surfaces serve different commands).
 //
 // Schema decision locked 2026-05-17: app-managed Map, no GSI, no
 // SK reshape. channel_policies table is empty pending Slack bot
@@ -63,9 +62,6 @@ const (
 // /qurl get $r_<id> (mint-time capability) consumed it. Post-revert
 // of #234 in #459 only the latter survives, so a name like
 // `ChannelMintableResourceIDs` would better reflect today's role.
-//
-// Same cleanup pass should also delete [Store.ResolvePolicy] below
-// (zero callers post-#459; see `git grep \.ResolvePolicy\b`).
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{
@@ -98,43 +94,6 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 		}
 	}
 	return allowed, nil
-}
-
-// ResolvePolicy returns true iff `resourceID` is in the
-// channel_policies row's `allowed_resource_ids` set for
-// (teamID, channelID). Missing row → false (no policy = no access).
-//
-// The old HTTP shape returned a `bool` and an error; same shape here.
-// Eventual-consistency read is intentional — `/qurl get` and `/qurl
-// aliases` tolerate ~few-second propagation lag after a fresh
-// allow/disallow; strong reads would double RCU cost without
-// changing failure modes that matter.
-func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID string) (bool, error) {
-	if teamID == "" || channelID == "" || resourceID == "" {
-		return false, &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "ResolvePolicy: team_id, channel_id, resource_id are required",
-		}
-	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-	})
-	if err != nil {
-		return false, ddbToError("ResolvePolicy", err)
-	}
-	if len(out.Item) == 0 {
-		return false, nil
-	}
-	for _, rid := range readStringSet(out.Item, attrAllowedResourceIDs) {
-		if rid == resourceID {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // AllowResource adds `resourceID` to the (teamID, channelID) row's
