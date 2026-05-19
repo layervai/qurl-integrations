@@ -257,6 +257,147 @@ describe('getManager — Pillar 3 leader handle', () => {
   });
 });
 
+describe('Pillar 3 manager contract — connect() + isConnected()', () => {
+  // The leader (gateway-leader.js) and watchdog
+  // (gateway-connection-watchdog.js) require a manager handle whose
+  // typeof connect === 'function' && typeof isConnected === 'function'.
+  // The raw @discordjs/ws WebSocketManager has connect() but NOT
+  // isConnected() (only async fetchStatus()) — so the SHIM has to be
+  // the contract-conforming handle. These tests pin the surface
+  // shape so a future refactor that drops either method fails CI
+  // instead of crash-looping the gateway task on next deploy.
+
+  it('exposes connect() and isConnected() on the returned shim', () => {
+    const { shim } = makeShim();
+    expect(typeof shim.connect).toBe('function');
+    expect(typeof shim.isConnected).toBe('function');
+  });
+
+  it('connect() throws before start() (no manager yet)', async () => {
+    const { shim } = makeShim();
+    await expect(shim.connect()).rejects.toThrow(/connect\(\) called before start\(\)/);
+  });
+
+  it('connect() delegates to the underlying manager once start() has run', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    await shim.connect();
+    // start({connect:false}) skips the internal connect, so the
+    // count reflects ONLY the shim.connect() call we just made.
+    expect(managerInstances[0].connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('isConnected() is false before any READY/RESUMED', async () => {
+    const { shim } = makeShim();
+    expect(shim.isConnected()).toBe(false);
+    await shim.start({ connect: false });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('isConnected() flips true on READY dispatch', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+    expect(shim.isConnected()).toBe(true);
+  });
+
+  it('isConnected() flips true on RESUMED dispatch (Pillar 2 happy path)', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED' },
+      shardId: 0,
+    });
+    expect(shim.isConnected()).toBe(true);
+  });
+
+  it('isConnected() flips back to false on Closed', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+    expect(shim.isConnected()).toBe(true);
+    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('isConnected() is false after stop() regardless of prior READY', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+    await shim.stop({ flushFinal: false });
+    expect(shim.isConnected()).toBe(false);
+  });
+
+  it('connect() rejects after stop()', async () => {
+    const { shim } = makeShim();
+    await shim.start({ connect: false });
+    await shim.stop({ flushFinal: false });
+    await expect(shim.connect()).rejects.toThrow(/connect\(\) called after stop\(\)/);
+  });
+
+  it('stop() removes the Closed listener too (no listener leak across cycles)', async () => {
+    // Regression pin for the listener-leak hazard: a future
+    // `start()/stop()/start()` cycle would otherwise accumulate
+    // Closed handlers on every new manager instance, each closing
+    // over the previous cycle's wsConnected/logger references.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(1);
+    await shim.stop({ flushFinal: false });
+    expect(managerInstances[0].listenerCount(WebSocketShardEvents.Closed)).toBe(0);
+  });
+
+  it('satisfies the leader/watchdog factory contracts (no TypeError on construction)', () => {
+    // Regression guard: the prior wiring passed `shim.getManager()` —
+    // the raw @discordjs/ws WebSocketManager — to createGatewayLeader,
+    // which throws "manager with connect() and isConnected() is
+    // required" because WebSocketManager has no isConnected(). The
+    // production fix passes `gatewayShim` itself; this test asserts
+    // both factories accept it without throwing.
+    const { shim } = makeShim();
+    const { createGatewayLeader } = require('../src/gateway-leader');
+    const { createConnectionWatchdog } = require('../src/gateway-connection-watchdog');
+
+    const minimalDeps = {
+      lock: {
+        acquireLock: async () => ({}),
+        renewLock: async () => ({}),
+        transferLock: async () => ({}),
+        adoptLockFromHandoff: () => {},
+        releaseLock: async () => {},
+      },
+      peerHeartbeat: {
+        writeHeartbeat: async () => {},
+        listFreshPeers: async () => [],
+        deleteOwnRow: async () => {},
+      },
+      controlClient: { pushHandoff: async () => ({ ok: true }) },
+      selfInstanceId: 'i-test',
+      shardId: '0:1',
+      logger: makeFakeLogger(),
+    };
+
+    expect(() => createGatewayLeader({ ...minimalDeps, manager: shim })).not.toThrow();
+    expect(() => createConnectionWatchdog({
+      manager: shim,
+      isHoldingLock: () => false,
+      isConnecting: () => false,
+      releaseLock: async () => {},
+      deleteOwnRow: async () => {},
+      logger: minimalDeps.logger,
+    })).not.toThrow();
+  });
+});
+
 describe('IDENTIFY budget guard', () => {
   it('passes through when mirror is non-null (RESUME path; no budget impact)', async () => {
     const { shim, store, managerInstances } = makeShim();
