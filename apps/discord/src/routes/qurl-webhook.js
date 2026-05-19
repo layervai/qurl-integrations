@@ -7,12 +7,23 @@
 // can land on instance A while the originating monitor's setInterval
 // runs on instance B, so we never reach for an in-process EventEmitter.
 //
-// Wire contract pinned by qurl-service:
-//   header  `QURL-Signature`  bare hex HMAC-SHA256 over raw body (no
-//                             `sha256=` prefix — different shape from
-//                             GitHub's signature scheme; do not copy
-//                             routes/webhooks.js' prefix-check verbatim)
-//   body    `{event, data:{qurl_id, resource_id, access_count, consumed}}`
+// Wire contract pinned by qurl-service domain.WebhookEvent
+// (internal/domain/webhook.go) + domain.SignPayload:
+//   header  `QURL-Signature`   bare hex HMAC-SHA256 over raw body (no
+//                              `sha256=` prefix — different shape from
+//                              GitHub's signature scheme; do not copy
+//                              routes/webhooks.js' prefix-check verbatim)
+//   header  `QURL-Delivery`    per-delivery ID (`wd_…`). Different
+//                              across redeliveries of the same event,
+//                              so NOT a replay key — use body.id for that.
+//   body    `{id, type, data:{qurl_id, resource_id, access_count, consumed},
+//             owner_id, timestamp, api_version}`
+//
+// Field NAMES matter: qurl-service emits `type` (not `event`) and `id`
+// (not `event_id`). Receiver-side renames of either field silently
+// 200-ignore every inbound webhook because the type check fails first.
+// Pinning the qurl-service field names here so a future "let's normalize
+// to event_id" refactor in EITHER repo fails CI rather than going dark.
 //
 // `src_ip` and `user_agent` are stripped server-side for type=transit
 // resources (the connector-owned privacy boundary). Discord bot sends
@@ -28,6 +39,7 @@ const crypto = require('crypto');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
+const { AUDIT_EVENTS } = require('../constants');
 
 const router = express.Router();
 
@@ -113,6 +125,7 @@ router.post('/qurl', async (req, res) => {
   const existing = (badSigAttempts.get(ip) || []).filter(t => t > Date.now() - BAD_SIG_WINDOW_MS);
   if (existing.length >= BAD_SIG_MAX) {
     logger.warn('qURL webhook rate limit exceeded (bad signatures)', { ip, recentFailures: existing.length });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, { recent_failures: existing.length });
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
@@ -128,28 +141,35 @@ router.post('/qurl', async (req, res) => {
   if (!verifySignature(req)) {
     const n = recordBadSig(ip);
     logger.warn('Invalid qURL webhook signature', { ip, totalInWindow: n });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID, { total_in_window: n });
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  const event = req.body?.event;
+  const eventType = req.body?.type;
   const data = req.body?.data;
-  // Replay protection key — peer is qurl-service's per-delivery event_id.
-  // We also fall back to message_id (older payload shape) so a
-  // qurl-service rev that hasn't standardized the field name yet still
-  // gets dedup. If BOTH are absent the payload predates webhook
-  // hardening; record under a synthesized key derived from the body so
-  // we still get SOME replay protection (won't dedup across distinct
-  // events, but a literal redelivery hashes to the same key).
-  const eventId = req.body?.event_id || req.body?.message_id ||
-    crypto.createHash('sha256').update(req.rawBody).digest('hex');
+  // Replay-protection key. Peer is qurl-service's WebhookEvent.ID
+  // (json `id`) — stable across redeliveries of the same event, so
+  // `last_event_id <> :eid` actually catches redeliveries. The peer
+  // does NOT use `event_id` / `message_id`; those names were a
+  // pre-merge guess on this side that 200-ignored every inbound
+  // webhook before #465 review caught it.
+  const eventId = req.body?.id;
+  if (!eventId) {
+    // Defensive: a future qurl-service refactor that drops `id` from
+    // the payload would silently disable replay protection — log the
+    // gap and reject so the regression surfaces immediately rather
+    // than via "duplicate view counts" downstream.
+    logger.warn('qURL webhook missing body.id (per-event replay key)');
+    return res.status(200).json({ status: 'invalid-payload' });
+  }
 
   // Only qurl.accessed drives the view counter today. Other event types
   // (e.g. qurl.created, qurl.revoked) may arrive if the subscription is
   // broader than necessary — silently 200 them so qurl-service doesn't
   // retry on the bot's account.
-  if (event !== 'qurl.accessed') {
-    logger.debug('qURL webhook event ignored', { event });
-    return res.status(200).json({ status: 'ignored', event });
+  if (eventType !== 'qurl.accessed') {
+    logger.debug('qURL webhook event ignored', { type: eventType });
+    return res.status(200).json({ status: 'ignored', type: eventType });
   }
 
   if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
@@ -174,11 +194,19 @@ router.post('/qurl', async (req, res) => {
       eventId,
     });
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed: Boolean(data.consumed), result });
+    // Audit ALL accepted webhooks — including dedup — so the
+    // QurlWebhookReceivedTotal metric reflects "qurl-service is
+    // reaching us" continuously. A drop to zero across an extended
+    // window is the load-bearing alarm signal (subscription drift /
+    // qurl-service down). Result dimension lets the dashboard split
+    // recorded vs dedup without a second filter.
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result });
     return res.status(200).json({ status: result });
   } catch (err) {
     // 5xx so qurl-service retries — transient DDB throttle should not
     // silently drop a view event.
     logger.error('Failed to record qURL view', { error: err.message, qurl_id: data.qurl_id });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_STORE_ERROR, { error_type: err.name || 'unknown' });
     return res.status(500).json({ error: 'Internal error' });
   }
 });

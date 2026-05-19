@@ -56,7 +56,11 @@ Each step blocks the next — do not skip ahead.
 
 - Header: `QURL-Signature` = bare-hex HMAC-SHA256 over the raw body.
   No `sha256=` prefix — that's the GitHub wire shape, NOT this one.
-- Body: `{event, event_id, data:{qurl_id, resource_id, access_count, consumed}}`
+- Body: `{id, type, data:{qurl_id, resource_id, access_count, consumed}, owner_id, timestamp, api_version}`
+  (peer is `qurl-service:internal/domain/webhook.go::WebhookEvent`).
+  Field names matter: `type` is the event type, `id` is the per-event
+  replay key. Receiver does NOT accept `event` / `event_id` as
+  synonyms — see the regression test in `tests/qurl-webhook.test.js`.
 - `src_ip` + `user_agent` are stripped server-side for type=transit
   resources (the connector-owned privacy boundary). Discord bot sends
   are always transit; we don't read those fields.
@@ -83,11 +87,23 @@ Each step blocks the next — do not skip ahead.
   (no `👀` line at all) and emits one WARN per affected send. Recover
   by deploying the connector forward.
 
+## Known operator-burden tradeoffs
+
+- **Secret coupled in two places.** Step 3's SSM value and step 4's
+  subscription `secret` field must match by hand; rotation is a
+  coordinated edit, not a single command. Auto-register-at-boot
+  (bot POSTs the subscription on startup with the same value it
+  read from SSM) would collapse this to one source of truth —
+  deferred because giving the bot a qurl-service admin token
+  widens the bot's blast radius beyond the per-guild `QURL_API_KEY`
+  it has today. Revisit when the admin-token surface has tighter
+  scoping (per-subscription instead of org-wide).
+
 ## What the bot does NOT need
 
 - A webhook auto-registration handshake — subscriptions are managed
-  out-of-band (curl above). Adding an admin slash command for this is
-  out of scope.
+  out-of-band (curl above). See "operator-burden tradeoffs" for
+  why this isn't automated today.
 - The full `qurl.accessed` payload's `src_ip` / `user_agent` fields —
   they're stripped for transit resources at the qurl-service boundary,
   per the connector-owned redaction policy.

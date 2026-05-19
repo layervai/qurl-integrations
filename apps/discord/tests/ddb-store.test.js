@@ -1008,8 +1008,9 @@ describe('qurl sends', () => {
 // ── QURL views (webhook-fed view counter) ──
 
 describe('qurl views', () => {
-  test('recordQurlView: conditional UpdateItem with MAX-merge + replay-protection clause', async () => {
+  test('recordQurlView: conditional UpdateItem with MAX-merge + replay-protection clause + TTL refresh', async () => {
     ddbMock.on(UpdateCommand).resolves({});
+    const before = Math.floor(Date.now() / 1000);
     const result = await store.recordQurlView({
       qurlId: 'q_aaaaaaaaaa1', accessCount: 3, consumed: false, eventId: 'evt-1',
     });
@@ -1026,6 +1027,15 @@ describe('qurl views', () => {
     expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
       ':n': 3, ':c': false, ':eid': 'evt-1',
     }));
+    // TTL refresh on every write — 30 days from now. The window must
+    // be longer than the longest monitor lifetime (1h cap) + longest
+    // link expiry (7d) + DDB TTL's ~48h precision slop. 30d gives
+    // ~3 weeks of buffer.
+    expect(input.UpdateExpression).toMatch(/#ttl = :ttl/);
+    expect(input.ExpressionAttributeNames).toEqual(expect.objectContaining({ '#ttl': 'ttl' }));
+    const THIRTY_DAYS = 30 * 24 * 60 * 60;
+    expect(input.ExpressionAttributeValues[':ttl']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
+    expect(input.ExpressionAttributeValues[':ttl']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
   });
 
   test('recordQurlView: ConditionalCheckFailedException → "dedup" (replay path, NOT a failure)', async () => {

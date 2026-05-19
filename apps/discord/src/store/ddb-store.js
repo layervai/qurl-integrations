@@ -1025,6 +1025,14 @@ async function recordQURLSendBatch(sends) {
 
 // ── QURL views (webhook-fed view counter for /qurl send + /qurl map) ──
 
+// 30-day TTL window on qurl_views rows. Safely past the longest
+// monitor lifetime (1h cap) + the longest link expiry (7d), with
+// ~3 weeks of buffer for DDB's TTL precision (rows can survive
+// up to 48h past their stamp before the asynchronous reaper sweeps
+// them). A shorter window risks dropping a row a monitor is still
+// reading; a longer window leaves unbounded growth on the table.
+const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
+
 // recordQurlView is the qurl.accessed webhook's persistence sink. The
 // conditional update implements MAX-merge semantics: a redelivery, a
 // stale (lower-count) replay, or an out-of-order arrival is silently
@@ -1032,6 +1040,10 @@ async function recordQURLSendBatch(sends) {
 // counter); a webhook can land on a different bot instance than the
 // one running the originating monitor's setInterval, so the join is
 // always through DDB — never in-process pub/sub.
+//
+// Every successful write refreshes the `ttl` attribute to (now + 30d).
+// A qURL that keeps receiving views (e.g. a multi-use link) keeps its
+// row alive; once views stop, the row reaps 30d later.
 async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
   if (!qurlId) throw new Error('recordQurlView: qurlId is required');
   if (typeof accessCount !== 'number' || accessCount < 0) {
@@ -1049,12 +1061,14 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
       // "out-of-order arrival" case (event N+1 races event N, and N
       // arrives second — we never want to regress access_count).
       ConditionExpression: 'attribute_not_exists(last_event_id) OR (last_event_id <> :eid AND access_count < :n)',
-      UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now',
+      UpdateExpression: 'SET access_count = :n, consumed = :c, last_event_id = :eid, last_updated = :now, #ttl = :ttl',
+      ExpressionAttributeNames: { '#ttl': 'ttl' },
       ExpressionAttributeValues: {
         ':n': accessCount,
         ':c': Boolean(consumed),
         ':eid': eventId,
         ':now': nowIso(),
+        ':ttl': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
       },
     }));
     return 'recorded';
