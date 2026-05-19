@@ -20,8 +20,10 @@ import (
 //     A channel can carry many alias bindings simultaneously;
 //     `/qurl aliases` lists every binding for the channel.
 //   - `allowed_resource_ids`: SS attribute; the multi-resource gate
-//     `/qurl get` checks via ResolvePolicy. Orthogonal to the alias
-//     map — a resource can be in the allowed set without an alias,
+//     `/qurl get $r_<id>` checks via AllowedResourceIDsForChannel
+//     (handler_get.go's authorizeResourceIDForGet). Orthogonal to
+//     the alias map — a resource can be in the allowed set without
+//     an alias,
 //     and an alias can be bound without being in the allowed set
 //     (the two surfaces serve different commands).
 //
@@ -61,6 +63,9 @@ const (
 // /qurl get $r_<id> (mint-time capability) consumed it. Post-revert
 // of #234 in #459 only the latter survives, so a name like
 // `ChannelMintableResourceIDs` would better reflect today's role.
+//
+// Same cleanup pass should also delete [Store.ResolvePolicy] below
+// (zero callers post-#459; see `git grep \.ResolvePolicy\b`).
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{
@@ -135,7 +140,8 @@ func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID
 // AllowResource adds `resourceID` to the (teamID, channelID) row's
 // allowed_resource_ids set via a conditional UpdateItem. Orthogonal
 // to alias_bindings — AllowResource only touches the allowed-set
-// surface that ResolvePolicy gates on.
+// surface that [Store.AllowedResourceIDsForChannel] reads back for
+// the `$r_<id>` mint gate.
 //
 // Returns 409 (via *Error) on a duplicate add. The 409 is surfaced
 // via DDB's ConditionalCheckFailedException on a
@@ -254,8 +260,9 @@ func (s *Store) DisallowResource(ctx context.Context, teamID, channelID, resourc
 // `/qurl aliases` can render one line per (channel, alias). Rows
 // without alias_bindings (only `allowed_resource_ids` populated)
 // emit zero entries — they're orthogonal to the alias listing.
-// `allowed_resource_ids` is the gate for `/qurl get` via
-// ResolvePolicy and intentionally NOT mirrored here.
+// `allowed_resource_ids` is the gate for `/qurl get $r_<id>` via
+// [Store.AllowedResourceIDsForChannel] and intentionally NOT
+// mirrored here.
 func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit int) (*PolicyList, error) {
 	if teamID == "" {
 		return nil, &Error{

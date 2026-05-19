@@ -97,6 +97,9 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	body := "*qURL Resources:*\n" + strings.Join(lines, "\n") +
 		"\n\n_Copy any `$token` and run `/qurl get $token` to mint a qURL link._"
 	if page.HasMore {
+		// `$token` (not `$alias`) is deliberate — the list also
+		// surfaces `$r_<resource_id>` rows for un-aliased resources,
+		// so the breadcrumb has to cover both shapes.
 		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $token`._", listResourcesPageLimit)
 	}
 	h.postResponse(log, responseURL, body)
