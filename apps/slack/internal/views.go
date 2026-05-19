@@ -85,52 +85,6 @@ func IsRedactedSubmissionBlock(blockID string) bool {
 	return ok
 }
 
-// HelpResponse renders the JSON for `/qurl help`. Returned as the
-// slash-command HTTP response body (not a modal).
-//
-// adminStoreConfigured mirrors the gate in [Handler.helpMessage]: on
-// sandbox deploys without the three `QURL_*_TABLE` env vars the
-// AdminStore is nil and `admin add/remove/list/revoke` reply
-// "Admin features are not configured", so the modal omits them too
-// rather than advertising verbs the user can't run.
-func HelpResponse(adminStoreConfigured bool) ([]byte, error) {
-	adminLines := []string{
-		"*Admin commands*",
-		"`/qurl admin claim` — open the bootstrap-code modal",
-		"`/qurl setalias $<alias> <url-or-resource-id>` — configure an alias in this channel",
-		"`/qurl unsetalias $<alias>` — remove a configured alias in this channel",
-		"`/qurl aliases` — list aliases configured in this channel",
-	}
-	if adminStoreConfigured {
-		adminLines = append(adminLines,
-			"`/qurl admin add @user` — promote a Slack user to bot admin",
-			"`/qurl admin remove @user` — demote a Slack user from bot admin",
-			"`/qurl admin list` — list the workspace owner and current bot admins",
-			"`/qurl admin revoke <qurl_id>` — revoke a single previously minted qURL",
-		)
-	}
-	payload := map[string]any{
-		respFieldResponseType: respTypeEphemeral,
-		"blocks": []any{
-			sectionBlock("*/qurl* — Create and manage qURLs from Slack"),
-			dividerBlock(),
-			sectionBlock(strings.Join([]string{
-				"*Commands*",
-				"`/qurl get <url>` — get a qURL for a URL",
-				"`/qurl get $name` — get a qURL for a name your Slack admin has configured in this channel",
-				"`/qurl get <url|$name> dm:true` — DM the link instead of posting it in-channel",
-				"`/qurl get <url|$name> reason:\"audit text\"` — attach a reason to the mint (audit trail)",
-				"`/qurl list` — show your 5 most recent qURLs",
-			}, "\n")),
-			dividerBlock(),
-			sectionBlock(strings.Join(adminLines, "\n")),
-			dividerBlock(),
-			sectionBlock("`/qurl help` — show this message"),
-		},
-	}
-	return json.Marshal(payload)
-}
-
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
 // in `private_metadata`. JSON-encoded so the view-submission handler
 // (PR-3c.3+) can `json.Unmarshal` into a known struct rather than

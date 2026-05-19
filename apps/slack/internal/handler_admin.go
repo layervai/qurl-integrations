@@ -305,9 +305,12 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, _ url.Values, teamID, c
 	}
 	// Defensive: BindWorkspace stamps owner_id on first claim, so an
 	// empty value would only fire on storage corruption. Surface it
-	// explicitly instead of rendering a malformed `<@>` mrkdwn link.
+	// explicitly instead of rendering a malformed `<@>` mrkdwn link,
+	// and log at Error so on-call sees the corruption signal directly
+	// rather than reconstructing from user reports.
 	ownerCopy := fmt.Sprintf("<@%s>", ownerID)
 	if ownerID == "" {
+		slog.Error("admin list: workspace_mappings row missing owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID)
 		ownerCopy = "(unknown — workspace_mappings missing owner_id)"
 	}
 	// Filter the owner out of the admins line so it doesn't duplicate

@@ -136,6 +136,13 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "admin revoke with malformed id rejected", text: "admin revoke ;rm-rf", wantErr: ErrInvalidQURLID},
 		{name: "admin revoke with non-q-prefix id rejected", text: "admin revoke r_resource_id", wantErr: ErrInvalidQURLID},
 		{name: "admin revoke with oversize id rejected", text: "admin revoke q_" + strings.Repeat("A", 100), wantErr: ErrInvalidQURLID},
+		// A fat-paste with embedded whitespace splits into two
+		// positional args at tokenize time; the first half passes
+		// the {16,64} length floor on its own (16 'A's), so the
+		// second half lands as an unexpected trailing arg. Either
+		// failure mode is a friendlier surface than shipping a
+		// space-containing path to qurl-service.
+		{name: "admin revoke with embedded whitespace rejected", text: "admin revoke q_" + strings.Repeat("A", 16) + " " + strings.Repeat("B", 16), wantErr: ErrUnexpectedArgument},
 		{name: "admin add without mention", text: "admin add", wantErr: ErrMissingUserMention},
 		{name: "admin add with bare @user", text: "admin add @alice", wantErr: ErrInvalidUserMention},
 		{name: "admin add with non-mention positional", text: "admin add alice", wantErr: ErrInvalidUserMention},
