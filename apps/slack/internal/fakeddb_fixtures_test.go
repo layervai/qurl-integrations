@@ -47,6 +47,13 @@ func seedWorkspaceAdmin(teamID, ownerID, slackUserID string, configuredAt time.T
 // seedWorkspaceNonAdmin returns a workspace_mappings row that
 // exists for `teamID` but does NOT name `slackUserID` as admin.
 // Used by the admin-check-no surfaces.
+//
+// `U_someone_else` violates the post-PR userMentionPattern (`[UW][A-Z0-9]{8,}`)
+// because it's never mention-parsed — DDB only stores it as opaque
+// data, CheckAdmin compares the *caller's* user_id (already
+// validated upstream) against the SS membership. Kept as-is so the
+// non-admin shape is visually distinct from the canonical
+// `UADMIN001` / `UOWNER001` fixtures.
 func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:        stringMember(teamID),
