@@ -62,18 +62,6 @@ async function sweepOnce() {
         // Exponential backoff when GitHub secondary rate-limits us. Cap at
         // 60s so a single sweep never stalls beyond the interval window.
         // Abort the rest of the batch — we'll retry on the next hourly sweep.
-        // No inline `accessToken = null` here: the `finally` below clears
-        // it on the `break`, and the loop's scope exit makes the binding
-        // unreachable anyway.
-        //
-        // LOAD-BEARING: do NOT add a `throw` (or a statement that might
-        // throw — `await db.X()`, a metric emit that can fail, etc.)
-        // between this point and the `break` below. The catch above
-        // unconditionally hashes `accessToken` for log-correlation;
-        // a throw here would either need the catch to handle a null
-        // token (re-add the ternary) or — better — keep this branch
-        // throw-free so the catch's invariant ("accessToken is bound
-        // when this fires") stays valid.
         logger.warn('Orphan sweep hit GitHub rate limit, aborting batch', {
           id, status: result.status, backoffMs,
         });
@@ -82,18 +70,20 @@ async function sweepOnce() {
         break;
       }
     } catch (err) {
-      // Catch fires when `revokeOneDetailed` or `db.deleteOrphanedToken`
-      // throws — `accessToken` is always set at that point because both
-      // throw sites run BEFORE the `finally` below nulls it. The most
-      // common production-throw shape is `revokeOneDetailed`'s
+      // Catch fires when `revokeOneDetailed` (most often
       // `AbortSignal.timeout(5000)` raising `AbortError` after a 5s
-      // GitHub timeout — that hits this branch with `accessToken`
-      // still bound, so the hash compute below is safe. (The
-      // rate-limit branch's `await new Promise(r => setTimeout(...))`
-      // resolves rather than rejects, so it's not a throw site.) Hash
-      // the plaintext for log-correlation only (first 8 hex chars;
-      // SHA-256 is one-way).
-      const tokenHash8 = crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8);
+      // GitHub timeout) or `db.deleteOrphanedToken` throws. Today
+      // `accessToken` is always set at that point — both throw sites
+      // run BEFORE the `finally` below nulls it. The ternary below
+      // is structural defense against a future contributor adding a
+      // throw-after-null statement (a metric emit, an
+      // `await db.X()` etc.); the `(already-released)` sentinel
+      // surfaces clearly in logs instead of degrading to a hash of
+      // the empty string. Hash the plaintext for log-correlation
+      // only (first 8 hex chars; SHA-256 is one-way).
+      const tokenHash8 = accessToken
+        ? crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8)
+        : '(already-released)';
       logger.warn('Orphan token retry-revoke failed (will retry next sweep)', {
         id, tokenHash8, error: err.message,
       });

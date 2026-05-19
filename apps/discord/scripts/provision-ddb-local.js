@@ -116,6 +116,23 @@ if (!/^[a-z0-9][a-z0-9-]*-$/.test(prefix) || prefix.length > 64) {
   }
 }
 
+// Secondary credential-shape guard: refuse when AWS_ACCESS_KEY_ID
+// looks like a real AWS key (starts with `AKIA` for IAM users or
+// `ASIA` for STS sessions). Closes the residual `host.docker.internal`
+// blast-radius described above — even if an operator's container has
+// a route to real AWS DDB, real-shaped creds in env cause this
+// script to refuse before any CreateTable lands in a real account.
+// `local`, `test`, or any non-AKIA/ASIA value passes (DDB-Local
+// accepts any non-empty credential pair).
+{
+  const akid = process.env.AWS_ACCESS_KEY_ID || '';
+  if (/^(AKIA|ASIA)/.test(akid)) {
+    console.error(`Refusing to run: AWS_ACCESS_KEY_ID='${akid.slice(0, 4)}…' looks like a real AWS key prefix.`);
+    console.error('This script is for DDB-Local only — use fake creds (e.g. AWS_ACCESS_KEY_ID=local).');
+    process.exit(1);
+  }
+}
+
 const client = new DynamoDBClient({
   region,
   endpoint,
@@ -292,7 +309,16 @@ async function main() {
   console.log('Done.');
 }
 
-main().catch(err => {
-  console.error('Provisioning failed:', err);
-  process.exit(1);
-});
+// `tables` is exported so `tests/provisioner-schema-parity.test.js` can
+// pin parity with `ddb-store.js`'s `TABLES` map at PR time (rather than
+// surfacing as a runtime `ResourceNotFoundException` on first local
+// boot). The `require.main === module` guard keeps the script's
+// validation + main() from firing under `require()` in jest.
+module.exports = { tables };
+
+if (require.main === module) {
+  main().catch(err => {
+    console.error('Provisioning failed:', err);
+    process.exit(1);
+  });
+}

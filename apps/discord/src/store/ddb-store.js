@@ -1553,4 +1553,11 @@ module.exports = {
   decryptOrphanedToken, deleteOrphanedToken,
   // Lifecycle
   close, healthCheck,
+  // Test-only: surface the prefixed table-name map so
+  // `tests/provisioner-schema-parity.test.js` can pin parity with
+  // `scripts/provision-ddb-local.js`. NOT part of the Store contract
+  // — production callers must NOT reach into this; the leading
+  // underscore signals intent. If you find yourself depending on
+  // this outside tests, add a real public API instead.
+  _TABLES_FOR_TESTING: TABLES,
 };
