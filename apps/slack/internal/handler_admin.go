@@ -410,10 +410,13 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	}
 	// Audit list reads — operators audit-via-paste and need to know
 	// who pulled the admin roster when. Mirrors the success slog on
-	// add/remove/revoke. admin_set_size is the total stored set
-	// (owner-inclusive) so it matches `ListAdmins`'s return shape; the
-	// user-visible "Admins:" line filters the owner for tidiness, so
-	// the displayed count is `len(otherAdmins)`.
-	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size", len(admins), "displayed_admins", len(otherAdmins))
+	// add/remove/revoke. `admin_set_size_raw` is the unfiltered
+	// `readStringSet` return (counts whatever DDB returned, including
+	// empties that the render loop filters defensively);
+	// `displayed_admins` is what the user-visible "Admins:" line
+	// rendered after the owner filter. The split keeps the log
+	// self-describing if a future readStringSet contract change ever
+	// surfaces empty members.
+	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size_raw", len(admins), "displayed_admins", len(otherAdmins))
 	respondSlack(w, body)
 }

@@ -10,7 +10,7 @@ package internal
 // Two helpers, in test-helper convention:
 //   - [newAdminTestHandler] wires a *Handler with AdminStore backed
 //     by an in-memory fakeDDB. Tests seed table rows via
-//     `ts.seedAdmin(...)`, `ts.seedPolicySingle(...)` before invoking.
+//     `ts.seedAdmin(...)`, `ts.seedPolicyDualShape(...)` before invoking.
 //   - [invokeAdminSlash] signs a slash-command form body and drives
 //     ServeHTTP. Returns (status, replyText) so assertion sites stay
 //     terse. The reply text is parsed from the JSON envelope — for
@@ -80,7 +80,7 @@ func (c *capturedResponseURL) waitForBody(t *testing.T, d time.Duration) []byte 
 //   - validateResponseURLFn relaxed (httptest server URLs are
 //     http://127.0.0.1:NNNNN — the production validator rejects those).
 //
-// Tests seed table rows via ts.seedAdmin / ts.seedPolicySingle / etc.
+// Tests seed table rows via ts.seedAdmin / ts.seedPolicyDualShape / etc.
 // before invoking the handler.
 func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	t.Helper()

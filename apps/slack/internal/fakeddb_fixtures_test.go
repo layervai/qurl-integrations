@@ -65,7 +65,7 @@ func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.Attribute
 	}
 }
 
-// seedChannelPolicySingle returns a channel_policies row that writes
+// seedChannelPolicyDualShape returns a channel_policies row that writes
 // both the post-pivot shape (`alias_bindings` Map +
 // `allowed_resource_ids` SS) AND the legacy single-row scalar
 // (`alias` + `resource_id`) so the fixture exercises ResolvePolicy's
@@ -73,7 +73,7 @@ func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.Attribute
 // row — tests that need the legacy scalar fallback in isolation
 // (the actual `TestResolvePolicy_LegacySingleRowShape`) construct
 // their row inline.
-func seedChannelPolicySingle(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
+func seedChannelPolicyDualShape(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(teamID),
 		fAttrSlackChannelID: stringMember(channelID),

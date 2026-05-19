@@ -146,11 +146,15 @@ func (ts *adminTestServers) seedWorkspace(t *testing.T, teamID, ownerID, slackUs
 	ts.ddb.seedItem(t, ts.tableNames.workspace, seedWorkspaceAdmin(teamID, ownerID, slackUserID, configuredAt))
 }
 
-// seedPolicySingle seeds a channel_policies row with a single
-// alias+resource_id binding (the legacy single-row shape).
-func (ts *adminTestServers) seedPolicySingle(t *testing.T, teamID, channelID, alias, resourceID string) {
+// seedPolicyDualShape seeds a channel_policies row carrying BOTH
+// the legacy single-row scalar (alias + resource_id) AND the
+// post-pivot shape (alias_bindings Map + allowed_resource_ids SS).
+// Use when tests need to exercise ResolvePolicy's gate against both
+// shapes on the same row. Tests that need legacy-isolation
+// construct their row inline (see TestResolvePolicy_LegacySingleRowShape).
+func (ts *adminTestServers) seedPolicyDualShape(t *testing.T, teamID, channelID, alias, resourceID string) {
 	t.Helper()
-	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicySingle(teamID, channelID, alias, resourceID))
+	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyDualShape(teamID, channelID, alias, resourceID))
 }
 
 // seedPolicySet seeds a channel_policies row carrying an

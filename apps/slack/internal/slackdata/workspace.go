@@ -84,6 +84,14 @@ const (
 // "couldn't confirm — please retry" copy.
 const bindDisambiguationBudget = 300 * time.Millisecond
 
+// addAdminDisambiguationBudget mirrors bindDisambiguationBudget for
+// the post-CCFE GetItem in AddAdmin. The handler-level
+// adminSyncVerbBudget (1.2s) wraps the whole call, but the store
+// layer is exported — a future caller with a tighter parent ctx
+// shouldn't see the disambig read consume the rest of its budget.
+// Clamps against the parent via [context.WithTimeout].
+const addAdminDisambiguationBudget = 300 * time.Millisecond
+
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
 //
 // Workspace not yet bound to an owner → (false, "", nil). The handler
@@ -308,8 +316,13 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 	// Disambiguate: row missing → 404; row exists with user already on
 	// the set → 409. A bare CCFE doesn't tell us which arm of the
 	// AND fired; one GetItem is the cheapest way to surface the right
-	// user-facing code.
-	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	// user-facing code. Sub-budget keeps a slow disambig read from
+	// consuming the parent's remaining budget — handler-side
+	// adminSyncVerbBudget is generous today, but the store is
+	// exported and a future caller may pass a tighter ctx.
+	disambigCtx, disambigCancel := context.WithTimeout(ctx, addAdminDisambiguationBudget)
+	defer disambigCancel()
+	out, getErr := s.Client.GetItem(disambigCtx, &dynamodb.GetItemInput{
 		TableName:      aws.String(s.WorkspaceMappingsName),
 		ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{

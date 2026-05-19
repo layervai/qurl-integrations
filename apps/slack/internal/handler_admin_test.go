@@ -580,6 +580,15 @@ func TestHandleAdminList_NonAdminCaller(t *testing.T) {
 //
 // We hit the slackdata.Store directly (no handler/HTTP shim) so the
 // failure mode is precisely localized to the admin-set mutation path.
+//
+// Note on test fidelity: the fakeDDB serializes all ops under a
+// single mutex, so the actual race window is collapsed at the
+// fake-storage layer. The test's load-bearing assertion is the
+// (1 success + N-1 deterministic 409s) contract, which the
+// fake-mutex implementation honors by sequencing the conditional
+// UpdateItem semantics in DDB-spec order. A future fine-grained
+// fake-DDB lock would exercise a different code path — adjust the
+// expectations if it ever lands.
 func TestAddAdmin_Concurrent(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -788,7 +797,7 @@ func TestResolvePolicy_PostPivotSetShape(t *testing.T) {
 // but not for this (channel, resource) returns false, not an error.
 func TestResolvePolicy_MissingResourceReturnsFalse(t *testing.T) {
 	ts := newAdminTestServers(t)
-	ts.seedPolicySingle(t, testAdminTeamID, "C12345", testListAliasProdDB, "r_prod_db_xyz")
+	ts.seedPolicyDualShape(t, testAdminTeamID, "C12345", testListAliasProdDB, "r_prod_db_xyz")
 	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
 
 	allowed, err := store.ResolvePolicy(context.Background(), testAdminTeamID, "C12345", "r_different_resource")

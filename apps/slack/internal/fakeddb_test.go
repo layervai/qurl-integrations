@@ -781,32 +781,15 @@ func splitTopLevelCommas(s string) []string {
 //
 //	attribute_exists(<attr>)
 //	attribute_not_exists(<attr>)
+//	contains(<attr>, :val)
+//	NOT contains(<attr>, :val)
 //	<attr> = :val
 //	<attr> > :val
 //
-// Returns (true, nil) when every subexpression is satisfied. We do
-// NOT parse OR — except a single top-level
-// `attribute_not_exists(<pk>) OR <attr> = :val` shape used by
-// [slackdata.Store.BindWorkspace], which we special-case below.
+// Returns (true, nil) when every subexpression is satisfied. OR is
+// NOT parsed — no production caller emits it post-scope-cut.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, _ map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
-	// Special-case BindWorkspace's
-	//   `attribute_not_exists(<pk>) OR <attr> = :val`
-	// shape: a top-level OR with exactly two subexpressions. We bail
-	// to false only if both halves fail.
-	if strings.Contains(expr, " OR ") {
-		halves := strings.SplitN(expr, " OR ", 2)
-		for _, h := range halves {
-			ok, err := evalCondition(strings.TrimSpace(h), item, present, vals, nil)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
 	parts := strings.Split(expr, " AND ")
 	for _, p := range parts {
 		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals)
