@@ -251,6 +251,9 @@ describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel han
     ['trailing space', 'PLACEHOLDER '],
     ['leading space', ' PLACEHOLDER'],
     ['mixed case', 'Placeholder'],
+    // Trailing newline — most plausible accidental variant if SSM is
+    // ever populated via shell pipe (`echo PLACEHOLDER | aws ssm ...`).
+    ['trailing newline', 'PLACEHOLDER\n'],
   ])('does NOT strip case/whitespace variants — %s "%s" is treated as a real secret', async (_label, ssmValue) => {
     // The strip is an exact-string compare against the
     // Terraform-emitted literal. Case/whitespace variants are NOT
@@ -263,20 +266,17 @@ describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel han
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
       .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
-      .resolves({ Parameter: { Value: ssmValue } })
-      .on(PutParameterCommand)
-      .resolves({});
-    let rotateHit = false;
+      .resolves({ Parameter: { Value: ssmValue } });
+    // No POST /secret mock — reuse path skips the rotate call entirely.
+    // If a future regression DID hit rotate, the unmocked-fetch error
+    // would catch it loudly.
     mockQurlService({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed'],
       }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => { rotateHit = true; return { body: { data: {} } }; },
     });
     const result = await handler(BASE_EVENT, CONTEXT);
-    // Reuse path — the variant value passed through as the secret.
     expect(result.action).toBe('reused');
-    expect(rotateHit).toBe(false);
     // Explicit no-PutParameter pin: reuse path skips SSM write (the
     // "skip persist on reused" optimization in the handler). A future
     // refactor that re-introduces noisy steady-state writes lands here.
