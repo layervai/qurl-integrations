@@ -583,14 +583,14 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 			return nil, ErrMissingTarget
 		}
 		if strings.HasPrefix(tail[0], "$") {
-			return nil, fmt.Errorf("%w: %q (admin revoke takes a `q_<id>` qurl_id, not an `$alias`)", ErrUnexpectedArgument, tail[0])
+			return nil, fmt.Errorf("%w: `%s` (admin revoke takes a `q_<id>` qurl_id, not an `$alias`)", ErrUnexpectedArgument, truncateForError(tail[0]))
 		}
 		if !qurlIDPattern.MatchString(tail[0]) {
-			return nil, fmt.Errorf("%w: %q (expected `q_<id>`)", ErrInvalidQURLID, truncateForError(tail[0]))
+			return nil, fmt.Errorf("%w: `%s` (expected `q_<id>`)", ErrInvalidQURLID, truncateForError(tail[0]))
 		}
 		cmd.Target = tail[0]
 		if len(tail) > 1 {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[1])
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tail[1]))
 		}
 		return cmd, nil
 	case AdminAdd, AdminRemove:
@@ -604,20 +604,20 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 		}
 		uid, ok := matchUserMention(tail[0])
 		if !ok {
-			return nil, fmt.Errorf("%w: %q (expected a Slack @user mention like `<@U12345>`)", ErrInvalidUserMention, tail[0])
+			return nil, fmt.Errorf("%w: `%s` (expected a Slack @user mention like `<@U12345>`)", ErrInvalidUserMention, truncateForError(tail[0]))
 		}
 		cmd.UserID = uid
 		if len(tail) > 1 {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[1])
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tail[1]))
 		}
 		return cmd, nil
 	case AdminList:
 		if len(tail) > 0 {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[0])
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tail[0]))
 		}
 		return cmd, nil
 	default:
-		return nil, fmt.Errorf("%w: %q", ErrUnknownAdminAction, verb)
+		return nil, fmt.Errorf("%w: `%s`", ErrUnknownAdminAction, truncateForError(verb))
 	}
 }
 
@@ -631,18 +631,35 @@ func matchUserMention(tok string) (string, bool) {
 	return m[1], true
 }
 
-// truncateForError caps a token at 32 runes for echo in error
-// messages. qurlIDPattern's {16,64} ceiling allows up to 64-char
-// values; a pathological paste would echo 64+ chars back to the
-// user, which is noisy. The cap is rune-aware (Slack pastes can
-// contain non-ASCII when the user fat-pastes the wrong content).
+// truncateForError caps a token at 32 runes and replaces backticks /
+// line breaks with safe substitutes, so the result is safe to echo
+// inside a Slack mrkdwn code span in an error message. Callers wrap
+// the return value with a backtick code-span delimiter so any
+// `<!channel>` / `<@U…>` / other mrkdwn token in the user's input
+// renders as a literal code-span character rather than as a Slack
+// mention. Pairs with the escapeMrkdwnCode posture in views.go —
+// same threat model, same substitutions.
 func truncateForError(s string) string {
 	const maxRunes = 32
 	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
+	if len(runes) > maxRunes {
+		runes = append(runes[:maxRunes], '…')
 	}
-	return string(runes[:maxRunes]) + "…"
+	// Backtick closes a code span; newline ends it. Mirror
+	// escapeMrkdwnCode's substitutions inline so this helper stays
+	// self-contained (no dependency on the views package).
+	out := make([]rune, 0, len(runes))
+	for _, r := range runes {
+		switch r {
+		case '`':
+			out = append(out, 'ˊ') // U+02CA MODIFIER LETTER ACUTE ACCENT
+		case '\n', '\r':
+			out = append(out, ' ')
+		default:
+			out = append(out, r)
+		}
+	}
+	return string(out)
 }
 
 // parseAliasToken enforces the `$` sigil, strips it, and validates the

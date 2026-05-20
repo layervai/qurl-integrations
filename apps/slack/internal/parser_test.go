@@ -366,6 +366,56 @@ func TestParse_UserMentionLengthBoundary(t *testing.T) {
 	}
 }
 
+// TestParse_AdminErrorsNeutralizeMrkdwn fences the defense-in-depth
+// posture for echoed tokens: when a user feeds the admin verbs a
+// Slack mrkdwn token like `<!channel>` or a literal backtick, the
+// parser error must wrap the echoed user input in a backtick code
+// span (so Slack renders the token as literal text rather than as a
+// channel mention) AND substitute backticks in the input (so a
+// user-supplied backtick can't break out of the code span).
+//
+// Mitigated today by ephemeral response_type, but defense-in-depth
+// in case response_type ever flips for any error surface.
+func TestParse_AdminErrorsNeutralizeMrkdwn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"revoke + mrkdwn paste", "admin revoke <!channel>"},
+		{"add + mrkdwn paste", "admin add <!channel>"},
+		{"remove + mrkdwn paste", "admin remove <!channel>"},
+		{"list + mrkdwn trailing", "admin list <!channel>"},
+		{"unknown verb + mrkdwn", "admin <!channel>"},
+	} {
+		_, err := Parse(tc.text)
+		if err == nil {
+			t.Errorf("%s: Parse(%q) returned nil error", tc.name, tc.text)
+			continue
+		}
+		msg := err.Error()
+		// The echoed `<!channel>` must appear inside a backtick code
+		// span — the unbreaking sequence is "`<!channel>`".
+		if !strings.Contains(msg, "`<!channel>`") {
+			t.Errorf("%s: error doesn't wrap user input in a code span: %q", tc.name, msg)
+		}
+	}
+
+	// Separate case: a backtick in the user input must be neutralized
+	// (replaced with U+02CA), otherwise it could close the code span
+	// and let subsequent mrkdwn render.
+	_, err := Parse("admin revoke q_AAAA`AAAA")
+	if err == nil {
+		t.Fatal("Parse with backtick payload returned nil error")
+	}
+	msg := err.Error()
+	// User's backtick must NOT survive — only the code-span delimiters
+	// (one pair around the echoed token) should appear.
+	if strings.Count(msg, "`q_AAAA`AAAA`") > 0 {
+		t.Errorf("error allows backtick code-span breakout: %q", msg)
+	}
+}
+
 // TestParse_AdminClaimErrorOmitsTail fences the bootstrap-code
 // redaction posture at the parser layer: when a user types
 // `admin claim BOOT-SECRET` (or mixed-case variants that bypass
