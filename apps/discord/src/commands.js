@@ -1160,11 +1160,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // closes over the live binding. With `let`, the binding exists at
   // function entry but throws TDZ on synchronous access before the
   // initializer line runs. The previous arrangement was safe only
-  // because the handler's getViewed/setViewed/buildStatusMsg
-  // closures all execute asynchronously (after the `let viewed = 0`
-  // line runs); a future refactor that called the handler
-  // synchronously would surface as ReferenceError. Move-up eliminates
-  // the footgun.
+  // because the handler's getViewed/setViewed closures execute
+  // asynchronously (after the `let viewed = 0` line runs); a future
+  // refactor that called the handler synchronously would surface as
+  // ReferenceError. Move-up eliminates the footgun. (buildStatusMsg
+  // is a function declaration — hoisted, so unaffected; the TDZ
+  // risk lives only on the `let` bindings.)
   let viewed = 0;
   let allDone = false;
 

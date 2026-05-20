@@ -35,8 +35,9 @@
 // keeps the paging pivot separate from event-shipper alerts.
 //
 // `consumed` rendered-state asymmetry: the field is plumbed end-to-end
-// but does NOT drive any user-visible Discord render today (only the
-// in-memory linkStatus). The strict-coerce-to-false on non-boolean is
+// but discarded at the handler today (view-update-handler.js does not
+// read `update.consumed`; only `accessCount`). The strict-coerce-to-
+// false on non-boolean is
 // loud (warn-logged with consumed_type) but the rendered state will
 // be wrong if an upstream regression sends `"true"` string — academic
 // today; surface in CloudWatch via the LOG_KINDS pivot before any
@@ -50,10 +51,15 @@ const config = require('./config');
 const logger = require('./logger');
 const { LOG_KINDS } = require('./constants');
 
-// Mutable so tests can shrink the deadline. Mirrors event-publisher.js's
-// getter-export shape — see that file's _setDrainDeadlineForTest
-// comment block for the snapshot-at-module-load footgun this dodges.
-let DRAIN_DEADLINE_MS = config.QURL_BOT_DRAIN_DEADLINE_MS;
+// Mutable so tests can shrink the deadline. INITIAL_DRAIN_DEADLINE_MS
+// captures the module-load value so `_resetStateForTest` restores
+// what was in scope at construction — mirrors event-publisher.js's
+// snapshot shape and dodges the test-config-mock-drift footgun (re-
+// reading `config.QURL_BOT_DRAIN_DEADLINE_MS` in reset would pick up
+// whatever the mock currently exposes, not what the module loaded
+// with).
+const INITIAL_DRAIN_DEADLINE_MS = config.QURL_BOT_DRAIN_DEADLINE_MS;
+let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 
 let sqsClient = null;
 let running = false;
@@ -222,7 +228,7 @@ function _resetStateForTest() {
   running = false;
   sqsClient = null;
   inFlightSends.clear();
-  DRAIN_DEADLINE_MS = config.QURL_BOT_DRAIN_DEADLINE_MS;
+  DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
 module.exports = {

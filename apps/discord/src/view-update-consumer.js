@@ -262,7 +262,10 @@ async function pollLoop() {
       running = false;
       if (onFatalCb) {
         try {
-          onFatalCb(err);
+          // Await: gracefulShutdown is async, and an unawaited reject
+          // would surface as UnhandledRejection. Sync throw is also
+          // caught (await wraps both shapes).
+          await onFatalCb(err);
         } catch (cbErr) {
           logger.error('view-update-consumer: onFatal callback threw', {
             error: cbErr?.message,
@@ -306,6 +309,14 @@ async function stop() {
   // (set running=true then threw before stopController = new ...
   // landed). Practically impossible since `new AbortController()`
   // shouldn't throw, but free defense vs. a future refactor.
+  //
+  // Contract: if pollLoop's defense-in-depth fatal branch has already
+  // flipped `running = false` (before invoking onFatalCb), this early
+  // return skips the `await loopPromise`. That's correct — the loop
+  // has already returned by the time onFatal → gracefulShutdown → stop
+  // re-enters here, so awaiting loopPromise would be a no-op. Callers
+  // that want a "loop has fully unwound" signal should rely on
+  // running=false (after the early return, it's already false).
   if (!running || stopController?.signal.aborted) return;
   stopController.abort();
   logger.info('view-update-consumer: stopping');
