@@ -19,6 +19,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -318,12 +319,39 @@ var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 // in cmd/main.go is the same http.ServeMux that already serves /health
 // and /slack/* — no prefix).
 //
+// Panics if Config fails its Validate() check. RegisterRoutes is a
+// boot-time call so panic is the right escalation — a misconfigured
+// Config can't possibly serve a coherent /oauth/qurl/callback, and
+// proceeding would surface as silent rebind-refused → 500 on every
+// install attempt instead of a clear startup failure.
+//
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API surface friction.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
+	if err := cfg.Validate(); err != nil {
+		panic("oauth.RegisterRoutes: " + err.Error())
+	}
 	mux.Handle(StartPath, http.TimeoutHandler(
 		Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
 	mux.Handle(callbackPath, http.TimeoutHandler(
 		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
+}
+
+// Validate checks the cross-field invariants that the callback's
+// branching depends on. Returns nil when the Config is safe to wire.
+// Callers should run this before RegisterRoutes (which calls it
+// internally and panics on failure).
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func (c Config) Validate() error {
+	// AdminStore wired without BindClassifyError would route every
+	// bind error — including the idempotent same-caller case — to
+	// handleBindError's default 500 arm. Same-caller rotation
+	// surfaces as a generic failure instead of "key rotated, admin
+	// set unchanged." Callers MUST pair the two.
+	if c.AdminStore != nil && c.BindClassifyError == nil {
+		return errors.New("AdminStore wired without BindClassifyError — same-caller idempotent re-entries would silently surface as 500")
+	}
+	return nil
 }
 
 // authorizeURL composes the Auth0 /authorize redirect target.

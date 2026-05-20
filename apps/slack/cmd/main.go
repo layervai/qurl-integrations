@@ -463,8 +463,22 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 // so the callback doesn't import slackdata directly; the adapter
 // translates the field-for-field equivalent shape and forwards the
 // call.
+//
+// `store` is typed as the slackdataBinder interface (not concrete
+// *slackdata.Store) so the adapter's translation logic can be
+// exercised end-to-end in tests against a captor without standing
+// up a real Store. *slackdata.Store satisfies the interface by
+// declaring BindWorkspace with the matching signature.
 type adminStoreAdapter struct {
-	store *slackdata.Store
+	store slackdataBinder
+}
+
+// slackdataBinder is the slice of slackdata.Store that the adapter
+// depends on. Defined here (rather than imported from slackdata)
+// so cmd/main_test.go can inject a captor that fences the
+// translation without dragging in the full Store surface.
+type slackdataBinder interface {
+	BindWorkspace(ctx context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error
 }
 
 func (a *adminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {

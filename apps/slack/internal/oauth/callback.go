@@ -325,7 +325,18 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {
-	if idToken == "" || cfg.IDTokenVerifier == nil {
+	if idToken == "" {
+		// Auth0 should always return an id_token when openid is in
+		// the scope set (see authorizeURL). An empty id_token here
+		// signals a misconfigured Auth0 application — likely the
+		// openid scope was dropped on the consent screen. Distinguish
+		// from "verifier rejected it" so on-call triaging the
+		// downstream 500 doesn't dig through JWKS logs that never
+		// fired.
+		slog.Warn("oauth/callback Auth0 returned empty id_token — sub-verify will be skipped (likely Auth0 application misconfigured without openid scope)")
+		return "", ""
+	}
+	if cfg.IDTokenVerifier == nil {
 		return "", ""
 	}
 	if e, verr := cfg.IDTokenVerifier.VerifyEmail(ctx, idToken); verr != nil {
