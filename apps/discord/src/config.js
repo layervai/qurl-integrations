@@ -356,8 +356,10 @@ module.exports = {
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
 
-  // qURL webhook receiver HMAC; peer is the qurl-service subscription's
-  // `secret` field on POST /v1/webhooks (must match exactly).
+  // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
+  // Lambda (apps/discord/lambda/webhook-registrar/) on each deploy
+  // invocation, then injected into the bot's task env. The bot reads
+  // it here and never modifies it — Lambda is the sole writer.
   QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
 
   // qURL OAuth (Auth0) — for /qurl setup admin consent flow.

@@ -62,6 +62,30 @@ beforeEach(() => {
   mockRecordQurlView.mockImplementation(async () => 'recorded');
 });
 
+describe('POST /webhooks/qurl — unconfigured secret returns 503 (retriable)', () => {
+  // If the webhook-registrar Lambda hasn't populated SSM yet, or the
+  // ECS task started before SSM secret injection completed, the bot's
+  // config.QURL_WEBHOOK_SECRET will be empty. MUST 503 (qurl-service
+  // retries) not 401 (non-retriable, drops the event).
+  it('returns 503 when secret is empty', async () => {
+    // eslint-disable-next-line global-require
+    const config = require('../src/config');
+    const original = config.QURL_WEBHOOK_SECRET;
+    config.QURL_WEBHOOK_SECRET = '';
+    try {
+      const res = await request(app)
+        .post('/webhooks/qurl')
+        .set('Content-Type', 'application/json')
+        .set('QURL-Signature', '0'.repeat(64))
+        .send('{}');
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'Webhook receiver not configured' });
+    } finally {
+      config.QURL_WEBHOOK_SECRET = original;
+    }
+  });
+});
+
 describe('POST /webhooks/qurl — signature verification', () => {
   it('accepts a request with a valid bare-hex HMAC over the raw body', async () => {
     const raw = JSON.stringify(VALID_PAYLOAD);

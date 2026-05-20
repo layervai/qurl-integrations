@@ -57,8 +57,10 @@ router.post('/qurl', async (req, res) => {
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
-  // 503 vs 401: 503 says "receiver is up but unconfigured" (set
-  // QURL_WEBHOOK_SECRET in SSM); 401 says "real signature mismatch."
+  // 503 (retriable) vs 401 (non-retriable): an empty/missing secret
+  // means the webhook-registrar Lambda hasn't populated SSM yet (or
+  // the bot task started before SSM injection completed). qurl-service
+  // retries 503; a 401 here would silently drop the event.
   if (!config.QURL_WEBHOOK_SECRET) {
     return res.status(503).json({ error: 'Webhook receiver not configured' });
   }

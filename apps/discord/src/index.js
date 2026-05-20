@@ -1094,6 +1094,16 @@ async function start() {
   //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
+    // Webhook subscription registration is OUT-OF-PROCESS as of the
+    // webhook-registrar Lambda — see
+    //   apps/discord/lambda/webhook-registrar/index.js  (handler)
+    //   apps/discord/lambda/webhook-registrar/README.md  (bundling)
+    //   apps/discord/docs/qurl-webhook-rollout.md        (operator flow)
+    // The Lambda is invoked once per deploy via Terraform, writes the
+    // rotated/created secret to SSM, and the bot reads
+    // `QURL_WEBHOOK_SECRET` from env at boot — single-instance Lambda
+    // is race-free by construction, no in-app dedupe/lock logic needed.
+    // Rotation: re-invoke the Lambda + force-redeploy the bot.
   } else if (isGateway) {
     // Returns 503 until isReady() flips true (after READY from the
     // Discord gateway). Dockerfile --start-period=30s covers this
