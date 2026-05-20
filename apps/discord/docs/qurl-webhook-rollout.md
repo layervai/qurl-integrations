@@ -161,9 +161,16 @@ bot still works" rather than a crashloop.
 **Latent risk if persistence stays broken**: every replica restart
 hits the bootstrap-rotate path (no real SSM secret available), which
 re-introduces the multi-replica rotate race on every redeploy. The
-warn log `Webhook secret persistence failed (auto-register continues
-with in-memory secret only)` is the early-warning signal — alarm on
-it if oncall hasn't built a CloudWatch rule yet.
+warn log `qURL webhook secret persistence failed (auto-register
+continues with in-memory secret only)` is the early-warning signal —
+alarm on it if oncall hasn't built a CloudWatch rule yet.
+
+**Higher-severity signal** — alarm on the outer error too:
+`qURL webhook self-registration failed`. This fires when GET/POST/
+PATCH/DELETE against qurl-service fails (transient 5xx, network
+abort, etc.) and the bot fell back to the manual-curl recovery path.
+Without an alarm, the failure is invisible until users notice
+"counter sat at 0" — exactly the gap this PR was built to close.
 
 **Operational note — `description` field staleness**: the
 `description` shown in the qurl-service webhook UI is captured at

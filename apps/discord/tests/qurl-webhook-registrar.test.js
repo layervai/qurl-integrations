@@ -44,6 +44,31 @@ const BASE_OPTS = {
   description: 'test description',
 };
 
+describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no real initialSecret) → creates', () => {
+  // The first-deploy-of-a-fresh-environment path. `initialSecret` is
+  // either unset (env never had QURL_WEBHOOK_SECRET) or set to the
+  // terraform-seeded PLACEHOLDER. Either way, action='created'.
+  it.each([
+    ['initialSecret undefined', undefined],
+    ['initialSecret empty string', ''],
+    ['initialSecret PLACEHOLDER literal', 'PLACEHOLDER'],
+  ])('creates a fresh subscription when no existing matches the bridge URL — %s', async (_label, initialSecret) => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_cold_bootstrap',
+        secret: 'whsec_fresh',
+        url: BASE_OPTS.bridgeUrl,
+        events: ['qurl.accessed'],
+      } } }),
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret });
+    expect(result.action).toBe('created');
+    expect(result.webhookId).toBe('wh_cold_bootstrap');
+    expect(result.secret).toBe('whsec_fresh');
+  });
+});
+
 describe('ensureWebhookSubscription — no existing subscription → creates fresh', () => {
   it('POSTs /v1/webhooks with the right body and returns the server-generated secret', async () => {
     let createBody = null;
@@ -701,6 +726,17 @@ describe('redactSecret — recursive scrubbing', () => {
     const out = redactSecret({ a: 1, b: 'x', c: null, d: false });
     expect(out).toEqual({ a: 1, b: 'x', c: null, d: false });
   });
+  it('fail-closes at depth cap with [TRUNCATED] (deeply-wrapped secret cannot survive)', () => {
+    // Build a body with a `secret` field deeper than REDACT_MAX_DEPTH (8).
+    let nested = { secret: 'whsec_deeply_nested' };
+    for (let i = 0; i < 10; i++) nested = { wrap: nested };
+    const out = redactSecret(nested);
+    // Walk to the truncation point and check the subtree was replaced
+    // by '[TRUNCATED]' instead of the original {secret: ...} subtree.
+    const json = JSON.stringify(out);
+    expect(json).not.toContain('whsec_deeply_nested');
+    expect(json).toContain('[TRUNCATED]');
+  });
 });
 
 describe('pickSurvivor — deterministic across replicas', () => {
@@ -724,6 +760,20 @@ describe('pickSurvivor — deterministic across replicas', () => {
       { webhook_id: 'wh_aaa' },
     ]);
     expect(winner.webhook_id).toBe('wh_aaa');
+  });
+  it('prefers the row with a timestamp over the row without (mixed case)', () => {
+    // Asymmetric responses (one row has created_at, the other doesn't)
+    // should resolve to the timestamped row regardless of input order.
+    const winner1 = pickSurvivor([
+      { webhook_id: 'wh_zzz', created_at: '2026-05-19T10:00:00Z' },
+      { webhook_id: 'wh_aaa' /* no timestamp */ },
+    ]);
+    expect(winner1.webhook_id).toBe('wh_zzz');
+    const winner2 = pickSurvivor([
+      { webhook_id: 'wh_aaa' /* no timestamp */ },
+      { webhook_id: 'wh_zzz', created_at: '2026-05-19T10:00:00Z' },
+    ]);
+    expect(winner2.webhook_id).toBe('wh_zzz');
   });
 });
 

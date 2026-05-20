@@ -1121,27 +1121,28 @@ async function start() {
       // the rejection and degrades to in-memory-only.
       const persistSecret = config.QURL_WEBHOOK_SECRET_SSM_PARAM
         ? async (secret) => {
-          const put = getSsmClient().send(new ssmSdk.PutParameterCommand({
+          // abortSignal on the SDK call so a 5s timeout actually
+          // cancels the underlying HTTP request, freeing the socket /
+          // credentials sooner. Without this, Promise.race would
+          // resolve after 5s but the SDK send would keep running in
+          // the background (idempotent because Overwrite=true, but
+          // wasteful).
+          await getSsmClient().send(new ssmSdk.PutParameterCommand({
             Name: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
             Type: 'SecureString',
             Value: secret,
             Overwrite: true,
-          }));
-          let timeoutHandle;
-          const timeout = new Promise((_, reject) => {
-            timeoutHandle = setTimeout(() => reject(new Error('SSM PutParameter timed out after 5s')), 5_000);
-          });
-          try {
-            await Promise.race([put, timeout]);
-          } finally {
-            clearTimeout(timeoutHandle);
-          }
+          }, { abortSignal: AbortSignal.timeout(5_000) }));
         }
         : undefined;
       // Length cap lives at the wire boundary (createSubscription in
-      // qurl-webhook-registrar.js). This caller just builds the human-
-      // readable string.
-      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'}, env=${process.env.NODE_ENV || 'unset'})`;
+      // qurl-webhook-registrar.js). The env label uses region only —
+      // NODE_ENV is conventionally `production` for both sandbox and
+      // prod deploys, so it would render `env=production` everywhere
+      // and not actually disambiguate. Region is the meaningful
+      // breakdown; operators distinguishing sandbox/prod use the
+      // subscription's owner_id or URL host instead.
+      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'})`;
       ensureWebhookSubscription({
         apiEndpoint: config.QURL_ENDPOINT,
         apiKey: config.QURL_API_KEY,
@@ -1174,8 +1175,15 @@ async function start() {
         // Don't crash the boot path — manual curl is still a recovery
         // route. But log loudly so the failure is visible without
         // user-facing symptoms.
+        // Cap err.message — most failures are short (HTTP status +
+        // op), but a TypeError stack or a non-QurlServiceError raw
+        // throw could include a long message that survived redactSecret
+        // (which only walks parsed bodies, not free-form strings).
+        // 500 chars covers typical stack tops without unbounded log
+        // lines.
+        const errMsg = typeof err.message === 'string' ? err.message.slice(0, 500) : '';
         logger.error('qURL webhook self-registration failed', {
-          error: err.message,
+          error: errMsg,
           status: err.status,
           op: err.op,
         });

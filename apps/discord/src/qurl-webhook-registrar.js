@@ -72,7 +72,11 @@ const PLACEHOLDER_SECRET = 'PLACEHOLDER';
 const REDACT_MAX_DEPTH = 8;
 const SECRET_KEY_RE = /secret/i;
 function redactSecret(body, depth = 0) {
-  if (depth > REDACT_MAX_DEPTH) return body;
+  // Fail-closed at the depth cap: return a marker instead of the raw
+  // subtree, so a deeply-wrapped secret can't survive the truncation.
+  // 8 levels is comfortably past any qurl-service error envelope shape
+  // observed; deeper than that is anomalous and warrants visibility.
+  if (depth > REDACT_MAX_DEPTH) return '[TRUNCATED]';
   if (!body || typeof body !== 'object') return body;
   if (Array.isArray(body)) return body.map(v => redactSecret(v, depth + 1));
   const out = {};
@@ -207,6 +211,11 @@ function pickSurvivor(matches) {
   if (matches.length === 0) return null;
   if (matches.length === 1) return matches[0];
   const sorted = [...matches].sort((a, b) => {
+    // Asymmetric timestamps: the row with a timestamp wins (it carries
+    // more information than the row without). Only fall through to lex
+    // when both lack or both share the same timestamp.
+    if (a.created_at && !b.created_at) return -1;
+    if (!a.created_at && b.created_at) return 1;
     if (a.created_at && b.created_at && a.created_at !== b.created_at) {
       return a.created_at < b.created_at ? -1 : 1;
     }
@@ -293,7 +302,7 @@ async function bestEffortPersist({ persistSecret, value }) {
     // for typical SDK errors ("User is not authorized to perform: ...")
     // and short enough that a multi-KB leak would be visibly truncated.
     const safeMsg = typeof err.message === 'string' ? err.message.slice(0, 200) : '';
-    logger[level]('Webhook secret persistence failed (auto-register continues with in-memory secret only)', {
+    logger[level]('qURL webhook secret persistence failed (auto-register continues with in-memory secret only)', {
       error: safeMsg,
       code: err.name,
     });
@@ -307,7 +316,7 @@ async function bestEffortPersist({ persistSecret, value }) {
 async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
   const events = existing?.events ?? [];
   if (events.includes(QURL_ACCESSED)) return;
-  logger.info('Webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId: existing.webhook_id, current: events });
+  logger.info('qURL webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId: existing.webhook_id, current: events });
   await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [QURL_ACCESSED] });
 }
 
@@ -340,15 +349,19 @@ async function ensureWebhookSubscription(opts) {
   const wasDedupe = matches.length > 1 && existing != null;
   if (wasDedupe) {
     const losers = matches.filter(s => s.webhook_id !== existing.webhook_id);
-    logger.warn('Webhook subscription duplicates detected — deleting non-survivors', {
+    logger.warn('qURL webhook subscription duplicates detected — deleting non-survivors', {
       total: matches.length,
       survivor: existing.webhook_id,
       losers: losers.map(s => s.webhook_id),
       url: bridgeUrl,
     });
-    for (const loser of losers) {
-      await deleteSubscription({ apiEndpoint, apiKey, webhookId: loser.webhook_id });
-    }
+    // Parallel — each DELETE is independent + the 404-on-concurrent-
+    // delete path is already swallowed per-loser, so concurrency is
+    // safe. N=2-5 in practice (replica count); sequential would add
+    // ~100-200ms per loser on the recovery boot.
+    await Promise.all(losers.map(loser =>
+      deleteSubscription({ apiEndpoint, apiKey, webhookId: loser.webhook_id }),
+    ));
   }
 
   let webhookId;
@@ -382,11 +395,11 @@ async function ensureWebhookSubscription(opts) {
     try {
       await reconcileEvents({ apiEndpoint, apiKey, existing });
     } catch (err) {
-      logger.error('Webhook subscription events PATCH failed in reuse path (continuing — receiver still works with initialSecret)', {
+      logger.error('qURL webhook subscription events PATCH failed in reuse path (continuing — receiver still works with initialSecret)', {
         webhookId, op: 'reconcileEvents', error: err.message, status: err.status,
       });
     }
-    logger.info('Webhook subscription reused (existing found, SSM secret trusted, no rotate)', { webhookId, url: bridgeUrl });
+    logger.info('qURL webhook subscription reused (existing found, SSM secret trusted, no rotate)', { webhookId, url: bridgeUrl });
     return { secret, webhookId, action };
   }
 
@@ -406,17 +419,17 @@ async function ensureWebhookSubscription(opts) {
       // Log + continue: rotation already landed, so the bot is
       // functionally healthy. Events drift can be reconciled on the
       // next boot or via a manual PATCH.
-      logger.error('Webhook subscription events PATCH failed after rotate (continuing — rotation succeeded)', {
+      logger.error('qURL webhook subscription events PATCH failed after rotate (continuing — rotation succeeded)', {
         webhookId, op: 'reconcileEvents', error: err.message, status: err.status,
       });
     }
-    logger.info('Webhook subscription reconciled (existing found, bootstrap rotate)', { webhookId, url: bridgeUrl });
+    logger.info('qURL webhook subscription reconciled (existing found, bootstrap rotate)', { webhookId, url: bridgeUrl });
   } else {
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
     webhookId = created.webhook_id;
     secret = created.secret;
     action = 'created';
-    logger.info('Webhook subscription created', { webhookId, url: bridgeUrl });
+    logger.info('qURL webhook subscription created', { webhookId, url: bridgeUrl });
   }
 
   if (!secret) {
