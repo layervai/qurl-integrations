@@ -1154,34 +1154,57 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // View-update push registration (feat #60). Each tracked qurl_id
-  // registers a callback that triggers a runTick when a view event
-  // arrives via SQS — sub-second latency on the half of events that
-  // land on this replica (see view-update-registry.js's SILENT DROP
-  // doc). The polling setInterval remains the correctness primitive;
-  // this is purely a latency optimization.
+  // View-update push registration (feat #60). One SHARED callback
+  // registers against every tracked qurl_id — the callback uses the
+  // qurlId it's invoked with (registry passes it as the second arg)
+  // to look up the per-recipient linkStatus row directly.
   //
-  // Callback closes over `runTick` (defined further down — same
-  // function body so closure capture is fine; the callback only fires
-  // after monitorLinkStatus returns and runTick is in scope) and
-  // `stopped` (gated so a SIGTERM-during-flight delivery is a no-op).
+  // Shared-callback shape (vs. per-id closures) collapses the 50-
+  // closure footprint of a max-recipients send to one. The registry
+  // still keys by qurl_id so dispatch lookup stays O(1).
   //
-  // GC: callbacks pin closure state (linkStatus, runTick) until
-  // unregistered. stop() below must drain this list — mirrors the
-  // closure-mutable-rebind discipline for interaction/qurlLinks.
-  const viewUpdateCallbacks = []; // [{qurlId, cb}, ...]
+  // Render path is envelope-driven (NOT runTick). The envelope already
+  // carries access_count + consumed; mutating linkStatus directly and
+  // calling safeEdit avoids the DDB BatchGet that runTick would do
+  // on every view event (would be O(tracked_qurl_ids) per event —
+  // 50× amplification on a max-recipients send). The polling tick in
+  // runTick remains the correctness primitive: any push that this
+  // path drops (silent-drop-on-miss, transient consumer error) is
+  // reconciled on the next interval via DDB.
+  //
+  // Concurrency with runTick: the `status === 'opened' continue`
+  // guard at the linkStatus mutation site is the same protection
+  // runTick uses (commands.js, runTick render path). Two paths
+  // can't double-flip the same qurl_id; `viewed` never regresses.
+  //
+  // GC: the shared callback pins closure state (linkStatus, safeEdit,
+  // viewed) until unregistered. stop() below must drain the registry
+  // keys this monitor registered against — mirrors the closure-mutable-
+  // rebind discipline for interaction/qurlLinks.
+  const viewUpdateRegisteredQurlIds = [];
+  function handleViewUpdate(update, qurlId) {
+    if (stopped) return;
+    if (viewCounterDegraded) return; // degraded monitor doesn't render counter
+    if (!(update && update.accessCount > 0)) return;
+    const current = linkStatus.get(qurlId);
+    if (!current || current.status === 'opened') return;
+    linkStatus.set(qurlId, { ...current, status: 'opened' });
+    viewed++;
+    if (!interaction) return;
+    const pending = Math.max(0, expectedCount - viewed);
+    safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] })
+      .catch((err) => {
+        logger.warn('view-update render failed', { sendId, qurl_id: qurlId, error: err.message });
+      });
+    if (pending === 0) {
+      allDone = true;
+      clearInterval(timer);
+    }
+  }
   function registerViewUpdateFor(qurlId) {
     if (!config.ENABLE_VIEW_UPDATE_PUSH) return;
-    const cb = () => {
-      if (stopped) return;
-      runTick().catch((err) => {
-        logger.warn('view-update-triggered runTick failed', {
-          sendId, qurl_id: qurlId, error: err.message,
-        });
-      });
-    };
-    viewUpdateRegistry.register(qurlId, cb);
-    viewUpdateCallbacks.push({ qurlId, cb });
+    viewUpdateRegistry.register(qurlId, handleViewUpdate);
+    viewUpdateRegisteredQurlIds.push(qurlId);
   }
   for (const qurlId of trackedQurlIds) {
     registerViewUpdateFor(qurlId);
@@ -1256,15 +1279,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       stopped = true;
       clearInterval(timer);
       activeMonitors.delete(control);
-      // Unregister every view-update callback so the registry doesn't
-      // pin this monitor's closure state past stop() (feat #60).
-      // Load-bearing: a long-running monitor that never unregisters
-      // would otherwise hold linkStatus + runTick references via the
-      // callback closure until process restart.
-      for (const { qurlId, cb } of viewUpdateCallbacks) {
-        viewUpdateRegistry.unregister(qurlId, cb);
+      // Unregister the shared callback from every tracked qurl_id so
+      // the registry doesn't pin this monitor's closure state past
+      // stop() (feat #60). Load-bearing: a long-running monitor that
+      // never unregisters would otherwise hold linkStatus + safeEdit
+      // references via the shared closure until process restart.
+      for (const qurlId of viewUpdateRegisteredQurlIds) {
+        viewUpdateRegistry.unregister(qurlId, handleViewUpdate);
       }
-      viewUpdateCallbacks.length = 0;
+      viewUpdateRegisteredQurlIds.length = 0;
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;

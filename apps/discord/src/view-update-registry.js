@@ -49,6 +49,12 @@ function unregister(qurlId, callback) {
 // Returns true if at least one callback was invoked; false on silent
 // drop (no monitor on this replica). Caller (consumer) deletes the
 // message regardless — see SILENT DROP IS LOAD-BEARING above.
+//
+// Callback signature: (update, qurlId). qurlId is passed in so a
+// single shared closure can register against all of a monitor's
+// tracked qurl_ids without paying per-id closure-creation cost — a
+// 50-recipient send registers the SAME callback against 50 keys,
+// each Set holds one element, callback distinguishes inside.
 function dispatch(qurlId, update) {
   const set = registry.get(qurlId);
   if (!set || set.size === 0) return false;
@@ -57,7 +63,7 @@ function dispatch(qurlId, update) {
   const snapshot = Array.from(set);
   for (const cb of snapshot) {
     try {
-      cb(update);
+      cb(update, qurlId);
     } catch (err) {
       logger.error('view-update-registry: callback threw', {
         qurl_id: qurlId,

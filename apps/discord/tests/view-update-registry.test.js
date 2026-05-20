@@ -88,8 +88,23 @@ describe('view-update-registry', () => {
       const update = { accessCount: 1, consumed: false };
       const hit = registry.dispatch('qrl_a', update);
       expect(hit).toBe(true);
-      expect(cb).toHaveBeenCalledWith(update);
+      // Callback receives (update, qurlId) — qurlId passes through so
+      // a shared closure can register against many qurl_ids.
+      expect(cb).toHaveBeenCalledWith(update, 'qrl_a');
       expect(cb).toHaveBeenCalledTimes(1);
+    });
+
+    test('shared callback registered against multiple qurl_ids gets the right qurlId per dispatch', () => {
+      const cb = jest.fn();
+      registry.register('qrl_a', cb);
+      registry.register('qrl_b', cb);
+      registry.register('qrl_c', cb);
+      registry.dispatch('qrl_b', { accessCount: 2 });
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb).toHaveBeenCalledWith({ accessCount: 2 }, 'qrl_b');
+      registry.dispatch('qrl_a', { accessCount: 3 });
+      expect(cb).toHaveBeenCalledTimes(2);
+      expect(cb).toHaveBeenLastCalledWith({ accessCount: 3 }, 'qrl_a');
     });
 
     test('returns false (silent-drop) when qurl_id is not registered', () => {

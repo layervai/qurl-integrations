@@ -25,7 +25,7 @@
 // replica on visibility-timeout expiry — the polling fallback covers
 // the miss case correctly.
 
-const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { SQSClient, ReceiveMessageCommand, DeleteMessageBatchCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
 const logger = require('./logger');
 const registry = require('./view-update-registry');
@@ -33,6 +33,13 @@ const registry = require('./view-update-registry');
 const RECEIVE_WAIT_SECONDS = 20;
 const MAX_MESSAGES_PER_RECEIVE = 10;
 const RECEIVE_VISIBILITY_SECONDS = 30;
+// Backoff after a ReceiveMessage error. Without this, a persistent
+// fast-failure mode (IAM denied after credentials rotation, malformed
+// QueueUrl, region drift) would spin the loop with zero delay between
+// fails — burns CPU + log volume. 1s matches event-consumer.js's
+// POLL_ERROR_BACKOFF_MS. AbortController short-circuits the sleep so
+// gracefulShutdown still returns in tens of ms.
+const POLL_ERROR_BACKOFF_MS = 1000;
 
 let sqsClient = null;
 let running = false;
@@ -45,22 +52,87 @@ function _setSqsClientForTest(client) {
 }
 
 function createSqsClient() {
-  return new SQSClient({ region: process.env.AWS_REGION || 'us-east-2' });
+  // Same shape as event-publisher.js / event-consumer.js — reject +
+  // throw on missing region. A wrong region surfaces as opaque
+  // ReceiveMessage failures otherwise.
+  const region = (process.env.AWS_REGION ?? '').trim();
+  if (!region) {
+    throw new Error('AWS_REGION is required to use the view-update consumer. Set it in the deployment template (e.g. `us-east-2`).');
+  }
+  return new SQSClient({ region });
 }
 
+// Local abortable sleep — resolves on timeout OR on stopController
+// abort, whichever lands first. Used by pollLoop's error backoff so
+// stop() returns in tens of ms instead of waiting for the backoff.
+// Mirrors event-consumer.js's abortableSleep shape.
+function abortableSleep(ms) {
+  return new Promise((resolve) => {
+    const ctrl = stopController;
+    if (ctrl?.signal.aborted) {
+      resolve();
+      return;
+    }
+    let onAbort;
+    const t = setTimeout(() => {
+      if (ctrl && onAbort) ctrl.signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    t.unref?.();
+    if (ctrl) {
+      onAbort = () => {
+        clearTimeout(t);
+        resolve();
+      };
+      ctrl.signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+// Mirrors event-consumer.js's isAbortError: walks err.cause with a
+// visited-set so cyclic / deeply-wrapped abort chains still match.
+// Both shapes (name + code) cover Node + AWS SDK conventions.
 function isAbortError(err) {
-  return err && (err.name === 'AbortError' || err.code === 'AbortError');
+  const visited = new Set();
+  let current = err;
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    if (current.name === 'AbortError'
+      || current.name === 'CanceledError'
+      || current.code === 'AbortError'
+      || current.code === 'ABORT_ERR') return true;
+    current = current.cause;
+  }
+  return false;
 }
 
-async function deleteMessage(receiptHandle) {
+// Batch-delete up to 10 messages in one SDK round-trip. SQS's
+// DeleteMessageBatch accepts 1–10 entries with caller-supplied Ids
+// (we use the array index as Id — only needs uniqueness within the
+// batch). Failures are reported in `Failed[]` on the response; we
+// log + continue rather than re-delete (the message will redeliver
+// after visibility timeout — and the dispatch path is idempotent,
+// so a redeliver of an already-dispatched event renders the same
+// linkStatus state via the polling fallback at the worst).
+async function deleteMessageBatch(messages) {
+  if (messages.length === 0) return;
   try {
-    await sqsClient.send(new DeleteMessageCommand({
+    const resp = await sqsClient.send(new DeleteMessageBatchCommand({
       QueueUrl: config.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
-      ReceiptHandle: receiptHandle,
+      Entries: messages.map((m, i) => ({
+        Id: String(i),
+        ReceiptHandle: m.ReceiptHandle,
+      })),
     }));
+    if (resp.Failed && resp.Failed.length > 0) {
+      logger.warn('view-update-consumer: DeleteMessageBatch had partial failures', {
+        failed_count: resp.Failed.length,
+        errors: resp.Failed.map((f) => ({ id: f.Id, code: f.Code, message: f.Message })),
+      });
+    }
   } catch (err) {
     if (isAbortError(err)) return;
-    logger.warn('view-update-consumer: DeleteMessage failed', {
+    logger.warn('view-update-consumer: DeleteMessageBatch failed', {
       error: err.message,
     });
   }
@@ -79,7 +151,11 @@ function processMessage(message) {
     });
     return;
   }
-  const qurlId = envelope?.qurl_id;
+  if (envelope === null || typeof envelope !== 'object') {
+    logger.warn('view-update-consumer: envelope is not an object, dropping');
+    return;
+  }
+  const qurlId = envelope.qurl_id;
   if (typeof qurlId !== 'string' || !qurlId) {
     logger.warn('view-update-consumer: envelope missing qurl_id, dropping');
     return;
@@ -95,6 +171,12 @@ function processMessage(message) {
   registry.dispatch(qurlId, {
     accessCount,
     consumed: envelope.consumed === true,
+    // TODO(view-update-dedup): eventId is plumbed end-to-end so a
+    // future dedup layer (in the registry or the monitor's
+    // handleViewUpdate) can drop SQS at-least-once duplicates without
+    // a wire-shape change. No consumer reads it today — the polling
+    // path's status === 'opened' guard makes per-event dedup
+    // unnecessary for the current render contract.
     eventId: typeof envelope.event_id === 'string' ? envelope.event_id : null,
     publishedAtMs: typeof envelope.published_at_ms === 'number' ? envelope.published_at_ms : null,
   });
@@ -118,16 +200,20 @@ async function pollOnce() {
     logger.warn('view-update-consumer: ReceiveMessage failed', {
       error: err.message,
     });
+    // Back off so a persistent failure (IAM denial, malformed
+    // QueueUrl, region drift) doesn't tight-spin the poll loop.
+    await abortableSleep(POLL_ERROR_BACKOFF_MS);
     return;
   }
   const messages = resp.Messages || [];
   for (const message of messages) {
     processMessage(message);
-    // Delete after processing; sequential awaits keep the in-flight
-    // SDK call count bounded by 1 — at 10 messages × ~10ms each
-    // that's ~100ms total, well inside RECEIVE_VISIBILITY_SECONDS.
-    await deleteMessage(message.ReceiptHandle);
   }
+  // Single batch round-trip for up to 10 deletes vs. sequential
+  // per-message DeleteMessage calls (~10ms each = ~100ms wall-time
+  // for a full batch). Failures inside the batch are logged + ignored;
+  // visibility timeout + idempotent dispatch handle the redelivery.
+  await deleteMessageBatch(messages);
 }
 
 async function pollLoop() {

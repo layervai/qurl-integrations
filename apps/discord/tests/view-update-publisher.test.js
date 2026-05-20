@@ -155,5 +155,29 @@ describe('view-update-publisher', () => {
         }),
       );
     });
+
+    test('sync throw from SQS client is caught (does NOT propagate to caller)', () => {
+      // Force a sync throw by stubbing the SQS client's send to throw
+      // immediately (vs. returning a rejecting promise). The webhook
+      // route's catch block would otherwise flip a 200 to a 500.
+      const throwingClient = {
+        send: () => { throw new Error('synchronous SDK validation error'); },
+      };
+      publisher._test._setSqsClientForTest(throwingClient);
+      publisher.start();
+      expect(() => publisher.publish({
+        qurlId: 'qrl_a',
+        accessCount: 1,
+        consumed: false,
+        eventId: 'evt_a',
+      })).not.toThrow();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('publish() sync threw'),
+        expect.objectContaining({
+          qurl_id: 'qrl_a',
+          kind: 'unhandledRejection',
+        }),
+      );
+    });
   });
 });

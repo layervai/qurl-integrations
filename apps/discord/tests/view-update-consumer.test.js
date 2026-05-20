@@ -29,7 +29,7 @@ jest.mock('../src/logger', () => ({
 }));
 
 const { mockClient } = require('aws-sdk-client-mock');
-const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
+const { SQSClient, ReceiveMessageCommand, DeleteMessageBatchCommand } = require('@aws-sdk/client-sqs');
 
 const sqsMock = mockClient(SQSClient);
 
@@ -105,12 +105,25 @@ describe('view-update-consumer', () => {
         }),
         ReceiptHandle: 'rh-1',
       });
-      expect(cb).toHaveBeenCalledWith(expect.objectContaining({
-        accessCount: 7,
-        consumed: false,
-        eventId: 'evt_x',
-        publishedAtMs: 1739462812345,
-      }));
+      expect(cb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accessCount: 7,
+          consumed: false,
+          eventId: 'evt_x',
+          publishedAtMs: 1739462812345,
+        }),
+        'qrl_x',
+      );
+    });
+
+    test('non-object envelope (e.g. JSON number) is dropped', () => {
+      consumer._test.processMessage({
+        Body: JSON.stringify(42),
+        ReceiptHandle: 'rh-1',
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('not an object'),
+      );
     });
 
     test('malformed JSON is dropped without throwing', () => {
@@ -191,15 +204,17 @@ describe('view-update-consumer', () => {
           ],
         })
         .resolves({ Messages: [] });
-      sqsMock.on(DeleteMessageCommand).resolves({});
+      sqsMock.on(DeleteMessageBatchCommand).resolves({});
 
       consumer.start();
       await consumer._test.pollOnce();
 
       expect(cb).toHaveBeenCalled();
-      const delCalls = sqsMock.commandCalls(DeleteMessageCommand);
+      const delCalls = sqsMock.commandCalls(DeleteMessageBatchCommand);
       expect(delCalls).toHaveLength(1);
-      expect(delCalls[0].args[0].input.ReceiptHandle).toBe('rh-1');
+      const entries = delCalls[0].args[0].input.Entries;
+      expect(entries).toHaveLength(1);
+      expect(entries[0].ReceiptHandle).toBe('rh-1');
 
       await consumer.stop();
     });
@@ -218,12 +233,14 @@ describe('view-update-consumer', () => {
           ],
         })
         .resolves({ Messages: [] });
-      sqsMock.on(DeleteMessageCommand).resolves({});
+      sqsMock.on(DeleteMessageBatchCommand).resolves({});
 
       consumer.start();
       await consumer._test.pollOnce();
 
-      expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
+      const delCalls = sqsMock.commandCalls(DeleteMessageBatchCommand);
+      expect(delCalls).toHaveLength(1);
+      expect(delCalls[0].args[0].input.Entries[0].ReceiptHandle).toBe('rh-1');
 
       await consumer.stop();
     });
@@ -238,6 +255,22 @@ describe('view-update-consumer', () => {
 
       // AbortError is the expected shape during stop() — must not
       // be logged as a real failure.
+      const errLogs = logger.warn.mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('ReceiveMessage failed'),
+      );
+      expect(errLogs).toHaveLength(0);
+
+      await consumer.stop();
+    });
+
+    test('AbortError via err.code (older SDK shape) is also handled cleanly', async () => {
+      const abortErr = new Error('aborted');
+      abortErr.code = 'AbortError';
+      sqsMock.on(ReceiveMessageCommand).rejects(abortErr);
+
+      consumer.start();
+      await consumer._test.pollOnce();
+
       const errLogs = logger.warn.mock.calls.filter(
         ([msg]) => typeof msg === 'string' && msg.includes('ReceiveMessage failed'),
       );

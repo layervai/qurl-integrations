@@ -722,11 +722,11 @@ async function gracefulShutdown(code = 0) {
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
     // View-update plumbing drain (feat #60). Same idempotent shape;
-    // unconditional. Consumer first so an in-flight pollOnce dispatches
-    // its current batch (and DeleteMessage's them) before we stop
-    // accepting new sends. The publisher's drain catches any view
-    // events that landed on the HTTP receiver during the
-    // eventConsumer.stop() await above.
+    // unconditional. Consumer first: stop() aborts the in-flight
+    // ReceiveMessage long-poll (via AbortController) so no NEW
+    // batches start; whatever was mid-processMessage at the time
+    // unwinds via its outer for-loop. The publisher's drain catches
+    // any view events the HTTP receiver pushed in the same window.
     await viewUpdateConsumer.stop();
     await viewUpdatePublisher.stop();
     // Periodic REST refreshCache in http-only mode is .unref()ed so it
@@ -1206,27 +1206,18 @@ async function start() {
 
   // View-update SQS plumbing (feat #60, sub-second view counter).
   // Independent of the event-shipper gates above; gated only on
-  // `config.ENABLE_VIEW_UPDATE_PUSH`. Publisher runs in any process
-  // whose tier might receive the webhook (HTTP listener — combined
-  // or http role). Consumer runs in any process whose tier might
-  // own a live monitorLinkStatus (combined or worker). Same
-  // shutdown-race guard as the event-shipper sibling above.
+  // `config.ENABLE_VIEW_UPDATE_PUSH` AND `isHttp` (the tier that
+  // owns BOTH the webhook receiver — publisher — and the
+  // monitorLinkStatus instances — consumer). Same shutdown-race
+  // guard as the event-shipper sibling above.
   //
   // Combined mode is intentionally NOT rejected here (unlike
   // ENABLE_EVENT_SHIPPER): the registry's silent-drop-on-miss is
   // idempotent — a duplicate dispatch in a combined process is a
   // no-op at the monitor render layer.
-  if (config.ENABLE_VIEW_UPDATE_PUSH && !isShuttingDown) {
-    if (isHttp) {
-      viewUpdatePublisher.start();
-    }
-    // isWorker || combined-with-monitors: combined is `isGateway &&
-    // isHttp`, both of which can own a monitor. Worker is `isHttp
-    // && config.ENABLE_EVENT_SHIPPER`, which is a strict subset of
-    // isHttp — so isHttp covers both consumer-eligible tiers.
-    if (isHttp) {
-      viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });
-    }
+  if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
+    viewUpdatePublisher.start();
+    viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });
   }
 
   // Open the Discord gateway WebSocket. Two disjoint paths:

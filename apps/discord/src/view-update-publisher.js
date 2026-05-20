@@ -33,9 +33,12 @@
 const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
 const logger = require('./logger');
+const { LOG_KINDS } = require('./constants');
 
-const INITIAL_DRAIN_DEADLINE_MS = 5_000;
-let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
+// Mutable so tests can shrink the deadline. Mirrors event-publisher.js's
+// getter-export shape — see that file's _setDrainDeadlineForTest
+// comment block for the snapshot-at-module-load footgun this dodges.
+let DRAIN_DEADLINE_MS = config.QURL_BOT_DRAIN_DEADLINE_MS;
 
 let sqsClient = null;
 let running = false;
@@ -46,11 +49,22 @@ function _setSqsClientForTest(client) {
 }
 
 function createSqsClient() {
-  return new SQSClient({ region: process.env.AWS_REGION || 'us-east-2' });
+  // Lazy AWS_REGION read mirrors event-publisher.js / event-consumer.js
+  // — reject + throw on missing region rather than silently falling
+  // back. A wrong region surfaces as opaque SendMessage failures inside
+  // pollLoop / publish error logs otherwise.
+  const region = (process.env.AWS_REGION ?? '').trim();
+  if (!region) {
+    throw new Error('AWS_REGION is required to use the view-update publisher. Set it in the deployment template (e.g. `us-east-2`).');
+  }
+  return new SQSClient({ region });
 }
 
 // Fire-and-log. No await. Safe to call from the hot path
-// (qurl-webhook handler).
+// (qurl-webhook handler) — the inner try/catch contains sync throws
+// (SDK input validation, JSON.stringify pathological cases) so the
+// route's catch block doesn't flip a successful 200 into a retried
+// 500. Same posture as event-publisher.js's publish().
 function publish({ qurlId, accessCount, consumed, eventId }) {
   if (!running) return; // safe no-op when disabled
   if (typeof qurlId !== 'string' || !qurlId) {
@@ -60,29 +74,40 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
     logger.warn('view-update-publisher: publish() called with invalid qurlId', { qurlId });
     return;
   }
-  const envelope = {
-    qurl_id: qurlId,
-    access_count: accessCount,
-    consumed: consumed === true,
-    event_id: eventId,
-    published_at_ms: Date.now(),
-  };
-  let sendPromise;
-  sendPromise = sqsClient.send(new SendMessageCommand({
-    QueueUrl: config.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
-    MessageBody: JSON.stringify(envelope),
-  }))
-    .catch((err) => {
-      logger.warn('view-update-publisher: SendMessage failed (fire-and-log)', {
-        qurl_id: qurlId,
-        error: err.message,
-        kind: 'unhandledRejection',
+  try {
+    const envelope = {
+      qurl_id: qurlId,
+      access_count: accessCount,
+      consumed: consumed === true,
+      event_id: eventId,
+      published_at_ms: Date.now(),
+    };
+    const sendPromise = sqsClient.send(new SendMessageCommand({
+      QueueUrl: config.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
+      MessageBody: JSON.stringify(envelope),
+    }))
+      .catch((err) => {
+        logger.warn('view-update-publisher: SendMessage failed (fire-and-log)', {
+          qurl_id: qurlId,
+          error: err.message,
+          kind: LOG_KINDS.UNHANDLED_REJECTION,
+        });
+      })
+      .finally(() => {
+        inFlightSends.delete(sendPromise);
       });
-    })
-    .finally(() => {
-      inFlightSends.delete(sendPromise);
+    inFlightSends.add(sendPromise);
+  } catch (err) {
+    // Sync throw — SDK input validation, JSON.stringify cycle, etc.
+    // Swallow + log so the webhook receiver's route handler stays
+    // 200. The DDB write that preceded this call is already committed;
+    // the polling fallback catches the view counter render regardless.
+    logger.warn('view-update-publisher: publish() sync threw (fire-and-log)', {
+      qurl_id: qurlId,
+      error: err.message,
+      kind: LOG_KINDS.UNHANDLED_REJECTION,
     });
-  inFlightSends.add(sendPromise);
+  }
 }
 
 function start() {
@@ -146,7 +171,7 @@ function _resetStateForTest() {
   running = false;
   sqsClient = null;
   inFlightSends.clear();
-  DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
+  DRAIN_DEADLINE_MS = config.QURL_BOT_DRAIN_DEADLINE_MS;
 }
 
 module.exports = {
