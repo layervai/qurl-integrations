@@ -372,35 +372,32 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 		respondSlack(w, ":warning: failed to list admins (upstream error; see logs).")
 		return
 	}
-	// Defensive: BindWorkspace stamps owner_id on first claim, so an
-	// empty value would only fire on storage corruption. Surface it
-	// explicitly instead of rendering a malformed `<@>` mrkdwn link,
-	// and log at Error so on-call sees the corruption signal directly
-	// rather than reconstructing from user reports.
+	// Defensive: BindWorkspace stamps owner_id on first claim, so a
+	// missing or shape-bad value would only fire on storage
+	// corruption. Surface it explicitly instead of interpolating
+	// anything that doesn't match the Slack-ID shape into a `<@%s>`
+	// mrkdwn link (where a malformed value could break out of the
+	// mention surface — defense-in-depth matches the
+	// escapeMrkdwnCode posture in views.go).
 	ownerCopy := "(unknown — workspace_mappings missing owner_id)"
-	if ownerID != "" {
+	if looksLikeSlackUserID(ownerID) {
 		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
 	} else {
-		slog.Error("admin list: workspace_mappings row missing owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID)
+		slog.Error("admin list: workspace_mappings row missing or shape-bad owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID, "owner_id_len", len(ownerID))
 	}
 	// Filter the owner out of the admins line so it doesn't duplicate
 	// the owner line. The owner is on the admin set by construction
 	// (BindWorkspace seeds it), so a single-admin workspace would
-	// otherwise render "Owner: <@X>\nAdmins: <@X>". The `ownerID !=
-	// ""` guard pairs with the storage-corruption case above — when
-	// ownerID is empty we don't want to silently drop legitimately-
-	// empty admin entries (impossible today via readStringSet, but
-	// defensive against a future contract change).
+	// otherwise render "Owner: <@X>\nAdmins: <@X>". The shape gate
+	// pairs with the storage-corruption case above — skip entries
+	// that don't match the Slack-ID shape so a corrupted SS member
+	// can't render `<@>` or break out of the mention surface.
 	otherAdmins := make([]string, 0, len(admins))
 	for _, a := range admins {
-		if a == "" {
-			// DDB SS doesn't permit empty members, so this is
-			// defensive against a future contract change in
-			// readStringSet. Skipping avoids rendering `<@>`
-			// mrkdwn (which Slack renders as a malformed mention).
+		if !looksLikeSlackUserID(a) {
 			continue
 		}
-		if ownerID != "" && a == ownerID {
+		if a == ownerID {
 			continue
 		}
 		otherAdmins = append(otherAdmins, fmt.Sprintf("<@%s>", a))
@@ -420,4 +417,30 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// surfaces empty members.
 	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size_raw", len(admins), "displayed_admins", len(otherAdmins))
 	respondSlack(w, body)
+}
+
+// looksLikeSlackUserID reports whether s matches Slack's documented
+// user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid) prefix
+// followed by 1+ uppercase-alphanumeric chars. Used as a defensive
+// guard on values read from DDB before interpolating into Slack
+// mrkdwn `<@%s>` mentions: the parser-level userMentionPattern
+// already constrains values written through admin add/remove, but
+// owner_id is written by BindWorkspace from the OAuth callback (a
+// different code path), and admin_slack_user_ids could in principle
+// be hand-mutated. Cheap insurance against a malformed value
+// breaking out of the mention surface.
+func looksLikeSlackUserID(s string) bool {
+	if len(s) < 2 {
+		return false
+	}
+	if s[0] != 'U' && s[0] != 'W' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
 }

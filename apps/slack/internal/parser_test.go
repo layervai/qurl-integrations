@@ -330,6 +330,42 @@ func TestParse_QURLIDLengthBoundary(t *testing.T) {
 	}
 }
 
+// TestParse_UserMentionLengthBoundary pins the {8,63}-suffix boundary
+// on userMentionPattern. 8 and 63 accept (real Slack IDs sit in
+// 8-11 char territory, with margin for future grammar shifts); 7 and
+// 64 reject. The ceiling mirrors qurlIDPattern's pathological-paste
+// posture — a 1000-char `<@U…>` paste surfaces as a parser error
+// rather than reaching DDB.
+func TestParse_UserMentionLengthBoundary(t *testing.T) {
+	t.Parallel()
+	at7 := strings.Repeat("A", 7)
+	at8 := strings.Repeat("A", 8)
+	at63 := strings.Repeat("A", 63)
+	at64 := strings.Repeat("A", 64)
+
+	for _, ok := range []string{at8, at63} {
+		cmd, err := Parse("admin add <@U" + ok + ">")
+		if err != nil {
+			t.Errorf("Parse(admin add <@U<%d chars>>): unexpected error %v", len(ok), err)
+			continue
+		}
+		if cmd.UserID != "U"+ok {
+			t.Errorf("UserID = %q, want %q", cmd.UserID, "U"+ok)
+		}
+	}
+
+	for _, bad := range []string{at7, at64} {
+		_, err := Parse("admin add <@U" + bad + ">")
+		if err == nil {
+			t.Errorf("Parse(admin add <@U<%d chars>>) returned nil error, want ErrInvalidUserMention", len(bad))
+			continue
+		}
+		if !errors.Is(err, ErrInvalidUserMention) {
+			t.Errorf("Parse(admin add <@U<%d chars>>) error = %v, want errors.Is(_, ErrInvalidUserMention)", len(bad), err)
+		}
+	}
+}
+
 // TestParse_AdminClaimErrorOmitsTail fences the bootstrap-code
 // redaction posture at the parser layer: when a user types
 // `admin claim BOOT-SECRET` (or mixed-case variants that bypass
