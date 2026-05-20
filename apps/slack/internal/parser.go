@@ -631,35 +631,25 @@ func matchUserMention(tok string) (string, bool) {
 	return m[1], true
 }
 
-// truncateForError caps a token at 32 runes and replaces backticks /
-// line breaks with safe substitutes, so the result is safe to echo
-// inside a Slack mrkdwn code span in an error message. Callers wrap
-// the return value with a backtick code-span delimiter so any
-// `<!channel>` / `<@U…>` / other mrkdwn token in the user's input
-// renders as a literal code-span character rather than as a Slack
-// mention. Pairs with the escapeMrkdwnCode posture in views.go —
-// same threat model, same substitutions.
+// truncateForError caps a token at 32 runes and runs it through
+// [escapeMrkdwnCode], so the result is safe to echo inside a Slack
+// mrkdwn code span in an error message. Callers wrap the return
+// value with a backtick code-span delimiter so any `<!channel>` /
+// `<@U…>` / other mrkdwn token in the user's input renders as a
+// literal code-span character rather than as a Slack mention.
+//
+// The escape table (backtick → U+02CA, line breaks → space) is owned
+// by [escapeMrkdwnCode] in views.go so the same-package neighbor is
+// the single source of truth — a future renderer-driven adjustment
+// to the table (e.g. CR/LF handling, new break tokens) flows through
+// both error and view code spans without drift.
 func truncateForError(s string) string {
 	const maxRunes = 32
 	runes := []rune(s)
 	if len(runes) > maxRunes {
 		runes = append(runes[:maxRunes], '…')
 	}
-	// Backtick closes a code span; newline ends it. Mirror
-	// escapeMrkdwnCode's substitutions inline so this helper stays
-	// self-contained (no dependency on the views package).
-	out := make([]rune, 0, len(runes))
-	for _, r := range runes {
-		switch r {
-		case '`':
-			out = append(out, 'ˊ') // U+02CA MODIFIER LETTER ACUTE ACCENT
-		case '\n', '\r':
-			out = append(out, ' ')
-		default:
-			out = append(out, r)
-		}
-	}
-	return string(out)
+	return escapeMrkdwnCode(string(runes))
 }
 
 // parseAliasToken enforces the `$` sigil, strips it, and validates the
