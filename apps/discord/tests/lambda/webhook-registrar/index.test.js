@@ -263,7 +263,9 @@ describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel han
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
       .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
-      .resolves({ Parameter: { Value: ssmValue } });
+      .resolves({ Parameter: { Value: ssmValue } })
+      .on(PutParameterCommand)
+      .resolves({});
     let rotateHit = false;
     mockQurlService({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -275,6 +277,10 @@ describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel han
     // Reuse path — the variant value passed through as the secret.
     expect(result.action).toBe('reused');
     expect(rotateHit).toBe(false);
+    // Explicit no-PutParameter pin: reuse path skips SSM write (the
+    // "skip persist on reused" optimization in the handler). A future
+    // refactor that re-introduces noisy steady-state writes lands here.
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
   });
 
   it('strips PLACEHOLDER and creates fresh when no existing sub (fresh-env first apply)', async () => {
