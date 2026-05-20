@@ -125,6 +125,23 @@ already exists and the SSM secret is populated. The durable upstream
 fix — making `POST /v1/webhooks` idempotent on `(owner_id, url)` —
 is tracked separately.
 
+**Dedupe-recovery boot also needs `desired_count=1`.** If the first
+deploy was accidentally run at `desired_count>1` and produced
+duplicate subscriptions, the *next* boot enters the dedupe-recovery
+path: it deletes the non-survivor duplicates AND force-rotates the
+survivor's secret (the survivor's pre-rotate secret belongs to a
+deleted replica's POST, so SSM almost certainly disagrees). That
+force-rotate runs on every replica concurrently, with the same
+last-write-wins SSM race that the steady-state reuse path was
+designed to avoid. To exit the duplicate state cleanly:
+
+1. Scale to `desired_count=1`.
+2. Confirm one boot completed cleanly (`Webhook subscription
+   reconciled (existing found, bootstrap rotate)` + the warn line
+   for `Webhook subscription duplicates detected — deleting
+   non-survivors`).
+3. Scale back to target desired_count.
+
 ### Persistence env var
 
 The registrar writes the active secret back to AWS Systems Manager

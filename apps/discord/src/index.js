@@ -1107,11 +1107,15 @@ async function start() {
       // registrar's `.then(setQurlWebhookSecret)` pending forever and
       // strand the receiver on PLACEHOLDER. bestEffortPersist swallows
       // the rejection and degrades to in-memory-only.
-      const persistSecret = process.env.QURL_WEBHOOK_SECRET_SSM_PARAM
+      const persistSecret = config.QURL_WEBHOOK_SECRET_SSM_PARAM
         ? async (secret) => {
+          // AWS_REGION stays a direct process.env read — matches the
+          // pattern in event-publisher.js, event-consumer.js, etc.
+          // Pulling it through config.js would be a separate cross-
+          // cutting cleanup.
           const client = new ssmSdk.SSMClient({ region: process.env.AWS_REGION });
           const put = client.send(new ssmSdk.PutParameterCommand({
-            Name: process.env.QURL_WEBHOOK_SECRET_SSM_PARAM,
+            Name: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
             Type: 'SecureString',
             Value: secret,
             Overwrite: true,

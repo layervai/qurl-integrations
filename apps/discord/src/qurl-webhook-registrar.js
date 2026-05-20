@@ -127,9 +127,9 @@ function canonicalUrl(u) {
 // Returns ALL subscriptions matching our URL (typically 0 or 1; >1
 // only after a cold-bootstrap race created duplicates — see the
 // dedupe path in ensureWebhookSubscription). Paginates so a caller
-// with many subs doesn't lose the match on page 2. Page size 100 is
-// the qurl-service default cap; loop bounded at 50 iterations
-// (5000 subs) so a misbehaving cursor can't spin forever.
+// with many subs doesn't lose the match on page 2. Page size 100
+// requested explicitly; loop bounded at 50 iterations (5000 subs)
+// so a misbehaving cursor can't spin forever.
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
@@ -142,7 +142,11 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
   const matches = [];
   let cursor = '';
   for (let i = 0; i < 50; i++) {
-    const path = `/v1/webhooks${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
+    // Explicit limit=100 (vs relying on a server default that could
+    // silently change). Combined with the 50-page cap, bounds the
+    // total walk at 5000 subs.
+    const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
+    const path = `/v1/webhooks${qs}`;
     const resp = await callQurlService({ method: 'GET', path, apiEndpoint, apiKey });
     const subs = (resp && resp.data) || [];
     for (const s of subs) {
@@ -189,6 +193,11 @@ function pickSurvivor(matches) {
   return sorted[0];
 }
 
+// Note: `description` is set only at create time and is not reconciled
+// on subsequent boots. Region / NODE_ENV captured in the description
+// string can go stale after env rename / region migration; that's
+// observability-only (qurl-service UI label) and not worth a PATCH
+// on every boot.
 async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description }) {
   const resp = await callQurlService({
     method: 'POST',

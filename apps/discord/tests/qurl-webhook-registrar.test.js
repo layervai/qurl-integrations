@@ -14,7 +14,12 @@ function mockFetchResponses(handlers) {
   global.fetch = jest.fn(async (url, opts) => {
     const path = url.replace(/^https?:\/\/[^/]+/, '');
     const method = opts.method || 'GET';
-    const handler = handlers[`${method} ${path}`];
+    // Try exact match first (so tests targeting a specific query string
+    // like `?cursor=page2` still work), then fall back to pathname-only
+    // so tests don't have to enumerate every `?limit=100` / `?limit=100&cursor=...`
+    // variation that the registrar adds for defensive reasons.
+    const pathnameOnly = path.split('?')[0];
+    const handler = handlers[`${method} ${path}`] || handlers[`${method} ${pathnameOnly}`];
     if (!handler) {
       throw new Error(`Unmocked fetch: ${method} ${path}`);
     }
@@ -207,12 +212,16 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
 
 describe('ensureWebhookSubscription — pagination', () => {
   it('walks cursor pages until the matching sub is found', async () => {
+    // Test keys spell the exact path the registrar produces so the
+    // exact-match path-with-query takes precedence over the
+    // pathname-only fallback (which would otherwise return the
+    // first-page handler for every call → cursor walk would loop).
     mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: {
+      'GET /v1/webhooks?limit=100': () => ({ body: {
         data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed'] }],
         meta: { next_cursor: 'page2', has_more: true },
       } }),
-      'GET /v1/webhooks?cursor=page2': () => ({ body: {
+      'GET /v1/webhooks?cursor=page2&limit=100': () => ({ body: {
         data: [{ webhook_id: 'wh_match', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] }],
         meta: { next_cursor: '', has_more: false },
       } }),
@@ -222,7 +231,7 @@ describe('ensureWebhookSubscription — pagination', () => {
     expect(result.action).toBe('reused');
   });
 
-  it('returns null (→ creates fresh) when cursor walk exhausts without a match', async () => {
+  it('returns [] (→ creates fresh) when cursor walk exhausts without any match', async () => {
     let createCalled = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: {

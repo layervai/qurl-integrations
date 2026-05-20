@@ -359,6 +359,11 @@ module.exports = {
   // qURL webhook receiver HMAC; peer is the qurl-service subscription's
   // `secret` field on POST /v1/webhooks (must match exactly).
   QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
+  // SSM parameter name where the auto-register path persists the
+  // rotated webhook secret. Unset = in-memory-only (every restart
+  // rotates because there's no place to read the previous one from).
+  // Pulled through config.* (not direct process.env) for grep-uniformity.
+  QURL_WEBHOOK_SECRET_SSM_PARAM: process.env.QURL_WEBHOOK_SECRET_SSM_PARAM,
 
   // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
   // When unset, /qurl setup falls back to the legacy modal-paste path so the
