@@ -101,7 +101,10 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		// cmd.AdminAction; even though it's parser-enumerated today,
 		// a future parser drift could land an arbitrary string here,
 		// and echoing it back risks confusing copy on already-confused
-		// input. The user already knows what they typed.
+		// input. The user already knows what they typed. Symmetric
+		// with the AdminClaim defensive arm: slog.Warn surfaces the
+		// drift to operators; user-visible copy stays generic.
+		slog.Warn("admin dispatcher: unknown action reached default arm — parser drift?", "team_id", teamID, "user_id", userID, "action", string(cmd.AdminAction))
 		respondSlack(w, "Unknown admin action. Try `/qurl help`.")
 	}
 }
@@ -276,10 +279,12 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 				return
 			case se.StatusCode == http.StatusConflict && se.Code == slackdata.ErrCodeAdminAddUnverified:
 				// Conditional fired but the post-CCFE disambiguation
-				// read can't confirm membership — likely a storage-
-				// corruption signal. "Retry" is the right user copy;
-				// the slog.Error below carries the triage detail.
-				slog.Error("add admin: conditional fired but disambiguation read can't confirm membership", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+				// read can't confirm membership — usually a transient
+				// DDB blip (timeout / transport) on the disambig
+				// GetItem. Warn (not Error) so dashboards tied to
+				// level=ERROR don't page on a user-recoverable
+				// "please retry" surface.
+				slog.Warn("add admin: conditional fired but disambiguation read can't confirm membership", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
 				respondSlack(w, ":warning: couldn't confirm admin add — please retry. If this persists, contact your Slack admin.")
 				return
 			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
@@ -405,6 +410,12 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// can't render `<@>` or break out of the mention surface.
 	otherAdmins := make([]string, 0, len(admins))
 	for _, a := range admins {
+		// Order matters: shape check FIRST so a corrupted (empty or
+		// mrkdwn-shaped) member is skipped before we compare it
+		// against ownerID. If ownerID is also corrupted (matching
+		// shape-bad) the equality comparison would still fire and
+		// silently drop the entry under the wrong reason. Keep this
+		// ordering load-bearing.
 		if !looksLikeSlackUserID(a) {
 			continue
 		}
