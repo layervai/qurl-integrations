@@ -434,7 +434,7 @@ func TestCreateInputJSON_OnceTrue(t *testing.T) {
 	if got, _ := parsed["one_time_use"].(bool); !got {
 		t.Errorf("one_time_use = %v, want true", parsed["one_time_use"])
 	}
-	if !strings.Contains(async, "(one-time use)") {
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
 		t.Errorf("async reply missing one-time-use suffix: %q", async)
 	}
 }
