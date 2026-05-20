@@ -376,7 +376,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   // Cold-bootstrap with N replicas + empty SSM creates N duplicate subs
   // (each replica POSTs concurrently). This path tests RECOVERY on the
   // next boot: pick deterministic survivor, DELETE others, continue.
-  it('deletes duplicates and keeps oldest-by-created_at survivor', async () => {
+  it('deletes duplicates and keeps oldest-by-created_at survivor (force-rotates the survivor)', async () => {
     const deletedIds = [];
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -386,10 +386,11 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => { deletedIds.push('wh_b'); return { status: 204, body: '' }; },
       'DELETE /v1/webhooks/wh_c': () => { deletedIds.push('wh_c'); return { status: 204, body: '' }; },
+      'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot' } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
     expect(result.webhookId).toBe('wh_a');
-    expect(result.action).toBe('reused');
+    expect(result.action).toBe('rotated'); // dedupe always force-rotates
     expect(deletedIds.sort()).toEqual(['wh_b', 'wh_c']);
   });
 
@@ -401,6 +402,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
         { webhook_id: 'wh_aaa', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] }, // lex-first — survivor
       ] } }),
       'DELETE /v1/webhooks/wh_zzz': () => { deletedIds.push('wh_zzz'); return { status: 204, body: '' }; },
+      'POST /v1/webhooks/wh_aaa/secret': () => ({ body: { data: { webhook_id: 'wh_aaa', secret: 'whsec_rot' } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
     expect(result.webhookId).toBe('wh_aaa');
@@ -417,10 +419,41 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
         { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 404, body: { error: 'not found' } }),
+      'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot' } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
     expect(result.webhookId).toBe('wh_a');
-    expect(result.action).toBe('reused');
+    expect(result.action).toBe('rotated');
+  });
+
+  it('force-rotates the survivor even when initialSecret is real (closes SSM↔survivor mismatch)', async () => {
+    // Cold-bootstrap created N subs each with distinct server-generated
+    // secrets. The SSM-persisted secret (last-write-wins) almost
+    // certainly belongs to a replica whose sub we just DELETEd. If we
+    // took the REUSE path with initialSecret, the receiver would 401
+    // every inbound forever (survivor's secret is unknown). Force-
+    // rotate produces a known-good secret tied to the survivor.
+    let rotated = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T10:00:00Z' }, // survivor
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T11:00:00Z' },
+      ] } }),
+      'DELETE /v1/webhooks/wh_b': () => ({ status: 204, body: '' }),
+      'POST /v1/webhooks/wh_a/secret': () => {
+        rotated = true;
+        return { body: { data: { webhook_id: 'wh_a', secret: 'whsec_post_dedupe' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription({
+      ...BASE_OPTS,
+      initialSecret: 'whsec_was_in_ssm_but_for_wh_b',
+    });
+    expect(rotated).toBe(true);
+    expect(result.webhookId).toBe('wh_a');
+    expect(result.action).toBe('rotated'); // NOT 'reused' — dedupe forces rotate
+    expect(result.secret).toBe('whsec_post_dedupe');
+    expect(result.secret).not.toBe('whsec_was_in_ssm_but_for_wh_b');
   });
 
   it('propagates non-404 DELETE errors so a real failure surfaces', async () => {
@@ -432,6 +465,38 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
       'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
     });
     await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' })).rejects.toThrow(/500/);
+  });
+});
+
+describe('ensureWebhookSubscription — real config integration (setQurlWebhookSecret)', () => {
+  // The fakeConfig-based mutation-seam test (above) keeps the unit
+  // hermetic but pins a synthesized shape. This test exercises the
+  // REAL `setQurlWebhookSecret` from src/config.js so a future rename
+  // or signature change is caught loudly here instead of at boot.
+  it('writing through the real config setter updates the canonical export', () => {
+    const config = require('../src/config');
+    const prev = config.QURL_WEBHOOK_SECRET;
+    try {
+      config.setQurlWebhookSecret('whsec_integration_test');
+      expect(config.QURL_WEBHOOK_SECRET).toBe('whsec_integration_test');
+    } finally {
+      config.setQurlWebhookSecret(prev);
+    }
+  });
+
+  it('works even when destructured-and-called (closure-captures module.exports, not `this`)', () => {
+    const { setQurlWebhookSecret } = require('../src/config');
+    const config = require('../src/config');
+    const prev = config.QURL_WEBHOOK_SECRET;
+    try {
+      // Pre-fix shorthand `setQurlWebhookSecret(secret) { this.X = secret }`
+      // would silently TypeError here because `this` is undefined in
+      // strict-mode standalone calls.
+      setQurlWebhookSecret('whsec_destructured');
+      expect(config.QURL_WEBHOOK_SECRET).toBe('whsec_destructured');
+    } finally {
+      setQurlWebhookSecret(prev);
+    }
   });
 });
 

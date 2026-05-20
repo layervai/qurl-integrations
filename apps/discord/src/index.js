@@ -1134,7 +1134,12 @@ async function start() {
       ensureWebhookSubscription({
         apiEndpoint: config.QURL_ENDPOINT,
         apiKey: config.QURL_API_KEY,
-        bridgeUrl: `${config.BASE_URL}/webhooks/qurl`,
+        // Strip a trailing slash so `BASE_URL=https://bot/` doesn't
+        // produce `https://bot//webhooks/qurl` — canonicalUrl can
+        // normalize trailing-slash drift between subs, but not an
+        // internal double slash, which would silently fail to match
+        // any hand-registered sub that lacks it.
+        bridgeUrl: `${config.BASE_URL.replace(/\/$/, '')}/webhooks/qurl`,
         description,
         // Pass the SSM-loaded secret so the registrar can skip rotation
         // when steady-state (existing sub + non-PLACEHOLDER secret) —

@@ -235,8 +235,14 @@ async function bestEffortPersist({ persistSecret, value }) {
     logger.info('qURL webhook secret persisted');
   } catch (err) {
     const level = err.name === 'AccessDeniedException' ? 'warn' : 'error';
+    // Cap err.message length — if a future SDK ever echoes the
+    // attempted-write value into a validation error, an unbounded log
+    // line would leak the secret to CloudWatch. 200 chars is enough
+    // for typical SDK errors ("User is not authorized to perform: ...")
+    // and short enough that a multi-KB leak would be visibly truncated.
+    const safeMsg = typeof err.message === 'string' ? err.message.slice(0, 200) : '';
     logger[level]('Webhook secret persistence failed (auto-register continues with in-memory secret only)', {
-      error: err.message,
+      error: safeMsg,
       code: err.name,
     });
   }
@@ -279,7 +285,8 @@ async function ensureWebhookSubscription(opts) {
   // converges without coordination.
   const matches = await findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl });
   const existing = pickSurvivor(matches);
-  if (matches.length > 1 && existing) {
+  const wasDedupe = matches.length > 1 && existing != null;
+  if (wasDedupe) {
     const losers = matches.filter(s => s.webhook_id !== existing.webhook_id);
     logger.warn('Webhook subscription duplicates detected — deleting non-survivors', {
       total: matches.length,
@@ -300,11 +307,18 @@ async function ensureWebhookSubscription(opts) {
   // initial secret means we're in steady-state — any other replica
   // already created the sub and put the secret in SSM/env, and we
   // can trust both. Rotating here would split-brain the fleet.
+  //
+  // EXCEPT after dedupe: the SSM secret may belong to a replica's POST
+  // that we just DELETEd (cold-bootstrap created N subs each with a
+  // distinct server-generated secret; SSM is last-write-wins, so the
+  // surviving sub's secret is almost certainly NOT the one in SSM).
+  // Force a rotate so SSM gets a known-good value tied to the
+  // survivor. One-time cost on dedupe; subsequent restarts reuse.
   const initialIsRealSecret = typeof initialSecret === 'string'
     && initialSecret.length > 0
     && initialSecret !== PLACEHOLDER_SECRET;
 
-  if (existing && initialIsRealSecret) {
+  if (existing && initialIsRealSecret && !wasDedupe) {
     webhookId = existing.webhook_id;
     secret = initialSecret;
     action = 'reused';
