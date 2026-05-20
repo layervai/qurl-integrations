@@ -158,6 +158,51 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
   });
 });
 
+describe('webhook-registrar Lambda — secret never echoes in handler response (all action paths)', () => {
+  // The handler-response shape MUST NOT contain `secret` — Terraform's
+  // aws_lambda_invocation echoes the entire response into its state +
+  // invocation log. Already pinned for `created`; this also covers
+  // `rotated` and `reused` to catch any future "convenience" return.
+  it('does not return secret on the rotated action', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_secret_to_hide' } },
+      }),
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(result.action).toBe('rotated');
+    expect(result).not.toHaveProperty('secret');
+    expect(JSON.stringify(result)).not.toContain('whsec_secret_to_hide');
+  });
+
+  it('does not return secret on the reused action', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'whsec_already_known_secret' } });
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(result.action).toBe('reused');
+    expect(result).not.toHaveProperty('secret');
+    expect(JSON.stringify(result)).not.toContain('whsec_already_known_secret');
+  });
+});
+
 describe('webhook-registrar Lambda — bootstrap rotate (existing sub, SSM empty)', () => {
   // Path that fires when an operator-or-prior-deploy created the
   // subscription out-of-band but the Lambda hasn't populated the

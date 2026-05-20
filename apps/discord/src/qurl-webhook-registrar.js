@@ -248,8 +248,13 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
   // raw TypeError with no context. Surface the contract violation
   // explicitly so the boot-log error is greppable.
   const data = resp?.data;
-  if (!data || typeof data.webhook_id !== 'string' || typeof data.secret !== 'string') {
-    throw new Error('createSubscription: contract drift (response missing webhook_id or secret)');
+  // length > 0 too — an empty-string secret would let the receiver
+  // verify against a zero-length HMAC key (any signature against ''
+  // produces the same digest), trivially bypassable.
+  if (!data
+      || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0
+      || typeof data.secret !== 'string' || data.secret.length === 0) {
+    throw new Error('createSubscription: contract drift (response missing or empty webhook_id/secret)');
   }
   return data;
 }
@@ -262,8 +267,8 @@ async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
     apiKey,
   });
   const data = resp?.data;
-  if (!data || typeof data.secret !== 'string') {
-    throw new Error('rotateSecret: contract drift (response missing secret)');
+  if (!data || typeof data.secret !== 'string' || data.secret.length === 0) {
+    throw new Error('rotateSecret: contract drift (response missing or empty secret)');
   }
   return data;
 }

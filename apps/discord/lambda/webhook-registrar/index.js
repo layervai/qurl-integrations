@@ -14,9 +14,19 @@
 // modest qURL traffic can flap legit clients into 429s.
 //
 // The deploy-time Lambda eliminates the race entirely: ONE invocation
-// per deploy, single-instance by design, never racy. Triggered by
-// Terraform `aws_lambda_invocation` (deploy succeeds only if
-// registration succeeded — fail-fast, no silent half-registered state).
+// per deploy, single-instance by design within a `terraform apply`,
+// never racy. Triggered by Terraform `aws_lambda_invocation` (deploy
+// succeeds only if registration succeeded — fail-fast, no silent
+// half-registered state).
+//
+// Caveat — the "single-instance" property is a TERRAFORM-level
+// invariant, not a Lambda-level one. Within one apply, `aws_lambda_invocation`
+// is synchronous → truly serial. Across concurrent applies (CI re-run
+// firing on a stale plan, two operators racing apply), the Lambda
+// will happily run two copies in parallel. The dedupe-recovery path in
+// ensureWebhookSubscription handles this defensively, but the infra-
+// repo SHOULD set the Lambda's reserved concurrency to 1 as belt-and-
+// suspenders so a stray concurrent invocation queues rather than runs.
 //
 // The Lambda reuses `apps/discord/src/qurl-webhook-registrar.js`'s
 // `ensureWebhookSubscription` + `buildSsmPersistSecret` directly —
@@ -132,6 +142,8 @@ async function readSsmSecureString({ ssmClient, name }) {
 // `https://bot//webhooks/qurl` and silently fail to match the bot's
 // actual receiver path. canonicalUrl normalizes drift BETWEEN subs
 // but not an internal `//`.
+const DESCRIPTION_WARN_LEN = 200;
+
 function validateAndNormalizeInput(event) {
   const required = ['apiEndpoint', 'bridgeUrl', 'description', 'ssmParamName', 'ssmRegion', 'apiKeySsmParamName'];
   for (const k of required) {
@@ -148,7 +160,20 @@ function validateAndNormalizeInput(event) {
       throw new Error(`webhook-registrar: ${k} must start with https:// (got: ${event[k].slice(0, 60)})`);
     }
   }
-  return { ...event, bridgeUrl: event.bridgeUrl.replace(/\/$/, '') };
+  // Description gets sliced to DESCRIPTION_MAX_LEN at the wire
+  // boundary in `createSubscription`. Warn here so an operator-
+  // configured oversized description (CI variable expansion gone
+  // wrong, copy-pasted multi-line string) is visible at invocation
+  // time rather than silently truncated in qurl-service's UI.
+  if (event.description.length > DESCRIPTION_WARN_LEN) {
+    console.warn(JSON.stringify({
+      msg: 'webhook-registrar: description exceeds warn length, will be clipped at wire boundary',
+      length: event.description.length,
+      limit: DESCRIPTION_WARN_LEN,
+    }));
+  }
+  const normalized = { ...event, bridgeUrl: event.bridgeUrl.replace(/\/$/, '') };
+  return normalized;
 }
 
 exports._internals = { getSsmClient, _resetSsmClientCacheForTests };
@@ -166,23 +191,20 @@ exports.handler = async (event, context) => {
     ssmRegion: event?.ssmRegion,
   }));
 
-  // Shadow `event` with the normalized one — all downstream reads
-  // get the trailing-slash-stripped bridgeUrl.
-  // eslint-disable-next-line no-param-reassign
-  event = validateAndNormalizeInput(event);
+  const input = validateAndNormalizeInput(event);
 
-  const ssmClient = getSsmClient(event.ssmRegion);
+  const ssmClient = getSsmClient(input.ssmRegion);
 
   // Read the qurl-service API key from SSM by name — keeps the value
   // out of Terraform state, Lambda env, and invocation logs. The
   // Lambda's IAM role has GetParameter on this specific parameter
   // (scoped in qurl-integrations-infra).
-  const apiKey = await readSsmSecureString({ ssmClient, name: event.apiKeySsmParamName });
+  const apiKey = await readSsmSecureString({ ssmClient, name: input.apiKeySsmParamName });
   if (!apiKey) {
     // Falsy catches both `null` (ParameterNotFound mapped) and `''`
     // (parameter present but empty value). Message lists both so a
     // future re-throw / test reader knows what fired.
-    throw new Error(`webhook-registrar: SSM parameter ${event.apiKeySsmParamName} returned empty or missing (ParameterNotFound or zero-length value)`);
+    throw new Error(`webhook-registrar: SSM parameter ${input.apiKeySsmParamName} returned empty or missing (ParameterNotFound or zero-length value)`);
   }
 
   // Read existing webhook secret (if any) so the registrar can take
@@ -192,7 +214,7 @@ exports.handler = async (event, context) => {
   // (manual rotation, scheduled rotation) the SSM value is the
   // previously-persisted secret — ensureWebhookSubscription's
   // initialIsRealSecret guard reuses it if the sub still matches.
-  const initialSecret = await readSsmSecureString({ ssmClient, name: event.ssmParamName });
+  const initialSecret = await readSsmSecureString({ ssmClient, name: input.ssmParamName });
 
   // Lambda STRICT-persist path: do NOT pass `persistSecret` into
   // `ensureWebhookSubscription` (its `bestEffortPersist` swallows
@@ -204,10 +226,10 @@ exports.handler = async (event, context) => {
   // the Lambda loudly → Terraform apply fails → operator notices
   // instead of half-registered state shipping silently.
   const result = await ensureWebhookSubscription({
-    apiEndpoint: event.apiEndpoint,
+    apiEndpoint: input.apiEndpoint,
     apiKey,
-    bridgeUrl: event.bridgeUrl,
-    description: event.description,
+    bridgeUrl: input.bridgeUrl,
+    description: input.description,
     initialSecret,
     // persistSecret intentionally omitted — handled below with strict
     // throw-on-failure semantics.
@@ -222,7 +244,7 @@ exports.handler = async (event, context) => {
   if (result.action !== 'reused') {
     const persist = buildSsmPersistSecret({
       ssmClient,
-      paramName: event.ssmParamName,
+      paramName: input.ssmParamName,
       PutParameterCommand,
     });
     await persist(result.secret);
