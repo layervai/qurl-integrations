@@ -38,7 +38,7 @@ const (
 	SubcmdList Subcommand = "list"
 )
 
-// AdminAction is the second word after `admin` (e.g. `admin claim`).
+// AdminAction is the second word after `admin` (e.g. `admin revoke`).
 type AdminAction string
 
 // Recognized admin actions.
