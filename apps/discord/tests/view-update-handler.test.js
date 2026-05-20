@@ -178,18 +178,18 @@ describe('createHandleViewUpdate', () => {
       expect(deps.safeEdit).not.toHaveBeenCalled();
     });
 
-    test('onAllDone does NOT fire when hasInteraction()=false (handler returns before the pending check)', () => {
+    test('onAllDone DOES fire even when hasInteraction()=false (interval teardown is interaction-independent)', () => {
       const deps = buildDeps({ hasInteraction: () => false, getExpectedCount: () => 1 });
       deps.linkStatus.set('qrl_a', { status: 'pending', username: 'a' });
       const handler = createHandleViewUpdate(deps);
       handler({ accessCount: 1 }, 'qrl_a');
-      // Contract: when interaction is nulled (post-stop or post-token-
-      // expiry), the handler mutates linkStatus + viewed but returns
-      // before the pending-check + onAllDone fire. The polling tick's
-      // isTerminated() or maxMonitorMs cap catches the all-done state
-      // on the next iteration. See the asymmetry comment in
-      // view-update-handler.js.
-      expect(deps.onAllDone).not.toHaveBeenCalled();
+      // Contract per cr round-5 #3: onAllDone is hoisted ABOVE the
+      // hasInteraction() gate so an interval teardown is reachable
+      // even if interaction is nulled outside stop() (e.g., a future
+      // token-expiry refactor). State mutates → pending hits 0 →
+      // onAllDone fires; safeEdit is still gated on hasInteraction.
+      expect(deps.onAllDone).toHaveBeenCalledTimes(1);
+      expect(deps.safeEdit).not.toHaveBeenCalled();
     });
   });
 

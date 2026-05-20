@@ -166,8 +166,27 @@ describe('view-update-consumer', () => {
 
       expect(cb).not.toHaveBeenCalled();
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('access_count not a non-negative safe integer'),
+        expect.stringContaining('access_count not a positive safe integer'),
         expect.any(Object),
+      );
+    });
+
+    test('access_count of 0 is dropped at parse boundary (cr round-5 #1)', () => {
+      // Tightened from `< 0` to `<= 0` so 0-count envelopes drop at
+      // the parse boundary instead of dispatching into the handler
+      // (which would also drop, but with a wider validation gate).
+      // qurl.accessed events always carry access_count >= 1, so a 0
+      // is a wire-shape regression worth surfacing.
+      const cb = jest.fn();
+      registry.register('qrl_x', cb);
+      consumer._test.processMessage({
+        Body: JSON.stringify({ qurl_id: 'qrl_x', access_count: 0 }),
+        ReceiptHandle: 'rh-zero',
+      });
+      expect(cb).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('access_count not a positive safe integer'),
+        expect.objectContaining({ access_count: 0 }),
       );
     });
 
@@ -186,30 +205,25 @@ describe('view-update-consumer', () => {
 
   describe('pollOnce', () => {
     test('receives + deletes each message', async () => {
+      // cr round-5 #4: drive pollOnce directly (no start() + background
+      // pollLoop race). We seed stopController via the test helper so
+      // pollOnce's abortSignal binding works, but no background loop
+      // competes with this test's pollOnce for the resolvesOnce.
       const cb = jest.fn();
       registry.register('qrl_x', cb);
 
-      // resolvesOnce + resolves: only the FIRST ReceiveMessage call
-      // gets the message; subsequent calls (whether from the background
-      // pollLoop spawned by start() or the manual pollOnce() below)
-      // see an empty queue. Net effect: exactly one delete, regardless
-      // of which loop's pollOnce processed the message — synchronous
-      // pollLoop scheduling means the background loop usually wins the
-      // race, but assertions don't depend on the winner.
-      sqsMock.on(ReceiveMessageCommand)
-        .resolvesOnce({
-          Messages: [
-            {
-              MessageId: 'm1',
-              ReceiptHandle: 'rh-1',
-              Body: JSON.stringify({ qurl_id: 'qrl_x', access_count: 3, consumed: false }),
-            },
-          ],
-        })
-        .resolves({ Messages: [] });
+      sqsMock.on(ReceiveMessageCommand).resolves({
+        Messages: [
+          {
+            MessageId: 'm1',
+            ReceiptHandle: 'rh-1',
+            Body: JSON.stringify({ qurl_id: 'qrl_x', access_count: 3, consumed: false }),
+          },
+        ],
+      });
       sqsMock.on(DeleteMessageBatchCommand).resolves({});
 
-      consumer.start();
+      consumer._test._setStopControllerForTest(new AbortController());
       await consumer._test.pollOnce();
 
       expect(cb).toHaveBeenCalled();
@@ -218,34 +232,28 @@ describe('view-update-consumer', () => {
       const entries = delCalls[0].args[0].input.Entries;
       expect(entries).toHaveLength(1);
       expect(entries[0].ReceiptHandle).toBe('rh-1');
-
-      await consumer.stop();
     });
 
     test('silent-drop-on-miss still deletes the message', async () => {
       // No callback registered. Consumer should still DELETE so it
       // doesn't re-deliver to the same replica on visibility expiry.
-      sqsMock.on(ReceiveMessageCommand)
-        .resolvesOnce({
-          Messages: [
-            {
-              MessageId: 'm1',
-              ReceiptHandle: 'rh-1',
-              Body: JSON.stringify({ qurl_id: 'qrl_nobody_home', access_count: 1, consumed: false }),
-            },
-          ],
-        })
-        .resolves({ Messages: [] });
+      sqsMock.on(ReceiveMessageCommand).resolves({
+        Messages: [
+          {
+            MessageId: 'm1',
+            ReceiptHandle: 'rh-1',
+            Body: JSON.stringify({ qurl_id: 'qrl_nobody_home', access_count: 1, consumed: false }),
+          },
+        ],
+      });
       sqsMock.on(DeleteMessageBatchCommand).resolves({});
 
-      consumer.start();
+      consumer._test._setStopControllerForTest(new AbortController());
       await consumer._test.pollOnce();
 
       const delCalls = sqsMock.commandCalls(DeleteMessageBatchCommand);
       expect(delCalls).toHaveLength(1);
       expect(delCalls[0].args[0].input.Entries[0].ReceiptHandle).toBe('rh-1');
-
-      await consumer.stop();
     });
 
     test('AbortError on ReceiveMessage is handled cleanly (no log)', async () => {
@@ -253,7 +261,7 @@ describe('view-update-consumer', () => {
       abortErr.name = 'AbortError';
       sqsMock.on(ReceiveMessageCommand).rejects(abortErr);
 
-      consumer.start();
+      consumer._test._setStopControllerForTest(new AbortController());
       await consumer._test.pollOnce();
 
       // AbortError is the expected shape during stop() — must not
@@ -262,8 +270,6 @@ describe('view-update-consumer', () => {
         ([msg]) => typeof msg === 'string' && msg.includes('ReceiveMessage failed'),
       );
       expect(errLogs).toHaveLength(0);
-
-      await consumer.stop();
     });
 
     test('AbortError via err.code (older SDK shape) is also handled cleanly', async () => {
@@ -271,15 +277,13 @@ describe('view-update-consumer', () => {
       abortErr.code = 'AbortError';
       sqsMock.on(ReceiveMessageCommand).rejects(abortErr);
 
-      consumer.start();
+      consumer._test._setStopControllerForTest(new AbortController());
       await consumer._test.pollOnce();
 
       const errLogs = logger.warn.mock.calls.filter(
         ([msg]) => typeof msg === 'string' && msg.includes('ReceiveMessage failed'),
       );
       expect(errLogs).toHaveLength(0);
-
-      await consumer.stop();
     });
 
     test('SDK response missing Messages property is handled (defensive ?? [])', async () => {
@@ -290,7 +294,7 @@ describe('view-update-consumer', () => {
       // default fails this test loudly.
       sqsMock.on(ReceiveMessageCommand).resolves({ /* no Messages key */ });
 
-      consumer.start();
+      consumer._test._setStopControllerForTest(new AbortController());
       await consumer._test.pollOnce();
 
       // No callback fired, no log line about parsing failure.
@@ -298,22 +302,23 @@ describe('view-update-consumer', () => {
         ([msg]) => typeof msg === 'string' && msg.includes('malformed'),
       );
       expect(errLogs).toHaveLength(0);
-
-      await consumer.stop();
     });
 
     test('non-AbortError on ReceiveMessage is logged + returns cleanly', async () => {
       sqsMock.on(ReceiveMessageCommand).rejects(new Error('SQS throttled'));
+      // Pre-arm a long-completed abort signal to skip the backoff
+      // sleep — the error path waits POLL_ERROR_BACKOFF_MS via
+      // abortableSleep otherwise.
+      const ctrl = new AbortController();
+      ctrl.abort();
+      consumer._test._setStopControllerForTest(ctrl);
 
-      consumer.start();
       await consumer._test.pollOnce();
 
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('ReceiveMessage failed'),
         expect.objectContaining({ error: 'SQS throttled' }),
       );
-
-      await consumer.stop();
     });
   });
 

@@ -25,6 +25,16 @@
 // "right" replica picks it up would just re-deliver to the wrong
 // replica on visibility-timeout expiry — the polling fallback covers
 // the miss case correctly.
+//
+// During shutdown: if stop() aborts after processMessage (synchronous,
+// fast) but before deleteMessageBatch lands, the registry has already
+// dispatched but the SQS message will redeliver after visibility
+// timeout. Idempotent dispatch covers correctness (the
+// `status === 'opened'` guard in the handler no-ops the redeliver);
+// operators will see a duplicate access_count dispatch in metrics
+// during the graceful-shutdown window. Acceptable cost — the
+// alternative is awaiting the delete inside the abort signal, which
+// extends shutdown latency past the 10s budget.
 
 const { SQSClient, ReceiveMessageCommand, DeleteMessageBatchCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
@@ -165,8 +175,12 @@ function processMessage(message) {
     return;
   }
   const accessCount = envelope.access_count;
-  if (!Number.isSafeInteger(accessCount) || accessCount < 0) {
-    logger.warn('view-update-consumer: envelope access_count not a non-negative safe integer, dropping', {
+  if (!Number.isSafeInteger(accessCount) || accessCount <= 0) {
+    // Tightened from `< 0` to `<= 0` so 0-count envelopes drop at
+    // the parse boundary (matches the handler's `accessCount > 0`
+    // gate). qurl.accessed events always carry `access_count >= 1`,
+    // so a 0 would be a wire-shape regression worth surfacing.
+    logger.warn('view-update-consumer: envelope access_count not a positive safe integer, dropping', {
       qurl_id: qurlId,
       access_count: accessCount,
     });
@@ -309,6 +323,11 @@ module.exports = {
   _test: {
     _setSqsClientForTest,
     _resetStateForTest,
+    // Lets tests drive pollOnce directly without spawning the
+    // background pollLoop via start(). Required by cr round-5 #4 —
+    // pollOnce needs stopController.signal to exist.
+    _setStopControllerForTest: (controller) => { stopController = controller; },
+    _setRunningForTest: (v) => { running = v; },
     pollOnce,
     processMessage,
     isRunning: () => running,

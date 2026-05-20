@@ -57,18 +57,24 @@ function createHandleViewUpdate({
     linkStatus.set(qurlId, { ...current, status: 'opened' });
     setViewed(getViewed() + 1);
     // Asymmetry vs runTick (commands.js): the poll path's
-    // `if (!interaction) return` GATES before its views loop, so it
+    // `if (!interaction) return` gates before its views loop, so it
     // never bumps `viewed` on a nulled-interaction tick. The push
     // path here bumps first so the in-memory counter stays consistent
     // with the eventual DDB state. Unreachable in practice today —
     // `interaction` is only nulled by stop(), after which isStopped()
     // gates above — but the order matters if a future refactor adds
     // a token-expiry path that nulls interaction without going
-    // through stop(). Either-shape behavior is documented; do not
-    // "fix" the asymmetry without verifying the polling-path branch
-    // too. Same applies to onAllDone below.
-    if (!hasInteraction()) return;
+    // through stop().
     const pending = Math.max(0, getExpectedCount() - getViewed());
+    // Hoisted ABOVE the hasInteraction() gate so a push event that
+    // takes pending to 0 tears down the interval even when the
+    // interaction token is null (cr round-5 #3). onAllDone()'s side
+    // effects (allDone=true + clearInterval(timer)) are safe with a
+    // nulled interaction; without this hoist, a polling-path
+    // refactor that nulled interaction outside stop() would leave
+    // the interval spinning until the 14-min maxMonitorMs cap.
+    if (pending === 0) onAllDone();
+    if (!hasInteraction()) return;
     // getButtonRow() is a getter (vs. capturing the value) because
     // the monitor reassigns buttonRow to null in stop(); a snapshot
     // at factory-call time would pin a stale reference past stop().
@@ -82,7 +88,6 @@ function createHandleViewUpdate({
         error: err.message,
       });
     });
-    if (pending === 0) onAllDone();
   };
 }
 

@@ -1170,7 +1170,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // per-event DDB BatchGet. Polling tick remains the correctness
   // primitive. Handler factory in view-update-handler.js so the
   // state matrix is unit-testable without a full monitor closure.
-  const viewUpdateRegisteredQurlIds = [];
+  //
+  // Unregister at stop() iterates `trackedQurlIds` directly (set
+  // cleared AFTER the unregister loop). Registry.unregister is a
+  // no-op for keys never registered (e.g. when the flag is off), so
+  // iterating the superset is safe.
   const handleViewUpdate = createHandleViewUpdate({
     sendId,
     linkStatus,
@@ -1192,7 +1196,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   function registerViewUpdateFor(qurlId) {
     if (!config.ENABLE_VIEW_UPDATE_PUSH) return;
     viewUpdateRegistry.register(qurlId, handleViewUpdate);
-    viewUpdateRegisteredQurlIds.push(qurlId);
   }
   for (const qurlId of trackedQurlIds) {
     registerViewUpdateFor(qurlId);
@@ -1275,10 +1278,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       // stop() (feat #60). Load-bearing: a long-running monitor that
       // never unregisters would otherwise hold linkStatus + safeEdit
       // references via the shared closure until process restart.
-      for (const qurlId of viewUpdateRegisteredQurlIds) {
+      // Iterates trackedQurlIds directly (no parallel bookkeeping
+      // array) — set cleared in the next two lines, so order matters.
+      for (const qurlId of trackedQurlIds) {
         viewUpdateRegistry.unregister(qurlId, handleViewUpdate);
       }
-      viewUpdateRegisteredQurlIds.length = 0;
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;
