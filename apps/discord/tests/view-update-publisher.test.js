@@ -121,7 +121,7 @@ describe('view-update-publisher', () => {
       expect(typeof body.published_at_ms).toBe('number');
     });
 
-    test('non-boolean consumed logs warning + coerces to false (cr round-3 #8)', async () => {
+    test('non-boolean consumed logs warning + coerces to false', async () => {
       sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
       publisher.start();
       publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: 'truthy-string', eventId: 'evt_a' });
@@ -161,7 +161,7 @@ describe('view-update-publisher', () => {
       );
     });
 
-    test('rejects invalid accessCount without sending (cr round-6 parity with consumer gate)', () => {
+    test('rejects invalid accessCount without sending (parity with consumer gate)', () => {
       publisher.start();
       for (const ac of [0, -1, 1.5, NaN, 'one', null, undefined]) {
         publisher.publish({ qurlId: 'qrl_a', accessCount: ac, consumed: false, eventId: 'evt' });

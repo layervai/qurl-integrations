@@ -171,7 +171,7 @@ describe('view-update-consumer', () => {
       );
     });
 
-    test('access_count of 0 is dropped at parse boundary (cr round-5 #1)', () => {
+    test('access_count of 0 is dropped at parse boundary', () => {
       // Tightened from `< 0` to `<= 0` so 0-count envelopes drop at
       // the parse boundary instead of dispatching into the handler
       // (which would also drop, but with a wider validation gate).
@@ -205,7 +205,7 @@ describe('view-update-consumer', () => {
 
   describe('pollOnce', () => {
     test('receives + deletes each message', async () => {
-      // cr round-5 #4: drive pollOnce directly (no start() + background
+      // Drive pollOnce directly (no start() + background
       // pollLoop race). We seed stopController via the test helper so
       // pollOnce's abortSignal binding works, but no background loop
       // competes with this test's pollOnce for the resolvesOnce.
@@ -340,7 +340,7 @@ describe('view-update-consumer', () => {
       await consumer.stop();
     });
 
-    test('pollLoop defense-in-depth path flips running=false before invoking onFatalCb (cr round-7 #1)', () => {
+    test('pollLoop defense-in-depth path flips running=false before invoking onFatalCb', () => {
       // Direct test of the defense-in-depth fatal-path order: the
       // module-state flip (running=false) must precede onFatalCb so a
       // caller without an onFatal handler doesn't end up wedged with

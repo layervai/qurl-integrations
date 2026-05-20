@@ -204,10 +204,10 @@ describe('missingViewUpdatePushKeys', () => {
     ).toEqual([]);
   });
 
-  // cr round-5 #7: pin the asymmetric "URL set without the flag"
-  // case. During the flag-flip rollout, infra changes may land the
-  // URL on the task def BEFORE the flag flips — the boot check
-  // must treat that as a harmlessly-ignored config.
+  // Pin the asymmetric "URL set without the flag" case. During the
+  // flag-flip rollout, infra changes may land the URL on the task
+  // def BEFORE the flag flips — the boot check must treat that as
+  // a harmlessly-ignored config.
   it('returns empty when URL is set but flag is off (mid-rollout shape)', () => {
     expect(
       missingViewUpdatePushKeys({
@@ -218,7 +218,7 @@ describe('missingViewUpdatePushKeys', () => {
   });
 });
 
-// cr round-5 #5: pin the contract that combined-mode + view-update-push
+// Pin the contract that combined-mode + view-update-push
 // is intentionally accepted (no analog of `unsupportedRoleShipperCombo`).
 // Locks the design so a copy-paste-from-shipper refactor doesn't silently
 // add a rejection.

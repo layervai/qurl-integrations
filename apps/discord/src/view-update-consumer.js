@@ -217,7 +217,7 @@ async function pollOnce() {
       MaxNumberOfMessages: MAX_MESSAGES_PER_RECEIVE,
       WaitTimeSeconds: RECEIVE_WAIT_SECONDS,
       VisibilityTimeout: RECEIVE_VISIBILITY_SECONDS,
-    }), { abortSignal: stopController.signal });
+    }), { abortSignal: stopController?.signal });
   } catch (err) {
     if (isAbortError(err)) return;
     logger.warn('view-update-consumer: ReceiveMessage failed', {
@@ -252,7 +252,7 @@ async function pollLoop() {
         error: err?.message,
       });
       // Flip running=false BEFORE invoking onFatalCb so module state
-      // matches reality (cr round-7 #1). Production wiring always
+      // matches reality. Production wiring always
       // passes onFatal=gracefulShutdown which would call stop() and
       // flip this anyway, but the onFatal contract is documented
       // optional — without this flip, a no-onFatal caller would be
@@ -338,8 +338,9 @@ module.exports = {
     _setSqsClientForTest,
     _resetStateForTest,
     // Lets tests drive pollOnce directly without spawning the
-    // background pollLoop via start(). Required by cr round-5 #4 —
-    // pollOnce needs stopController.signal to exist.
+    // background pollLoop via start(). Required because pollOnce
+    // needs stopController.signal to exist (the abort plumbing for
+    // the long-poll receive).
     _setStopControllerForTest: (controller) => { stopController = controller; },
     _setRunningForTest: (v) => { running = v; },
     pollOnce,

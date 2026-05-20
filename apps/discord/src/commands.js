@@ -1222,7 +1222,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       // callbacks against the registry — the latter wouldn't be
       // unregistered (stop() has already iterated trackedQurlIds),
       // pinning the closure (linkStatus + safeEdit) until process
-      // restart (cr round-8 #2). Pre-#60 fields (expectedCount,
+      // restart. Pre-#60 fields (expectedCount,
       // linkStatus) also leaked into a dead monitor; this guard
       // closes both the new + pre-existing leak surfaces.
       if (stopped) return;

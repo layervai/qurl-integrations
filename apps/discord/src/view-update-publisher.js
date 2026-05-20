@@ -105,7 +105,7 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
   // `data.consumed` to a literal boolean before calling here, so
   // anything other than `true` / `false` arriving at this point is a
   // caller-side regression worth surfacing. Log + coerce-to-false
-  // rather than silently flipping (cr round-3 #8).
+  // rather than silently flipping a string into a false-boolean.
   let consumedBool = consumed;
   if (typeof consumedBool !== 'boolean') {
     logger.warn('view-update-publisher: consumed is not a boolean (contract regression)', {
@@ -130,7 +130,7 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
         logger.warn('view-update-publisher: SendMessage failed (fire-and-log)', {
           qurl_id: qurlId,
           error: err.message,
-          stack: err.stack,
+          stack: err?.stack,
           kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL,
         });
       })

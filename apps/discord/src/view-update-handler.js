@@ -68,7 +68,7 @@ function createHandleViewUpdate({
     const pending = Math.max(0, getExpectedCount() - getViewed());
     // Hoisted ABOVE the hasInteraction() gate so a push event that
     // takes pending to 0 tears down the interval even when the
-    // interaction token is null (cr round-5 #3). onAllDone()'s side
+    // interaction token is null. onAllDone()'s side
     // effects (allDone=true + clearInterval(timer)) are safe with a
     // nulled interaction; without this hoist, a polling-path
     // refactor that nulled interaction outside stop() would leave

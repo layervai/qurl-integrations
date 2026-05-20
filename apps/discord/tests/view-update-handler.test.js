@@ -17,9 +17,9 @@
  *   - getButtonRow() called fresh on each invocation (catches stop()
  *     setting it to null without keeping a stale reference)
  *
- * cr round-3 #1 motivated the extraction — these tests close the
- * "what could regress later" surface that the in-place closure body
- * couldn't reach.
+ * The factory extraction lets these tests close the "what could
+ * regress later" surface that the in-place closure body couldn't
+ * reach.
  */
 
 const { createHandleViewUpdate } = require('../src/view-update-handler');
@@ -183,7 +183,7 @@ describe('createHandleViewUpdate', () => {
       deps.linkStatus.set('qrl_a', { status: 'pending', username: 'a' });
       const handler = createHandleViewUpdate(deps);
       handler({ accessCount: 1 }, 'qrl_a');
-      // Contract per cr round-5 #3: onAllDone is hoisted ABOVE the
+      // Contract: onAllDone is hoisted ABOVE the
       // hasInteraction() gate so an interval teardown is reachable
       // even if interaction is nulled outside stop() (e.g., a future
       // token-expiry refactor). State mutates → pending hits 0 →
@@ -220,14 +220,13 @@ describe('createHandleViewUpdate', () => {
     });
   });
 
-  // cr round-8 #2 surfaced a GC leak shape — post-stop addRecipients
-  // calls would register new callbacks without an unregister path.
-  // The fix lives in commands.js's addRecipients (early-out on
-  // stopped). This test pins the contract at the handler layer: an
-  // isStopped()=true handler invocation is a no-op even if the
-  // registry has the callback still wired up. Belt-and-suspenders
-  // for the addRecipients-after-stop regression class.
-  describe('post-stop dispatch is a strict no-op (cr round-8 #2 backstop)', () => {
+  // GC leak shape backstop: a post-stop addRecipients in commands.js
+  // would otherwise register new callbacks without an unregister
+  // path. The primary fix is the early-out at the top of
+  // addRecipients (commands.js); this test pins the contract at the
+  // handler layer that an isStopped()=true handler invocation is a
+  // strict no-op even if the registry still has the callback wired.
+  describe('post-stop dispatch is a strict no-op (GC leak backstop)', () => {
     test('stopped handler does not mutate linkStatus, viewed, safeEdit, or onAllDone', () => {
       const deps = buildDeps({ isStopped: () => true });
       deps.linkStatus.set('qrl_a', { status: 'pending', username: 'u' });
