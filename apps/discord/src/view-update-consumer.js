@@ -151,6 +151,11 @@ async function deleteMessageBatch(messages) {
       })),
     }), { abortSignal: stopController?.signal });
     if (resp.Failed && resp.Failed.length > 0) {
+      // TODO(view-update-delete-dedup, #475): a sender-fault entry
+      // (e.g. ReceiptHandleIsInvalid) will redeliver until the
+      // message-retention-period expires, re-logging the same error
+      // each pass. If soak logs show repetition, switch to dedup
+      // on f.Code or short-circuit on the non-retriable codes here.
       logger.warn('view-update-consumer: DeleteMessageBatch had partial failures', {
         failed_count: resp.Failed.length,
         errors: resp.Failed.map((f) => ({ id: f.Id, code: f.Code, message: f.Message })),
@@ -324,6 +329,13 @@ async function stop() {
   // re-enters here, so awaiting loopPromise would be a no-op. Callers
   // that want a "loop has fully unwound" signal should rely on
   // running=false (after the early return, it's already false).
+  //
+  // stopController stays unaborted in this path. Harmless because the
+  // old controller has no live listeners post-fatal (the pollLoop's
+  // ReceiveMessage long-poll was synchronously throwing the error
+  // that triggered the fatal path, so the signal binding is moot).
+  // A subsequent start() creates a fresh controller and discards the
+  // stale one to GC.
   if (!running || stopController?.signal.aborted) return;
   stopController.abort();
   logger.info('view-update-consumer: stopping');

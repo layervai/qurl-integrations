@@ -90,6 +90,14 @@ function missingEventShipperKeys(cfg) {
 // event silently (publisher) or throw at start() (consumer); the
 // uniform boot-time check makes the failure mode loud and consistent
 // with the existing event-shipper gate.
+//
+// Intentionally no combined-mode rejector (no analog of
+// unsupportedRoleShipperCombo). The registry's silent-drop-on-miss +
+// status==='opened' idempotency guard make combined-mode safe: a
+// duplicate dispatch within one process is a no-op at the handler
+// layer. Pinned by tests/boot-requirements.test.js's absence
+// assertion — a copy-paste-from-shipper refactor that adds a
+// rejector would fail that test.
 function missingViewUpdatePushKeys(cfg) {
   if (!cfg.ENABLE_VIEW_UPDATE_PUSH) return [];
   return cfg.QURL_BOT_VIEW_UPDATES_QUEUE_URL ? [] : ['QURL_BOT_VIEW_UPDATES_QUEUE_URL'];

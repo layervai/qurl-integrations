@@ -88,6 +88,12 @@ function createHandleViewUpdate({
     // throws (effectively never). Kept so a future refactor that
     // removes safeEdit's internal swallow can't surface as an
     // UnhandledRejection from this fire-and-forget dispatch.
+    //
+    // Relies on safeEdit being `async` (returns a Promise). A future
+    // refactor that switches safeEdit to a sync-return shape would
+    // make this `.catch` throw at runtime — pin the async return
+    // shape if that refactor is contemplated, or wrap with
+    // `Promise.resolve(safeEdit(...))` for paranoid safety.
     safeEdit({
       content: buildStatusMsg(),
       components: pending > 0 ? [getButtonRow()] : [],
