@@ -123,6 +123,14 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   reconciled by subsequent Lambda invocations. Region/env rename
   leaves the qurl-service UI label stale until the subscription is
   recreated. Observability-only — the bot keeps working.
+- **`bridgeUrl` change → orphaned old subscription**: if `BASE_URL`
+  changes (domain migration, env rename, https/host swap), the
+  Lambda's `canonicalUrl` match against the existing sub fails and a
+  NEW subscription is created at the new URL. The OLD sub remains
+  registered with qurl-service and keeps trying to deliver to the
+  defunct URL until manually deleted. Recovery: run the manual
+  `DELETE /v1/webhooks/{old_id}` curl from the appendix below for the
+  old sub after confirming the new one is healthy.
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.

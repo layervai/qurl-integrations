@@ -139,6 +139,15 @@ function validateAndNormalizeInput(event) {
       throw new Error(`webhook-registrar: missing or invalid input field: ${k}`);
     }
   }
+  // Defensive `https://` check on both URL fields — a Terraform
+  // input typo (`http://` for either, or a placeholder literal that
+  // slipped through) would otherwise fail late. Catches the bad
+  // input at the boundary instead.
+  for (const k of ['apiEndpoint', 'bridgeUrl']) {
+    if (!event[k].startsWith('https://')) {
+      throw new Error(`webhook-registrar: ${k} must start with https:// (got: ${event[k].slice(0, 60)})`);
+    }
+  }
   return { ...event, bridgeUrl: event.bridgeUrl.replace(/\/$/, '') };
 }
 

@@ -386,6 +386,12 @@ async function ensureWebhookSubscription(opts) {
     && initialSecret.length > 0;
 
   if (existing && initialIsRealSecret && !wasDedupe) {
+    // Trust assumption: the SSM-loaded `initialSecret` matches the
+    // existing sub's server-side secret. No challenge/verify here.
+    // If SSM ever desyncs from qurl-service (partial backup restore,
+    // manual SSM edit, missed rotation step), the receiver 401s
+    // every webhook. Operator recovery: clear SSM, re-invoke Lambda
+    // → bootstrap-rotate path lands a known-good shared secret.
     webhookId = existing.webhook_id;
     secret = initialSecret;
     action = 'reused';

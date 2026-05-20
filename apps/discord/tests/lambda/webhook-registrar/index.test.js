@@ -82,8 +82,16 @@ describe('webhook-registrar Lambda — input validation', () => {
   });
 
   it.each([null, undefined, '', 42, {}])('throws on non-string value for required field (%s)', async (badValue) => {
-    
+
     await expect(handler({ ...BASE_EVENT, ssmParamName: badValue }, CONTEXT)).rejects.toThrow(/missing.*ssmParamName/);
+  });
+
+  it.each([
+    ['apiEndpoint', 'http://insecure.example'],
+    ['apiEndpoint', 'ws://wrong-scheme.example'],
+    ['bridgeUrl', 'http://insecure.example/webhooks/qurl'],
+  ])('throws when %s doesn\'t start with https:// (got %s)', async (key, badValue) => {
+    await expect(handler({ ...BASE_EVENT, [key]: badValue }, CONTEXT)).rejects.toThrow(/must start with https:\/\//);
   });
 });
 
