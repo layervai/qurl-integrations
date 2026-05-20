@@ -23,11 +23,11 @@ const (
 	attrCreatedAt         = "created_at"
 	attrUpdatedAt         = "updated_at"
 	// attrSeedAdminSlackUser records who originally claimed the
-	// workspace (the user who redeemed the bootstrap code in
-	// BindWorkspace). Write-only today — kept for forensic
-	// attribution if the admin set churns post-claim, so on-call
-	// can answer "who was the original installer?" from
-	// CloudWatch + a direct DDB read.
+	// workspace (the user who ran /qurl setup — BindWorkspace seeds
+	// this from the OAuth callback's verified.UserID). Write-only
+	// today — kept for forensic attribution if the admin set churns
+	// post-install, so on-call can answer "who was the original
+	// installer?" from CloudWatch + a direct DDB read.
 	attrSeedAdminSlackUser = "seed_admin_slack_user_id"
 )
 
@@ -269,14 +269,16 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		}
 	}
 	// ErrCodeWorkspaceAlreadyBound covers two structurally distinct
-	// conflicts: (a) the existing row's owner_id matches m.OwnerID but
-	// the caller is not on the admin set, and (b) the existing row's
-	// owner_id is a DIFFERENT owner entirely (a bootstrap code minted
-	// against owner A landed on a row owned by B). Both produce the
-	// same "different admin claims this workspace" user copy because
-	// the user signal is the same — they cannot become admin via this
-	// path regardless of which mismatch fired. Operators who need the
-	// distinction read the workspace_mappings row directly.
+	// conflicts: (a) the existing row's owner_id matches m.OwnerID
+	// (same qURL account holder reinstalling) but the OAuth state
+	// names a Slack user who isn't on the admin set, and (b) the
+	// existing row's owner_id is a DIFFERENT qURL account entirely
+	// (a fresh /qurl setup from a different Auth0 identity). Both
+	// produce the same "different admin claims this workspace" user
+	// copy because the user signal is the same — they cannot become
+	// admin via the OAuth path regardless of which mismatch fired.
+	// Operators who need the distinction read the workspace_mappings
+	// row directly.
 	return &Error{
 		StatusCode: http.StatusConflict,
 		Code:       ErrCodeWorkspaceAlreadyBound,

@@ -1,45 +1,42 @@
 // Package slackdata is the DDB-direct replacement for the old
-// admin_client.go HTTP wrapper. /qurl setup now seeds the
-// workspace admin row from the OAuth callback (no bootstrap codes,
-// no separate redeem step), so the bootstrap_codes table is gone
-// and this package owns only workspace_mappings + channel_policies.
-//
 // admin_client.go HTTP wrapper around qurl-service `/internal/v1/admin/*`.
 //
 // Justin's 2026-05-12 pivot (see SLACK_QURL_ROLLOUT.md and
-// qurl-integrations-infra #523) moved the three Slack-keyed DynamoDB
-// tables — workspace_mappings, channel_policies, bootstrap_codes —
-// out of qurl-service into qurl-bot-slack-owned terraform
+// qurl-integrations-infra #523) moved the Slack-keyed DynamoDB
+// tables — workspace_mappings and channel_policies — out of
+// qurl-service into qurl-bot-slack-owned terraform
 // (`modules/qurl-slack-ddb/`). The bot now reads/writes those tables
 // directly with in-account IAM. There is no longer any HTTP surface
 // in qurl-service for admin/policy state; calling
 // `/internal/v1/admin/*` returns 404.
 //
+// /qurl setup also seeds the workspace admin row from the OAuth
+// callback (the installer becomes the seed admin), so the previously
+// separate bootstrap_codes table and the `/qurl admin claim` redeem
+// step are gone — this package owns only workspace_mappings +
+// channel_policies.
+//
 // This package exposes a `Store` facade with the method shapes the
 // post-pivot Slack handlers depend on (CheckAdmin, ResolvePolicy,
 // GetChannelPolicy, AllowedResourceIDsForChannel, LookupChannelAlias,
-// BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins, RedeemBootstrap).
-// Errors carry an HTTP-shaped StatusCode on `*Error` so handlers
-// branch via errors.As without caring about the underlying DDB
-// exception shape.
+// BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins). Errors carry an
+// HTTP-shaped StatusCode on `*Error` so handlers branch via errors.As
+// without caring about the underlying DDB exception shape.
 //
-// Three env vars wire the tables on Fargate (set by
+// Two env vars wire the tables on Fargate (set by
 // qurl-bot-slack/terraform via modules/qurl-slack-ddb's outputs):
 //
 //   - QURL_WORKSPACE_MAPPINGS_TABLE
 //   - QURL_CHANNEL_POLICIES_TABLE
-//   - QURL_BOOTSTRAP_CODES_TABLE
 //
-// Encryption note: the three tables use customer-managed SSE on the
+// Encryption note: both tables use customer-managed SSE on the
 // qurl-bot-slack CMK. The task role's IAM grant is `kms:ViaService =
 // dynamodb.<region>` so the bot never sees the data key directly;
 // SSE is transparent at the SDK layer. (Field-level envelope
 // encryption like shared/auth.DDBProvider does for `qurl_api_key`
 // is NOT used here — workspace identity + admin user IDs + alias
 // mappings are not customer-secret-grade payloads, and the per-row
-// re-encrypt would burn KMS quota for no posture gain. The
-// bootstrap_codes table stores only sha256(plaintext) so the
-// plaintext never lives at rest.)
+// re-encrypt would burn KMS quota for no posture gain.)
 package slackdata
 
 import (
@@ -184,7 +181,7 @@ func (s *Store) nowOrDefault() time.Time {
 // each DDB-direct op below maps native ddb errors to the
 // equivalent HTTP-shaped status (404 for ConditionalCheckFailed
 // on a "not-found"-style condition, 409 for "already exists",
-// 410 for "expired/used bootstrap code", 503 for transport).
+// 503 for transport).
 type Error struct {
 	StatusCode int
 	Code       string
@@ -218,8 +215,9 @@ type PolicyEntry struct {
 }
 
 // WorkspaceMapping describes the 1:1 workspace → owner row stored on
-// the workspace_mappings table. Returned from `RedeemBootstrap` so
-// the modal-submit path can post the success DM with the owner ID.
+// the workspace_mappings table. Passed to `BindWorkspace` from the
+// OAuth callback to seed the row (TeamID from the HMAC'd state,
+// OwnerID from the JWKS-verified id_token sub).
 type WorkspaceMapping struct {
 	TeamID    string    `json:"team_id"`
 	OwnerID   string    `json:"owner_id"`
@@ -241,8 +239,8 @@ func ddbToError(op string, err error) error {
 		// it via errors.As + Code without parsing Detail. The
 		// caller-supplied wrapper sets the right HTTP-shaped status.
 		//
-		// CONTRACT: every existing call site (RedeemBootstrap,
-		// BindWorkspace, AddAdmin, RemoveAdmin) catches
+		// CONTRACT: every existing call site (BindWorkspace,
+		// AddAdmin, RemoveAdmin) catches
 		// ConditionalCheckFailedException BEFORE calling
 		// ddbToError, so this 412 branch is currently unreachable.
 		// Any new op that calls ddbToError MUST do the same — the
@@ -264,11 +262,6 @@ func ddbToError(op string, err error) error {
 		Title:      op,
 		Detail:     err.Error(),
 	}
-}
-
-// boolAttr is a small helper for boolean DDB AttributeValues.
-func boolAttr(b bool) ddbtypes.AttributeValue {
-	return &ddbtypes.AttributeValueMemberBOOL{Value: b}
 }
 
 // stringAttr is a small helper for string DDB AttributeValues. Empty

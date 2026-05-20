@@ -802,6 +802,42 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 	t.Error("expected key revoke after rebind-refused")
 }
 
+// TestCallbackBindRefusedWhenUnverified fences the unverified-conflict
+// posture: when the post-CCFE disambiguation can't read the existing
+// row's admin set, BindConflictUnverified arrives. The handler must
+// treat it the same as the cross-admin rebind (refuse + revoke + 409),
+// not as the idempotent same-caller case — the safer default is to
+// refuse than to potentially overwrite. The two cases share a switch
+// arm today, but this fence prevents a future split that silently
+// downgrades unverified to "idempotent success."
+func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
+	cfg, _, _, minter := newCallbackCfg(t)
+	admin := &fakeAdminStore{err: errors.New("could not confirm bind")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictUnverified }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status: got %d want 409 (rebind-refused page, unverified arm)", rec.Code)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		minter.revokeMu.Lock()
+		revoked := minter.revoked
+		minter.revokeMu.Unlock()
+		if revoked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("expected key revoke after unverified rebind")
+}
+
 // TestCallbackBindSkippedWhenSubMissing fences the hard-failure
 // posture: if the id_token's sub claim can't be verified, we have
 // no OwnerID to bind with. The handler must NOT silently skip the
