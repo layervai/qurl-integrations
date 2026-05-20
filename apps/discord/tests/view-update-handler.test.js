@@ -220,6 +220,27 @@ describe('createHandleViewUpdate', () => {
     });
   });
 
+  // cr round-8 #2 surfaced a GC leak shape — post-stop addRecipients
+  // calls would register new callbacks without an unregister path.
+  // The fix lives in commands.js's addRecipients (early-out on
+  // stopped). This test pins the contract at the handler layer: an
+  // isStopped()=true handler invocation is a no-op even if the
+  // registry has the callback still wired up. Belt-and-suspenders
+  // for the addRecipients-after-stop regression class.
+  describe('post-stop dispatch is a strict no-op (cr round-8 #2 backstop)', () => {
+    test('stopped handler does not mutate linkStatus, viewed, safeEdit, or onAllDone', () => {
+      const deps = buildDeps({ isStopped: () => true });
+      deps.linkStatus.set('qrl_a', { status: 'pending', username: 'u' });
+      const handler = createHandleViewUpdate(deps);
+      handler({ accessCount: 5 }, 'qrl_a');
+      // Every state-mutation gate must trip on isStopped first.
+      expect(deps.linkStatus.get('qrl_a').status).toBe('pending');
+      expect(deps._getViewed()).toBe(0);
+      expect(deps.safeEdit).not.toHaveBeenCalled();
+      expect(deps.onAllDone).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getButtonRow() called fresh each invocation', () => {
     test('reflects post-construction reassignment without stale capture', () => {
       let buttonRow = { type: 1, components: [{ id: 'btn' }] };

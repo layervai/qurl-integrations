@@ -640,9 +640,10 @@ module.exports = {
 
   // View-update push (feat #60, sub-second view counter). When true,
   // qurl-webhook.js publishes view events to a separate SQS queue
-  // after a successful recordQurlView; the worker tier drains the
-  // queue and dispatches into the process-local view-update-registry
-  // for live monitorLinkStatus instances. The polling fallback in
+  // after a successful recordQurlView; the HTTP tier (same process
+  // that owns the webhook receiver and the live monitorLinkStatus
+  // instances) drains the queue and dispatches into the process-
+  // local view-update-registry. The polling fallback in
   // commands.js stays as the correctness primitive — this flag gates
   // ONLY the latency-optimization path. Default false so a deploy
   // without the flag behaves identically to the legacy polling shape.
