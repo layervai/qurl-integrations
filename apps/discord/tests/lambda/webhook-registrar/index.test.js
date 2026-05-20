@@ -203,6 +203,70 @@ describe('webhook-registrar Lambda — secret never echoes in handler response (
   });
 });
 
+describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel handling', () => {
+  // qurl-integrations-infra creates aws_ssm_parameter.bot["QURL_WEBHOOK_SECRET"]
+  // with value="PLACEHOLDER" on first apply. The bot's receiver dropped
+  // its PLACEHOLDER sentinel check in PR #472, so the Lambda is the
+  // sole place that strips this literal. Without the strip, an
+  // operator-pre-created subscription + PLACEHOLDER SSM value would
+  // make the Lambda's reuse path return "PLACEHOLDER" as the secret →
+  // bot would 401 every webhook.
+  it('strips PLACEHOLDER and rotates when an existing sub is found (cold-bootstrap recovery)', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'PLACEHOLDER' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_op_created',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_op_created/secret': () => ({
+        body: { data: { webhook_id: 'wh_op_created', secret: 'whsec_rotated_strip' } },
+      }),
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    // Critical: rotated, NOT reused — the strip turned PLACEHOLDER
+    // into null, which makes initialIsRealSecret false, which forces
+    // the bootstrap-rotate branch.
+    expect(result.action).toBe('rotated');
+    expect(result.webhookId).toBe('wh_op_created');
+    // Stronger: the SSM-persisted value is the FRESH rotated secret,
+    // not the literal "PLACEHOLDER" we read.
+    const putCalls = ssmMock.commandCalls(PutParameterCommand);
+    expect(putCalls).toHaveLength(1);
+    expect(putCalls[0].args[0].input.Value).toBe('whsec_rotated_strip');
+    expect(putCalls[0].args[0].input.Value).not.toBe('PLACEHOLDER');
+    // Defensive: the response body to Terraform doesn't echo the
+    // sentinel either (just in case).
+    expect(JSON.stringify(result)).not.toContain('PLACEHOLDER');
+  });
+
+  it('strips PLACEHOLDER and creates fresh when no existing sub (fresh-env first apply)', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'PLACEHOLDER' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_fresh', secret: 'whsec_created_strip',
+      } } }),
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(result.action).toBe('created');
+    const putCalls = ssmMock.commandCalls(PutParameterCommand);
+    expect(putCalls[0].args[0].input.Value).toBe('whsec_created_strip');
+  });
+});
+
 describe('webhook-registrar Lambda — bootstrap rotate (existing sub, SSM empty)', () => {
   // Path that fires when an operator-or-prior-deploy created the
   // subscription out-of-band but the Lambda hasn't populated the

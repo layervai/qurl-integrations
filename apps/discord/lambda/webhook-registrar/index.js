@@ -94,6 +94,15 @@ const {
   buildSsmPersistSecret,
 } = require('../../src/qurl-webhook-registrar');
 
+// Terraform-seeded sentinel value for the QURL_WEBHOOK_SECRET SSM
+// parameter — see qurl-integrations-infra:qurl-bot-discord/terraform/
+// main.tf's `aws_ssm_parameter.bot`. The bot's receiver dropped its
+// own PLACEHOLDER-sentinel check in qurl-integrations#472, so the
+// Lambda is the sole place that knows about this literal. Stripping
+// to null here lets the registrar library's initialIsRealSecret
+// guard correctly treat it as "no real secret yet, bootstrap-rotate."
+const TERRAFORM_SEEDED_PLACEHOLDER = 'PLACEHOLDER';
+
 // SSM client at module scope — Lambda reuses the same execution
 // context across consecutive invocations within the same container
 // lifetime, so reusing the client is a meaningful perf win for
@@ -214,7 +223,21 @@ exports.handler = async (event, context) => {
   // (manual rotation, scheduled rotation) the SSM value is the
   // previously-persisted secret — ensureWebhookSubscription's
   // initialIsRealSecret guard reuses it if the sub still matches.
-  const initialSecret = await readSsmSecureString({ ssmClient, name: input.ssmParamName });
+  //
+  // Strip the Terraform-seeded sentinel: qurl-integrations-infra
+  // creates aws_ssm_parameter.bot["QURL_WEBHOOK_SECRET"] with
+  // value="PLACEHOLDER" (lifecycle ignore_changes preserves the real
+  // value once written, but a fresh env carries the literal until
+  // the first Lambda run rotates it). The registrar library's
+  // initialIsRealSecret guard checks length>0 only — without this
+  // strip, the literal "PLACEHOLDER" would pass as a "real" secret,
+  // and if an existing subscription was created out-of-band
+  // (operator curl, manual setup), the reuse path would return
+  // "PLACEHOLDER" to the bot → 401 every webhook. Stripping here
+  // is belt-and-suspenders to the Terraform `depends_on` chain that
+  // already serializes Lambda-before-ECS on the common path.
+  const rawSsmSecret = await readSsmSecureString({ ssmClient, name: input.ssmParamName });
+  const initialSecret = rawSsmSecret === TERRAFORM_SEEDED_PLACEHOLDER ? null : rawSsmSecret;
 
   // Lambda STRICT-persist path: do NOT pass `persistSecret` into
   // `ensureWebhookSubscription` (its `bestEffortPersist` swallows
