@@ -10,7 +10,7 @@ package internal
 // Two helpers, in test-helper convention:
 //   - [newAdminTestHandler] wires a *Handler with AdminStore backed
 //     by an in-memory fakeDDB. Tests seed table rows via
-//     `ts.seedAdmin(...)`, `ts.seedPolicySingle(...)` before invoking.
+//     `ts.seedAdmin(...)`, `ts.seedPolicyDualShape(...)` before invoking.
 //   - [invokeAdminSlash] signs a slash-command form body and drives
 //     ServeHTTP. Returns (status, replyText) so assertion sites stay
 //     terse. The reply text is parsed from the JSON envelope — for
@@ -80,7 +80,7 @@ func (c *capturedResponseURL) waitForBody(t *testing.T, d time.Duration) []byte 
 //   - validateResponseURLFn relaxed (httptest server URLs are
 //     http://127.0.0.1:NNNNN — the production validator rejects those).
 //
-// Tests seed table rows via ts.seedAdmin / ts.seedPolicySingle / etc.
+// Tests seed table rows via ts.seedAdmin / ts.seedPolicyDualShape / etc.
 // before invoking the handler.
 func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	t.Helper()
@@ -241,41 +241,6 @@ func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID str
 				}
 			}
 			return false
-		}
-	}
-	return false
-}
-
-// policyHasResource returns true iff the channel_policies row for
-// (teamID, channelID) carries resourceID in its allowed_resource_ids
-// SS (set). The production AllowResource path stores resources in
-// the SS shape so the post-mutation check needs to look for set
-// membership, not bare equality.
-func (f *fakeDDB) policyHasResource(t *testing.T, teamID, channelID, resourceID string) bool {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Look up the row by composite key teamID:channelID.
-	for _, tbl := range f.tables {
-		for _, item := range tbl {
-			team, _ := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
-			ch, _ := item[fAttrSlackChannelID].(*ddbtypes.AttributeValueMemberS)
-			if team == nil || ch == nil {
-				continue
-			}
-			if team.Value != teamID || ch.Value != channelID {
-				continue
-			}
-			if ss, ok := item[fAttrAllowedResourceIDs].(*ddbtypes.AttributeValueMemberSS); ok {
-				for _, v := range ss.Value {
-					if v == resourceID {
-						return true
-					}
-				}
-			}
-			if rid, ok := item[fAttrResourceID].(*ddbtypes.AttributeValueMemberS); ok && rid.Value == resourceID {
-				return true
-			}
 		}
 	}
 	return false

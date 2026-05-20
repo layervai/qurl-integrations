@@ -25,8 +25,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 // adminTestServers owns the customer httptest server and the
@@ -100,12 +98,16 @@ type customerPrefixRoute struct {
 const testAdminTeamID = "T_team"
 
 // testAdminUserID is the admin user ID matching seedAdmin/seedNonAdmin.
-const testAdminUserID = "U_admin"
+// Slack-shape (uppercase alphanumeric, no underscore) so the admin
+// add/remove handlers — which parse `<@U…>` mentions through the
+// strict userMentionPattern — can accept it as a mention target.
+const testAdminUserID = "UADMIN001"
 
 // testAdminOwnerID is the owner ID the workspace_mappings row binds
-// to in tests. Matches the canned `u_workspace_owner` the legacy
-// HTTP fixtures returned.
-const testAdminOwnerID = "u_workspace_owner"
+// to in tests. Slack-shape ID (see [testAdminUserID]) so the admin
+// remove handler's owner-check path can be exercised against a
+// `<@U…>` mention without tripping the mention validator.
+const testAdminOwnerID = "UOWNER001"
 
 // testWorkspaceConfiguredAt is the canonical `created_at` time the
 // workspace fixture exposes. Matches the legacy
@@ -144,19 +146,15 @@ func (ts *adminTestServers) seedWorkspace(t *testing.T, teamID, ownerID, slackUs
 	ts.ddb.seedItem(t, ts.tableNames.workspace, seedWorkspaceAdmin(teamID, ownerID, slackUserID, configuredAt))
 }
 
-// seedWorkspaceCustom seeds a workspace_mappings row with arbitrary
-// fields. Used by status tests that need to vary api_key_fingerprint
-// or omit configured_at.
-func (ts *adminTestServers) seedWorkspaceCustom(t *testing.T, item map[string]ddbtypes.AttributeValue) {
+// seedPolicyDualShape seeds a channel_policies row carrying BOTH
+// the legacy single-row scalar (alias + resource_id) AND the
+// post-pivot shape (alias_bindings Map + allowed_resource_ids SS).
+// Use when tests need to exercise ResolvePolicy's gate against both
+// shapes on the same row. Tests that need legacy-isolation
+// construct their row inline (see TestResolvePolicy_LegacySingleRowShape).
+func (ts *adminTestServers) seedPolicyDualShape(t *testing.T, teamID, channelID, alias, resourceID string) {
 	t.Helper()
-	ts.ddb.seedItem(t, ts.tableNames.workspace, item)
-}
-
-// seedPolicySingle seeds a channel_policies row with a single
-// alias+resource_id binding (the legacy single-row shape).
-func (ts *adminTestServers) seedPolicySingle(t *testing.T, teamID, channelID, alias, resourceID string) {
-	t.Helper()
-	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicySingle(teamID, channelID, alias, resourceID))
+	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyDualShape(teamID, channelID, alias, resourceID))
 }
 
 // seedPolicySet seeds a channel_policies row carrying an
@@ -179,17 +177,12 @@ func (ts *adminTestServers) seedPolicyAliasBindings(t *testing.T, teamID, channe
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyAliasBindings(teamID, channelID, bindings))
 }
 
-// failOnAllowResource installs a hook that fails the test if any
-// AllowResource UpdateItem hits the channel_policies table. Mirrors
-// the pre-pivot pattern `ts.addAdmin("POST",
-// "/internal/v1/admin/policy/allow", t.Error(...))`.
-//
-// Implementation: we wrap the existing fakeDDB with a UpdateItem
-// override via [fakeDDB.UpdateItemHook]. Tests that need this set
-// it before invoking the handler.
-func (ts *adminTestServers) failOnAllowResource(t *testing.T, msg string) {
+// failOnAdminMutation installs a hook that fails the test if any
+// UpdateItem hits the table set. Used to assert the admin-only gate
+// short-circuits before any policy or admin-set mutation.
+func (ts *adminTestServers) failOnAdminMutation(t *testing.T, msg string) {
 	t.Helper()
 	ts.ddb.SetUpdateItemHook(func(in interface{}) {
-		t.Errorf("AllowResource (UpdateItem) reached despite gate: %s", msg)
+		t.Errorf("admin UpdateItem reached despite gate: %s", msg)
 	})
 }

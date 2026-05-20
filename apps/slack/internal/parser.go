@@ -50,16 +50,20 @@ const (
 	// the code; the bot's logging middleware redacts the block on
 	// submission so it never reaches diagnostics either.
 	AdminClaim AdminAction = "claim"
-	// AdminAllow whitelists an alias for use in a specific channel.
-	AdminAllow AdminAction = "allow"
-	// AdminDisallow removes an alias from a channel's allowed set.
-	AdminDisallow AdminAction = "disallow"
-	// AdminPolicies lists channel/alias policy rows.
-	AdminPolicies AdminAction = "policies"
-	// AdminStatus reports per-workspace bot health/admin info.
-	AdminStatus AdminAction = "status"
-	// AdminRevoke revokes a previously minted access link by alias.
+	// AdminRevoke revokes a single previously minted qURL by its
+	// `qurl_id` (no `$` sigil — operators paste the ID directly out
+	// of an audit trail or a previous mint reply).
 	AdminRevoke AdminAction = "revoke"
+	// AdminAdd promotes a Slack user to bot admin. The argument is the
+	// Slack `<@U12345>` mention syntax; the parsed user ID lands on
+	// [Command.UserID].
+	AdminAdd AdminAction = "add"
+	// AdminRemove demotes a Slack user from bot admin. Same mention-
+	// argument shape as [AdminAdd].
+	AdminRemove AdminAction = "remove"
+	// AdminList lists the workspace owner and current bot admins.
+	// No positional arguments.
+	AdminList AdminAction = "list"
 )
 
 // ResourceTokenKind discriminates between the two shapes a `$<token>`
@@ -103,8 +107,7 @@ type Command struct {
 	// resource-token is an alias. Empty when the user supplied a raw
 	// resource ID instead — see [Command.Resource] for the kind-aware
 	// view. Kept populated for the alias path so verbs that only accept
-	// aliases (`setalias`, `unsetalias`, `admin allow`, `admin
-	// disallow`, `admin revoke`) keep their existing read site.
+	// aliases (`setalias`, `unsetalias`) keep their existing read site.
 	Alias string
 	// Resource is the kind-aware shape of the `$<token>` argument when
 	// the verb accepts both alias and resource-ID forms (currently
@@ -115,9 +118,12 @@ type Command struct {
 	// Target is the trailing positional arg used by `setalias` (a URL or
 	// raw resource_id) and the legacy `create <url>`.
 	Target string
-	// ChannelID is the parsed channel from `<#C12345|name>` form when
-	// present (used by `admin allow` / `admin disallow`).
-	ChannelID string
+	// UserID is the parsed Slack user ID from a `<@U12345>` mention
+	// argument used by `admin add` / `admin remove`. Distinct from the
+	// `user_id` form-field of the slash command itself (which is the
+	// *caller* — the user who typed the command); this field holds the
+	// *target* of the verb (the user being added or removed).
+	UserID string
 	// Flags holds optional `key:value` flags. Only `dm` and `reason` are
 	// recognized today (on `get`).
 	Flags map[string]string
@@ -168,22 +174,31 @@ var ErrUnknownAdminAction = errors.New("unknown admin action")
 // `errors.Is` caller can distinguish "user forgot to type a verb"
 // from "user typed something we don't recognize" — the right
 // user-facing message differs ("which admin command?" vs "frobnicate
-// isn't a thing, try `admin policies` / `admin status` / …").
+// isn't a thing, try `admin list` / `admin revoke` / …").
 var ErrMissingAdminAction = errors.New("missing admin action")
-
-// ErrMissingChannel is returned when `admin allow` / `admin disallow` are
-// invoked without a `<#C…|…>` channel reference.
-var ErrMissingChannel = errors.New("missing #channel argument")
 
 // ErrMissingTarget is returned when `setalias` or `create` are invoked
 // without the trailing target/URL argument.
 var ErrMissingTarget = errors.New("missing target argument")
+
+// ErrMissingUserMention is returned when `admin add` / `admin remove`
+// are invoked without a `<@U…>` Slack user mention.
+var ErrMissingUserMention = errors.New("missing @user mention")
+
+// ErrInvalidUserMention is returned when the `admin add` / `admin
+// remove` argument doesn't match the Slack mention encoding
+// `<@U12345>` / `<@U12345|name>`.
+var ErrInvalidUserMention = errors.New("invalid @user mention")
 
 // ErrInvalidAlias is returned when an alias name (the part after `$`)
 // contains characters outside the recognized set. Catching this in
 // the parser surfaces a friendly slash-command error instead of
 // punting an obviously-bogus alias to qurl-service.
 var ErrInvalidAlias = errors.New("invalid alias")
+
+// ErrInvalidQURLID is returned when `admin revoke <id>` receives a
+// token that isn't shaped like a qurl_id (`q_<alnum>`).
+var ErrInvalidQURLID = errors.New("invalid qurl_id")
 
 // ErrUnexpectedArgument is returned when a verb that takes no
 // positional arguments receives one (e.g. `admin policies extra`).
@@ -198,10 +213,24 @@ var ErrUnexpectedArgument = errors.New("unexpected argument")
 // churning the test surface.
 var ErrInvalidFlag = errors.New("invalid flag")
 
-// channelRefPattern matches Slack's encoded channel-mention form
-// `<#C12345|channel-name>`. The trailing `|name` is optional (Slack's UI
-// always includes it but the wire shape allows omission).
-var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
+// userMentionPattern matches Slack's encoded user-mention form
+// `<@U12345678>` (and `<@U12345678|display-name>` when the client
+// includes the optional pipe-delimited display label). Real Slack
+// user IDs start with `U` (workspace user) or `W` (Enterprise Grid
+// org-level user) followed by 8+ uppercase-alphanumeric characters,
+// per Slack's documented ID grammar — `{8,63}` after the prefix
+// rejects toy IDs like `<@A>` at parse time, where a future
+// AddAdmin would otherwise happily store a bogus user ID. The
+// `{,63}` ceiling mirrors qurlIDPattern's posture so a pathological
+// paste surfaces as a parser error rather than propagating to DDB.
+//
+// TODO(legacy-slack-ids): pre-2017 Slack workspaces may have user
+// IDs shorter than 9 chars total (e.g. `U12345`). If any such
+// workspace hits beta with an admin who can't be added/removed
+// because their ID rejects here, relax the {8,} floor — the
+// security posture only depends on the regex rejecting truly-
+// malformed tokens, not on the length floor itself.
+var userMentionPattern = regexp.MustCompile(`^<@([UW][A-Z0-9]{8,63})(?:\|[^>]*)?>$`)
 
 // flagKeyCharset is the shared key-shape contract for flag-style
 // tokens. Used by both [flagPattern] (full key:value parse) and
@@ -258,6 +287,29 @@ var flagKeyShape = regexp.MustCompile(`(?i)^` + flagKeyCharset + `$`)
 // `qurl-service/internal/domain/qurl.go::resourceIDPattern`. If the
 // upstream regex (charset, length, anchors) changes, mirror it here.
 var resourceIDPattern = regexp.MustCompile(`^r_[a-z0-9_-]{11}$`)
+
+// qurlIDPattern is the shape of a qurl_id passed to `admin revoke`.
+// qurl-service emits `q_<UPPERCASE_ALPHANUMERIC>` (a ULID-style
+// 26-char suffix; ULIDs are uppercase by spec); the regex is
+// conservative — anything that doesn't match this gets surfaced as a
+// parser error rather than letting `client.Delete` produce an opaque
+// 404 from the backend. Operators paste these IDs out of an audit
+// trail or a previous mint reply, so a fat-fingered space or an
+// injected character is the most common failure mode this catches.
+//
+// The {16,64} length floor rejects obviously-truncated IDs (`q_abc`
+// can't reach a real qURL) at parse time so the user gets a parser
+// hint instead of an opaque 404. The ceiling fails a fat-paste at
+// parse time rather than shipping a kilobyte URL path to qurl-service.
+// Current qurl-service IDs are 26-char ULIDs so the {16,64} range is
+// generous enough to absorb a one-off shape change without an SDK
+// pin; widen further if the suffix grammar shifts.
+//
+// TODO(upstream-rebrand): the [A-Z0-9]-only character class will
+// refuse legitimate IDs if qurl-service ever emits lowercase,
+// hyphens, or underscores. The qurl-service ID grammar lives in the
+// resource-mint path; widen this set in lockstep with that contract.
+var qurlIDPattern = regexp.MustCompile(`^q_[A-Z0-9]{16,64}$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -404,8 +456,9 @@ func tokenize(text string) []string {
 //
 // `get` is the only verb in the grammar that accepts both alias and
 // resource-ID shapes — the alias-mutating verbs (`setalias`,
-// `unsetalias`, admin allow/disallow/revoke) intentionally stay
-// alias-only because their semantics are alias-scoped. Letting `get`
+// `unsetalias`) intentionally stay alias-only because their semantics
+// are alias-scoped. `admin revoke` takes a raw `q_<id>` qurl_id (no
+// sigil) so it doesn't go through this token shape. Letting `get`
 // take a raw ID closes the gap between `/qurl list` (which surfaces
 // IDs for un-aliased resources) and `/qurl get` (which previously
 // only minted from aliases or URLs) so a list line can be
@@ -489,13 +542,13 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 	return cmd, nil
 }
 
-// parseAdmin dispatches on the second word (the [AdminAction]). `claim`
-// takes no positional args (the code is collected via modal — see
-// Blocker #3 in the plan and [AdminClaimModal]); `allow`/`disallow`
-// take a `#channel` and a `$alias`; `policies`/`status` take no
-// args; `revoke` takes a `$alias`. Verbs that take no args fail
-// [ErrUnexpectedArgument] when given any — surfacing a typo like
-// `admin policies extra` early instead of silently routing it.
+// parseAdmin dispatches on the second word (the [AdminAction]).
+// `claim` takes no positional args (the code is collected via modal —
+// see Blocker #3 in the plan and [AdminClaimModal]); `revoke` takes a
+// `q_<id>` qurl_id; `add` / `remove` take a `<@U…>` mention; `list`
+// takes no args. Verbs that take no args fail [ErrUnexpectedArgument]
+// when given any — surfacing a typo like `admin list extra` early
+// instead of silently routing it.
 func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrMissingAdminAction
@@ -506,101 +559,99 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	tail := rest[1:]
 	switch action {
 	case AdminClaim:
-		// Code never appears as text — modal-only flow.
+		// Code never appears as text — modal-only flow. The error
+		// message intentionally OMITS the tail token because callers
+		// echo Parse's errors to Slack (and Slack may log them in the
+		// audit log); a user who typed `admin claim BOOT-SECRET`
+		// would otherwise see the bootstrap code repeated in the
+		// reply. The slash-command-line dispatcher in handler.go
+		// catches the case-exact `admin claim ` prefix earlier with
+		// its own (also tail-stripped) hint, but mixed-case input
+		// (`admin CLAIM ...`) falls through to handleAdmin → Parse,
+		// so this error path has to be safe in isolation.
 		if len(tail) > 0 {
-			return nil, fmt.Errorf("%w: %q (use the modal to enter the code)", ErrUnexpectedArgument, tail[0])
-		}
-		return cmd, nil
-	case AdminAllow, AdminDisallow:
-		return parseAdminChannelAlias(cmd, tail)
-	case AdminPolicies, AdminStatus:
-		if len(tail) > 0 {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[0])
+			return nil, fmt.Errorf("%w: use the modal to enter the bootstrap code (no arguments on the slash-command line)", ErrUnexpectedArgument)
 		}
 		return cmd, nil
 	case AdminRevoke:
+		// `revoke` takes a single positional `q_<id>` qurl_id (no
+		// `$` sigil). A `$alias` token here surfaces an
+		// [ErrUnexpectedArgument] with a hint to use the single-id
+		// form — the alias-scoped revoke-all verb was cut in v1
+		// because a per-link kill is enough for the beta scope.
 		if len(tail) == 0 {
-			return nil, ErrEmptyResource
+			return nil, ErrMissingTarget
 		}
-		alias, err := parseAliasToken(tail[0])
-		if err != nil {
-			return nil, err
+		if strings.HasPrefix(tail[0], "$") {
+			return nil, fmt.Errorf("%w: `%s` (admin revoke takes a `q_<id>` qurl_id, not an `$alias`)", ErrUnexpectedArgument, truncateForError(tail[0]))
 		}
-		cmd.Alias = alias
+		if !qurlIDPattern.MatchString(tail[0]) {
+			return nil, fmt.Errorf("%w: `%s` (expected `q_<id>`)", ErrInvalidQURLID, truncateForError(tail[0]))
+		}
+		cmd.Target = tail[0]
 		if len(tail) > 1 {
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[1])
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tail[1]))
+		}
+		return cmd, nil
+	case AdminAdd, AdminRemove:
+		// `admin add @user` / `admin remove @user` — promote or demote
+		// a Slack user on the bot's admin set. The argument arrives as
+		// Slack's encoded mention syntax (`<@U12345>` or
+		// `<@U12345|name>`); [userMentionPattern] strips the sigil
+		// wrapper and yields the bare user ID for the handler.
+		if len(tail) == 0 {
+			return nil, ErrMissingUserMention
+		}
+		uid, ok := matchUserMention(tail[0])
+		if !ok {
+			return nil, fmt.Errorf("%w: `%s` (expected a Slack @user mention like `<@U12345>`)", ErrInvalidUserMention, truncateForError(tail[0]))
+		}
+		cmd.UserID = uid
+		if len(tail) > 1 {
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tail[1]))
+		}
+		return cmd, nil
+	case AdminList:
+		if len(tail) > 0 {
+			return nil, fmt.Errorf("%w: `%s`", ErrUnexpectedArgument, truncateForError(tail[0]))
 		}
 		return cmd, nil
 	default:
-		return nil, fmt.Errorf("%w: %q", ErrUnknownAdminAction, verb)
+		return nil, fmt.Errorf("%w: `%s`", ErrUnknownAdminAction, truncateForError(verb))
 	}
 }
 
-// parseAdminChannelAlias extracts `<#channel|name> $alias` in either order
-// (Slack's autocomplete sometimes interleaves them). Both must be
-// present, and each may appear at most once — duplicate channels or
-// aliases are an [ErrUnexpectedArgument] (consistent with the strict
-// posture parseAdmin takes for verbs like `admin policies`). Once
-// both slots are filled, any further positional surfaces as
-// [ErrUnexpectedArgument] too — `admin allow <#C1|a> $alias junk`
-// is a typo, not a missing-sigil error.
+// matchUserMention returns the `U…` ID and true when `tok` is a Slack
+// user-mention encoded form, else returns ("", false).
+func matchUserMention(tok string) (string, bool) {
+	m := userMentionPattern.FindStringSubmatch(tok)
+	if len(m) < 2 {
+		return "", false
+	}
+	return m[1], true
+}
+
+// truncateForError caps a token at 32 runes of content (plus a `…`
+// truncation marker when truncation fires, so the max rendered
+// length is 33 runes) and runs it through [escapeMrkdwnCode], so
+// the result is safe to echo inside a Slack mrkdwn code span in an
+// error message. Callers wrap the return value with a backtick
+// code-span delimiter so any `<!channel>` / `<@U…>` / other mrkdwn
+// token in the user's input renders as a literal code-span
+// character rather than as a Slack mention.
 //
-// Three guards work in tandem:
-//   - The top-of-loop "both slots full" check catches the third+
-//     token case (`allow <#C1|a> $alias <#C2|b>` — third token).
-//   - The per-slot "duplicate <kind>" branches catch the second-
-//     token case where only one slot is filled and the new token
-//     would overfill that same slot (`allow <#C1|a> <#C2|b>` —
-//     second token, ChannelID set, Alias empty).
-//   - The bottom-of-loop "missing-sigil" branch catches a token
-//     that's neither a channel ref nor a `$`-prefixed alias.
-//
-// Each guard exists because the others don't cover its case — the
-// branches look overlapping but are non-overlapping in practice.
-func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
-	for _, tok := range rest {
-		if cmd.ChannelID != "" && cmd.Alias != "" {
-			// Both slots taken — any further token is a typo, surface
-			// the strict-posture sentinel instead of routing through
-			// the channel/alias dispatchers (which would say
-			// "duplicate" or "missing sigil" — neither is right here).
-			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
-		}
-		if id, ok := matchChannel(tok); ok {
-			if cmd.ChannelID != "" {
-				// Duplicate-channel before both slots are full —
-				// the top-of-loop guard hasn't fired yet (Alias is
-				// still empty). Without this branch the second
-				// channel would silently overwrite the first.
-				return nil, fmt.Errorf("%w: duplicate #channel %q", ErrUnexpectedArgument, tok)
-			}
-			cmd.ChannelID = id
-			continue
-		}
-		if strings.HasPrefix(tok, "$") {
-			alias, err := parseAliasToken(tok)
-			if err != nil {
-				return nil, err
-			}
-			if cmd.Alias != "" {
-				// Duplicate-alias before both slots are full — same
-				// rationale as the duplicate-channel branch above.
-				return nil, fmt.Errorf("%w: duplicate $alias %q", ErrUnexpectedArgument, tok)
-			}
-			cmd.Alias = alias
-			continue
-		}
-		// Unrecognized positional — surface as missing-sigil for the
-		// most common mistake (forgetting the $).
-		return nil, fmt.Errorf("%w: %q", ErrMissingSigil, tok)
+// The escape table (backtick → U+02CA, line breaks → space) is owned
+// by [escapeMrkdwnCode] in views.go so the same-package neighbor is
+// the single source of truth — a future renderer-driven adjustment
+// to the table (e.g. CR/LF handling, new break tokens) flows through
+// both error and view code spans without drift.
+func truncateForError(s string) string {
+	const maxRunes = 32
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		runes = append(runes[:maxRunes], '…')
 	}
-	if cmd.ChannelID == "" {
-		return nil, ErrMissingChannel
-	}
-	if cmd.Alias == "" {
-		return nil, ErrEmptyResource
-	}
-	return cmd, nil
+	return escapeMrkdwnCode(string(runes))
 }
 
 // parseAliasToken enforces the `$` sigil, strips it, and validates the
@@ -619,17 +670,17 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 // entry points produce parallel copy.
 func parseAliasToken(tok string) (string, error) {
 	if !strings.HasPrefix(tok, "$") {
-		return "", fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
+		return "", fmt.Errorf("%w: got `%s`", ErrMissingSigil, truncateForError(tok))
 	}
 	alias := strings.TrimPrefix(tok, "$")
 	if alias == "" {
 		return "", ErrEmptyResource
 	}
 	if len(alias) > aliasMaxLen {
-		return "", fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, alias, aliasMaxLen)
+		return "", fmt.Errorf("%w: `%s` is longer than %d characters", ErrInvalidAlias, truncateForError(alias), aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "", fmt.Errorf("%w: %q (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, alias)
+		return "", fmt.Errorf("%w: `%s` (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, truncateForError(alias))
 	}
 	return alias, nil
 }
@@ -646,11 +697,11 @@ func parseAliasToken(tok string) (string, error) {
 // [ErrInvalidAlias] with a message naming both accepted shapes.
 //
 // Used by verbs that accept both alias and resource-ID forms
-// (currently `/qurl get`). Alias-only verbs (`setalias`, `unsetalias`,
-// `admin allow/disallow/revoke`) use [parseAliasToken] instead.
+// (currently `/qurl get`). Alias-only verbs (`setalias`, `unsetalias`)
+// use [parseAliasToken] instead.
 func requireResourceToken(tok string) (ParsedResourceToken, error) {
 	if !strings.HasPrefix(tok, "$") {
-		return ParsedResourceToken{}, fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
+		return ParsedResourceToken{}, fmt.Errorf("%w: got `%s`", ErrMissingSigil, truncateForError(tok))
 	}
 	bare := strings.TrimPrefix(tok, "$")
 	if bare == "" {
@@ -666,25 +717,15 @@ func requireResourceToken(tok string) (ParsedResourceToken, error) {
 	// alias. Mirrors parseAliasToken's order; pinned by parser_test.go's
 	// `alias over 64 chars rejected` case.
 	if len(bare) > aliasMaxLen {
-		return ParsedResourceToken{}, fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, bare, aliasMaxLen)
+		return ParsedResourceToken{}, fmt.Errorf("%w: `%s` is longer than %d characters", ErrInvalidAlias, truncateForError(bare), aliasMaxLen)
 	}
 	if aliasCharsetPattern.MatchString(bare) {
 		return ParsedResourceToken{Kind: ResourceTokenAlias, Value: bare}, nil
 	}
 	return ParsedResourceToken{}, fmt.Errorf(
-		"%w: %q — token must be an alias (e.g. `$dev-dashboard`, lowercase a-z/0-9/hyphen, no leading/trailing hyphen) or a resource ID (e.g. `$r_abc123def01`)",
-		ErrInvalidAlias, bare,
+		"%w: `%s` — token must be an alias (e.g. `$dev-dashboard`, lowercase a-z/0-9/hyphen, no leading/trailing hyphen) or a resource ID (e.g. `$r_abc123def01`)",
+		ErrInvalidAlias, truncateForError(bare),
 	)
-}
-
-// matchChannel returns the `C…` ID and true when `tok` is a Slack
-// channel-mention encoded form, else returns ("", false).
-func matchChannel(tok string) (string, bool) {
-	m := channelRefPattern.FindStringSubmatch(tok)
-	if len(m) < 2 {
-		return "", false
-	}
-	return m[1], true
 }
 
 // looksLikeFlag reports whether `tok` is shaped like a `key:value`
