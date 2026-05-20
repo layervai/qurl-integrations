@@ -2,8 +2,7 @@ package internal
 
 // Test-only fixture helpers for seeding the fake DDB with the
 // post-pivot table shapes. Mirrors the workspace_mappings /
-// channel_policies / bootstrap_codes schemas fenced in
-// modules/qurl-slack-ddb/main.tf.
+// channel_policies schemas fenced in modules/qurl-slack-ddb/main.tf.
 
 import (
 	"time"

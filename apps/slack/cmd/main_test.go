@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -198,6 +199,60 @@ func (*fakeAdminStore) BindWorkspace(_ context.Context, _ *oauth.WorkspaceMappin
 	return nil
 }
 
+// TestClassifyBindErrorMapping locks the slackdata.Error.Code →
+// oauth.BindConflictCode mapping that wires the callback's switch
+// arm to slackdata's 409 surface. The reflect-shape fence covers
+// the struct; this covers the code-string mapping which is its own
+// drift surface — rename slackdata.ErrCodeWorkspaceAlreadyBound and
+// the classifier silently falls through to the empty-string "generic
+// failure" arm, downgrading rebind-refused to a 500.
+func TestClassifyBindErrorMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want oauth.BindConflictCode
+	}{
+		{
+			"already bound to caller (idempotent rotation)",
+			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBoundToCaller},
+			oauth.BindConflictAlreadyBoundToCaller,
+		},
+		{
+			"already bound to different admin (rebind-refused)",
+			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBound},
+			oauth.BindConflictAlreadyBound,
+		},
+		{
+			"bind held but disambig read failed (unverified)",
+			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceBindUnverified},
+			oauth.BindConflictUnverified,
+		},
+		{
+			"non-409 *slackdata.Error → empty (generic failure)",
+			&slackdata.Error{StatusCode: http.StatusServiceUnavailable, Code: "ddb_error"},
+			"",
+		},
+		{
+			"409 with unknown Code → empty (default arm)",
+			&slackdata.Error{StatusCode: http.StatusConflict, Code: "future_unmapped_code"},
+			"",
+		},
+		{
+			"non-*slackdata.Error → empty",
+			errors.New("plain string error"),
+			"",
+		},
+		{"nil → empty", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyBindError(c.err); got != c.want {
+				t.Errorf("classifyBindError(%v) = %q, want %q", c.err, got, c.want)
+			}
+		})
+	}
+}
+
 // TestAdminStoreAdapterMappingShapesMatch fences the field-for-field
 // equivalence of oauth.WorkspaceMapping and slackdata.WorkspaceMapping.
 // The adminStoreAdapter copies between the two by named field; a new
@@ -212,14 +267,17 @@ func TestAdminStoreAdapterMappingShapesMatch(t *testing.T) {
 	}
 }
 
-// structFieldSet returns the {name → kind} map for a struct type. Used
-// to compare field shapes across packages without requiring identical
-// declaration order.
-func structFieldSet(t reflect.Type) map[string]reflect.Kind {
-	out := make(map[string]reflect.Kind, t.NumField())
+// structFieldSet returns the {name → full type string} map for a
+// struct type. Used to compare field shapes across packages without
+// requiring identical declaration order. Type string (not Kind) so
+// a future drift like `OwnerID OwnerID` (named-string) vs
+// `OwnerID string` fails the test here rather than at the adapter
+// build line — the test owns the contract end-to-end.
+func structFieldSet(t reflect.Type) map[string]string {
+	out := make(map[string]string, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		out[f.Name] = f.Type.Kind()
+		out[f.Name] = f.Type.String()
 	}
 	return out
 }

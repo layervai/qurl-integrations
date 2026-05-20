@@ -41,8 +41,8 @@ type fakeDDB struct {
 	// tables maps tableName → composite-key string → item.
 	tables map[string]map[string]map[string]ddbtypes.AttributeValue
 	// keySchemas maps tableName → ordered PK/SK attr names, used for
-	// composite-key construction. workspace_mappings & bootstrap_codes
-	// are PK-only; channel_policies is PK+SK.
+	// composite-key construction. workspace_mappings is PK-only;
+	// channel_policies is PK+SK.
 	keySchemas map[string][]string
 
 	// updateHook is invoked on every UpdateItem if non-nil. Tests use

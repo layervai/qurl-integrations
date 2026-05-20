@@ -311,9 +311,15 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 
 // verifyIDTokenClaims extracts email + sub from the id_token. Email
 // is best-effort (failure logged, returned ""); sub is mandatory for
-// the downstream bind (failure returned as "" so seedAdminBind can
-// fail-closed). Both verifies are skipped cleanly when idToken is
-// empty or the verifier is unwired.
+// the downstream bind (failure returned as "" so checkBindAllowed
+// can fail-closed). Both verifies are skipped cleanly when idToken
+// is empty or the verifier is unwired.
+//
+// In production the verifier is non-nil by construction — main.go's
+// JWKS prime fails-fast at boot when AdminStore is wired — so the
+// nil-verifier branch is reachable only on the sandbox / no-DDB
+// deploy path, where checkBindAllowed short-circuits on
+// AdminStore==nil before reading the (empty) sub anyway.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {

@@ -732,27 +732,30 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 		t.Fatalf("status: got %d want 500", rec.Code)
 	}
 
+	// store.setArgs == nil is the load-bearing fence: a regression
+	// that re-introduces mint-before-bind would set it. minter.revoked
+	// is redundant under the reorder — no key minted means no revoke
+	// can fire — and read synchronously without an AsyncTracker drain
+	// would risk flake. Trust the deterministic check.
 	store.mu.Lock()
+	defer store.mu.Unlock()
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
 	}
-	store.mu.Unlock()
-
-	minter.revokeMu.Lock()
-	if minter.revoked {
-		t.Error("RevokeAPIKey called but no key was minted — bind-before-mint reorder makes revoke unnecessary")
-	}
-	minter.revokeMu.Unlock()
+	_ = minter
 }
 
 // TestCallbackBindIdempotentForSameCaller fences the rotation
 // posture: the same Slack user re-running /qurl setup must succeed
-// idempotently. The new API key is now persisted (key rotated) and
-// the admin set is unchanged. Without this, an admin re-running
-// setup to rotate keys would see the rebind-refused page.
+// idempotently. The new API key is persisted (key rotated) and the
+// admin set is unchanged. Without this, an admin re-running setup
+// to rotate keys would see the rebind-refused page.
 func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
-	cfg, _, _, minter := newCallbackCfg(t)
-	admin := &fakeAdminStore{err: errors.New("caller already on admin set")}
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	// The error text is irrelevant — the stubbed classifier returns
+	// the same-caller code regardless. Use sentinel text so a future
+	// reader doesn't think production reads the message string.
+	admin := &fakeAdminStore{err: errors.New("classified as same-caller")}
 	cfg.AdminStore = admin
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
 	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
@@ -764,6 +767,18 @@ func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d want 200 (idempotent rotation, body=%s)", rec.Code, rec.Body.String())
 	}
+	// The "key rotated" half of the promise — SetAPIKey must actually
+	// run after the idempotent-bind continue. A regression that
+	// short-circuited mint on AlreadyBoundToCaller would pass the
+	// 200-status check but leave the user's stale key in place.
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKey must run on idempotent rebind so the key rotates")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("SetAPIKey APIKey: got %q want %q (the rotation must persist the freshly minted key)", store.setArgs.APIKey, testAPIKey)
+	}
+	store.mu.Unlock()
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
 	if minter.revoked {
@@ -801,16 +816,15 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
 	}
 
+	// setArgs==nil is the deterministic fence on the reorder. See
+	// TestCallbackBindFailureSkipsMint for why minter.revoked is
+	// dropped — redundant under the reorder, flaky to read sync.
 	store.mu.Lock()
+	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run on rebind-refused — would overwrite the existing admin's encrypted key with a key that's about to be revoked")
+		t.Error("SetAPIKey must not run on rebind-refused — would overwrite the existing admin's encrypted key")
 	}
-	store.mu.Unlock()
-	minter.revokeMu.Lock()
-	if minter.revoked {
-		t.Error("RevokeAPIKey called but no key was minted — bind-before-mint reorder makes revoke unnecessary")
-	}
-	minter.revokeMu.Unlock()
+	_ = minter
 }
 
 // TestCallbackBindRefusedWhenUnverified fences the unverified-conflict
@@ -840,15 +854,11 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	}
 
 	store.mu.Lock()
+	defer store.mu.Unlock()
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run on unverified-rebind — same posture as the cross-admin arm")
 	}
-	store.mu.Unlock()
-	minter.revokeMu.Lock()
-	if minter.revoked {
-		t.Error("RevokeAPIKey called but no key was minted")
-	}
-	minter.revokeMu.Unlock()
+	_ = minter
 }
 
 // TestCallbackBindSkippedWhenSubMissing fences the hard-failure
@@ -877,15 +887,69 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	admin.mu.Unlock()
 
 	store.mu.Lock()
+	defer store.mu.Unlock()
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
 	}
-	store.mu.Unlock()
-	minter.revokeMu.Lock()
-	if minter.revoked {
-		t.Error("RevokeAPIKey called but no key was minted")
+	_ = minter
+}
+
+// TestCallbackBindSucceedsThenMintFails fences the recovery path
+// after the bind-before-mint reorder. With bind running first, a
+// fresh install where bind succeeds but mint then 502s leaves the
+// workspace_mappings row seeded but no workspace_keys row. The user
+// re-runs /qurl setup; bind returns BindConflictAlreadyBoundToCaller
+// (idempotent), the callback continues to mint, mint now succeeds,
+// and the workspace lands in the fully-installed state. Without
+// this fence the new ordering's recovery story rests on inspection
+// alone.
+func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
+	// First attempt: bind succeeds (admin.err=nil), mint fails (502).
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	admin := &fakeAdminStore{}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	minter.mintErr = errors.New("simulated qurl-service 502")
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("first attempt status: got %d want 502 (mint failure)", rec.Code)
 	}
-	minter.revokeMu.Unlock()
+	admin.mu.Lock()
+	if admin.calls != 1 || admin.gotSeed != testUserID {
+		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d seed=%q)", admin.calls, admin.gotSeed)
+	}
+	admin.mu.Unlock()
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("first attempt: SetAPIKey must NOT run when mint failed")
+	}
+	store.mu.Unlock()
+
+	// Second attempt: same caller re-runs /qurl setup. Bind now
+	// returns the same-caller-already-bound classifier code; mint
+	// succeeds; rotation completes. This is the documented recovery.
+	admin.err = errors.New("classified as same-caller")
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
+	minter.mintErr = nil
+	state2 := mintTestState(t, &cfg)
+	h2 := Callback(cfg)
+	rec2 := httptest.NewRecorder()
+	h2(rec2, callbackRequest(state2))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry status: got %d want 200 (recovery path, body=%s)", rec2.Code, rec2.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Fatal("retry: SetAPIKey must run after bind classifies as same-caller and mint succeeds")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("retry: SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+	}
 }
 
 // TestCallbackSkipsBindWhenAdminStoreNil fences the sandbox / no-DDB

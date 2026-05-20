@@ -150,20 +150,20 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 }
 
 // BindWorkspace creates the workspace mapping row on first setup.
-// Called from /oauth/qurl/callback after the API key has been minted
-// on qurl-service and persisted — the installer becomes the
-// workspace's seed admin in the same flow. The seedAdmin becomes the
-// only entry in admin_slack_user_ids; additional admins are added
-// later via /qurl admin add.
+// Called from /oauth/qurl/callback BEFORE the API key is minted on
+// qurl-service — bind acts as the gate so a rebind-refused outcome
+// can't overwrite the existing admin's stored credential. The
+// seedAdmin becomes the only entry in admin_slack_user_ids;
+// additional admins are added later via /qurl admin add.
 //
 // Returns 409 (via *Error) if the row already exists. Two sub-cases:
 //   - caller is already on the admin set → ErrCodeWorkspaceAlreadyBoundToCaller.
-//     The callback treats this as idempotent success (re-running
-//     /qurl setup rotates the API key without mutating the admin set).
+//     The callback treats this as idempotent success and continues
+//     to mint, rotating the API key without mutating the admin set.
 //   - a different admin holds the workspace → ErrCodeWorkspaceAlreadyBound.
-//     The callback renders a rebind-refused page and revokes the
-//     just-minted API key so a second admin can't silently install
-//     against an existing workspace's identity.
+//     The callback renders a rebind-refused page; no key is minted
+//     so there's nothing to revoke and the existing admin's
+//     workspace_keys row stays intact.
 //
 // Surfacing same-owner as 409 (instead of silently overwriting) is
 // intentional: PutItem would replace the entire row including any
