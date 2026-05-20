@@ -97,6 +97,50 @@ SSM-loaded secret is non-empty and non-`PLACEHOLDER`. Steady-state
 restarts reuse the SSM value; only the bootstrap path (no sub yet,
 or seeded `PLACEHOLDER`) rotates.
 
+### Cold-bootstrap of a fresh environment — DEPLOY AT desired_count=1 FIRST
+
+On the very first deploy to a fresh environment, no subscription
+exists yet AND no SSM secret exists yet. If N replicas boot
+concurrently in that state, each replica independently `POST`s
+`/v1/webhooks` and N duplicate subscriptions are created, each with
+a distinct server-generated secret. SSM is last-write-wins so only
+one replica's secret persists; the N-1 surviving duplicate
+subscriptions deliver events to dead secrets and 401 forever until
+manual cleanup.
+
+The registrar's dedupe path (next boot finds the duplicates and
+deletes all but the oldest survivor by `created_at`) is RECOVERY,
+not prevention. To avoid the race entirely on a fresh environment:
+
+1. Scale the bot HTTP service to `desired_count=1` before the first
+   deploy.
+2. Confirm one boot completed cleanly (`qURL webhook self-
+   registration complete` log line + `created` action).
+3. Scale back to the target desired_count.
+
+This procedure is only required on the first deploy of a brand-new
+environment. Every subsequent deploy (rolling, blue/green, redeploy)
+falls into the steady-state `reused` path because the subscription
+already exists and the SSM secret is populated. The durable upstream
+fix — making `POST /v1/webhooks` idempotent on `(owner_id, url)` —
+is tracked separately.
+
+### Persistence env var
+
+The registrar writes the active secret back to AWS Systems Manager
+Parameter Store when `QURL_WEBHOOK_SECRET_SSM_PARAM` is set in the
+bot's environment. The value is the full SSM parameter name (e.g.
+`/discord-bot/sandbox/QURL_WEBHOOK_SECRET`). When unset, the
+registrar runs in-memory-only — usable for local dev but every
+restart rotates the secret because there's no place to read the
+previous one from.
+
+The IAM role for the bot's task needs `ssm:PutParameter` on that
+specific parameter. The bot tolerates `AccessDeniedException`
+gracefully (logs `warn`, continues with in-memory secret) so a
+missing grant degrades to "the secret rotates each boot, but the
+bot still works" rather than a crashloop.
+
 ## What the bot does NOT need
 
 - The full `qurl.accessed` payload's `src_ip` / `user_agent` fields —

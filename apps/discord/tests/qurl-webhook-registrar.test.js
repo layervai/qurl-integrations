@@ -372,6 +372,191 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
   });
 });
 
+describe('ensureWebhookSubscription — duplicate-subscription recovery', () => {
+  // Cold-bootstrap with N replicas + empty SSM creates N duplicate subs
+  // (each replica POSTs concurrently). This path tests RECOVERY on the
+  // next boot: pick deterministic survivor, DELETE others, continue.
+  it('deletes duplicates and keeps oldest-by-created_at survivor', async () => {
+    const deletedIds = [];
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T12:00:00Z' },
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T10:00:00Z' }, // older — survivor
+        { webhook_id: 'wh_c', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T14:00:00Z' },
+      ] } }),
+      'DELETE /v1/webhooks/wh_b': () => { deletedIds.push('wh_b'); return { status: 204, body: '' }; },
+      'DELETE /v1/webhooks/wh_c': () => { deletedIds.push('wh_c'); return { status: 204, body: '' }; },
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(result.webhookId).toBe('wh_a');
+    expect(result.action).toBe('reused');
+    expect(deletedIds.sort()).toEqual(['wh_b', 'wh_c']);
+  });
+
+  it('falls back to lexicographic webhook_id when created_at is absent (no replica-identity coupling)', async () => {
+    const deletedIds = [];
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_zzz', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_aaa', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] }, // lex-first — survivor
+      ] } }),
+      'DELETE /v1/webhooks/wh_zzz': () => { deletedIds.push('wh_zzz'); return { status: 204, body: '' }; },
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(result.webhookId).toBe('wh_aaa');
+    expect(deletedIds).toEqual(['wh_zzz']);
+  });
+
+  it('treats DELETE 404 as success (concurrent dedupe race)', async () => {
+    // Two replicas independently picking the same survivor + DELETEing
+    // the same losers means the second DELETE on each loser hits 404.
+    // The dedupe path must NOT crash on this.
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+      ] } }),
+      'DELETE /v1/webhooks/wh_b': () => ({ status: 404, body: { error: 'not found' } }),
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(result.webhookId).toBe('wh_a');
+    expect(result.action).toBe('reused');
+  });
+
+  it('propagates non-404 DELETE errors so a real failure surfaces', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+      ] } }),
+      'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
+    });
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' })).rejects.toThrow(/500/);
+  });
+});
+
+describe('ensureWebhookSubscription — multi-subscription scan', () => {
+  it('matches the correct sub when several non-matching ones share the page', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_other_1', url: 'https://elsewhere.example/hook1', events: ['qurl.accessed'] },
+        { webhook_id: 'wh_match',   url: BASE_OPTS.bridgeUrl,              events: ['qurl.accessed'] },
+        { webhook_id: 'wh_other_2', url: 'https://elsewhere.example/hook2', events: ['qurl.accessed'] },
+      ] } }),
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(result.webhookId).toBe('wh_match');
+    expect(result.action).toBe('reused');
+  });
+});
+
+describe('ensureWebhookSubscription — rotation survives PATCH failure', () => {
+  it('returns the rotated secret even when the events PATCH fails', async () => {
+    // Behavior pin: if PATCH ran before rotate and threw, the bot
+    // would never get a usable secret on this boot — receiver stays on
+    // PLACEHOLDER, 503s forever. Asserting the rotated secret made it
+    // out implicitly proves rotation ran (and succeeded) despite the
+    // PATCH 500. Doesn't pin call order, so a future refactor that
+    // makes rotation+PATCH independent still passes.
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated_ok' } },
+      }),
+      'PATCH /v1/webhooks/wh_existing': () => ({ status: 500, body: { error: 'transient' } }),
+    });
+    const result = await ensureWebhookSubscription(BASE_OPTS);
+    expect(result.secret).toBe('whsec_rotated_ok');
+    expect(result.action).toBe('rotated');
+  });
+});
+
+describe('ensureWebhookSubscription — events drift edge cases', () => {
+  it('triggers PATCH when existing.events is undefined (regression guard for Array.isArray(undefined))', async () => {
+    let patched = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, // no events field at all
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patched).toBe(true);
+  });
+});
+
+describe('ensureWebhookSubscription — pagination cap', () => {
+  it('throws when the 50-page cap is hit (refuses to fall through to create-fresh)', async () => {
+    // Silently returning null + creating-fresh would compound duplicates
+    // on every restart with a stuck cursor.
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        data: [{ webhook_id: 'wh_other', url: 'https://other.example', events: [] }],
+        meta: { next_cursor: 'never-ends', has_more: true },
+      }),
+    }));
+    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/pagination cap/i);
+  });
+});
+
+describe('ensureWebhookSubscription — fetch timeout', () => {
+  it('surfaces AbortError when qurl-service hangs past the 10s deadline', async () => {
+    // The registrar relies on AbortSignal.timeout(10_000) — verify the
+    // surface is an error, not a hung promise. Replaces the awaited
+    // fetch with one that throws an AbortError synchronously to avoid
+    // real-time waits in tests.
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    global.fetch = jest.fn(async () => { throw abortErr; });
+    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/aborted/i);
+  });
+});
+
+describe('redactSecret — recursive scrubbing', () => {
+  const { redactSecret } = _internals;
+  it('scrubs nested secret fields at any depth', () => {
+    const out = redactSecret({ data: { webhook: { secret: 'whsec_leaked', other: 'fine' } } });
+    expect(out.data.webhook.secret).toBe('[REDACTED]');
+    expect(out.data.webhook.other).toBe('fine');
+  });
+  it('scrubs secrets inside arrays of objects', () => {
+    const out = redactSecret({ data: [{ secret: 'whsec_one' }, { secret: 'whsec_two' }] });
+    expect(out.data[0].secret).toBe('[REDACTED]');
+    expect(out.data[1].secret).toBe('[REDACTED]');
+  });
+  it('leaves non-secret leaf values intact', () => {
+    const out = redactSecret({ a: 1, b: 'x', c: null, d: false });
+    expect(out).toEqual({ a: 1, b: 'x', c: null, d: false });
+  });
+});
+
+describe('pickSurvivor — deterministic across replicas', () => {
+  const { pickSurvivor } = _internals;
+  it('returns null on empty input', () => {
+    expect(pickSurvivor([])).toBeNull();
+  });
+  it('returns the single match when only one', () => {
+    expect(pickSurvivor([{ webhook_id: 'x' }])).toEqual({ webhook_id: 'x' });
+  });
+  it('picks oldest created_at when both present', () => {
+    const winner = pickSurvivor([
+      { webhook_id: 'wh_z', created_at: '2026-05-19T12:00:00Z' },
+      { webhook_id: 'wh_a', created_at: '2026-05-19T10:00:00Z' },
+    ]);
+    expect(winner.webhook_id).toBe('wh_a');
+  });
+  it('falls back to lex webhook_id when created_at is missing', () => {
+    const winner = pickSurvivor([
+      { webhook_id: 'wh_zzz' },
+      { webhook_id: 'wh_aaa' },
+    ]);
+    expect(winner.webhook_id).toBe('wh_aaa');
+  });
+});
+
 describe('ensureWebhookSubscription — config-mutation seam (receiver picks up new secret)', () => {
   // The wire-up cr called out: receiver reads config.QURL_WEBHOOK_SECRET
   // on every request; the registrar's `.then()` callback writes to
