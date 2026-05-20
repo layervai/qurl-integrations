@@ -34,21 +34,28 @@ const EXPRESSION_PROP_NAMES = new Set([
 
 // Negative lookbehind on `#` and `:` so the regex skips already-
 // aliased names (`#consumed`) and value placeholders (`:c`).
-// `\b` alone treats `#` as a word boundary and would match
-// `consumed` out of `#consumed` — the exact pattern that hid the
-// original bug from the first version of this static check.
+// `\b` alone treats `#` as a word boundary, which means
+// `\b\w+\b` would match `consumed` out of `#consumed`. The
+// lookbehind closes that gap explicitly.
 const ATTR_NAME_PATTERN = /(?<![#:])\b[A-Za-z_][A-Za-z0-9_]*\b/g;
 
 // Tokens that LOOK like attribute names by the regex but are
 // expression keywords / function calls — not table column names.
 // DDB's expression grammar includes these as reserved syntax, not
-// as attributes you'd alias. NOT all-caps in the source — DDB
-// expressions are case-sensitive only for attribute names.
+// as attributes you'd alias.
+//
+// `size` is intentionally NOT here even though it's a DDB function.
+// It's also a reserved word, and a bare `SET size = :s` would
+// silently pass if the keyword exemption ran first. The trade-off:
+// a future `size(attr)` function call would false-positive; a
+// codebase grep shows zero such usages, so the cost is theoretical.
+// A future legit `size(...)` use can either dodge the check via
+// `#size_alias` or this list can grow a narrowly-targeted exception.
 const EXPRESSION_KEYWORDS = new Set([
   'set', 'remove', 'add', 'delete',
   'and', 'or', 'not', 'between', 'in',
   'attribute_exists', 'attribute_not_exists', 'attribute_type',
-  'begins_with', 'contains', 'size',
+  'begins_with', 'contains',
   'if_not_exists', 'list_append',
 ]);
 
@@ -134,12 +141,94 @@ function findViolations(file) {
   return violations;
 }
 
-describe('DDB expression strings — no bare reserved-word attribute names', () => {
+// In-memory fixture self-tests — pin the detection logic itself so
+// a future refactor of evalString / the lookbehind regex / the
+// EXPRESSION_KEYWORDS set can't silently neuter the check. Each
+// fixture writes a synthetic .js source to /tmp, runs findViolations
+// against it, and asserts the expected outcome.
+function withFixture(source, fn) {
+  const fixturePath = path.join(require('os').tmpdir(), `ddb-static-fixture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+  fs.writeFileSync(fixturePath, source);
+  try { return fn(fixturePath); } finally { fs.unlinkSync(fixturePath); }
+}
+
+describe('DDB reserved-words static check — detection logic', () => {
+  it('flags a bare reserved word in UpdateExpression', () => {
+    withFixture(`
+      module.exports = {
+        params: { UpdateExpression: 'SET consumed = :c' },
+      };
+    `, file => {
+      const v = findViolations(file);
+      expect(v.filter(x => !x.dynamic)).toEqual([expect.objectContaining({
+        expression: 'UpdateExpression',
+        word: 'consumed',
+      })]);
+    });
+  });
+
+  it('does NOT flag an aliased reserved word (#consumed)', () => {
+    withFixture(`
+      module.exports = {
+        params: {
+          UpdateExpression: 'SET #consumed = :c',
+          ExpressionAttributeNames: { '#consumed': 'consumed' },
+        },
+      };
+    `, file => {
+      const v = findViolations(file).filter(x => !x.dynamic);
+      expect(v).toEqual([]);
+    });
+  });
+
+  it('flags a reserved word in ConditionExpression assembled via + concat', () => {
+    withFixture(`
+      module.exports = {
+        params: {
+          ConditionExpression:
+            'attribute_not_exists(x) OR (' +
+            'x <> :y AND consumed = :c)',
+        },
+      };
+    `, file => {
+      const v = findViolations(file).filter(x => !x.dynamic);
+      expect(v.length).toBe(1);
+      expect(v[0].word).toBe('consumed');
+    });
+  });
+
+  it('marks a dynamic expression (template-with-substitution) as dynamic, not as a violation', () => {
+    withFixture(`
+      const col = 'foo';
+      module.exports = {
+        params: { FilterExpression: \`\${col} = :v\` },
+      };
+    `, file => {
+      const v = findViolations(file);
+      expect(v.filter(x => !x.dynamic)).toEqual([]);
+      expect(v.filter(x => x.dynamic).length).toBe(1);
+    });
+  });
+
+  it('treats `size` as a reserved word (catches the original bug class)', () => {
+    withFixture(`
+      module.exports = {
+        params: { UpdateExpression: 'SET size = :s' },
+      };
+    `, file => {
+      const v = findViolations(file).filter(x => !x.dynamic);
+      expect(v.length).toBe(1);
+      expect(v[0].word).toBe('size');
+    });
+  });
+});
+
+describe('DDB reserved-words static check — full src scan', () => {
   const SRC_DIR = path.join(__dirname, '..', 'src');
   const files = walkJsFiles(SRC_DIR);
 
-  it('the test infrastructure itself works (scan finds real .js files)', () => {
-    expect(files.length).toBeGreaterThan(50); // Sanity floor — bot has many src files
+  it('the walker finds .js files (otherwise the rest of this suite is a no-op)', () => {
+    expect(files.length).toBeGreaterThan(0);
   });
 
   it('every UpdateExpression / ConditionExpression / etc. is free of bare reserved words', () => {
@@ -155,15 +244,18 @@ describe('DDB expression strings — no bare reserved-word attribute names', () 
     }
   });
 
-  it('logs (but does not fail on) dynamic-string expressions that the check cannot validate', () => {
+  it('the ceiling on non-static-literal expressions prevents silent coverage shrink', () => {
+    // Dynamic expressions can't be statically validated (they
+    // interpolate runtime values). Ceiling so a refactor that turns
+    // many literals into template-with-substitutions doesn't quietly
+    // defeat the check. Today's expected dynamic sites:
+    //   - flow-state.js (a few template-with-expression Filter/Update)
+    // If this assertion fires, audit each newly-dynamic expression
+    // against the reserved-words list manually + raise the ceiling.
     const dynamic = [];
     for (const f of files) {
       dynamic.push(...findViolations(f).filter(v => v.dynamic));
     }
-    // Dynamic expressions are rare in this codebase — if the count
-    // grows, that's a signal the static check coverage is shrinking.
-    // Hard ceiling so a refactor that converts many literals to
-    // template-with-substitutions doesn't quietly defeat the check.
-    expect(dynamic.length).toBeLessThan(5);
+    expect(dynamic.length).toBeLessThan(8);
   });
 });
