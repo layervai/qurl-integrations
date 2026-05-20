@@ -2,7 +2,7 @@
 // Wired into qurl-webhook.js after a successful recordQurlView returns
 // `result === 'recorded'` — i.e., a real new view event (not a
 // per-event dedup hit). The consumer (view-update-consumer.js) drains
-// the queue on worker replicas and dispatches into the process-local
+// the queue on HTTP-tier replicas and dispatches into the process-local
 // view-update-registry.
 //
 // Pairs with src/view-update-consumer.js. Envelope contract:
@@ -174,6 +174,15 @@ function start() {
 
 // Drain in-flight SendMessage promises up to DRAIN_DEADLINE_MS.
 // Mirrors event-publisher.stop()'s discipline.
+//
+// publish() → drain race: a publish() that observed running=true
+// synchronously can land on inFlightSends.add(...) AFTER stop()
+// snapshotted the set via [...inFlightSends] below. The post-snapshot
+// send completes detached without drain coverage. Same posture as
+// event-publisher.js. Acceptable in this module because the polling
+// fallback at the render layer catches the resulting view-counter
+// miss; flagged for parity with the sibling so a future drain-
+// hardening pass touches both files together.
 async function stop() {
   if (!running) return;
   running = false;

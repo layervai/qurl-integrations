@@ -251,6 +251,15 @@ async function pollLoop() {
       logger.error('view-update-consumer: unexpected error in pollOnce', {
         error: err?.message,
       });
+      // Flip running=false BEFORE invoking onFatalCb so module state
+      // matches reality (cr round-7 #1). Production wiring always
+      // passes onFatal=gracefulShutdown which would call stop() and
+      // flip this anyway, but the onFatal contract is documented
+      // optional — without this flip, a no-onFatal caller would be
+      // wedged with isRunning()=true but no actual polling. A
+      // subsequent start() would warn-and-no-op, masking the
+      // failure.
+      running = false;
       if (onFatalCb) {
         try {
           onFatalCb(err);

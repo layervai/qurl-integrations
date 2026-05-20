@@ -1157,10 +1157,14 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 
   // `viewed` and `allDone` declared up-front (vs at their original
   // mid-monitor positions) so the createHandleViewUpdate factory
-  // closes over them directly. Without this, the factory was capturing
-  // pre-initialization variables — safe in practice (callbacks fire
-  // async) but a future refactor that called the handler synchronously
-  // would surface as a ReferenceError. Move-up eliminates the footgun.
+  // closes over the live binding. With `let`, the binding exists at
+  // function entry but throws TDZ on synchronous access before the
+  // initializer line runs. The previous arrangement was safe only
+  // because the handler's getViewed/setViewed/buildStatusMsg
+  // closures all execute asynchronously (after the `let viewed = 0`
+  // line runs); a future refactor that called the handler
+  // synchronously would surface as ReferenceError. Move-up eliminates
+  // the footgun.
   let viewed = 0;
   let allDone = false;
 
