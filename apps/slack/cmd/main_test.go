@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -146,6 +148,80 @@ func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
 			t.Errorf("ok=%v err=%v — want ok=true at exactly StateMinSecret bytes", ok, err)
 		}
 	})
+}
+
+// TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired fences the
+// mismatched-degradation guard: when the JWKS prime fails AND AdminStore
+// is wired, every callback would reject the install (no sub → no
+// OwnerID → no bind → 500). Catching that at boot beats catching it
+// after the first user hits /qurl setup. The sandbox path (no
+// AdminStore) is the inverse — falls through to a warn + nil
+// verifier so the API-key surface keeps working.
+func TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired(t *testing.T) {
+	prev := newJWKSVerifier
+	newJWKSVerifier = func(_ context.Context, _, _ string) (oauth.IDTokenVerifier, error) {
+		return nil, errors.New("simulated JWKS prime failure")
+	}
+	t.Cleanup(func() { newJWKSVerifier = prev })
+
+	applyEnv(t, validEnv())
+
+	t.Run("admin store wired — must fail-fast", func(t *testing.T) {
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, &fakeAdminStore{})
+		if ok {
+			t.Error("expected ok=false when JWKS prime fails with AdminStore wired (every callback would 500)")
+		}
+		if err == nil || !strings.Contains(err.Error(), "JWKS") {
+			t.Errorf("expected fail-fast error mentioning JWKS, got %v", err)
+		}
+	})
+
+	t.Run("admin store nil — must warn-and-continue", func(t *testing.T) {
+		cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+		if err != nil {
+			t.Fatalf("expected nil err on sandbox path, got %v", err)
+		}
+		if !ok {
+			t.Fatal("expected ok=true on sandbox path (no AdminStore → bind is skipped, verifier is best-effort)")
+		}
+		if cfg.IDTokenVerifier != nil {
+			t.Error("expected verifier=nil when prime failed; callback gates on this to skip claim extraction")
+		}
+	})
+}
+
+// fakeAdminStore is the cmd-side stand-in for oauth.AdminStore in
+// tests that only need a non-nil to flip the JWKS fail-fast branch.
+type fakeAdminStore struct{}
+
+func (*fakeAdminStore) BindWorkspace(_ context.Context, _ *oauth.WorkspaceMapping, _ string) error {
+	return nil
+}
+
+// TestAdminStoreAdapterMappingShapesMatch fences the field-for-field
+// equivalence of oauth.WorkspaceMapping and slackdata.WorkspaceMapping.
+// The adminStoreAdapter copies between the two by named field; a new
+// field added to one and not the other would silently drop on the
+// adapter's copy. Reflect-walk the field sets so the build breaks
+// when they drift.
+func TestAdminStoreAdapterMappingShapesMatch(t *testing.T) {
+	oauthFields := structFieldSet(reflect.TypeOf(oauth.WorkspaceMapping{}))
+	storeFields := structFieldSet(reflect.TypeOf(slackdata.WorkspaceMapping{}))
+	if !reflect.DeepEqual(oauthFields, storeFields) {
+		t.Errorf("oauth.WorkspaceMapping vs slackdata.WorkspaceMapping fields differ — adminStoreAdapter copy would silently drop the diff\noauth:     %v\nslackdata: %v", oauthFields, storeFields)
+	}
+}
+
+// structFieldSet returns the {name → kind} map for a struct type. Used
+// to compare field shapes across packages without requiring identical
+// declaration order.
+func structFieldSet(t reflect.Type) map[string]reflect.Kind {
+	out := make(map[string]reflect.Kind, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		out[f.Name] = f.Type.Kind()
+	}
+	return out
 }
 
 // TestBuildOAuthConfigRejectsEmptyHostSlackBaseURL locks the contract

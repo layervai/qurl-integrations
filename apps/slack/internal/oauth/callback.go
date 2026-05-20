@@ -38,6 +38,11 @@ const (
 	// what we report to the user. 15s is well over typical DDB PutItem
 	// latency.
 	persistTimeout = 15 * time.Second
+	// bindTimeout bounds the DDB PutItem (+ optional disambiguation
+	// GetItem) from checkBindAllowed. Same fresh-context posture as
+	// persistTimeout — the two are separate constants so a future
+	// adjustment of one doesn't accidentally retune the other.
+	bindTimeout = 15 * time.Second
 	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
 	// mintAndPersist. Same fresh-context rationale as persistTimeout:
 	// TimeoutHandler canceling mid-mint would orphan a key the bot
@@ -143,23 +148,24 @@ type auth0TokenResponse struct {
 
 // Callback returns the http.HandlerFunc for GET /oauth/qurl/callback.
 //
-// Steps mirror the Discord LIVE flow (apps/discord/src/routes/qurl-oauth.js):
-//  1. Validate cookie + query.state via timing-safe compare.
-//  2. Validate the state's HMAC + recover (teamID, userID).
-//  3. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
-//  4. Verify id_token signature against Auth0 JWKS — extract `sub` (used
-//     as the workspace OwnerID; mandatory) and `email` (best-effort for
-//     the success-page readout).
+// Steps:
+//  1. Validate cookie + query.state via timing-safe compare; verify the
+//     state's HMAC + expiry; recover (teamID, userID).
+//  2. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
+//  3. Verify id_token signature against Auth0 JWKS — extract `sub`
+//     (workspace OwnerID; mandatory) and `email` (best-effort for the
+//     success-page readout).
+//  4. Bind workspace_mappings via AdminStore.BindWorkspace — the
+//     installer becomes the first admin. A rebind conflict against a
+//     different admin (or unverified) renders the rebind-refused page
+//     and short-circuits BEFORE we touch any key state, so a refused
+//     install can't overwrite the existing admin's stored API key.
+//     Same-caller re-entry is idempotent success.
 //  5. POST to qurl-service /v1/api-keys to mint the workspace key.
 //  6. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
-//     revoke on qurl-service.
-//  7. Seed the workspace_mappings row via AdminStore.BindWorkspace — the
-//     installer becomes the first admin. On a rebind conflict against a
-//     different admin, render the rebind-refused page and revoke the
-//     minted key so we don't leave a half-installed workspace.
-//     Same-user re-entry is idempotent success.
-//  8. DM the admin (fire-and-forget; failure doesn't block the page).
-//  9. Render success HTML.
+//     revoke on qurl-service to bound the orphan-key window.
+//  7. DM the admin (fire-and-forget; failure doesn't block the page).
+//  8. Render success HTML.
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API-surface friction.
 func Callback(cfg Config) http.HandlerFunc {
@@ -197,12 +203,19 @@ func Callback(cfg Config) http.HandlerFunc {
 
 		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
 
-		keyID, keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
-		if !ok {
+		// Bind BEFORE mint so a rebind-refused install can't overwrite
+		// the existing admin's encrypted qurl_api_key row with a key
+		// that's about to be revoked. The OwnerID needed for the bind
+		// (id_token sub) is already in hand pre-mint, so there's no
+		// ordering blocker. On a refused outcome, no key is minted and
+		// no DDB row is touched — half-install becomes impossible by
+		// construction rather than recoverable after the fact.
+		if !checkBindAllowed(w, cfg, verified, qurlSub) {
 			return
 		}
 
-		if !seedAdminBind(w, cfg, verified, accessToken, qurlSub, keyID) {
+		keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
+		if !ok {
 			return
 		}
 
@@ -320,32 +333,31 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 	return email, sub
 }
 
-// seedAdminBind seeds the workspace_mappings row so /qurl admin
-// commands work immediately. Returns true to continue to the success
-// page; false when a response has already been written (rebind-
-// refused, generic 500, or the sub-missing 500).
+// checkBindAllowed runs the BindWorkspace pre-flight. Returns true to
+// continue to mint+persist; false when a response has already been
+// written (rebind-refused, generic 500, or sub-missing 500). Because
+// this runs BEFORE mint, a refused install never produces an orphan
+// key and never overwrites an existing admin's stored credential.
 //
 // AdminStore=nil is the sandbox / no-DDB path — log and skip.
 // qurlSub=="" means the verifier failed; we can't bind without the
-// OwnerID. Treat the latter as a hard failure (revoke the minted
-// key, render 500) because half-installing — API key works, admin
-// verbs don't — is the worst-of-both-worlds state.
+// OwnerID. Render a 500 — half-installing (API key minted, admin
+// verbs broken) is the worst-of-both-worlds state.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
-func seedAdminBind(w http.ResponseWriter, cfg Config, verified VerifiedState, accessToken, qurlSub, keyID string) bool {
+func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState, qurlSub string) bool {
 	if cfg.AdminStore == nil {
 		slog.Warn("oauth/callback AdminStore not wired — workspace_mappings not seeded", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", verified.TeamID)
 		return true
 	}
 	if qurlSub == "" {
-		slog.Error("oauth/callback bind skipped — id_token sub unavailable; revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-			"team_id", verified.TeamID, "key_id", keyID)
-		scheduleOrphanRevoke(cfg, accessToken, keyID, verified.TeamID)
-		http.Error(w, "qURL key provisioned but workspace identity could not be confirmed — run /qurl setup again", http.StatusInternalServerError)
+		slog.Error("oauth/callback bind skipped — id_token sub unavailable", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", verified.TeamID)
+		http.Error(w, "workspace identity could not be confirmed — run /qurl setup again", http.StatusInternalServerError)
 		return false
 	}
-	bindCtx, bindCancel := context.WithTimeout(context.Background(), persistTimeout)
+	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
 	defer bindCancel()
 	bindErr := cfg.AdminStore.BindWorkspace(bindCtx,
 		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: qurlSub},
@@ -353,17 +365,18 @@ func seedAdminBind(w http.ResponseWriter, cfg Config, verified VerifiedState, ac
 	if bindErr == nil {
 		return true
 	}
-	return handleBindError(w, cfg, bindErr, verified.TeamID, accessToken, keyID)
+	return handleBindError(w, cfg, bindErr, verified.TeamID)
 }
 
 // handleBindError classifies the BindWorkspace error via cfg.BindClassifyError
 // and writes the appropriate response. Returns true if the caller should
 // continue (idempotent same-caller re-entry — bind held, no overwrite,
 // success-page still appropriate) and false if a response has been
-// written (rebind-refused page, or generic 500 + key revoke).
+// written (rebind-refused page or generic 500). No key revoke wiring
+// because this runs BEFORE mint by construction.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
-func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID, accessToken, keyID string) bool {
+func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID string) bool {
 	var code BindConflictCode
 	if cfg.BindClassifyError != nil {
 		code = cfg.BindClassifyError(bindErr)
@@ -371,31 +384,25 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID, a
 	switch code {
 	case BindConflictAlreadyBoundToCaller:
 		// Same Slack user re-running /qurl setup — they were already
-		// admin. The new API key is now persisted (SetAPIKey already
-		// ran above), so the operator-visible effect is "key rotated,
-		// admin set unchanged." Idempotent success.
+		// admin. We continue to mint, which rotates their API key.
+		// Operator-visible effect: "key rotated, admin set unchanged."
 		slog.Info("oauth/callback rebind idempotent (caller already on admin set)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID)
 		return true
 	case BindConflictAlreadyBound, BindConflictUnverified:
 		// A different admin holds the workspace (or we can't tell —
 		// treat unverified the same way; the safer default is to
-		// refuse the rebind than to potentially overwrite). Revoke
-		// the minted key so we don't leave a half-installed
-		// workspace, then render the rebind-refused page.
-		slog.Warn("oauth/callback rebind refused — workspace held by different admin; revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-			"team_id", teamID, "key_id", keyID, "conflict", string(code), "error", bindErr)
-		scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
+		// refuse the rebind than to potentially overwrite). No mint
+		// has happened yet, so nothing to revoke — the existing
+		// admin's key row is untouched.
+		slog.Warn("oauth/callback rebind refused — workspace held by different admin", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID, "conflict", string(code), "error", bindErr)
 		renderRebindRefused(w, teamID)
 		return false
 	default:
-		// Transport / validation / unclassified failure. Mirrors the
-		// SetAPIKey-failure branch: half-installed workspace is the
-		// worst state, so revoke the key and surface a generic 500.
-		slog.Error("oauth/callback BindWorkspace failed after key mint — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-			"team_id", teamID, "key_id", keyID, "error", bindErr)
-		scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
-		http.Error(w, "qURL key provisioned but workspace not bound — run /qurl setup again", http.StatusInternalServerError)
+		slog.Error("oauth/callback BindWorkspace failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID, "error", bindErr)
+		http.Error(w, "workspace not bound — run /qurl setup again", http.StatusInternalServerError)
 		return false
 	}
 }
@@ -411,15 +418,13 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 }
 
 // mintAndPersist mints the API key on qurl-service and persists it via
-// WorkspaceStore. Returns (keyID, keyPrefix, true) on success; on
-// failure writes the HTTP error response and fires the orphan-key
-// revoke when a mint succeeded but the persist did not. keyID is
-// surfaced so the caller can drive the same revoke from its own
-// BindWorkspace-failure path — a half-installed workspace (key
-// persisted but admin row missing) is the worst-of-both-worlds state.
-// The plaintext apiKey stays internal: SetAPIKey is its only consumer
-// and exposing it would extend a credential past its single intended
-// use.
+// WorkspaceStore. Returns (keyPrefix, true) on success; on failure
+// writes the HTTP error response and fires the orphan-key revoke
+// when a mint succeeded but the persist did not. The plaintext apiKey
+// and keyID stay internal: SetAPIKey is the only apiKey consumer and
+// keyID's only use is the persist-failure revoke. With BindWorkspace
+// running BEFORE this step (see Callback), no bind-failure path needs
+// the keyID either.
 //
 // Post-timeout-completion footgun: the mint + persist contexts are
 // fresh (decoupled from the request context) so a TimeoutHandler
@@ -433,7 +438,7 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 // Tracked at #265 alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, string, bool) {
+func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
 	keyName := "Slack workspace " + teamID
 	// Fresh bounded context for the mint, decoupled from the request
 	// context. TimeoutHandler's 60s deadline could fire mid-mint;
@@ -449,7 +454,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	if err != nil {
 		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		http.Error(w, "could not provision qURL key — run /qurl setup again to retry", http.StatusBadGateway)
-		return "", "", false
+		return "", false
 	}
 
 	// Persist with a fresh bounded context, not the request context.
@@ -470,9 +475,9 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		// and leaks an orphan. Closes when #265's ConditionExpression
 		// shift lets us detect the lost-race case end-to-end.
 		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
-		return "", "", false
+		return "", false
 	}
-	return keyID, keyPrefix, true
+	return keyPrefix, true
 }
 
 // scheduleOrphanRevoke fires a fire-and-forget revoke of a key that

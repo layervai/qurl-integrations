@@ -189,7 +189,11 @@ func run() error {
 	// Route the callback's fire-and-forget goroutines through handler.wg
 	// so they fall inside the same shutdown drain budget as the
 	// slash-command async workers.
-	oauthCfg, ok, err := buildOAuthConfig(signalCtx, ddbProvider, handler, adminStore)
+	var oauthAdminStore oauth.AdminStore
+	if adminStore != nil {
+		oauthAdminStore = &adminStoreAdapter{store: adminStore}
+	}
+	oauthCfg, ok, err := buildOAuthConfig(signalCtx, ddbProvider, handler, oauthAdminStore)
 	if err != nil {
 		return fmt.Errorf("OAuth config: %w", err)
 	}
@@ -343,11 +347,7 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
 // goroutine tears down on SIGTERM.
-func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker oauth.AsyncTracker, store *slackdata.Store) (oauth.Config, bool, error) {
-	var adminStore oauth.AdminStore
-	if store != nil {
-		adminStore = &adminStoreAdapter{store: store}
-	}
+func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker oauth.AsyncTracker, adminStore oauth.AdminStore) (oauth.Config, bool, error) {
 	// Strip trailing slashes from URL-shaped env vars at one chokepoint so
 	// downstream concatenations (redirect_uri, /oauth/token URL composition)
 	// can't produce //-path artifacts. Auth0 rejects redirect_uri mismatches
@@ -415,24 +415,29 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 			errOAuthStateSecretTooShort, len(stateSecret), minStateSecretBytes)
 	}
 
-	// JWKS verifier opens the network for the initial JWKS fetch (bounded
-	// inside NewJWKSVerifier). If the prime fails, the callback proceeds
-	// without email-claim verification for the lifetime of the process —
-	// the qURL key still gets minted; only the success-page email line
-	// is missing. We don't retry: the failure path is the operator-
-	// configured-wrong-domain scenario, where a lazy retry would log a
-	// noisy warning on every callback rather than once at boot.
-	// Operators who fix the domain restart the task.
-	var verifier oauth.IDTokenVerifier
+	// JWKS verifier opens the network for the initial JWKS fetch
+	// (bounded inside NewJWKSVerifier). The callback uses the verifier
+	// to extract the id_token `sub` claim, which becomes the
+	// workspace_mappings OwnerID at BindWorkspace time. Without a
+	// usable verifier, every callback in production would refuse the
+	// install (no OwnerID → no bind → 500). Fail-fast at boot when
+	// adminStore is wired so the operator sees the configuration error
+	// immediately instead of after the first user tries /qurl setup.
+	// On sandbox / no-DDB deploys (adminStore==nil) the bind is
+	// skipped anyway, so the verifier is downgraded to "email line
+	// missing on the success page" — non-fatal, log and continue.
 	issuer := "https://" + domain + "/"
 	// id_tokens carry the application's client_id as their `aud`
 	// claim, distinct from AUTH0_AUDIENCE (the API resource server
 	// identifier used at /authorize for access-token scope). Passing
 	// clientID here matches what Auth0 actually stamps into id_tokens.
-	if v, err := newJWKSVerifier(ctx, issuer, clientID); err != nil {
-		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task", "error", err)
-	} else {
-		verifier = v
+	verifier, err := newJWKSVerifier(ctx, issuer, clientID)
+	if err != nil {
+		if adminStore != nil {
+			return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed and AdminStore is wired — every callback would refuse the install: %w", err)
+		}
+		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task (AdminStore=nil so bind is skipped anyway)", "error", err)
+		verifier = nil
 	}
 
 	return oauth.Config{

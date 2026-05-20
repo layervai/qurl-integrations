@@ -76,9 +76,12 @@ const (
 )
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
-// between the caller-already-bound and different-admin 409 message
-// variants. BindWorkspace is called from the OAuth callback under
-// its own persistTimeout budget; this sub-budget keeps a slow
+// between the caller-already-bound (idempotent-continue) and
+// different-admin (refuse) callback-side outcomes. The two return
+// the same rebind-refused page, but the caller drives different
+// behavior — idempotent-same-caller continues to mint, refuse short-
+// circuits. BindWorkspace is called from the OAuth callback under
+// its own bindTimeout budget; this sub-budget keeps a slow
 // disambiguating read from consuming whatever budget remains after
 // the failed PutItem.
 //
