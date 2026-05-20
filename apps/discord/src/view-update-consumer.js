@@ -43,6 +43,11 @@ const registry = require('./view-update-registry');
 
 const RECEIVE_WAIT_SECONDS = 20;
 const MAX_MESSAGES_PER_RECEIVE = 10;
+// 30s visibility timeout assumes synchronous processMessage (parse +
+// registry.dispatch, no awaits). Worst-case batch of 10 messages at
+// ~ms each is well under budget. If a future change makes
+// processMessage async (e.g., an awaited dedup-LRU lookup against
+// DDB), the 30s budget tightens — revisit this constant.
 const RECEIVE_VISIBILITY_SECONDS = 30;
 // Backoff after a ReceiveMessage error. Without this, a persistent
 // fast-failure mode (IAM denied after credentials rotation, malformed

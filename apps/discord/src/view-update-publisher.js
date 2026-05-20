@@ -27,6 +27,21 @@
 // posture — the in-process fallback (here: polling) makes a queue
 // outage observable without action.
 //
+// Log severity (warn vs error): event-publisher.js uses logger.error
+// because interaction loss is user-visible (3s ACK deadline). This
+// module uses logger.warn because the polling tick covers
+// correctness — sustained warns merit attention but not paging.
+// `kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL` (NOT UNHANDLED_REJECTION)
+// keeps the paging pivot separate from event-shipper alerts.
+//
+// `consumed` rendered-state asymmetry: the field is plumbed end-to-end
+// but does NOT drive any user-visible Discord render today (only the
+// in-memory linkStatus). The strict-coerce-to-false on non-boolean is
+// loud (warn-logged with consumed_type) but the rendered state will
+// be wrong if an upstream regression sends `"true"` string — academic
+// today; surface in CloudWatch via the LOG_KINDS pivot before any
+// future render path starts using `consumed`.
+//
 // Process-singleton: module-level state. At most one publisher per
 // process. start() is no-op-with-warn on second call.
 
@@ -74,6 +89,18 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
     logger.warn('view-update-publisher: publish() called with invalid qurlId', { qurlId });
     return;
   }
+  // Mirror the consumer's `accessCount <= 0` gate at the parse boundary
+  // so a caller regression doesn't burn a SendMessage on a payload the
+  // consumer would drop anyway. qurl.accessed webhooks always carry
+  // access_count >= 1; a 0 / NaN / non-integer is a wire-shape
+  // regression worth catching producer-side too.
+  if (!Number.isSafeInteger(accessCount) || accessCount <= 0) {
+    logger.warn('view-update-publisher: publish() called with invalid accessCount', {
+      qurlId,
+      accessCount,
+    });
+    return;
+  }
   // The webhook handler (qurl-webhook.js) already strict-coerces
   // `data.consumed` to a literal boolean before calling here, so
   // anything other than `true` / `false` arriving at this point is a
@@ -103,7 +130,8 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
         logger.warn('view-update-publisher: SendMessage failed (fire-and-log)', {
           qurl_id: qurlId,
           error: err.message,
-          kind: LOG_KINDS.UNHANDLED_REJECTION,
+          stack: err.stack,
+          kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL,
         });
       })
       .finally(() => {
@@ -118,7 +146,8 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
     logger.warn('view-update-publisher: publish() sync threw (fire-and-log)', {
       qurl_id: qurlId,
       error: err.message,
-      kind: LOG_KINDS.UNHANDLED_REJECTION,
+      stack: err.stack,
+      kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL,
     });
   }
 }

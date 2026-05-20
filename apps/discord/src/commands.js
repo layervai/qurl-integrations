@@ -1205,10 +1205,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // generation advanced must skip its render — the views map was built
   // against the pre-add tracked set and could under-report.
   let trackingGeneration = 0;
-  // `allDone` already declared above the createHandleViewUpdate factory
-  // call (the factory's onAllDone closure references it). Kept here as
-  // a no-op marker comment — there was a `let allDone = false;` here
-  // pre-#60.
 
   const control = {
     // newLinks: Array<{qurlId, username}> aligned per-recipient. Must

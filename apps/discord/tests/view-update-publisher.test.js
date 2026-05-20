@@ -6,8 +6,9 @@
  *   - publish(): envelope shape, SendMessage call
  *   - start/stop lifecycle: idempotency, flag/queue-url guards
  *   - pre-start drop (publish() called before start() is a safe no-op)
- *   - SendMessage failure logging (kind: 'unhandledRejection' parity
- *     with event-publisher.js)
+ *   - SendMessage failure logging (kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL
+ *     — decoupled from event-publisher.js's UNHANDLED_REJECTION so
+ *     paging pivots stay separate)
  *   - drain on stop()
  *   - input validation (publish() with invalid qurlId)
  */
@@ -160,6 +161,18 @@ describe('view-update-publisher', () => {
       );
     });
 
+    test('rejects invalid accessCount without sending (cr round-6 parity with consumer gate)', () => {
+      publisher.start();
+      for (const ac of [0, -1, 1.5, NaN, 'one', null, undefined]) {
+        publisher.publish({ qurlId: 'qrl_a', accessCount: ac, consumed: false, eventId: 'evt' });
+      }
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('invalid accessCount'),
+        expect.any(Object),
+      );
+    });
+
     test('SendMessage failure is fire-and-log (no unhandled rejection)', async () => {
       sqsMock.on(SendMessageCommand).rejects(new Error('SQS throttled'));
       publisher.start();
@@ -170,7 +183,7 @@ describe('view-update-publisher', () => {
         expect.objectContaining({
           qurl_id: 'qrl_a',
           error: 'SQS throttled',
-          kind: 'unhandledRejection',
+          kind: 'viewUpdatePublishFail',
         }),
       );
     });
@@ -194,7 +207,7 @@ describe('view-update-publisher', () => {
         expect.stringContaining('publish() sync threw'),
         expect.objectContaining({
           qurl_id: 'qrl_a',
-          kind: 'unhandledRejection',
+          kind: 'viewUpdatePublishFail',
         }),
       );
     });

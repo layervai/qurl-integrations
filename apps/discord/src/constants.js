@@ -477,6 +477,12 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
 // alarm filter the other two sites still emit.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
+  // Separate kind for view-update publish/dispatch failures (feat #60).
+  // Decoupled from UNHANDLED_REJECTION so CloudWatch alarm filters
+  // targeting interaction-loss (event-shipper + global unhandled-
+  // rejection paths) don't page on view-update failures — those are
+  // covered by the polling-tick fallback at the render layer.
+  VIEW_UPDATE_PUBLISH_FAIL: 'viewUpdatePublishFail',
 });
 
 module.exports = {
