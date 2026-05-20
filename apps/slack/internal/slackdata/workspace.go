@@ -17,11 +17,17 @@ import (
 // fenced in modules/qurl-slack-ddb/main.tf so a schema rename only
 // touches one file in this repo (this one).
 const (
-	attrSlackTeamID        = "slack_team_id"
-	attrOwnerID            = "owner_id"
-	attrAdminSlackUserIDs  = "admin_slack_user_ids"
-	attrCreatedAt          = "created_at"
-	attrUpdatedAt          = "updated_at"
+	attrSlackTeamID       = "slack_team_id"
+	attrOwnerID           = "owner_id"
+	attrAdminSlackUserIDs = "admin_slack_user_ids"
+	attrCreatedAt         = "created_at"
+	attrUpdatedAt         = "updated_at"
+	// attrSeedAdminSlackUser records who originally claimed the
+	// workspace (the user who redeemed the bootstrap code in
+	// BindWorkspace). Write-only today — kept for forensic
+	// attribution if the admin set churns post-claim, so on-call
+	// can answer "who was the original installer?" from
+	// CloudWatch + a direct DDB read.
 	attrSeedAdminSlackUser = "seed_admin_slack_user_id"
 )
 
@@ -91,6 +97,13 @@ const bindDisambiguationBudget = 300 * time.Millisecond
 // layer is exported — a future caller with a tighter parent ctx
 // shouldn't see the disambig read consume the rest of its budget.
 // Clamps against the parent via [context.WithTimeout].
+//
+// Kept as a distinct constant from bindDisambiguationBudget (same
+// value today, 300ms) so the two paths can diverge if one of them
+// ever has to tighten or relax independently — the rationale for
+// each is slightly different (BindWorkspace's parent is a
+// view_submission async, AddAdmin's is a slash-command sync). A
+// single shared const would tie the two together implicitly.
 const addAdminDisambiguationBudget = 300 * time.Millisecond
 
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
@@ -321,6 +334,14 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 	// consuming the parent's remaining budget — handler-side
 	// adminSyncVerbBudget is generous today, but the store is
 	// exported and a future caller may pass a tighter ctx.
+	//
+	// Race-window note: a concurrent RemoveAdmin could mutate
+	// admin_slack_user_ids between this CCFE and the disambig read,
+	// landing us in "row exists but target absent" → unverified 409
+	// even though the original CCFE was a real already-admin signal.
+	// Benign: the user-visible "couldn't confirm — please retry" copy
+	// converges (a retry will succeed since the racer removed them);
+	// no spurious admin add results.
 	disambigCtx, disambigCancel := context.WithTimeout(ctx, addAdminDisambiguationBudget)
 	defer disambigCancel()
 	out, getErr := s.Client.GetItem(disambigCtx, &dynamodb.GetItemInput{

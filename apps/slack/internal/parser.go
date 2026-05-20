@@ -670,17 +670,17 @@ func truncateForError(s string) string {
 // entry points produce parallel copy.
 func parseAliasToken(tok string) (string, error) {
 	if !strings.HasPrefix(tok, "$") {
-		return "", fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
+		return "", fmt.Errorf("%w: got `%s`", ErrMissingSigil, truncateForError(tok))
 	}
 	alias := strings.TrimPrefix(tok, "$")
 	if alias == "" {
 		return "", ErrEmptyResource
 	}
 	if len(alias) > aliasMaxLen {
-		return "", fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, alias, aliasMaxLen)
+		return "", fmt.Errorf("%w: `%s` is longer than %d characters", ErrInvalidAlias, truncateForError(alias), aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "", fmt.Errorf("%w: %q (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, alias)
+		return "", fmt.Errorf("%w: `%s` (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, truncateForError(alias))
 	}
 	return alias, nil
 }
@@ -701,7 +701,7 @@ func parseAliasToken(tok string) (string, error) {
 // use [parseAliasToken] instead.
 func requireResourceToken(tok string) (ParsedResourceToken, error) {
 	if !strings.HasPrefix(tok, "$") {
-		return ParsedResourceToken{}, fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
+		return ParsedResourceToken{}, fmt.Errorf("%w: got `%s`", ErrMissingSigil, truncateForError(tok))
 	}
 	bare := strings.TrimPrefix(tok, "$")
 	if bare == "" {
@@ -717,14 +717,14 @@ func requireResourceToken(tok string) (ParsedResourceToken, error) {
 	// alias. Mirrors parseAliasToken's order; pinned by parser_test.go's
 	// `alias over 64 chars rejected` case.
 	if len(bare) > aliasMaxLen {
-		return ParsedResourceToken{}, fmt.Errorf("%w: %q is longer than %d characters", ErrInvalidAlias, bare, aliasMaxLen)
+		return ParsedResourceToken{}, fmt.Errorf("%w: `%s` is longer than %d characters", ErrInvalidAlias, truncateForError(bare), aliasMaxLen)
 	}
 	if aliasCharsetPattern.MatchString(bare) {
 		return ParsedResourceToken{Kind: ResourceTokenAlias, Value: bare}, nil
 	}
 	return ParsedResourceToken{}, fmt.Errorf(
-		"%w: %q — token must be an alias (e.g. `$dev-dashboard`, lowercase a-z/0-9/hyphen, no leading/trailing hyphen) or a resource ID (e.g. `$r_abc123def01`)",
-		ErrInvalidAlias, bare,
+		"%w: `%s` — token must be an alias (e.g. `$dev-dashboard`, lowercase a-z/0-9/hyphen, no leading/trailing hyphen) or a resource ID (e.g. `$r_abc123def01`)",
+		ErrInvalidAlias, truncateForError(bare),
 	)
 }
 
