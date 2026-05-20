@@ -1120,7 +1120,12 @@ async function start() {
         apiEndpoint: config.QURL_ENDPOINT,
         apiKey: config.QURL_API_KEY,
         bridgeUrl: `${config.BASE_URL}/webhooks/qurl`,
-        description: `Discord bot view counter (${process.env.AWS_REGION || 'unknown-region'}, ${process.env.NODE_ENV || 'unknown-env'})`,
+        description: `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'}, env=${process.env.NODE_ENV || 'unset'})`,
+        // Pass the SSM-loaded secret so the registrar can skip rotation
+        // when steady-state (existing sub + non-PLACEHOLDER secret) —
+        // prevents multi-replica HTTP-fleet boots from rotating each
+        // other's secrets into uselessness.
+        initialSecret: config.QURL_WEBHOOK_SECRET,
         persistSecret,
       }).then(result => {
         // Update the in-memory secret so the receiver uses what the

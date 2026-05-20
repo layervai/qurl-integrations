@@ -68,7 +68,7 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
   });
 });
 
-describe('ensureWebhookSubscription — existing subscription with matching URL → rotates secret', () => {
+describe('ensureWebhookSubscription — existing sub, bootstrap (no real initialSecret) → rotates', () => {
   it('finds the sub, calls POST /v1/webhooks/{id}/secret, returns the rotated secret', async () => {
     let rotatedFor = null;
     mockFetchResponses({
@@ -91,6 +91,20 @@ describe('ensureWebhookSubscription — existing subscription with matching URL 
     });
   });
 
+  it('also rotates when initialSecret is the terraform PLACEHOLDER sentinel', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } },
+      }),
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'PLACEHOLDER' });
+    expect(result.action).toBe('rotated');
+    expect(result.secret).toBe('whsec_post_bootstrap');
+  });
+
   it('patches events if the existing list does not include qurl.accessed', async () => {
     let patchedEvents = null;
     mockFetchResponses({
@@ -110,6 +124,137 @@ describe('ensureWebhookSubscription — existing subscription with matching URL 
     const result = await ensureWebhookSubscription(BASE_OPTS);
     expect(patchedEvents).toEqual(['qurl.accessed']);
     expect(result.secret).toBe('whsec_post_patch');
+  });
+});
+
+describe('ensureWebhookSubscription — existing sub + real initialSecret → REUSE (multi-replica safety)', () => {
+  it('skips POST /secret entirely and returns the initialSecret unchanged', async () => {
+    // The load-bearing multi-replica safety property. Pre-fix, each
+    // HTTP replica rotated → server-side last-write-wins → (N-1)
+    // replicas held stale secrets → ALB-routed events 401'd on
+    // ~(N-1)/N of replicas until a follow-up restart.
+    let secretEndpointHit = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => {
+        secretEndpointHit = true;
+        return { body: { data: {} } };
+      },
+    });
+    const result = await ensureWebhookSubscription({
+      ...BASE_OPTS,
+      initialSecret: 'whsec_already_known',
+    });
+    expect(secretEndpointHit).toBe(false); // critical: no rotation
+    expect(result).toEqual({
+      secret: 'whsec_already_known',
+      webhookId: 'wh_existing',
+      action: 'reused',
+    });
+  });
+
+  it('still PATCHes events on drift even in the reuse path (PATCH is idempotent)', async () => {
+    let patched = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'],
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patched).toBe(true);
+  });
+
+  it('does NOT PATCH when events already include qurl.accessed (no-drift positive case)', async () => {
+    let patched = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patched).toBe(false);
+  });
+});
+
+describe('ensureWebhookSubscription — URL canonicalization', () => {
+  it('matches an existing sub even when URLs differ by trailing slash', async () => {
+    let rotated = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: 'https://bot.test.example/webhooks/qurl/', // trailing slash
+        events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => {
+        rotated = true;
+        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_x' } } };
+      },
+    });
+    // bridgeUrl has NO trailing slash; strict equality would miss
+    // and create a duplicate. canonicalUrl matches both.
+    const result = await ensureWebhookSubscription({
+      ...BASE_OPTS,
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+    });
+    expect(rotated).toBe(true);
+    expect(result.action).toBe('rotated'); // matched the existing sub, not 'created'
+  });
+});
+
+describe('ensureWebhookSubscription — pagination', () => {
+  it('walks cursor pages until the matching sub is found', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: {
+        data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed'] }],
+        meta: { next_cursor: 'page2', has_more: true },
+      } }),
+      'GET /v1/webhooks?cursor=page2': () => ({ body: {
+        data: [{ webhook_id: 'wh_match', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] }],
+        meta: { next_cursor: '', has_more: false },
+      } }),
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(result.webhookId).toBe('wh_match');
+    expect(result.action).toBe('reused');
+  });
+
+  it('returns null (→ creates fresh) when cursor walk exhausts without a match', async () => {
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: {
+        data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed'] }],
+        meta: { next_cursor: '', has_more: false },
+      } }),
+      'POST /v1/webhooks': () => {
+        createCalled = true;
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BASE_OPTS);
+    expect(createCalled).toBe(true);
+    expect(result.action).toBe('created');
+  });
+});
+
+describe('ensureWebhookSubscription — secret redaction in error messages', () => {
+  it('redacts secret from response body when surfacing an error', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({
+        status: 500,
+        body: { error: 'Internal Server Error', data: { secret: 'whsec_leaked', other: 'fine' } },
+      }),
+    });
+    let caught;
+    try {
+      await ensureWebhookSubscription(BASE_OPTS);
+    } catch (err) { caught = err; }
+    expect(caught).toBeDefined();
+    expect(caught.message).not.toContain('whsec_leaked');
+    expect(caught.message).toContain('[REDACTED]');
   });
 });
 

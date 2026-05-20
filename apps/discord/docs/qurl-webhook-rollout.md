@@ -11,46 +11,32 @@ This rollout replaces the poll with a `qurl.accessed` webhook receiver.
 
 ## Rollout order
 
-Each step blocks the next — do not skip ahead.
-
-1. **`qurl-views` DDB table.** Provisioned by the deploying organization's
-   infrastructure (separate from this repo). Without it, the bot's
-   monitor `BatchGet` returns the empty map and the counter silently
-   stays at `0 viewed / N pending` forever. Confirm with:
+1. **`qurl-views` DDB table.** Provisioned by the deploying
+   organization's infrastructure (separate from this repo). Without
+   it, the bot's monitor `BatchGet` returns the empty map and the
+   counter silently stays at `0 viewed / N pending` forever. Confirm
+   with:
    ```
    aws dynamodb describe-table \
      --table-name <DDB_TABLE_PREFIX>qurl-views \
      --region <env-region>
    ```
-2. **Deploy the bot.** Code mounts `/webhooks/qurl` unconditionally and
-   warns on boot if `QURL_WEBHOOK_SECRET` is unset — that's the operator
-   signal that step 3 hasn't happened yet.
-3. **Set the SSM secret.**
-   ```
-   aws ssm put-parameter \
-     --name "/<project>/QURL_WEBHOOK_SECRET" \
-     --type SecureString \
-     --value "$(openssl rand -hex 32)" \
-     --overwrite \
-     --region <env-region>
-   ```
-   Then restart the task so the secret is picked up:
-   ```
-   aws ecs update-service --service <svc> --force-new-deployment ...
-   ```
-4. **Register the subscription with qurl-service.** The subscription's
-   `secret` field MUST be the same hex string as step 3 — the bot's
-   verifySignature pins bare-hex HMAC-SHA256 over the raw body.
-   ```
-   curl -X POST https://<qurl-service-host>/v1/webhooks \
-     -H 'Authorization: Bearer <qurl-service-admin-token>' \
-     -H 'Content-Type: application/json' \
-     -d '{
-       "url": "https://<bot-host>/webhooks/qurl",
-       "event_types": ["qurl.accessed"],
-       "secret": "<same-hex-as-step-3>"
-     }'
-   ```
+2. **Deploy the bot.** On `isHttp` boot, the bot self-registers its
+   `qurl.accessed` webhook subscription with qurl-service using its
+   own `QURL_API_KEY` (the same key it uses to mint qURLs — so the
+   subscription's `owner_id` matches the qURLs the bot creates).
+   Steady-state reuses the secret already in SSM/env. Bootstrap (no
+   subscription yet, or SSM seeded with `PLACEHOLDER`) creates or
+   rotates the subscription and best-effort writes the secret back
+   to SSM via `ssm:PutParameter`.
+
+   No manual operator curl required. The bot's `qURL webhook self-
+   registration complete` log line confirms the registration on each
+   boot.
+
+   Recovery if auto-register fails: the registrar logs at error
+   level and the bot continues booting; manual fallback is the
+   `curl` step in the [appendix](#appendix-manual-recovery) below.
 
 ## Wire shape (pinned)
 
@@ -99,23 +85,61 @@ Each step blocks the next — do not skip ahead.
   bare base message (no `👀` line at all) and emits one WARN per
   affected send. Recover by deploying the connector forward.
 
-## Known operator-burden tradeoffs
+## Multi-replica safety
 
-- **Secret coupled in two places.** Step 3's SSM value and step 4's
-  subscription `secret` field must match by hand; rotation is a
-  coordinated edit, not a single command. Auto-register-at-boot
-  (bot POSTs the subscription on startup with the same value it
-  read from SSM) would collapse this to one source of truth —
-  deferred because giving the bot a qurl-service admin token
-  widens the bot's blast radius beyond the per-guild `QURL_API_KEY`
-  it has today. Revisit when the admin-token surface has tighter
-  scoping (per-subscription instead of org-wide).
+Multiple HTTP replicas booting concurrently used to race on
+`POST /v1/webhooks/{id}/secret` — server-side last-write-wins meant
+N-1 replicas held a stale secret in memory, and the ALB-routed
+traffic across them 401'd on roughly `(N-1)/N` of inbound webhooks
+until the next restart settled the fleet. The registrar now skips
+rotation when (a) an existing subscription is found AND (b) the
+SSM-loaded secret is non-empty and non-`PLACEHOLDER`. Steady-state
+restarts reuse the SSM value; only the bootstrap path (no sub yet,
+or seeded `PLACEHOLDER`) rotates.
 
 ## What the bot does NOT need
 
-- A webhook auto-registration handshake — subscriptions are managed
-  out-of-band (curl above). See "operator-burden tradeoffs" for
-  why this isn't automated today.
 - The full `qurl.accessed` payload's `src_ip` / `user_agent` fields —
   they're stripped for transit resources at the qurl-service boundary,
   per the connector-owned redaction policy.
+
+## Appendix — manual recovery
+
+Use this only if auto-register failed and the bot logs show
+`qURL webhook self-registration failed` repeatedly. Replace the
+placeholder values:
+
+```
+# 1. Create or rotate the subscription with the bot's own API key
+#    (NOT an admin token — owner_id must match the bot's qURL-mint
+#    owner_id, otherwise events get filtered out before delivery).
+curl -X POST https://<qurl-service-host>/v1/webhooks \
+  -H "Authorization: Bearer $(aws ssm get-parameter --name /<project>/QURL_API_KEY --with-decryption --query 'Parameter.Value' --output text)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://<bot-host>/webhooks/qurl",
+    "events": ["qurl.accessed"],
+    "description": "manual recovery"
+  }'
+# Capture the `secret` from the response.
+
+# 2. Put it in SSM so the next bot boot picks it up.
+aws ssm put-parameter \
+  --name "/<project>/QURL_WEBHOOK_SECRET" \
+  --type SecureString \
+  --value "<secret-from-step-1>" \
+  --overwrite \
+  --region <env-region>
+
+# 3. Force a redeploy.
+aws ecs update-service \
+  --cluster <cluster> \
+  --service <bot-http-service> \
+  --force-new-deployment \
+  --region <env-region>
+```
+
+After step 3, the bot will boot with the SSM secret in env,
+the auto-register will find the existing sub + the real
+SSM-loaded secret, take the reuse path, and the rotation race
+is gone for steady-state.
