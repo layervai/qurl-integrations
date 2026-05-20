@@ -584,8 +584,10 @@ func TestHandleAdminList_OwnerOnly(t *testing.T) {
 // storage-corruption render path: when workspace_mappings is
 // missing owner_id (impossible today via readStringSet but
 // defensive against a future contract change), the reply renders
-// the explicit "(unknown — workspace_mappings missing owner_id)"
-// copy instead of a malformed `Owner: <@>` mrkdwn link.
+// the explicit "(unknown — workspace owner record is missing;
+// contact support)" copy instead of a malformed `Owner: <@>`
+// mrkdwn link. User-visible copy omits the internal table name;
+// the slog.Error carries it for triage.
 func TestHandleAdminList_EmptyOwnerCorruption(t *testing.T) {
 	ts := newAdminTestServers(t)
 	// Seed a workspace_mappings row with admin_slack_user_ids set
@@ -602,7 +604,7 @@ func TestHandleAdminList_EmptyOwnerCorruption(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "workspace_mappings missing owner_id") {
+	if !strings.Contains(reply, "workspace owner record is missing") {
 		t.Errorf("reply missing storage-corruption surface: %q", reply)
 	}
 	if strings.Contains(reply, "Owner: <@>") {
@@ -903,5 +905,41 @@ func TestHandleSlashCommand_AdminOvermatchRejected(t *testing.T) {
 		if !strings.Contains(reply, "Unknown subcommand") {
 			t.Errorf("%q routed unexpectedly: %q", text, reply)
 		}
+	}
+}
+
+// TestLooksLikeSlackUserID_MatchesUserMentionPattern pins the bounds
+// contract between the handler-side `looksLikeSlackUserID` defensive
+// guard and the parser-side `userMentionPattern`. Both gates have to
+// agree: a value rejected by the parser (write path) must also be
+// rejected by the handler (read path), otherwise an admin write
+// stops at parse time but the corresponding render breaks out of
+// the mention surface. Drift in either direction is silent without
+// this fence.
+func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{"floor-accept (U + 8)", "U" + strings.Repeat("A", 8)},
+		{"ceiling-accept (U + 63)", "U" + strings.Repeat("A", 63)},
+		{"floor-accept (W + 8)", "W" + strings.Repeat("A", 8)},
+		{"too-short (U + 7)", "U" + strings.Repeat("A", 7)},
+		{"too-long (U + 64)", "U" + strings.Repeat("A", 64)},
+		{"non-UW prefix", "A" + strings.Repeat("A", 8)},
+		{"lowercase suffix", "Uabcdefgh"},
+		{"empty", ""},
+		{"one char", "U"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handlerOK := looksLikeSlackUserID(tc.id)
+			parserOK := userMentionPattern.MatchString("<@" + tc.id + ">")
+			if handlerOK != parserOK {
+				t.Errorf("drift on %q: looksLikeSlackUserID=%v, userMentionPattern=%v", tc.id, handlerOK, parserOK)
+			}
+		})
 	}
 }

@@ -387,8 +387,10 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// anything that doesn't match the Slack-ID shape into a `<@%s>`
 	// mrkdwn link (where a malformed value could break out of the
 	// mention surface — defense-in-depth matches the
-	// escapeMrkdwnCode posture in views.go).
-	ownerCopy := "(unknown — workspace_mappings missing owner_id)"
+	// escapeMrkdwnCode posture in views.go). The user-visible copy
+	// omits the internal table name; the slog.Error below carries
+	// it for on-call triage.
+	ownerCopy := "(unknown — workspace owner record is missing; contact support)"
 	if looksLikeSlackUserID(ownerID) {
 		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
 	} else {
