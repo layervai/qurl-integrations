@@ -31,10 +31,19 @@
 // then `aws ecs update-service --force-new-deployment`.
 //
 // IAM scope (set in qurl-integrations-infra):
-//   - ssm:GetParameter, ssm:PutParameter on the QURL_WEBHOOK_SECRET path
-//   - logs:* for CloudWatch
+//   - ssm:GetParameter on the QURL_API_KEY + QURL_WEBHOOK_SECRET paths
+//   - ssm:PutParameter on the QURL_WEBHOOK_SECRET path
+//   - logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
+//     (the minimum CloudWatch grant; `logs:*` is overly broad)
 //   - NO DDB grants (the bot's webhook-receiver path needs DDB, the
 //     registrar does not — keep separation of concerns clean)
+//
+// Caller (Terraform `aws_lambda_invocation`) is responsible for any
+// `bridgeUrl` normalization. The registrar's `canonicalUrl` handles
+// trailing slashes between subscriptions during matching, but does
+// NOT normalize an internal double-slash from a `BASE_URL` ending in
+// `/`. Strip in the Terraform input so `https://bot/` doesn't produce
+// `https://bot//webhooks/qurl`.
 //
 // Input shape (set in Terraform invocation):
 //   {
@@ -71,12 +80,28 @@ const {
 // context across consecutive invocations within the same container
 // lifetime, so reusing the client is a meaningful perf win for
 // rotation workflows that invoke the Lambda repeatedly.
+//
+// We track the region in a closure variable rather than reading it
+// back off `client.config.region` — in AWS SDK v3 that field is
+// normalized to a Provider<string> (a `() => Promise<string>`), so a
+// naive `config.region() !== region` compares a Promise to a string
+// (always truthy → cache never invalidates, AND would require an
+// `await` to compare correctly, which forces this helper async).
 let ssmClientCache = null;
+let ssmClientRegion = null;
 function getSsmClient(region) {
-  if (!ssmClientCache || ssmClientCache.config.region() !== region) {
+  if (!ssmClientCache || ssmClientRegion !== region) {
     ssmClientCache = new SSMClient({ region });
+    ssmClientRegion = region;
   }
   return ssmClientCache;
+}
+// Test seam — Lambda execution contexts persist across invocations,
+// so a unit test that exercises multi-region behavior or wants warm-
+// invocation parity has to reset the singleton between cases.
+function _resetSsmClientCacheForTests() {
+  ssmClientCache = null;
+  ssmClientRegion = null;
 }
 
 async function readSsmSecureString({ ssmClient, name }) {
@@ -100,6 +125,8 @@ function validateInput(event) {
     }
   }
 }
+
+exports._internals = { getSsmClient, _resetSsmClientCacheForTests };
 
 exports.handler = async (event, context) => {
   // Surface invocation context up front so CloudWatch correlates the

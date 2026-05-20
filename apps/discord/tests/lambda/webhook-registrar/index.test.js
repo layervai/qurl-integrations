@@ -55,8 +55,16 @@ function mockQurlService(handlers) {
 // still routes through the per-test `ssmMock.reset()`. Re-requiring
 // the module would create a fresh SDK class that the mock doesn't
 // cover, breaking the dynamic-import path.
-const { handler: cachedHandler } = require('../../../lambda/webhook-registrar/index');
-function freshHandler() { return cachedHandler; }
+const lambdaModule = require('../../../lambda/webhook-registrar/index');
+const { handler } = lambdaModule;
+const { _resetSsmClientCacheForTests, getSsmClient } = lambdaModule._internals;
+
+beforeEach(() => {
+  // Reset the module-level SSM client cache between tests so a region
+  // change in one test doesn't leak into the next, and so the
+  // ssmMock-patched class is what the handler resolves on first use.
+  _resetSsmClientCacheForTests();
+});
 
 describe('webhook-registrar Lambda — input validation', () => {
   it.each([
@@ -67,14 +75,14 @@ describe('webhook-registrar Lambda — input validation', () => {
     'ssmRegion',
     'apiKeySsmParamName',
   ])('throws when required field %s is missing', async (key) => {
-    const handler = freshHandler();
+    
     const event = { ...BASE_EVENT };
     delete event[key];
     await expect(handler(event, CONTEXT)).rejects.toThrow(new RegExp(`missing.*${key}`));
   });
 
   it.each([null, undefined, '', 42, {}])('throws on non-string value for required field (%s)', async (badValue) => {
-    const handler = freshHandler();
+    
     await expect(handler({ ...BASE_EVENT, ssmParamName: badValue }, CONTEXT)).rejects.toThrow(/missing.*ssmParamName/);
   });
 });
@@ -97,7 +105,7 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
         events: ['qurl.accessed'],
       } } }),
     });
-    const handler = freshHandler();
+    
     const result = await handler(BASE_EVENT, CONTEXT);
     expect(result).toEqual({ webhookId: 'wh_lambda_created', action: 'created' });
     // Secret persisted via SSM, NOT echoed in the response (avoids
@@ -135,7 +143,7 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
         return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated' } } };
       },
     });
-    const handler = freshHandler();
+    
     const result = await handler(BASE_EVENT, CONTEXT);
     expect(result).toEqual({ webhookId: 'wh_existing', action: 'reused' });
     expect(rotateHit).toBe(false); // critical: no rotate, single-source-of-truth secret stays
@@ -147,8 +155,10 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }));
-    const handler = freshHandler();
-    await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/API key.*ParameterNotFound|null/);
+    
+    // Tight regex — `/A|null/` would match the bare `null` token in
+    // most error messages and pass for the wrong reason.
+    await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/SSM parameter.*returned null/);
   });
 
   it('propagates qurl-service errors so Terraform deploy fails fast', async () => {
@@ -160,7 +170,32 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
     mockQurlService({
       'GET /v1/webhooks': () => ({ status: 401, body: { error: 'Unauthorized' } }),
     });
-    const handler = freshHandler();
+    
     await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/401/);
+  });
+});
+
+describe('webhook-registrar Lambda — getSsmClient cache', () => {
+  // The cache key (region) is tracked in a closure — NOT read back
+  // off `client.config.region` which in AWS SDK v3 is a Provider<string>
+  // (function returning Promise). Comparing the Promise to a region
+  // string would always be truthy → cache never invalidates AND
+  // forcing this helper async would propagate up. These tests pin
+  // the closure-based behavior.
+  it('warm invocation returns the same client instance for the same region', () => {
+    _resetSsmClientCacheForTests();
+    const a = getSsmClient('us-east-2');
+    const b = getSsmClient('us-east-2');
+    expect(b).toBe(a);
+  });
+
+  it('returns a new client instance when the region changes', () => {
+    _resetSsmClientCacheForTests();
+    const a = getSsmClient('us-east-2');
+    const b = getSsmClient('us-west-2');
+    expect(b).not.toBe(a);
+    // ...and reverts again on the original region (no permanent cache).
+    const c = getSsmClient('us-east-2');
+    expect(c).not.toBe(a); // a fresh instance — the cache only holds the LATEST region
   });
 });
