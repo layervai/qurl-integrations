@@ -124,8 +124,8 @@ type Command struct {
 	// *caller* — the user who typed the command); this field holds the
 	// *target* of the verb (the user being added or removed).
 	UserID string
-	// Flags holds optional `key:value` flags. Only `dm` and `reason` are
-	// recognized today (on `get`).
+	// Flags holds optional `key:value` flags. Only `dm`, `once`, and
+	// `reason` are recognized today (on `get`).
 	Flags map[string]string
 	// Raw is the original trimmed text, kept for diagnostics.
 	Raw string
@@ -137,6 +137,22 @@ func (c *Command) DM() bool {
 		return false
 	}
 	v, ok := c.Flags["dm"]
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(v, "true")
+}
+
+// Once returns the parsed value of the `once:true` flag on `get`. When
+// set, the resulting qURL is single-use — the first redemption burns
+// the link. Mirrors [Command.DM]'s shape so `once:false` (and absence)
+// both return false; the applyFlag arm gates the value half so only
+// the literal `true` / `false` strings reach this accessor.
+func (c *Command) Once() bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Flags[flagKeyOnce]
 	if !ok {
 		return false
 	}
@@ -204,6 +220,15 @@ var ErrInvalidQURLID = errors.New("invalid qurl_id")
 // positional arguments receives one (e.g. `admin policies extra`).
 // Catches user-facing typos earlier than the handler dispatch.
 var ErrUnexpectedArgument = errors.New("unexpected argument")
+
+// flagKeyOnce is the canonical flag-key string for the strict-boolean
+// `once:` flag. Lifted to a constant so the accessor lookup, the
+// applyFlag case label, and the rejection error message share one
+// source — a future rename here propagates without a grep audit. The
+// sibling `dm` key is still inlined at its three call sites for
+// historical reasons; not pre-emptively refactored per
+// surgical-changes guidance.
+const flagKeyOnce = "once"
 
 // ErrInvalidFlag is the sentinel wrapped by every [applyFlag] error
 // path (unknown key, missing-key-before-colon, empty value,
@@ -786,8 +811,8 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 }
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
-// the recognized keys (`dm`, `reason`) survive — unknown keys are an
-// error so a typo doesn't silently no-op. The key half is
+// the recognized keys (`dm`, `once`, `reason`) survive — unknown keys
+// are an error so a typo doesn't silently no-op. The key half is
 // case-folded so `DM:true` and `Reason:foo` work the way users on
 // mobile clients (with auto-capitalize) expect; the value half is
 // preserved verbatim because reasons are user-facing prose. An
@@ -795,15 +820,15 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 // in PR-3c.3+ should be able to distinguish "flag unset" from "flag
 // set to empty" by absence in [Command.Flags] alone.
 //
-// Per-key validation is strict-posture: `dm` accepts only the
-// boolean strings `true` / `false` (case-folded), so a user typing
-// `dm:yes` or `dm:1` sees a friendly error rather than the
+// Per-key validation is strict-posture: `dm` and `once` accept only
+// the boolean strings `true` / `false` (case-folded), so a user
+// typing `dm:yes` or `once:1` sees a friendly error rather than the
 // silent-falsey behavior the unvalidated form would have produced
-// ([Command.DM] case-equals against "true", so any non-"true" value
-// silently returns false — exactly the typo class the rest of the
-// parser rejects). `reason` accepts any non-empty prose because the
-// handler in PR-3c.3+ uses it for audit text where the user's exact
-// wording is the point.
+// ([Command.DM] / [Command.Once] case-equal against "true", so any
+// non-"true" value silently returns false — exactly the typo class
+// the rest of the parser rejects). `reason` accepts any non-empty
+// prose because the handler in PR-3c.3+ uses it for audit text where
+// the user's exact wording is the point.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
@@ -848,6 +873,17 @@ func applyFlag(cmd *Command, tok string) error {
 		// values too.
 		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
 			return fmt.Errorf("%w: dm:%q (use dm:true or omit the flag)", ErrInvalidFlag, val)
+		}
+		cmd.Flags[key] = val
+		return nil
+	case flagKeyOnce:
+		// Strict-posture boolean — same shape as `dm` above. Only
+		// `true` / `false` (case-folded) survive; `once:yes` /
+		// `once:1` / `once:please` reject so the user sees a friendly
+		// error instead of [Command.Once] silently returning false on
+		// a non-"true" value.
+		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
+			return fmt.Errorf("%w: once:%q (use once:true or omit the flag)", ErrInvalidFlag, val)
 		}
 		cmd.Flags[key] = val
 		return nil

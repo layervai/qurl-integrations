@@ -246,6 +246,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 
 	input := client.CreateInput{
 		Reason:         args.cmd.Reason(),
+		OneTimeUse:     args.cmd.Once(),
 		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
@@ -302,6 +303,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 
 	message := ":link: *qURL ready:* " + out.QURLLink
+	if args.cmd.Once() {
+		// Make the single-use posture visible to the requester so they
+		// see what they shipped — a link that burns on first redemption
+		// behaves materially differently from the default.
+		message += " (one-time use)"
+	}
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}

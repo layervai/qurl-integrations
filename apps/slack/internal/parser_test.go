@@ -12,6 +12,12 @@ import (
 // facing wording changes, this is the single edit point.
 const dmRejectSubstr = "use dm:true"
 
+// onceRejectSubstr is the counterpart to [dmRejectSubstr] for the
+// once: strict-boolean gate. Mirrors the dm: rejection shape so a
+// loosening of either gate's value grammar surfaces here, not in
+// production via a silent-falsey [Command.Once].
+const onceRejectSubstr = "use once:true"
+
 // TestParse_HappyPaths fences the recognized grammar of every subcommand.
 // One row per verb so a regression that drops or relabels a verb is the
 // failure that reaches review, not a behavioral diff in PR-3c.3+.
@@ -31,8 +37,13 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "help literal", text: "help", wantSub: SubcmdHelp, wantFlags: map[string]string{}},
 		{name: "get alias", text: "get $prod-db", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{}},
 		{name: "get with dm flag", text: "get $prod-db dm:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
+		{name: "get with once flag", text: "get $prod-db once:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{flagKeyOnce: "true"}},
 		{name: "get with reason flag", text: `get $prod-db reason:"on call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "on call"}},
 		{name: "get with both flags", text: `get $prod-db dm:true reason:"audit"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true", "reason": "audit"}},
+		// once: composes with the other two flags. Pinned as a single
+		// row so a future regression in flag-loop ordering surfaces
+		// without needing three separate composition probes.
+		{name: "get with once, dm, and reason flags", text: `get $prod-db once:true dm:true reason:"audit"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{flagKeyOnce: "true", "dm": "true", "reason": "audit"}},
 		{name: "setalias url", text: "setalias $prod-db https://internal.example.com", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		{name: "setalias resource_id", text: "setalias $prod-db r_abc123", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "r_abc123", wantFlags: map[string]string{}},
 		{name: "unsetalias", text: "unsetalias $prod-db", wantSub: SubcmdUnsetAlias, wantAlias: "prod-db", wantFlags: map[string]string{}},
@@ -63,6 +74,12 @@ func TestParse_HappyPaths(t *testing.T) {
 		// "unknown flag" error.
 		{name: "dm:false accepted", text: "get $prod-db dm:false", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "false"}},
 		{name: "dm:FALSE case-folded", text: "get $prod-db dm:FALSE", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "FALSE"}},
+		// once:false mirrors dm:false — accepted because the strict-
+		// boolean gate allows both `true` and `false`, but [Command.Once]
+		// case-equals against "true" so it has the same runtime effect
+		// as omitting the flag. Accepting it explicitly lets users opt
+		// out without seeing an "unknown flag" error.
+		{name: "once:false accepted", text: "get $prod-db once:false", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{flagKeyOnce: "false"}},
 		// Admin verb is lowercased before the AdminAction switch. Pinned
 		// so a future refactor that drops `strings.ToLower(verb)` can't
 		// silently regress mobile-client / auto-capitalize inputs.
@@ -276,6 +293,16 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "dm:1 rejected (not true/false)", text: "get $prod-db dm:1", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
 		{name: "dm:yes rejected (not true/false)", text: "get $prod-db dm:yes", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
 		{name: "dm:please rejected (not true/false)", text: "get $prod-db dm:please", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
+		// once: mirrors dm:'s strict-boolean gate. Without these
+		// rejections, `once:1` / `once:yes` would parse fine and then
+		// silently return false on [Command.Once] — exactly the
+		// silent-no-op failure mode the dm: rows above pin against.
+		// Empty `once:` and `once:""` cases are pinned by the shared
+		// "empty bare value" / "empty quoted value" rows higher up.
+		{name: "once:1 rejected (not true/false)", text: "get $prod-db once:1", wantSentnl: ErrInvalidFlag, wantSubstr: onceRejectSubstr},
+		{name: "once:yes rejected (not true/false)", text: "get $prod-db once:yes", wantSentnl: ErrInvalidFlag, wantSubstr: onceRejectSubstr},
+		{name: "once:please rejected (not true/false)", text: "get $prod-db once:please", wantSentnl: ErrInvalidFlag, wantSubstr: onceRejectSubstr},
+		{name: "once: empty bare value rejected", text: "get $prod-db once:", wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -568,6 +595,32 @@ func TestCommand_DM(t *testing.T) {
 			t.Parallel()
 			if got := tc.cmd.DM(); got != tc.want {
 				t.Errorf("DM() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCommand_Once mirrors [TestCommand_DM] for the once accessor —
+// nil receiver, absence, true (canonical + case-folded), and false
+// all pin the same contract the dm: accessor does.
+func TestCommand_Once(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cmd  *Command
+		want bool
+	}{
+		{name: "nil receiver", cmd: nil, want: false},
+		{name: "no flags", cmd: &Command{Flags: map[string]string{}}, want: false},
+		{name: "once:true", cmd: &Command{Flags: map[string]string{flagKeyOnce: "true"}}, want: true},
+		{name: "once:TRUE (case-insensitive)", cmd: &Command{Flags: map[string]string{flagKeyOnce: "TRUE"}}, want: true},
+		{name: "once:false", cmd: &Command{Flags: map[string]string{flagKeyOnce: "false"}}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.cmd.Once(); got != tc.want {
+				t.Errorf("Once() = %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -411,6 +411,70 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	}
 }
 
+// TestCreateInputJSON_OnceTrue fences the wire shape for the
+// once:true flag: the JSON body carries `one_time_use: true` so the
+// minted qURL burns on first redemption. Alias-form mint, matching
+// the [TestCreateInputJSON_Reason] sibling — the body shape is
+// `createForResourceBody`, which carries `OneTimeUse` directly.
+func TestCreateInputJSON_OnceTrue(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var capturedBody []byte
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = b
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db once:true", testAdminTeamID, testAdminUserID)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
+		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
+	}
+	if got, _ := parsed["one_time_use"].(bool); !got {
+		t.Errorf("one_time_use = %v, want true", parsed["one_time_use"])
+	}
+	if !strings.Contains(async, "(one-time use)") {
+		t.Errorf("async reply missing one-time-use suffix: %q", async)
+	}
+}
+
+// TestCreateInputJSON_OnceAbsent fences the absence half of the
+// once: contract: when the flag is omitted, the JSON body must NOT
+// carry `one_time_use` (the SDK's `omitempty` tag drops the false
+// zero value). Mirrors [TestCreateInputJSON_OnceTrue] so a regression
+// that flipped the default to true at the handler layer surfaces
+// here. Also pins that the reply copy does NOT carry the suffix on
+// the default path.
+func TestCreateInputJSON_OnceAbsent(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var capturedBody []byte
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = b
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
+		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
+	}
+	if _, ok := parsed["one_time_use"]; ok {
+		t.Errorf("one_time_use present on default mint body (omitempty must drop the false zero): %v", parsed)
+	}
+	if strings.Contains(async, "(one-time use)") {
+		t.Errorf("async reply carries one-time-use suffix without the flag: %q", async)
+	}
+}
+
 // TestCreateInputJSON_IdempotencyKeyHeader fences that the
 // Idempotency-Key header lands on the wire (not in the JSON body)
 // and is the sha256(team\x00channel\x00user\x00trigger). Alias-form,
