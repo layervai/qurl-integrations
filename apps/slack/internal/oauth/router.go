@@ -159,7 +159,8 @@ type IDTokenVerifier interface {
 // oauth's interfaces in cmd/main.go but the reverse would create a
 // cycle.
 //
-// Fields mirror slackdata.WorkspaceMapping exactly.
+// Fields mirror slackdata.WorkspaceMapping exactly; the drift fence
+// lives in cmd/main_test.go's TestAdminStoreAdapterMappingShapesMatch.
 type WorkspaceMapping struct {
 	TeamID    string
 	OwnerID   string
@@ -264,13 +265,19 @@ type Config struct {
 	// 409 rebind-conflict code (when the error came from the
 	// already-bound branch) or "" when the error is a transport /
 	// validation failure that the callback should treat as a
-	// generic bind failure (revoke + 500).
+	// generic bind failure (500).
 	//
 	// Wired in cmd/main.go to a small classifier that errors.As's
 	// the *slackdata.Error and returns its Code field when
 	// StatusCode == 409. Nil falls back to "always treat as
-	// generic bind failure" — preserves the safe default during
-	// rollout.
+	// generic bind failure".
+	//
+	// COUPLING: callers that set AdminStore MUST also set
+	// BindClassifyError. Otherwise every bind conflict — including
+	// idempotent same-caller re-entries — falls through to the
+	// default 500 arm in handleBindError, downgrading rebind-refused
+	// to a generic failure for the user. cmd/main.go wires both
+	// together; future callers should mirror that pairing.
 	BindClassifyError func(err error) BindConflictCode
 
 	// HTTPClient is used for Auth0 token-exchange calls. Defaults to

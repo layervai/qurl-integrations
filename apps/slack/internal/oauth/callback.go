@@ -208,8 +208,9 @@ func Callback(cfg Config) http.HandlerFunc {
 		// that's about to be revoked. The OwnerID needed for the bind
 		// (id_token sub) is already in hand pre-mint, so there's no
 		// ordering blocker. On a refused outcome, no key is minted and
-		// no DDB row is touched — half-install becomes impossible by
-		// construction rather than recoverable after the fact.
+		// no DDB row is touched — refused-bind half-install becomes
+		// impossible by construction (the lost-PutItem-race orphan-key
+		// case is separate; tracked at #265).
 		if !checkBindAllowed(w, cfg, verified, qurlSub) {
 			return
 		}
@@ -315,11 +316,12 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 // can fail-closed). Both verifies are skipped cleanly when idToken
 // is empty or the verifier is unwired.
 //
-// In production the verifier is non-nil by construction — main.go's
-// JWKS prime fails-fast at boot when AdminStore is wired — so the
-// nil-verifier branch is reachable only on the sandbox / no-DDB
-// deploy path, where checkBindAllowed short-circuits on
-// AdminStore==nil before reading the (empty) sub anyway.
+// In production the verifier is non-nil by construction —
+// cmd/main.go's buildOAuthConfig fails-fast at boot when AdminStore
+// is wired and JWKS prime fails — so the nil-verifier branch is
+// reachable only on the sandbox / no-DDB deploy path, where
+// checkBindAllowed short-circuits on AdminStore==nil before reading
+// the (empty) sub anyway.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {
@@ -332,7 +334,7 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 		email = e
 	}
 	if s, serr := cfg.IDTokenVerifier.VerifySub(ctx, idToken); serr != nil {
-		slog.Warn("oauth/callback id_token sub-verify failed (non-fatal for mint, blocks bind)", "error", serr)
+		slog.Warn("oauth/callback id_token sub-verify failed — bind will be skipped (fatal in production where AdminStore is wired)", "error", serr)
 	} else {
 		sub = s
 	}

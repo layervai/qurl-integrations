@@ -285,6 +285,43 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 	})
 }
 
+// TestBindWorkspace_WritesSeedAdminAttribute fences the forensic-
+// attribution promise documented at workspace.go's
+// attrSeedAdminSlackUser comment block: BindWorkspace MUST stamp the
+// seedAdmin Slack user ID onto a write-only `seed_admin_slack_user_id`
+// attribute so on-call can answer "who was the original installer?"
+// after the admin set churns. A refactor that drops this line from
+// the PutItem (e.g., by inlining the item map) would silently lose
+// the attribution; no other test exercises this attr.
+func TestBindWorkspace_WritesSeedAdminAttribute(t *testing.T) {
+	var captured *dynamodb.PutItemInput
+	store := newStore(&stubDDB{
+		putItemFn: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			captured = in
+			return &dynamodb.PutItemOutput{}, nil
+		},
+	})
+	const (
+		teamID    = "T_seed"
+		ownerID   = "auth0|owner-1"
+		seedAdmin = "USEEDADMIN"
+	)
+	if err := store.BindWorkspace(context.Background(),
+		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}, seedAdmin); err != nil {
+		t.Fatalf("BindWorkspace: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("PutItem not invoked")
+	}
+	got, ok := captured.Item[attrSeedAdminSlackUser].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		t.Fatalf("seed_admin_slack_user_id missing or wrong type in PutItem (item=%+v)", captured.Item)
+	}
+	if got.Value != seedAdmin {
+		t.Errorf("seed_admin_slack_user_id: got %q want %q", got.Value, seedAdmin)
+	}
+}
+
 // TestBindWorkspace_TransportErrorMapsTo503 fences the
 // ddbToError fallthrough: a non-CCFE PutItem error becomes
 // 503/ddb_error, NOT 409. The handler's `surfaceBindError` routes

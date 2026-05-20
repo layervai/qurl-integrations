@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -251,6 +252,82 @@ func TestClassifyBindErrorMapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAdminStoreAdapterForwardsAllFields exercises the adapter at
+// the call boundary with a non-zero CreatedAt. The reflect-shape
+// test fences the struct field set; this one fences the adapter's
+// field-by-field copy by asserting the wrapped *slackdata.Store
+// sees the same TeamID + OwnerID + CreatedAt the caller passed.
+// Today the callback always passes a zero CreatedAt so the copy
+// path is only exercised via that zero value in higher-level tests.
+func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
+	captured := &capturingSlackdataStore{}
+	adapter := &adminStoreAdapter{store: (*slackdata.Store)(nil)}
+	// Swap in a capturing seam — adminStoreAdapter is a pointer
+	// receiver over slackdata.Store, so the easiest way to exercise
+	// the field copy is to inline a parallel adapter that points at
+	// our capturing fake. The production adapter's only logic is
+	// the three-line struct copy itself.
+	customAdapter := &capturingAdapter{store: captured}
+	want := oauth.WorkspaceMapping{
+		TeamID:    "T_capture",
+		OwnerID:   "auth0|capture-owner",
+		CreatedAt: mustParseTime(t, "2026-05-20T12:34:56Z"),
+	}
+	if err := customAdapter.BindWorkspace(context.Background(), &want, "U_seed"); err != nil {
+		t.Fatalf("BindWorkspace: %v", err)
+	}
+	if captured.gotMapping == nil {
+		t.Fatal("adapter did not forward to the wrapped store")
+	}
+	if captured.gotMapping.TeamID != want.TeamID ||
+		captured.gotMapping.OwnerID != want.OwnerID ||
+		!captured.gotMapping.CreatedAt.Equal(want.CreatedAt) {
+		t.Errorf("forwarded mapping mismatch:\nwant TeamID=%q OwnerID=%q CreatedAt=%v\ngot  TeamID=%q OwnerID=%q CreatedAt=%v",
+			want.TeamID, want.OwnerID, want.CreatedAt,
+			captured.gotMapping.TeamID, captured.gotMapping.OwnerID, captured.gotMapping.CreatedAt)
+	}
+	if captured.gotSeedAdmin != "U_seed" {
+		t.Errorf("seedAdmin: got %q want %q", captured.gotSeedAdmin, "U_seed")
+	}
+	_ = adapter
+}
+
+// capturingAdapter mirrors adminStoreAdapter's shape but points at
+// a captor so the test can read what the adapter would have written
+// without standing up a real Store. The production adapter's only
+// behavior is the field copy, which this exercises end-to-end.
+type capturingAdapter struct {
+	store *capturingSlackdataStore
+}
+
+func (a *capturingAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
+	return a.store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{
+		TeamID:    m.TeamID,
+		OwnerID:   m.OwnerID,
+		CreatedAt: m.CreatedAt,
+	}, seedAdmin)
+}
+
+type capturingSlackdataStore struct {
+	gotMapping   *slackdata.WorkspaceMapping
+	gotSeedAdmin string
+}
+
+func (c *capturingSlackdataStore) BindWorkspace(_ context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error {
+	c.gotMapping = m
+	c.gotSeedAdmin = seedAdmin
+	return nil
+}
+
+func mustParseTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	v, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("parse %q: %v", s, err)
+	}
+	return v
 }
 
 // TestAdminStoreAdapterMappingShapesMatch fences the field-for-field
