@@ -20,10 +20,11 @@ import (
 //     A channel can carry many alias bindings simultaneously;
 //     `/qurl aliases` lists every binding for the channel.
 //   - `allowed_resource_ids`: SS attribute; the multi-resource gate
-//     `/qurl get` checks via ResolvePolicy. Orthogonal to the alias
-//     map — a resource can be in the allowed set without an alias,
-//     and an alias can be bound without being in the allowed set
-//     (the two surfaces serve different commands).
+//     `/qurl get $r_<id>` checks via AllowedResourceIDsForChannel
+//     (handler_get.go's authorizeResourceIDForGet). Orthogonal to
+//     the alias map — a resource can be in the allowed set without
+//     an alias, and an alias can be bound without being in the
+//     allowed set (the two surfaces serve different commands).
 //
 // Schema decision locked 2026-05-17: app-managed Map, no GSI, no
 // SK reshape. channel_policies table is empty pending Slack bot
@@ -35,24 +36,32 @@ const (
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
-// (teamID, channelID) channel_policies row exposes to non-admin
-// `/qurl list`. The set is the union of two orthogonal surfaces on
-// the same row:
+// (teamID, channelID) channel_policies row authorizes for non-admin
+// mint via the `$r_<id>` get path (`handler_get.go`
+// `authorizeResourceIDForGet`). The set is the union of two
+// orthogonal surfaces on the same row:
 //
 //   - `allowed_resource_ids` SS — the multi-resource gate
 //     `/qurl admin allow/disallow` mutates; `/qurl get $r_<id>`
-//     checks via [ResolvePolicy].
+//     checks membership here.
 //   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl setalias` / `/qurl unsetalias` mutate;
-//     `/qurl get $alias` checks via [ResolveAlias].
+//     surface `/qurl setalias` / `/qurl unsetalias` mutate; the
+//     binding's resource_id is also accepted on the `$r_<id>` path
+//     so an aliased resource is mintable by its raw ID too.
 //
-// Either surface allows the row to mint, so `/qurl list` must show
-// resources visible via EITHER — surfacing only the alias-bindings
-// values (the bug closed here) hides allow-listed-but-unaliased
-// resources from non-admin listings even though `/qurl get $r_<id>`
-// would mint them. Single-row GetItem; no pagination needed.
+// Either surface allows the row to mint. The `/qurl list` consumer
+// of this set was removed in #459 (post-revert of #234) — the list
+// is now workspace-wide and unfiltered. This function survives as
+// the mint-time channel gate. Single-row GetItem; no pagination
+// needed.
 //
 // Missing row → empty set (no policy = no access, fail-closed).
+//
+// TODO(#464): rename when next touched. The function was named in
+// an era where both /qurl list (non-admin disclosure) and
+// /qurl get $r_<id> (mint-time capability) consumed it. Post-revert
+// of #234 in #459 only the latter survives, so a name like
+// `ChannelMintableResourceIDs` would better reflect today's role.
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{
@@ -87,47 +96,11 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 	return allowed, nil
 }
 
-// ResolvePolicy returns true iff `resourceID` is in the
-// channel_policies row's `allowed_resource_ids` set for
-// (teamID, channelID). Missing row → false (no policy = no access).
-//
-// The old HTTP shape returned a `bool` and an error; same shape here.
-// Eventual-consistency read is intentional — `/qurl get` and `/qurl
-// aliases` tolerate ~few-second propagation lag after a fresh
-// allow/disallow; strong reads would double RCU cost without
-// changing failure modes that matter.
-func (s *Store) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID string) (bool, error) {
-	if teamID == "" || channelID == "" || resourceID == "" {
-		return false, &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "ResolvePolicy: team_id, channel_id, resource_id are required",
-		}
-	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-	})
-	if err != nil {
-		return false, ddbToError("ResolvePolicy", err)
-	}
-	if len(out.Item) == 0 {
-		return false, nil
-	}
-	for _, rid := range readStringSet(out.Item, attrAllowedResourceIDs) {
-		if rid == resourceID {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // AllowResource adds `resourceID` to the (teamID, channelID) row's
 // allowed_resource_ids set via a conditional UpdateItem. Orthogonal
 // to alias_bindings — AllowResource only touches the allowed-set
-// surface that ResolvePolicy gates on.
+// surface that [Store.AllowedResourceIDsForChannel] reads back for
+// the `$r_<id>` mint gate.
 //
 // Returns 409 (via *Error) on a duplicate add. The 409 is surfaced
 // via DDB's ConditionalCheckFailedException on a
@@ -246,8 +219,9 @@ func (s *Store) DisallowResource(ctx context.Context, teamID, channelID, resourc
 // `/qurl aliases` can render one line per (channel, alias). Rows
 // without alias_bindings (only `allowed_resource_ids` populated)
 // emit zero entries — they're orthogonal to the alias listing.
-// `allowed_resource_ids` is the gate for `/qurl get` via
-// ResolvePolicy and intentionally NOT mirrored here.
+// `allowed_resource_ids` is the gate for `/qurl get $r_<id>` via
+// [Store.AllowedResourceIDsForChannel] and intentionally NOT
+// mirrored here.
 func (s *Store) ListPolicies(ctx context.Context, teamID, cursor string, limit int) (*PolicyList, error) {
 	if teamID == "" {
 		return nil, &Error{
