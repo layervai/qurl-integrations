@@ -84,6 +84,17 @@ function missingEventShipperKeys(cfg) {
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
 }
 
+// View-update push (feat #60). Mirrors missingEventShipperKeys: when
+// ENABLE_VIEW_UPDATE_PUSH=true, QURL_BOT_VIEW_UPDATES_QUEUE_URL is
+// required. A misconfigured deploy would otherwise drop every view
+// event silently (publisher) or throw at start() (consumer); the
+// uniform boot-time check makes the failure mode loud and consistent
+// with the existing event-shipper gate.
+function missingViewUpdatePushKeys(cfg) {
+  if (!cfg.ENABLE_VIEW_UPDATE_PUSH) return [];
+  return cfg.QURL_BOT_VIEW_UPDATES_QUEUE_URL ? [] : ['QURL_BOT_VIEW_UPDATES_QUEUE_URL'];
+}
+
 // PROCESS_ROLE=combined paired with ENABLE_EVENT_SHIPPER=true is
 // unsupported and rejected at boot. In combined mode both `isGateway`
 // and `isHttp` evaluate true, which derives `isWorker=true`, which
@@ -418,6 +429,7 @@ module.exports = {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  missingViewUpdatePushKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,

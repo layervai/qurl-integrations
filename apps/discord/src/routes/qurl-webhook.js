@@ -17,6 +17,7 @@ const db = require('../store');
 const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
+const viewUpdatePublisher = require('../view-update-publisher');
 
 const router = express.Router();
 
@@ -130,6 +131,20 @@ router.post('/qurl', async (req, res) => {
     });
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result });
+    // Sub-second view counter (feat #60): publish to SQS only on
+    // result === 'recorded' (a real new view, not a per-event dedup
+    // replay). Fire-and-log — the polling fallback in
+    // monitorLinkStatus catches anything the publisher drops. No
+    // await: the HTTP response must come back to qurl-service
+    // promptly so it doesn't retry on its own.
+    if (result === 'recorded') {
+      viewUpdatePublisher.publish({
+        qurlId: data.qurl_id,
+        accessCount,
+        consumed,
+        eventId,
+      });
+    }
     return res.status(200).json({ status: result });
   } catch (err) {
     // 5xx so qurl-service retries — transient DDB throttle should not

@@ -175,6 +175,36 @@ describe('missingEventShipperKeys', () => {
   });
 });
 
+describe('missingViewUpdatePushKeys', () => {
+  const { missingViewUpdatePushKeys } = require('../src/boot-requirements');
+
+  it('returns empty when the flag is unset (view-update-push path inactive)', () => {
+    expect(missingViewUpdatePushKeys({})).toEqual([]);
+    expect(missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: false })).toEqual([]);
+    expect(
+      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: false, QURL_BOT_VIEW_UPDATES_QUEUE_URL: undefined })
+    ).toEqual([]);
+  });
+
+  it('flags QURL_BOT_VIEW_UPDATES_QUEUE_URL when flag is on without a URL', () => {
+    expect(
+      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: true })
+    ).toEqual(['QURL_BOT_VIEW_UPDATES_QUEUE_URL']);
+    expect(
+      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: true, QURL_BOT_VIEW_UPDATES_QUEUE_URL: '' })
+    ).toEqual(['QURL_BOT_VIEW_UPDATES_QUEUE_URL']);
+  });
+
+  it('returns empty when both are set', () => {
+    expect(
+      missingViewUpdatePushKeys({
+        ENABLE_VIEW_UPDATE_PUSH: true,
+        QURL_BOT_VIEW_UPDATES_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-view-updates',
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe('unsupportedRoleShipperCombo', () => {
   it('rejects combined + flag-on with operator-facing remediation', () => {
     const msg = unsupportedRoleShipperCombo('combined', true);

@@ -19,6 +19,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
+const viewUpdateRegistry = require('./view-update-registry');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
@@ -1153,6 +1154,39 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
+  // View-update push registration (feat #60). Each tracked qurl_id
+  // registers a callback that triggers a runTick when a view event
+  // arrives via SQS — sub-second latency on the half of events that
+  // land on this replica (see view-update-registry.js's SILENT DROP
+  // doc). The polling setInterval remains the correctness primitive;
+  // this is purely a latency optimization.
+  //
+  // Callback closes over `runTick` (defined further down — same
+  // function body so closure capture is fine; the callback only fires
+  // after monitorLinkStatus returns and runTick is in scope) and
+  // `stopped` (gated so a SIGTERM-during-flight delivery is a no-op).
+  //
+  // GC: callbacks pin closure state (linkStatus, runTick) until
+  // unregistered. stop() below must drain this list — mirrors the
+  // closure-mutable-rebind discipline for interaction/qurlLinks.
+  const viewUpdateCallbacks = []; // [{qurlId, cb}, ...]
+  function registerViewUpdateFor(qurlId) {
+    if (!config.ENABLE_VIEW_UPDATE_PUSH) return;
+    const cb = () => {
+      if (stopped) return;
+      runTick().catch((err) => {
+        logger.warn('view-update-triggered runTick failed', {
+          sendId, qurl_id: qurlId, error: err.message,
+        });
+      });
+    };
+    viewUpdateRegistry.register(qurlId, cb);
+    viewUpdateCallbacks.push({ qurlId, cb });
+  }
+  for (const qurlId of trackedQurlIds) {
+    registerViewUpdateFor(qurlId);
+  }
+
   // Bumped by addRecipients. A tick whose getQurlViews resolves after
   // generation advanced must skip its render — the views map was built
   // against the pre-add tracked set and could under-report.
@@ -1183,6 +1217,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           if (!trackedQurlIds.has(qid)) {
             trackedQurlIds.add(qid);
             linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
+            // Register the new qurl_id for view-update push (feat #60).
+            // Symmetric with the construction-time loop above — the
+            // tracked set and the registry must extend together or the
+            // new recipients never get sub-second updates (the polling
+            // path catches them on the next interval regardless).
+            registerViewUpdateFor(qid);
           }
         }
       }
@@ -1216,6 +1256,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       stopped = true;
       clearInterval(timer);
       activeMonitors.delete(control);
+      // Unregister every view-update callback so the registry doesn't
+      // pin this monitor's closure state past stop() (feat #60).
+      // Load-bearing: a long-running monitor that never unregisters
+      // would otherwise hold linkStatus + runTick references via the
+      // callback closure until process restart.
+      for (const { qurlId, cb } of viewUpdateCallbacks) {
+        viewUpdateRegistry.unregister(qurlId, cb);
+      }
+      viewUpdateCallbacks.length = 0;
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;
