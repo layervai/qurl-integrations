@@ -631,12 +631,14 @@ func matchUserMention(tok string) (string, bool) {
 	return m[1], true
 }
 
-// truncateForError caps a token at 32 runes and runs it through
-// [escapeMrkdwnCode], so the result is safe to echo inside a Slack
-// mrkdwn code span in an error message. Callers wrap the return
-// value with a backtick code-span delimiter so any `<!channel>` /
-// `<@U…>` / other mrkdwn token in the user's input renders as a
-// literal code-span character rather than as a Slack mention.
+// truncateForError caps a token at 32 runes of content (plus a `…`
+// truncation marker when truncation fires, so the max rendered
+// length is 33 runes) and runs it through [escapeMrkdwnCode], so
+// the result is safe to echo inside a Slack mrkdwn code span in an
+// error message. Callers wrap the return value with a backtick
+// code-span delimiter so any `<!channel>` / `<@U…>` / other mrkdwn
+// token in the user's input renders as a literal code-span
+// character rather than as a Slack mention.
 //
 // The escape table (backtick → U+02CA, line breaks → space) is owned
 // by [escapeMrkdwnCode] in views.go so the same-package neighbor is

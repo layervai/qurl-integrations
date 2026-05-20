@@ -118,6 +118,36 @@ func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 	}
 }
 
+// TestHandleAdminRevoke_Upstream5xx fences the generic upstream-error
+// surface: a 5xx from qurl-service surfaces the generic
+// "failed to revoke" copy + the detailed slog.Error for triage. The
+// 5xx path is distinct from the 401/403 auth-rejected path (which
+// renders the "re-run /qurl setup" hint) and the 404 path (which
+// renders the "already revoked or typo'd" hint).
+func TestHandleAdminRevoke_Upstream5xx(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"title":"Internal Server Error","status":500}}`))
+	})
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "failed to revoke") {
+		t.Errorf("reply missing generic-error surface: %q", reply)
+	}
+	// Should NOT misclassify as auth-rejected or not-found.
+	if strings.Contains(reply, "re-run `/qurl setup`") {
+		t.Errorf("5xx misclassified as auth-rejected: %q", reply)
+	}
+	if strings.Contains(reply, "already revoked") {
+		t.Errorf("5xx misclassified as not-found: %q", reply)
+	}
+}
+
 // TestHandleAdminRevoke_CheckAdminError fences the 5xx surface on
 // the admin-gate path: a DDB transient failure during CheckAdmin
 // (the GetItem against workspace_mappings) renders the generic
