@@ -211,7 +211,7 @@ describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel han
   // operator-pre-created subscription + PLACEHOLDER SSM value would
   // make the Lambda's reuse path return "PLACEHOLDER" as the secret →
   // bot would 401 every webhook.
-  it('strips PLACEHOLDER and rotates when an existing sub is found (cold-bootstrap recovery)', async () => {
+  it('strips PLACEHOLDER and rotates when an existing sub is found (post-seed first-apply recovery)', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
@@ -244,6 +244,37 @@ describe('webhook-registrar Lambda — Terraform-seeded PLACEHOLDER sentinel han
     // Defensive: the response body to Terraform doesn't echo the
     // sentinel either (just in case).
     expect(JSON.stringify(result)).not.toContain('PLACEHOLDER');
+  });
+
+  it.each([
+    ['lowercase', 'placeholder'],
+    ['trailing space', 'PLACEHOLDER '],
+    ['leading space', ' PLACEHOLDER'],
+    ['mixed case', 'Placeholder'],
+  ])('does NOT strip case/whitespace variants — %s "%s" is treated as a real secret', async (_label, ssmValue) => {
+    // The strip is an exact-string compare against the
+    // Terraform-emitted literal. Case/whitespace variants are NOT
+    // the Terraform sentinel — they'd indicate operator-set values
+    // and should pass through unchanged (taking the reuse path if
+    // an existing sub matches). This pins the exact-match semantic
+    // so a future "be helpful" refactor (e.g., `.trim().toUpperCase()`)
+    // doesn't broaden the strip to legitimate values.
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: ssmValue } });
+    let rotateHit = false;
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => { rotateHit = true; return { body: { data: {} } }; },
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    // Reuse path — the variant value passed through as the secret.
+    expect(result.action).toBe('reused');
+    expect(rotateHit).toBe(false);
   });
 
   it('strips PLACEHOLDER and creates fresh when no existing sub (fresh-env first apply)', async () => {

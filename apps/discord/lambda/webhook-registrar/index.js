@@ -101,6 +101,17 @@ const {
 // Lambda is the sole place that knows about this literal. Stripping
 // to null here lets the registrar library's initialIsRealSecret
 // guard correctly treat it as "no real secret yet, bootstrap-rotate."
+//
+// TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also the
+// seed value for `aws_ssm_parameter.bot["QURL_WEBHOOK_SECRET"]` in
+// qurl-integrations-infra/qurl-bot-discord/terraform/main.tf. If
+// infra ever renames the sentinel (e.g., "REPLACE_ME"), update here
+// in lockstep — otherwise the strip silently no-ops and the original
+// failure mode (bot reads literal as real secret → 401s every
+// webhook) returns. `git grep TODO(infra-sentinel-sync)` across both
+// repos finds every site that needs the lockstep edit. The same
+// marker appears in apps/discord/src/boot-requirements.js for the
+// GOOGLE_MAPS_API_KEY sentinel parallel case.
 const TERRAFORM_SEEDED_PLACEHOLDER = 'PLACEHOLDER';
 
 // SSM client at module scope — Lambda reuses the same execution
