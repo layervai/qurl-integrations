@@ -2,39 +2,41 @@
 // admin_client.go HTTP wrapper around qurl-service `/internal/v1/admin/*`.
 //
 // Justin's 2026-05-12 pivot (see SLACK_QURL_ROLLOUT.md and
-// qurl-integrations-infra #523) moved the three Slack-keyed DynamoDB
-// tables — workspace_mappings, channel_policies, bootstrap_codes —
-// out of qurl-service into qurl-bot-slack-owned terraform
+// qurl-integrations-infra #523) moved the Slack-keyed DynamoDB
+// tables — workspace_mappings and channel_policies — out of
+// qurl-service into qurl-bot-slack-owned terraform
 // (`modules/qurl-slack-ddb/`). The bot now reads/writes those tables
 // directly with in-account IAM. There is no longer any HTTP surface
 // in qurl-service for admin/policy state; calling
 // `/internal/v1/admin/*` returns 404.
 //
+// /qurl setup also seeds the workspace admin row from the OAuth
+// callback (the installer becomes the seed admin), so the previously
+// separate bootstrap_codes table and the `/qurl admin claim` redeem
+// step are gone — this package owns only workspace_mappings +
+// channel_policies.
+//
 // This package exposes a `Store` facade with the method shapes the
 // post-pivot Slack handlers depend on (CheckAdmin, ResolvePolicy,
 // GetChannelPolicy, AllowedResourceIDsForChannel, LookupChannelAlias,
-// BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins, RedeemBootstrap).
-// Errors carry an HTTP-shaped StatusCode on `*Error` so handlers
-// branch via errors.As without caring about the underlying DDB
-// exception shape.
+// BindWorkspace, AddAdmin, RemoveAdmin, ListAdmins). Errors carry an
+// HTTP-shaped StatusCode on `*Error` so handlers branch via errors.As
+// without caring about the underlying DDB exception shape.
 //
-// Three env vars wire the tables on Fargate (set by
+// Two env vars wire the tables on Fargate (set by
 // qurl-bot-slack/terraform via modules/qurl-slack-ddb's outputs):
 //
 //   - QURL_WORKSPACE_MAPPINGS_TABLE
 //   - QURL_CHANNEL_POLICIES_TABLE
-//   - QURL_BOOTSTRAP_CODES_TABLE
 //
-// Encryption note: the three tables use customer-managed SSE on the
+// Encryption note: both tables use customer-managed SSE on the
 // qurl-bot-slack CMK. The task role's IAM grant is `kms:ViaService =
 // dynamodb.<region>` so the bot never sees the data key directly;
 // SSE is transparent at the SDK layer. (Field-level envelope
 // encryption like shared/auth.DDBProvider does for `qurl_api_key`
 // is NOT used here — workspace identity + admin user IDs + alias
 // mappings are not customer-secret-grade payloads, and the per-row
-// re-encrypt would burn KMS quota for no posture gain. The
-// bootstrap_codes table stores only sha256(plaintext) so the
-// plaintext never lives at rest.)
+// re-encrypt would burn KMS quota for no posture gain.)
 package slackdata
 
 import (
@@ -52,10 +54,10 @@ import (
 
 // Env var names — operator-set via the Fargate task definition (the
 // qurl-bot-slack TF wires these from modules/qurl-slack-ddb's
-// `output.table_names`). The three tables are named with the env-
-// scoped prefix `qurl-bot-slack-<env>-<table>` so a misrouted call
-// hits NoSuchTable instead of the wrong env's data — see the
-// "blast-radius control" rationale in modules/qurl-slack-ddb/main.tf.
+// `output.table_names`). The tables are named with the env-scoped
+// prefix `qurl-bot-slack-<env>-<table>` so a misrouted call hits
+// NoSuchTable instead of the wrong env's data — see the "blast-radius
+// control" rationale in modules/qurl-slack-ddb/main.tf.
 const (
 	// EnvWorkspaceMappingsTable holds the DDB table name for the
 	// 1:1 Slack team_id → qurl owner mapping table.
@@ -63,9 +65,6 @@ const (
 	// EnvChannelPoliciesTable holds the DDB table name for the per-
 	// channel allowed-resource-id policy table.
 	EnvChannelPoliciesTable = "QURL_CHANNEL_POLICIES_TABLE"
-	// EnvBootstrapCodesTable holds the DDB table name for the
-	// single-use bootstrap-code table.
-	EnvBootstrapCodesTable = "QURL_BOOTSTRAP_CODES_TABLE"
 )
 
 // DynamoDBClient is the slice of *dynamodb.Client the Store uses.
@@ -80,7 +79,7 @@ type DynamoDBClient interface {
 }
 
 // Store is the DDB-direct replacement for the old `AdminClient`. It
-// owns three DDB tables (workspace, policies, bootstrap codes) and
+// owns two DDB tables (workspace_mappings, channel_policies) and
 // surfaces the same method set the old HTTP client had so the
 // slash-command handlers don't need restructuring.
 //
@@ -90,33 +89,21 @@ type Store struct {
 	Client                DynamoDBClient
 	WorkspaceMappingsName string
 	ChannelPoliciesName   string
-	BootstrapCodesName    string
 
 	// Now is injected so tests can pin the clock for created_at /
-	// updated_at / expires_at-vs-now assertions without poking a
-	// package-global. Defaults to time.Now.
+	// updated_at assertions without poking a package-global.
+	// Defaults to time.Now.
 	Now func() time.Time
-
-	// ExternalIdentityBindings is the optional client for the
-	// new `POST /v1/external-identity-bindings` qurl-service surface
-	// (see SLACK_QURL_ROLLOUT.md Appendix A). The endpoint doesn't
-	// exist yet — the redeem path leaves this nil and skips the
-	// HTTP call until the qurl-service PR lands. When non-nil,
-	// RedeemBootstrap calls into it after the conditional UpdateItem
-	// on bootstrap_codes succeeds.
-	ExternalIdentityBindings ExternalIdentityBindingsClient
 }
 
 // StoreOption configures [NewStore].
 type StoreOption func(*storeOptions)
 
 type storeOptions struct {
-	workspaceMappingsName    string
-	channelPoliciesName      string
-	bootstrapCodesName       string
-	ddbClient                DynamoDBClient
-	externalIdentityBindings ExternalIdentityBindingsClient
-	awsConfigFns             []func(*awsconfig.LoadOptions) error
+	workspaceMappingsName string
+	channelPoliciesName   string
+	ddbClient             DynamoDBClient
+	awsConfigFns          []func(*awsconfig.LoadOptions) error
 }
 
 // WithDynamoDBClient injects a DDB client. Primarily for tests; in
@@ -127,27 +114,18 @@ func WithDynamoDBClient(c DynamoDBClient) StoreOption {
 
 // WithTableNames overrides the per-table names. Any empty argument
 // falls back to the matching env var. Primarily for tests.
-func WithTableNames(workspaceMappings, channelPolicies, bootstrapCodes string) StoreOption {
+func WithTableNames(workspaceMappings, channelPolicies string) StoreOption {
 	return func(o *storeOptions) {
 		o.workspaceMappingsName = workspaceMappings
 		o.channelPoliciesName = channelPolicies
-		o.bootstrapCodesName = bootstrapCodes
 	}
 }
 
-// WithExternalIdentityBindings injects the qurl-service binding
-// client for the redeem flow. Optional — leave nil until the
-// `/v1/external-identity-bindings` endpoint ships (see Appendix A
-// of SLACK_QURL_ROLLOUT.md).
-func WithExternalIdentityBindings(c ExternalIdentityBindingsClient) StoreOption {
-	return func(o *storeOptions) { o.externalIdentityBindings = c }
-}
-
 // NewStore constructs a [Store], loading AWS config from the ambient
-// environment unless overridden via options. Returns an error if any
-// of the three table names is missing — there is no sane fallback for
-// "which env's data am I supposed to write to" so failing fast at
-// boot is the only safe move.
+// environment unless overridden via options. Returns an error if a
+// table name is missing — there is no sane fallback for "which env's
+// data am I supposed to write to" so failing fast at boot is the
+// only safe move.
 func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	o := &storeOptions{}
 	for _, fn := range opts {
@@ -160,17 +138,12 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	if o.channelPoliciesName == "" {
 		o.channelPoliciesName = os.Getenv(EnvChannelPoliciesTable)
 	}
-	if o.bootstrapCodesName == "" {
-		o.bootstrapCodesName = os.Getenv(EnvBootstrapCodesTable)
-	}
 
 	switch {
 	case o.workspaceMappingsName == "":
 		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvWorkspaceMappingsTable)
 	case o.channelPoliciesName == "":
 		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvChannelPoliciesTable)
-	case o.bootstrapCodesName == "":
-		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvBootstrapCodesTable)
 	}
 
 	if o.ddbClient == nil {
@@ -182,12 +155,10 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	}
 
 	return &Store{
-		Client:                   o.ddbClient,
-		WorkspaceMappingsName:    o.workspaceMappingsName,
-		ChannelPoliciesName:      o.channelPoliciesName,
-		BootstrapCodesName:       o.bootstrapCodesName,
-		Now:                      time.Now,
-		ExternalIdentityBindings: o.externalIdentityBindings,
+		Client:                o.ddbClient,
+		WorkspaceMappingsName: o.workspaceMappingsName,
+		ChannelPoliciesName:   o.channelPoliciesName,
+		Now:                   time.Now,
 	}, nil
 }
 
@@ -210,7 +181,7 @@ func (s *Store) nowOrDefault() time.Time {
 // each DDB-direct op below maps native ddb errors to the
 // equivalent HTTP-shaped status (404 for ConditionalCheckFailed
 // on a "not-found"-style condition, 409 for "already exists",
-// 410 for "expired/used bootstrap code", 503 for transport).
+// 503 for transport).
 type Error struct {
 	StatusCode int
 	Code       string
@@ -244,8 +215,9 @@ type PolicyEntry struct {
 }
 
 // WorkspaceMapping describes the 1:1 workspace → owner row stored on
-// the workspace_mappings table. Returned from `RedeemBootstrap` so
-// the modal-submit path can post the success DM with the owner ID.
+// the workspace_mappings table. Passed to `BindWorkspace` from the
+// OAuth callback to seed the row (TeamID from the HMAC'd state,
+// OwnerID from the JWKS-verified id_token sub).
 type WorkspaceMapping struct {
 	TeamID    string    `json:"team_id"`
 	OwnerID   string    `json:"owner_id"`
@@ -267,8 +239,8 @@ func ddbToError(op string, err error) error {
 		// it via errors.As + Code without parsing Detail. The
 		// caller-supplied wrapper sets the right HTTP-shaped status.
 		//
-		// CONTRACT: every existing call site (RedeemBootstrap,
-		// BindWorkspace, AddAdmin, RemoveAdmin) catches
+		// CONTRACT: every existing call site (BindWorkspace,
+		// AddAdmin, RemoveAdmin) catches
 		// ConditionalCheckFailedException BEFORE calling
 		// ddbToError, so this 412 branch is currently unreachable.
 		// Any new op that calls ddbToError MUST do the same — the
@@ -290,11 +262,6 @@ func ddbToError(op string, err error) error {
 		Title:      op,
 		Detail:     err.Error(),
 	}
-}
-
-// boolAttr is a small helper for boolean DDB AttributeValues.
-func boolAttr(b bool) ddbtypes.AttributeValue {
-	return &ddbtypes.AttributeValueMemberBOOL{Value: b}
 }
 
 // stringAttr is a small helper for string DDB AttributeValues. Empty

@@ -61,16 +61,17 @@ func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifie
 	return &JWKSVerifier{Issuer: issuer, Audience: audience, jwksURL: jwksURL, cache: c}, nil
 }
 
-// VerifyEmail verifies the id_token signature + claims and returns the
-// email claim. Returns ("", err) on any verify failure — the callback
-// treats this as non-fatal (success page renders without the email).
-func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string, error) {
+// verifiedToken parses + verifies the id_token signature + claims
+// against Auth0's JWKS. Shared by VerifyEmail and VerifySub so the
+// verify posture (kid required, alg inferred from key, iss + aud
+// validated) lives in one place.
+func (v *JWKSVerifier) verifiedToken(ctx context.Context, idToken string) (jwt.Token, error) {
 	if v.cache == nil {
-		return "", errors.New("JWKSVerifier: cache not initialized")
+		return nil, errors.New("JWKSVerifier: cache not initialized")
 	}
 	set, err := v.cache.Get(ctx, v.jwksURL)
 	if err != nil {
-		return "", fmt.Errorf("get jwks: %w", err)
+		return nil, fmt.Errorf("get jwks: %w", err)
 	}
 	// WithRequireKid + WithInferAlgorithmFromKey: defense against an
 	// alg-confusion variant where a future Auth0 misconfig publishes a
@@ -86,7 +87,18 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 		jwt.WithValidate(true),
 	)
 	if err != nil {
-		return "", fmt.Errorf("parse/verify: %w", err)
+		return nil, fmt.Errorf("parse/verify: %w", err)
+	}
+	return tok, nil
+}
+
+// VerifyEmail verifies the id_token signature + claims and returns the
+// email claim. Returns ("", err) on any verify failure — the callback
+// treats this as non-fatal (success page renders without the email).
+func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string, error) {
+	tok, err := v.verifiedToken(ctx, idToken)
+	if err != nil {
+		return "", err
 	}
 	// Fail-closed on email_verified: surface the email only when the
 	// claim is present *and* a `bool` *and* explicitly true. Some
@@ -115,4 +127,25 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 		return "", errors.New("email claim is not a string")
 	}
 	return s, nil
+}
+
+// VerifySub verifies the id_token and returns the `sub` claim — Auth0's
+// stable identifier for the authenticated user, used as the workspace
+// OwnerID when BindWorkspace seeds the admin row. Returns ("", err) on
+// any verify failure or an absent / empty sub claim. The callback
+// treats this as fatal-to-bind (unlike VerifyEmail's best-effort
+// posture): an empty sub can't legitimately key a workspace.
+func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, error) {
+	tok, err := v.verifiedToken(ctx, idToken)
+	if err != nil {
+		return "", err
+	}
+	// jwt.Token.Subject() reads the standard `sub` claim (RFC 7519
+	// §4.1.2). Auth0 always populates it on id_tokens; an empty value
+	// signals a misconfigured federation upstream.
+	sub := tok.Subject()
+	if sub == "" {
+		return "", errors.New("sub claim missing or empty")
+	}
+	return sub, nil
 }

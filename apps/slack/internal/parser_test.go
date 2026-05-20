@@ -42,7 +42,6 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "setalias resource_id", text: "setalias $prod-db r_abc123", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "r_abc123", wantFlags: map[string]string{}},
 		{name: "unsetalias", text: "unsetalias $prod-db", wantSub: SubcmdUnsetAlias, wantAlias: "prod-db", wantFlags: map[string]string{}},
 		{name: "aliases", text: "aliases", wantSub: SubcmdAliases, wantFlags: map[string]string{}},
-		{name: "admin claim no args", text: "admin claim", wantSub: SubcmdAdmin, wantAdmin: AdminClaim, wantFlags: map[string]string{}},
 		{name: "admin revoke qurl_id", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantTarget: "q_01HXYZ8ABCDEF0123456789AB", wantFlags: map[string]string{}},
 		{name: "admin add mention", text: "admin add <@U12345678>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
 		{name: "admin add mention with display name", text: "admin add <@U12345678|kevin>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
@@ -73,7 +72,6 @@ func TestParse_HappyPaths(t *testing.T) {
 		// Admin verb is lowercased before the AdminAction switch. Pinned
 		// so a future refactor that drops `strings.ToLower(verb)` can't
 		// silently regress mobile-client / auto-capitalize inputs.
-		{name: "uppercase admin verb normalized", text: "admin CLAIM", wantSub: SubcmdAdmin, wantAdmin: AdminClaim, wantFlags: map[string]string{}},
 		{name: "mixed-case admin verb normalized", text: "admin List", wantSub: SubcmdAdmin, wantAdmin: AdminList, wantFlags: map[string]string{}},
 		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
 		{name: "single-digit alias accepted", text: "get $1", wantSub: SubcmdGet, wantAlias: "1", wantFlags: map[string]string{}},
@@ -165,7 +163,6 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "alias with leading hyphen rejected", text: "get $-foo", wantErr: ErrInvalidAlias},
 		{name: "alias with space (quoted) rejected", text: `get "$prod db"`, wantErr: ErrInvalidAlias},
 		{name: "alias with equals rejected", text: "setalias $a=b https://x.example", wantErr: ErrInvalidAlias},
-		{name: "admin claim with positional rejected", text: "admin claim boot-code", wantErr: ErrUnexpectedArgument},
 		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB extra", wantErr: ErrUnexpectedArgument},
 		{name: "alias with trailing hyphen rejected", text: "get $prod-", wantErr: ErrInvalidAlias},
 		{name: "alias single hyphen rejected", text: "get $-", wantErr: ErrInvalidAlias},
@@ -431,34 +428,6 @@ func TestParse_AdminErrorsNeutralizeMrkdwn(t *testing.T) {
 	}
 }
 
-// TestParse_AdminClaimErrorOmitsTail fences the bootstrap-code
-// redaction posture at the parser layer: when a user types
-// `admin claim BOOT-SECRET` (or mixed-case variants that bypass
-// the case-sensitive prefix-hint branch in handleSlashCommand),
-// Parse's error MUST NOT include the bootstrap-code token in the
-// rendered message — handler_admin echoes Parse errors to Slack and
-// Slack may log them in its audit feed.
-func TestParse_AdminClaimErrorOmitsTail(t *testing.T) {
-	t.Parallel()
-	const secret = "BOOT-SECRET-XYZ-DO-NOT-LEAK"
-	for _, text := range []string{
-		"admin claim " + secret,
-		"admin CLAIM " + secret,
-	} {
-		_, err := Parse(text)
-		if err == nil {
-			t.Errorf("Parse(%q) returned nil error", text)
-			continue
-		}
-		if !errors.Is(err, ErrUnexpectedArgument) {
-			t.Errorf("Parse(%q) error = %v, want ErrUnexpectedArgument", text, err)
-		}
-		if strings.Contains(err.Error(), secret) {
-			t.Errorf("Parse(%q) error leaks bootstrap code: %q", text, err.Error())
-		}
-	}
-}
-
 // TestParse_AliasLengthBoundary pins the off-by-one boundary on the
 // shared 64-char alias cap. 64 chars must accept (qurl-service's
 // nhp #1825 GSI key is exactly 64); 65 must reject with the
@@ -669,7 +638,6 @@ func FuzzParse(f *testing.F) {
 		"setalias $alias \"https://x.example with space\"",
 		"setalias $alias \"unbalanced",
 		"unsetalias $alias",
-		"admin claim",
 		"admin revoke q_01HXYZ8ABCDEF0123456789AB",
 		"admin add <@U12345678>",
 		"admin remove <@U12345678|kevin>",

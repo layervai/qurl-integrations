@@ -189,7 +189,11 @@ func run() error {
 	// Route the callback's fire-and-forget goroutines through handler.wg
 	// so they fall inside the same shutdown drain budget as the
 	// slash-command async workers.
-	oauthCfg, ok, err := buildOAuthConfig(signalCtx, ddbProvider, handler)
+	var oauthAdminStore oauth.AdminStore
+	if adminStore != nil {
+		oauthAdminStore = &adminStoreAdapter{store: adminStore}
+	}
+	oauthCfg, ok, err := buildOAuthConfig(signalCtx, ddbProvider, handler, oauthAdminStore)
 	if err != nil {
 		return fmt.Errorf("OAuth config: %w", err)
 	}
@@ -343,7 +347,7 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
 // goroutine tears down on SIGTERM.
-func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker oauth.AsyncTracker) (oauth.Config, bool, error) {
+func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker oauth.AsyncTracker, adminStore oauth.AdminStore) (oauth.Config, bool, error) {
 	// Strip trailing slashes from URL-shaped env vars at one chokepoint so
 	// downstream concatenations (redirect_uri, /oauth/token URL composition)
 	// can't produce //-path artifacts. Auth0 rejects redirect_uri mismatches
@@ -411,24 +415,29 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 			errOAuthStateSecretTooShort, len(stateSecret), minStateSecretBytes)
 	}
 
-	// JWKS verifier opens the network for the initial JWKS fetch (bounded
-	// inside NewJWKSVerifier). If the prime fails, the callback proceeds
-	// without email-claim verification for the lifetime of the process —
-	// the qURL key still gets minted; only the success-page email line
-	// is missing. We don't retry: the failure path is the operator-
-	// configured-wrong-domain scenario, where a lazy retry would log a
-	// noisy warning on every callback rather than once at boot.
-	// Operators who fix the domain restart the task.
-	var verifier oauth.IDTokenVerifier
+	// JWKS verifier opens the network for the initial JWKS fetch
+	// (bounded inside NewJWKSVerifier). The callback uses the verifier
+	// to extract the id_token `sub` claim, which becomes the
+	// workspace_mappings OwnerID at BindWorkspace time. Without a
+	// usable verifier, every callback in production would refuse the
+	// install (no OwnerID → no bind → 500). Fail-fast at boot when
+	// adminStore is wired so the operator sees the configuration error
+	// immediately instead of after the first user tries /qurl setup.
+	// On sandbox / no-DDB deploys (adminStore==nil) the bind is
+	// skipped anyway, so the verifier is downgraded to "email line
+	// missing on the success page" — non-fatal, log and continue.
 	issuer := "https://" + domain + "/"
 	// id_tokens carry the application's client_id as their `aud`
 	// claim, distinct from AUTH0_AUDIENCE (the API resource server
 	// identifier used at /authorize for access-token scope). Passing
 	// clientID here matches what Auth0 actually stamps into id_tokens.
-	if v, err := newJWKSVerifier(ctx, issuer, clientID); err != nil {
-		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task", "error", err)
-	} else {
-		verifier = v
+	verifier, err := newJWKSVerifier(ctx, issuer, clientID)
+	if err != nil {
+		if adminStore != nil {
+			return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed and AdminStore is wired — every callback would refuse the install: %w", err)
+		}
+		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task (AdminStore=nil so bind is skipped anyway)", "error", err)
+		verifier = nil
 	}
 
 	return oauth.Config{
@@ -442,9 +451,71 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		IDTokenVerifier:   verifier,
 		Minter:            &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
 		AsyncTracker:      tracker,
+		AdminStore:        adminStore,
+		BindClassifyError: classifyBindError,
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
+}
+
+// adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore
+// interface. The two declare WorkspaceMapping in their own packages
+// so the callback doesn't import slackdata directly; the adapter
+// translates the field-for-field equivalent shape and forwards the
+// call.
+//
+// `store` is typed as the slackdataBinder interface (not concrete
+// *slackdata.Store) so the adapter's translation logic can be
+// exercised end-to-end in tests against a captor without standing
+// up a real Store. *slackdata.Store satisfies the interface by
+// declaring BindWorkspace with the matching signature.
+type adminStoreAdapter struct {
+	store slackdataBinder
+}
+
+// slackdataBinder is the slice of slackdata.Store that the adapter
+// depends on. Defined here (rather than imported from slackdata)
+// so cmd/main_test.go can inject a captor that fences the
+// translation without dragging in the full Store surface.
+type slackdataBinder interface {
+	BindWorkspace(ctx context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error
+}
+
+func (a *adminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
+	return a.store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{
+		TeamID:    m.TeamID,
+		OwnerID:   m.OwnerID,
+		CreatedAt: m.CreatedAt,
+	}, seedAdmin)
+}
+
+// classifyBindError errors.As's the slackdata.Error and returns the
+// matching oauth.BindConflictCode for 409 paths so the callback can
+// branch idempotent vs. rebind-refused vs. generic-failure. Non-409
+// or non-*slackdata.Error returns "" so the callback treats it as a
+// generic failure (500).
+func classifyBindError(err error) oauth.BindConflictCode {
+	var ae *slackdata.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
+		return ""
+	}
+	switch ae.Code {
+	case slackdata.ErrCodeWorkspaceAlreadyBoundToCaller:
+		return oauth.BindConflictAlreadyBoundToCaller
+	case slackdata.ErrCodeWorkspaceAlreadyBound:
+		return oauth.BindConflictAlreadyBound
+	case slackdata.ErrCodeWorkspaceBindUnverified:
+		return oauth.BindConflictUnverified
+	default:
+		// A 409 from slackdata with an unmapped Code means a new
+		// conflict variant was added on the producer side without
+		// the classifier here being updated. Surface a warn so
+		// on-call sees the drift on CloudWatch before users start
+		// reporting "every rebind 500s."
+		slog.Warn("classifyBindError: slackdata returned 409 with unmapped Code — defaulting to generic 500 (classifier and slackdata.ErrCodeWorkspace* have drifted)",
+			"code", ae.Code, "title", ae.Title)
+		return ""
+	}
 }
 
 // missingAdminStoreEnvVars returns the slackdata table env-var names
@@ -455,7 +526,6 @@ func missingAdminStoreEnvVars() []string {
 	keys := []string{
 		slackdata.EnvWorkspaceMappingsTable,
 		slackdata.EnvChannelPoliciesTable,
-		slackdata.EnvBootstrapCodesTable,
 	}
 	var missing []string
 	for _, k := range keys {
@@ -497,16 +567,15 @@ func readMaxConcurrentAsync() int {
 }
 
 // buildAdminStore constructs the DDB-direct facade for
-// workspace_mappings + channel_policies + bootstrap_codes. When all
-// three QURL_*_TABLE env vars are set, we construct it; otherwise the
-// /qurl admin verbs reply "Admin features are not configured" rather
-// than crashing. Failure during construction (AWS config load, etc.)
-// degrades the bot to no-admin mode rather than failing startup, so
-// the OAuth + create/list surface stays available.
+// workspace_mappings + channel_policies. When both QURL_*_TABLE env
+// vars are set, we construct it; otherwise the /qurl admin verbs
+// reply "Admin features are not configured" rather than crashing.
+// Failure during construction (AWS config load, etc.) degrades the
+// bot to no-admin mode rather than failing startup, so the OAuth +
+// create/list surface stays available.
 func buildAdminStore(ctx context.Context) *slackdata.Store {
 	if os.Getenv(slackdata.EnvWorkspaceMappingsTable) == "" ||
-		os.Getenv(slackdata.EnvChannelPoliciesTable) == "" ||
-		os.Getenv(slackdata.EnvBootstrapCodesTable) == "" {
+		os.Getenv(slackdata.EnvChannelPoliciesTable) == "" {
 		slog.Warn("admin store NOT configured — /qurl admin will reply 'not configured'",
 			"missing_env", missingAdminStoreEnvVars())
 		return nil
@@ -518,7 +587,6 @@ func buildAdminStore(ctx context.Context) *slackdata.Store {
 	}
 	slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.
 		"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
-		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable),
-		"bootstrap_codes_table", os.Getenv(slackdata.EnvBootstrapCodesTable))
+		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable))
 	return s
 }

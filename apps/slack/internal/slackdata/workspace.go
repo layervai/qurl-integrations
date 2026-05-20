@@ -23,11 +23,11 @@ const (
 	attrCreatedAt         = "created_at"
 	attrUpdatedAt         = "updated_at"
 	// attrSeedAdminSlackUser records who originally claimed the
-	// workspace (the user who redeemed the bootstrap code in
-	// BindWorkspace). Write-only today — kept for forensic
-	// attribution if the admin set churns post-claim, so on-call
-	// can answer "who was the original installer?" from
-	// CloudWatch + a direct DDB read.
+	// workspace (the user who ran /qurl setup — BindWorkspace seeds
+	// this from the OAuth callback's verified.UserID). Write-only
+	// today — kept for forensic attribution if the admin set churns
+	// post-install, so on-call can answer "who was the original
+	// installer?" from CloudWatch + a direct DDB read.
 	attrSeedAdminSlackUser = "seed_admin_slack_user_id"
 )
 
@@ -76,19 +76,21 @@ const (
 )
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
-// between the caller-already-bound and different-admin 409 message
-// variants. The full BindWorkspace call already runs inside the
-// view_submission [interactionAsyncBudget] (2.5s); this sub-budget
-// keeps a slow disambiguating read from consuming whatever budget
-// remains after the failed PutItem and forcing the post-409 PostDM
-// off the wire.
+// between the caller-already-bound (idempotent-continue) and
+// different-admin (refuse) callback-side outcomes. The two return
+// the same rebind-refused page, but the caller drives different
+// behavior — idempotent-same-caller continues to mint, refuse short-
+// circuits. BindWorkspace is called from the OAuth callback under
+// its own bindTimeout budget; this sub-budget keeps a slow
+// disambiguating read from consuming whatever budget remains after
+// the failed PutItem.
 //
 // The wrapping [context.WithTimeout](ctx, budget) clamps against
 // the parent ctx, so the effective budget is `min(300ms, parent
 // remaining)` — a near-expired parent ctx yields a tighter cap.
 // On timeout/transport failure the call surfaces
-// [ErrCodeWorkspaceBindUnverified]; the handler renders a
-// "couldn't confirm — please retry" copy.
+// [ErrCodeWorkspaceBindUnverified]; the callback treats that as
+// rebind-refused (the binding IS held; we just can't tell whose).
 const bindDisambiguationBudget = 300 * time.Millisecond
 
 // addAdminDisambiguationBudget mirrors bindDisambiguationBudget for
@@ -147,20 +149,25 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 	return false, ownerID, nil
 }
 
-// BindWorkspace creates the workspace mapping row on first claim.
-// Used by the admin-claim redeem flow once the bootstrap code has
-// been atomically consumed. The seedAdmin becomes the only entry in
-// admin_slack_user_ids — additional admins are added later via a
-// separate "add admin" path (not in this PR).
+// BindWorkspace creates the workspace mapping row on first setup.
+// Called from /oauth/qurl/callback BEFORE the API key is minted on
+// qurl-service — bind acts as the gate so a rebind-refused outcome
+// can't overwrite the existing admin's stored credential. The
+// seedAdmin becomes the only entry in admin_slack_user_ids;
+// additional admins are added later via /qurl admin add.
 //
-// Returns 409 (via *Error) if the row already exists — a single-use
-// bootstrap code can't legitimately produce a re-bind, so the
-// existing-row case is treated as a fatal "this workspace is already
-// claimed" failure. Surfacing same-owner as 409 (instead of silently
-// overwriting) is intentional: PutItem would replace the entire row
-// including any admin_slack_user_ids added after the first claim.
-// If/when an explicit "rotate" verb lands, it gets its own SET-based
-// UpdateItem rather than reusing this constructor path.
+// Returns 409 (via *Error) if the row already exists. Two sub-cases:
+//   - caller is already on the admin set → ErrCodeWorkspaceAlreadyBoundToCaller.
+//     The callback treats this as idempotent success and continues
+//     to mint, rotating the API key without mutating the admin set.
+//   - a different admin holds the workspace → ErrCodeWorkspaceAlreadyBound.
+//     The callback renders a rebind-refused page; no key is minted
+//     so there's nothing to revoke and the existing admin's
+//     workspace_keys row stays intact.
+//
+// Surfacing same-owner as 409 (instead of silently overwriting) is
+// intentional: PutItem would replace the entire row including any
+// admin_slack_user_ids added after the first bind.
 func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error {
 	if m == nil || m.TeamID == "" || m.OwnerID == "" {
 		return &Error{
@@ -185,12 +192,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		created = now
 	}
 
-	// Conditional PutItem: refuse to overwrite any existing row. The
-	// single-use bootstrap code means we can't legitimately re-enter
-	// this path with the same workspace; an existing row is either a
-	// different-owner conflict (the new owner shouldn't silently win)
-	// OR a same-owner re-entry that would clobber later-added admins.
-	// Both deserve the 409 signal.
+	// Conditional PutItem: refuse to overwrite any existing row. A
+	// rebind attempt is either a different-owner conflict (the new
+	// owner shouldn't silently win) OR a same-owner re-entry that
+	// would clobber later-added admins. Both deserve the 409 signal;
+	// the post-CCFE disambiguation read below distinguishes the two
+	// cases so the callback can branch idempotent vs. rebind-refused.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Item: map[string]ddbtypes.AttributeValue{
@@ -265,14 +272,16 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		}
 	}
 	// ErrCodeWorkspaceAlreadyBound covers two structurally distinct
-	// conflicts: (a) the existing row's owner_id matches m.OwnerID but
-	// the caller is not on the admin set, and (b) the existing row's
-	// owner_id is a DIFFERENT owner entirely (a bootstrap code minted
-	// against owner A landed on a row owned by B). Both produce the
-	// same "different admin claims this workspace" user copy because
-	// the user signal is the same — they cannot become admin via this
-	// path regardless of which mismatch fired. Operators who need the
-	// distinction read the workspace_mappings row directly.
+	// conflicts: (a) the existing row's owner_id matches m.OwnerID
+	// (same qURL account holder reinstalling) but the OAuth state
+	// names a Slack user who isn't on the admin set, and (b) the
+	// existing row's owner_id is a DIFFERENT qURL account entirely
+	// (a fresh /qurl setup from a different Auth0 identity). Both
+	// produce the same "different admin claims this workspace" user
+	// copy because the user signal is the same — they cannot become
+	// admin via the OAuth path regardless of which mismatch fired.
+	// Operators who need the distinction read the workspace_mappings
+	// row directly.
 	return &Error{
 		StatusCode: http.StatusConflict,
 		Code:       ErrCodeWorkspaceAlreadyBound,

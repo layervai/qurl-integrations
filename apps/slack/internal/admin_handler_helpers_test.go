@@ -212,10 +212,10 @@ func parseSlackText(t *testing.T, body []byte) string {
 
 // workspaceMappingHasAdmin returns true iff the workspace_mappings
 // row for `teamID` exists AND carries `slackUserID` in its
-// admin_slack_user_ids SS (set). The post-pivot admin-claim flow
-// writes this row via BindWorkspace after RedeemBootstrap; without
-// it CheckAdmin returns (false, "", nil) on every subsequent admin
-// verb. This helper is the post-state fence for the persistence bug.
+// admin_slack_user_ids SS (set). The OAuth callback writes this row
+// via BindWorkspace as the installer becomes the seed admin;
+// without it CheckAdmin returns (false, "", nil) on every subsequent
+// admin verb. This helper is the post-state fence for the persistence bug.
 func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID string) bool {
 	t.Helper()
 	f.mu.Lock()

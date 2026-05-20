@@ -25,7 +25,6 @@ const (
 	// httptest mock at the same path the bot actually calls.
 	mintByTestResourcePath = "/v1/resources/" + testResourceIDFix + "/qurls"
 	testCmdSlash           = "/qurl"
-	testCmdAdminClaim      = "admin claim"
 	testFieldCallbackID    = "callback_id"
 )
 

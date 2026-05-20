@@ -38,6 +38,11 @@ const (
 	// what we report to the user. 15s is well over typical DDB PutItem
 	// latency.
 	persistTimeout = 15 * time.Second
+	// bindTimeout bounds the DDB PutItem (+ optional disambiguation
+	// GetItem) from checkBindAllowed. Same fresh-context posture as
+	// persistTimeout — the two are separate constants so a future
+	// adjustment of one doesn't accidentally retune the other.
+	bindTimeout = 15 * time.Second
 	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
 	// mintAndPersist. Same fresh-context rationale as persistTimeout:
 	// TimeoutHandler canceling mid-mint would orphan a key the bot
@@ -93,6 +98,48 @@ type successPageData struct {
 	Email     string
 }
 
+// rebindRefusedPageTemplate is the page rendered when BindWorkspace
+// returns a 409 indicating a *different* admin already holds the
+// workspace. We do NOT silently overwrite — that was the
+// workspace-rebind primitive Justin flagged. The page tells the
+// installer to coordinate with the existing admin instead.
+//
+// The API key minted earlier in the callback is revoked before we
+// render this page so a refused install doesn't leave a half-installed
+// key behind.
+var rebindRefusedPageTemplate = template.Must(template.New("oauth-rebind-refused").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>qURL setup blocked</title>
+<meta name="robots" content="noindex">
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
+.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
+h1{margin:0 0 .5rem;font-size:1.5rem}
+.kv{margin-top:1rem;font-size:.875rem;color:#374151}
+.warn{color:#b91c1c;font-weight:600}
+code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
+</style>
+</head>
+<body>
+<div class="card">
+<h1><span class="warn">&#9888;</span> qURL setup blocked</h1>
+<p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup</code> was not applied.</p>
+<p>Please ask the existing qURL admin in your workspace to add you, or contact LayerV support if the original admin is no longer reachable.</p>
+<div class="kv">
+<div>Slack workspace: <code>{{.TeamID}}</code></div>
+</div>
+<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab.</p>
+</div>
+</body>
+</html>`))
+
+// rebindRefusedPageData is the model passed to rebindRefusedPageTemplate.
+type rebindRefusedPageData struct {
+	TeamID string
+}
+
 // auth0TokenResponse is the slice of Auth0's /oauth/token response we read.
 type auth0TokenResponse struct {
 	AccessToken string `json:"access_token"`
@@ -101,15 +148,22 @@ type auth0TokenResponse struct {
 
 // Callback returns the http.HandlerFunc for GET /oauth/qurl/callback.
 //
-// Steps mirror the Discord LIVE flow (apps/discord/src/routes/qurl-oauth.js):
-//  1. Validate cookie + query.state via timing-safe compare.
-//  2. Validate the state's HMAC + recover (teamID, userID).
-//  3. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
-//  4. Verify id_token signature against Auth0 JWKS (non-fatal — success
-//     page renders without the email line if verify fails).
+// Steps:
+//  1. Validate cookie + query.state via timing-safe compare; verify the
+//     state's HMAC + expiry; recover (teamID, userID).
+//  2. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
+//  3. Verify id_token signature against Auth0 JWKS — extract `sub`
+//     (workspace OwnerID; mandatory) and `email` (best-effort for the
+//     success-page readout).
+//  4. Bind workspace_mappings via AdminStore.BindWorkspace — the
+//     installer becomes the first admin. A rebind conflict against a
+//     different admin (or unverified) renders the rebind-refused page
+//     and short-circuits BEFORE we touch any key state, so a refused
+//     install can't overwrite the existing admin's stored API key.
+//     Same-caller re-entry is idempotent success.
 //  5. POST to qurl-service /v1/api-keys to mint the workspace key.
 //  6. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
-//     revoke on qurl-service.
+//     revoke on qurl-service to bound the orphan-key window.
 //  7. DM the admin (fire-and-forget; failure doesn't block the page).
 //  8. Render success HTML.
 //
@@ -135,68 +189,10 @@ func Callback(cfg Config) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		verified, code, ok := validateCallbackRequest(w, r, cfg, now)
+		if !ok {
 			return
 		}
-
-		q := r.URL.Query()
-		if errParam := q.Get("error"); errParam != "" {
-			//nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-			slog.Warn("oauth/callback Auth0 returned error",
-				"error", errParam,
-				// Auth0 enterprise SAML connections occasionally embed
-				// the rejected username in error_description. Truncate
-				// to bound PII exposure in operator logs.
-				"error_description", truncateForLog(q.Get("error_description"), 128))
-			// Clear the cookie even on the Auth0-error branch so the
-			// stale state can't be replayed within the 5-minute TTL.
-			// On the success path, the cookie clears after verify; this
-			// closes the same-browser-replay window on Auth0 reject too.
-			clearStateCookie(w)
-			http.Error(w, "authorization failed — run /qurl setup again to retry", http.StatusBadRequest)
-			return
-		}
-		code := q.Get("code")
-		stateParam := q.Get("state")
-		if code == "" || stateParam == "" {
-			http.Error(w, "missing code or state", http.StatusBadRequest)
-			return
-		}
-
-		cookieState := readStateCookie(r)
-		if cookieState == "" {
-			slog.Warn("oauth/callback missing state cookie")
-			clearStateCookie(w)
-			http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
-			return
-		}
-		// Both values come from the same MintState call so canonical
-		// length is fixed; hmac.Equal short-circuits to false on
-		// length mismatch (length oracle is harmless here because an
-		// attacker who can probe arbitrary cookie+state pairs already
-		// has the HttpOnly cookie). Constant-time byte compare on
-		// equal-length inputs.
-		if !hmac.Equal([]byte(cookieState), []byte(stateParam)) {
-			slog.Warn("oauth/callback cookie/state mismatch")
-			clearStateCookie(w)
-			http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
-			return
-		}
-
-		// HMAC + expiry on the state token itself; the cookie check
-		// above proves "same browser" but not "minted by us".
-		verified, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
-		if err != nil {
-			slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
-			clearStateCookie(w)
-			http.Error(w, "invalid or expired setup link", http.StatusBadRequest)
-			return
-		}
-
-		// Cookie has done its job — clear so a refresh can't re-bind.
-		clearStateCookie(w)
 
 		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code)
 		if err != nil {
@@ -205,16 +201,18 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		// id_token verification is best-effort; failure suppresses the
-		// success-page email line but never blocks key mint or persist.
-		var qurlEmail string
-		if idToken != "" && cfg.IDTokenVerifier != nil {
-			email, verr := cfg.IDTokenVerifier.VerifyEmail(r.Context(), idToken)
-			if verr != nil {
-				slog.Warn("oauth/callback id_token verify failed (non-fatal)", "error", verr)
-			} else {
-				qurlEmail = email
-			}
+		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
+
+		// Bind BEFORE mint so a rebind-refused install can't overwrite
+		// the existing admin's encrypted qurl_api_key row with a key
+		// that's about to be revoked. The OwnerID needed for the bind
+		// (id_token sub) is already in hand pre-mint, so there's no
+		// ordering blocker. On a refused outcome, no key is minted and
+		// no DDB row is touched — refused-bind half-install becomes
+		// impossible by construction (the lost-PutItem-race orphan-key
+		// case is separate; tracked at #265).
+		if !checkBindAllowed(w, cfg, verified, qurlSub) {
+			return
 		}
 
 		keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
@@ -241,6 +239,193 @@ func Callback(cfg Config) http.HandlerFunc {
 	}
 }
 
+// validateCallbackRequest verifies the request envelope: method, query
+// parameters, cookie/state HMAC pairing, and state HMAC+expiry. On
+// failure it has already written the HTTP error response.
+//
+//nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
+func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config, now func() time.Time) (verified VerifiedState, code string, ok bool) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return VerifiedState{}, "", false
+	}
+
+	q := r.URL.Query()
+	if errParam := q.Get("error"); errParam != "" {
+		//nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+		slog.Warn("oauth/callback Auth0 returned error",
+			"error", errParam,
+			// Auth0 enterprise SAML connections occasionally embed
+			// the rejected username in error_description. Truncate
+			// to bound PII exposure in operator logs.
+			"error_description", truncateForLog(q.Get("error_description"), 128))
+		// Clear the cookie even on the Auth0-error branch so the
+		// stale state can't be replayed within the 5-minute TTL.
+		// On the success path, the cookie clears after verify; this
+		// closes the same-browser-replay window on Auth0 reject too.
+		clearStateCookie(w)
+		http.Error(w, "authorization failed — run /qurl setup again to retry", http.StatusBadRequest)
+		return VerifiedState{}, "", false
+	}
+	code = q.Get("code")
+	stateParam := q.Get("state")
+	if code == "" || stateParam == "" {
+		http.Error(w, "missing code or state", http.StatusBadRequest)
+		return VerifiedState{}, "", false
+	}
+
+	cookieState := readStateCookie(r)
+	if cookieState == "" {
+		slog.Warn("oauth/callback missing state cookie")
+		clearStateCookie(w)
+		http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
+		return VerifiedState{}, "", false
+	}
+	// Both values come from the same MintState call so canonical
+	// length is fixed; hmac.Equal short-circuits to false on
+	// length mismatch (length oracle is harmless here because an
+	// attacker who can probe arbitrary cookie+state pairs already
+	// has the HttpOnly cookie). Constant-time byte compare on
+	// equal-length inputs.
+	if !hmac.Equal([]byte(cookieState), []byte(stateParam)) {
+		slog.Warn("oauth/callback cookie/state mismatch")
+		clearStateCookie(w)
+		http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
+		return VerifiedState{}, "", false
+	}
+
+	// HMAC + expiry on the state token itself; the cookie check
+	// above proves "same browser" but not "minted by us".
+	v, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
+	if err != nil {
+		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		clearStateCookie(w)
+		http.Error(w, "invalid or expired setup link", http.StatusBadRequest)
+		return VerifiedState{}, "", false
+	}
+
+	// Cookie has done its job — clear so a refresh can't re-bind.
+	clearStateCookie(w)
+	return v, code, true
+}
+
+// verifyIDTokenClaims extracts email + sub from the id_token. Email
+// is best-effort (failure logged, returned ""); sub is mandatory for
+// the downstream bind (failure returned as "" so checkBindAllowed
+// can fail-closed). Both verifies are skipped cleanly when idToken
+// is empty or the verifier is unwired.
+//
+// In production the verifier is non-nil by construction —
+// cmd/main.go's buildOAuthConfig fails-fast at boot when AdminStore
+// is wired and JWKS prime fails — so the nil-verifier branch is
+// reachable only on the sandbox / no-DDB deploy path, where
+// checkBindAllowed short-circuits on AdminStore==nil before reading
+// the (empty) sub anyway.
+//
+//nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
+func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {
+	if idToken == "" {
+		// Auth0 should always return an id_token when openid is in
+		// the scope set (see authorizeURL). An empty id_token here
+		// signals a misconfigured Auth0 application — likely the
+		// openid scope was dropped on the consent screen. Distinguish
+		// from "verifier rejected it" so on-call triaging the
+		// downstream 500 doesn't dig through JWKS logs that never
+		// fired.
+		slog.Warn("oauth/callback Auth0 returned empty id_token — sub-verify will be skipped (likely Auth0 application misconfigured without openid scope)")
+		return "", ""
+	}
+	if cfg.IDTokenVerifier == nil {
+		return "", ""
+	}
+	if e, verr := cfg.IDTokenVerifier.VerifyEmail(ctx, idToken); verr != nil {
+		slog.Warn("oauth/callback id_token email-verify failed (non-fatal)", "error", verr)
+	} else {
+		email = e
+	}
+	if s, serr := cfg.IDTokenVerifier.VerifySub(ctx, idToken); serr != nil {
+		slog.Warn("oauth/callback id_token sub-verify failed — bind will be skipped (fatal in production where AdminStore is wired)", "error", serr)
+	} else {
+		sub = s
+	}
+	return email, sub
+}
+
+// checkBindAllowed runs the BindWorkspace pre-flight. Returns true to
+// continue to mint+persist; false when a response has already been
+// written (rebind-refused, generic 500, or sub-missing 500). Because
+// this runs BEFORE mint, a refused install never produces an orphan
+// key and never overwrites an existing admin's stored credential.
+//
+// AdminStore=nil is the sandbox / no-DDB path — log and skip.
+// qurlSub=="" means the verifier failed; we can't bind without the
+// OwnerID. Render a 500 — half-installing (API key minted, admin
+// verbs broken) is the worst-of-both-worlds state.
+//
+//nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
+func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState, qurlSub string) bool {
+	if cfg.AdminStore == nil {
+		slog.Warn("oauth/callback AdminStore not wired — workspace_mappings not seeded", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", verified.TeamID)
+		return true
+	}
+	if qurlSub == "" {
+		slog.Error("oauth/callback bind skipped — id_token sub unavailable", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", verified.TeamID)
+		http.Error(w, "workspace identity could not be confirmed — run /qurl setup again", http.StatusInternalServerError)
+		return false
+	}
+	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
+	defer bindCancel()
+	bindErr := cfg.AdminStore.BindWorkspace(bindCtx,
+		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: qurlSub},
+		verified.UserID)
+	if bindErr == nil {
+		return true
+	}
+	return handleBindError(w, cfg, bindErr, verified.TeamID)
+}
+
+// handleBindError classifies the BindWorkspace error via cfg.BindClassifyError
+// and writes the appropriate response. Returns true if the caller should
+// continue (idempotent same-caller re-entry — bind held, no overwrite,
+// success-page still appropriate) and false if a response has been
+// written (rebind-refused page or generic 500). No key revoke wiring
+// because this runs BEFORE mint by construction.
+//
+//nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
+func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID string) bool {
+	var code BindConflictCode
+	if cfg.BindClassifyError != nil {
+		code = cfg.BindClassifyError(bindErr)
+	}
+	switch code {
+	case BindConflictAlreadyBoundToCaller:
+		// Same Slack user re-running /qurl setup — they were already
+		// admin. We continue to mint, which rotates their API key.
+		// Operator-visible effect: "key rotated, admin set unchanged."
+		slog.Info("oauth/callback rebind idempotent (caller already on admin set)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID)
+		return true
+	case BindConflictAlreadyBound, BindConflictUnverified:
+		// A different admin holds the workspace (or we can't tell —
+		// treat unverified the same way; the safer default is to
+		// refuse the rebind than to potentially overwrite). No mint
+		// has happened yet, so nothing to revoke — the existing
+		// admin's key row is untouched.
+		slog.Warn("oauth/callback rebind refused — workspace held by different admin", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID, "conflict", string(code), "error", bindErr)
+		renderRebindRefused(w, teamID)
+		return false
+	default:
+		slog.Error("oauth/callback BindWorkspace failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID, "error", bindErr)
+		http.Error(w, "workspace not bound — run /qurl setup again", http.StatusInternalServerError)
+		return false
+	}
+}
+
 // spawnAsync routes a goroutine through the AsyncTracker if one is
 // wired, falling back to plain `go` for tests / unconfigured callers.
 func spawnAsync(tracker AsyncTracker, fn func()) {
@@ -251,24 +436,25 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 	go fn()
 }
 
-// mintAndPersist runs steps 5 + 6: mint key on qurl-service, persist via
-// WorkspaceStore, fire-and-forget revoke if persist fails. Returns
-// (keyPrefix, true) on success; on failure writes the HTTP error response
-// and returns (_, false).
-//
-// Extracted so Callback stays straight-line and the linter doesn't need
-// gocognit/gocyclo suppressors.
+// mintAndPersist mints the API key on qurl-service and persists it via
+// WorkspaceStore. Returns (keyPrefix, true) on success; on failure
+// writes the HTTP error response and fires the orphan-key revoke
+// when a mint succeeded but the persist did not. The plaintext apiKey
+// and keyID stay internal: SetAPIKey is the only apiKey consumer and
+// keyID's only use is the persist-failure revoke. With BindWorkspace
+// running BEFORE this step (see Callback), no bind-failure path needs
+// the keyID either.
 //
 // Post-timeout-completion footgun: the mint + persist contexts are
-// deliberately fresh (decoupled from the request context) so a
-// TimeoutHandler cancel doesn't desync row state from what we tell the
-// user. The flip side: if oauthHandlerTimeout (60s) fires after we
-// already started the mint, the goroutine continues for up to
-// mintTimeout + persistTimeout (≈30s) after we've returned an error to
-// the user. The user retries, mints K2, and the eventual completion of
-// K1 races K2's persist as a row overwrite. K1 then becomes an orphan
-// in qurl-service (no revoke wired for this case). Tracked at #265
-// alongside the lost-PutItem-race orphan path.
+// fresh (decoupled from the request context) so a TimeoutHandler
+// cancel doesn't desync row state from what we tell the user. The
+// flip side: if oauthHandlerTimeout (60s) fires after we already
+// started the mint, the goroutine continues for up to
+// mintTimeout + persistTimeout (≈30s) after we've returned an error
+// to the user. The user retries, mints K2, and the eventual
+// completion of K1 races K2's persist as a row overwrite. K1 then
+// becomes an orphan in qurl-service (no revoke wired for this case).
+// Tracked at #265 alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
@@ -301,13 +487,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
 		slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", perr, "team_id", teamID, "key_id", keyID)
-		// Fire-and-forget revoke. Fresh context (not the request
-		// context) because the request context may be canceling by
-		// the time we get to write the error response; we still want
-		// the revoke to run to bound the orphan-key window.
-		spawnAsync(cfg.AsyncTracker, func() {
-			revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
-		})
+		scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
 		// TODO(#265): revoke is wired only for the persist-failure case.
 		// A TimeoutHandler-induced abandon (outer 60s fires after mint
 		// has started but before persist returns) escapes this branch
@@ -317,6 +497,18 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		return "", false
 	}
 	return keyPrefix, true
+}
+
+// scheduleOrphanRevoke fires a fire-and-forget revoke of a key that
+// can't be left in place — persist failure, bind failure, or any
+// other half-install state. Routed through the AsyncTracker so
+// SIGTERM drains it under handler.wg rather than cutting mid-call.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func scheduleOrphanRevoke(cfg Config, accessToken, keyID, teamID string) {
+	spawnAsync(cfg.AsyncTracker, func() {
+		revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+	})
 }
 
 func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID string) {
@@ -340,6 +532,23 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 	if err := client.PostDirectMessage(ctx, userID, msg); err != nil {
 		slog.Warn("oauth/callback DM failed", "error", err, "user_id", userID, "team_id", teamID)
+	}
+}
+
+// renderRebindRefused writes the rebind-refused page. Same defense-in-
+// depth headers as the success page — the only differences are the body
+// template and a 409 status code (so an automated retry surfaces the
+// conflict rather than silently looping).
+func renderRebindRefused(w http.ResponseWriter, teamID string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusConflict)
+	if err := rebindRefusedPageTemplate.Execute(w, rebindRefusedPageData{TeamID: teamID}); err != nil {
+		slog.Warn("oauth/callback rebind-refused page write failed", "error", err)
 	}
 }
 

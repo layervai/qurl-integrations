@@ -2,12 +2,9 @@ package internal
 
 // Test-only fixture helpers for seeding the fake DDB with the
 // post-pivot table shapes. Mirrors the workspace_mappings /
-// channel_policies / bootstrap_codes schemas fenced in
-// modules/qurl-slack-ddb/main.tf.
+// channel_policies schemas fenced in modules/qurl-slack-ddb/main.tf.
 
 import (
-	"strconv"
-	"testing"
 	"time"
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -138,38 +135,8 @@ func seedChannelPolicyAliasBindings(teamID, channelID string, bindings map[strin
 	}
 }
 
-// seedBootstrapCode returns a bootstrap_codes row keyed by the
-// sha256(plaintext) code_hash. `expiresAt` is encoded as a numeric
-// epoch-seconds attribute (matches the DDB TTL conventions in the
-// production schema). When `redeemed` is true the row is already
-// consumed — the conditional UpdateItem will fail against it.
-// Currently unused on #231 (no claim flow); kept so #233 can reuse
-// the same fixture set.
-func seedBootstrapCode(_ *testing.T, plaintext, ownerID, keyID string, expiresAt time.Time, redeemed bool) map[string]ddbtypes.AttributeValue {
-	return map[string]ddbtypes.AttributeValue{
-		"code_hash":  stringMember(plaintextCodeHash(plaintext)),
-		fAttrOwnerID: stringMember(ownerID),
-		"key_id":     stringMember(keyID),
-		"redeemed":   boolMember(redeemed),
-		"expires_at": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt.Unix(), 10)},
-	}
-}
-
-// plaintextCodeHash mirrors slackdata.hashBootstrapCode without
-// importing it (the helper is unexported on the production side).
-// Kept in sync with that implementation; if the algorithm rotates,
-// update here too.
-func plaintextCodeHash(plaintext string) string {
-	return fakeSha256Hex([]byte(plaintext))
-}
-
 // stringMember is a 3-character alias for the AttributeValueMemberS
 // constructor so fixture rows fit on one line.
 func stringMember(v string) *ddbtypes.AttributeValueMemberS {
 	return &ddbtypes.AttributeValueMemberS{Value: v}
-}
-
-// boolMember mirrors stringMember for boolean attrs.
-func boolMember(v bool) *ddbtypes.AttributeValueMemberBOOL {
-	return &ddbtypes.AttributeValueMemberBOOL{Value: v}
 }
