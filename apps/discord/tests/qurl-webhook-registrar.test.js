@@ -656,6 +656,21 @@ describe('ensureWebhookSubscription — fetch timeout', () => {
     global.fetch = jest.fn(async () => { throw abortErr; });
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/aborted/i);
   });
+  it('attaches `op` to pre-response fetch errors so oncall greps catch network failures too', async () => {
+    // callQurlService used to surface only resp-status errors with op;
+    // pre-response failures (AbortError, DNS, TLS) lacked the op field,
+    // so a "filter logs by op=GET /v1/webhooks" search silently missed
+    // network errors. Now op is attached at the catch site.
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    global.fetch = jest.fn(async () => { throw abortErr; });
+    let caught;
+    try {
+      await ensureWebhookSubscription(BASE_OPTS);
+    } catch (err) { caught = err; }
+    expect(caught).toBeDefined();
+    expect(caught.op).toBe('GET /v1/webhooks?limit=100');
+  });
 });
 
 describe('redactSecret — recursive scrubbing', () => {
@@ -664,6 +679,18 @@ describe('redactSecret — recursive scrubbing', () => {
     const out = redactSecret({ data: { webhook: { secret: 'whsec_leaked', other: 'fine' } } });
     expect(out.data.webhook.secret).toBe('[REDACTED]');
     expect(out.data.webhook.other).toBe('fine');
+  });
+  it('scrubs secret-shaped key variants (webhook_secret, signing_secret, client_secret)', () => {
+    const out = redactSecret({
+      webhook_secret: 'whsec_a',
+      signing_secret: 'whsec_b',
+      client_secret: 'whsec_c',
+      regular_field: 'fine',
+    });
+    expect(out.webhook_secret).toBe('[REDACTED]');
+    expect(out.signing_secret).toBe('[REDACTED]');
+    expect(out.client_secret).toBe('[REDACTED]');
+    expect(out.regular_field).toBe('fine');
   });
   it('scrubs secrets inside arrays of objects', () => {
     const out = redactSecret({ data: [{ secret: 'whsec_one' }, { secret: 'whsec_two' }] });

@@ -57,21 +57,27 @@ const QURL_ACCESSED = QURL_WEBHOOK_EVENTS.ACCESSED;
 // rotation without permanently re-rotating every restart afterward.
 const PLACEHOLDER_SECRET = 'PLACEHOLDER';
 
-// Strip `secret` fields anywhere in a parsed body before stringifying.
-// Error messages echo response bodies into CloudWatch; defense-in-
-// depth scrubbing avoids the secret leaking via a logger error.
-// Walks objects + arrays recursively because qurl-service's error
-// envelope shape isn't pinned — `data.webhook.secret`,
+// Strip secret-shaped fields anywhere in a parsed body before
+// stringifying. Error messages echo response bodies into CloudWatch;
+// defense-in-depth scrubbing avoids the secret leaking via a logger
+// error. Walks objects + arrays recursively because qurl-service's
+// error envelope shape isn't pinned — `data.webhook.secret`,
 // `data[0].secret`, or `error.detail.secret` would all bypass a
 // top-level-only redactor.
+//
+// Match policy: any key containing "secret" (case-insensitive), so
+// `webhook_secret`, `signing_secret`, `secret_key`, `client_secret`
+// all redact too. Receiver wouldn't accept those field names anyway —
+// this is purely a log-leak guard.
 const REDACT_MAX_DEPTH = 8;
+const SECRET_KEY_RE = /secret/i;
 function redactSecret(body, depth = 0) {
   if (depth > REDACT_MAX_DEPTH) return body;
   if (!body || typeof body !== 'object') return body;
   if (Array.isArray(body)) return body.map(v => redactSecret(v, depth + 1));
   const out = {};
   for (const [k, v] of Object.entries(body)) {
-    out[k] = (k === 'secret') ? '[REDACTED]' : redactSecret(v, depth + 1);
+    out[k] = SECRET_KEY_RE.test(k) ? '[REDACTED]' : redactSecret(v, depth + 1);
   }
   return out;
 }
@@ -87,6 +93,7 @@ class QurlServiceError extends Error {
 }
 
 async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeoutMs = 10_000 }) {
+  const op = `${method} ${path}`;
   const opts = {
     method,
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -96,11 +103,21 @@ async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeou
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(`${apiEndpoint}${path}`, opts);
+  let resp;
+  try {
+    resp = await fetch(`${apiEndpoint}${path}`, opts);
+  } catch (err) {
+    // fetch can reject before we have a response (AbortError on
+    // timeout, DNS failure, TLS handshake error). Re-throw with `op`
+    // attached so oncall greps for `op=GET /v1/webhooks` catch
+    // network errors too, not just HTTP-status errors.
+    err.op = op;
+    throw err;
+  }
   const text = await resp.text();
   let parsed = text;
   try { parsed = text ? JSON.parse(text) : null; } catch { /* keep as text */ }
-  if (!resp.ok) throw new QurlServiceError(resp.status, parsed, `${method} ${path}`);
+  if (!resp.ok) throw new QurlServiceError(resp.status, parsed, op);
   return parsed;
 }
 

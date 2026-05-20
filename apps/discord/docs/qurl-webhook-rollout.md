@@ -158,6 +158,23 @@ gracefully (logs `warn`, continues with in-memory secret) so a
 missing grant degrades to "the secret rotates each boot, but the
 bot still works" rather than a crashloop.
 
+**Latent risk if persistence stays broken**: every replica restart
+hits the bootstrap-rotate path (no real SSM secret available), which
+re-introduces the multi-replica rotate race on every redeploy. The
+warn log `Webhook secret persistence failed (auto-register continues
+with in-memory secret only)` is the early-warning signal — alarm on
+it if oncall hasn't built a CloudWatch rule yet.
+
+**Operational note — `description` field staleness**: the
+`description` shown in the qurl-service webhook UI is captured at
+create time (e.g. `Discord bot view counter (region=us-east-2,
+env=sandbox)`) and is NOT reconciled by subsequent boots. If the
+environment is renamed or migrated to a new region, the UI label
+stays stale until the subscription is deleted and recreated.
+Observability-only — the bot keeps working — but operators sweeping
+the qurl-service UI for "which sub belongs to which env" should not
+trust the description as authoritative.
+
 ## What the bot does NOT need
 
 - The full `qurl.accessed` payload's `src_ip` / `user_agent` fields —
