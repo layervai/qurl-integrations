@@ -172,6 +172,23 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
     expect(patched).toBe(true);
   });
 
+  it('returns reused successfully even when the events PATCH fails (transient 5xx must not flip the boot log)', async () => {
+    // Receiver is already correct via initialSecret. A transient PATCH
+    // 5xx shouldn't make ensureWebhookSubscription reject — the boot
+    // log would then say "self-registration failed" while the bot is
+    // actually healthy. Catch + log + return reused.
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': () => ({ status: 500, body: { error: 'transient' } }),
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(result.secret).toBe('whsec_known');
+    expect(result.action).toBe('reused');
+    expect(result.webhookId).toBe('wh_existing');
+  });
+
   it('does NOT PATCH when events already include qurl.accessed (no-drift positive case)', async () => {
     let patched = false;
     mockFetchResponses({
@@ -283,7 +300,25 @@ describe('ensureWebhookSubscription — error paths', () => {
         // No secret field — contract drift
       } } }),
     });
-    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/no secret in response/);
+    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
+  });
+
+  it('throws if create response has no data envelope (contract drift)', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { /* no data */ } }),
+    });
+    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
+  });
+
+  it('throws if rotate response has no secret (contract drift)', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({ body: { data: { webhook_id: 'wh_existing' /* no secret */ } } }),
+    });
+    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/rotateSecret.*contract drift/);
   });
 
   it('throws on missing required option', async () => {
@@ -340,6 +375,40 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
     expect(result.secret).toBe('whsec_in_memory_only');
+  });
+});
+
+describe('ensureWebhookSubscription — description length defense', () => {
+  // Slice lives at the wire boundary (createSubscription) so future
+  // callers don't have to remember the 200-char cap. Defense against
+  // a hypothetical future qurl-service-side length-cap 4xx that
+  // would otherwise infinite-loop on retry-create.
+  it('clips description to 200 chars at the wire boundary regardless of caller input', async () => {
+    let sentDescription = null;
+    const longDescription = 'x'.repeat(500);
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': (opts) => {
+        sentDescription = JSON.parse(opts.body).description;
+        return { status: 201, body: { data: { webhook_id: 'wh_clipped', secret: 'whsec_' } } };
+      },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, description: longDescription });
+    expect(sentDescription).toHaveLength(200);
+    expect(sentDescription).toBe('x'.repeat(200));
+  });
+
+  it('treats non-string description as empty', async () => {
+    let sentDescription = null;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': (opts) => {
+        sentDescription = JSON.parse(opts.body).description;
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+      },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, description: undefined });
+    expect(sentDescription).toBe('');
   });
 });
 

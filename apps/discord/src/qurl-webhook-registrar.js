@@ -109,7 +109,9 @@ async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeou
 // round-trip handles HOST case (lowercased) + default ports (:80/:443
 // elided). PATHNAME case is intentionally NOT folded — Express and
 // qurl-service both route case-sensitively, so `/Webhooks/qurl` and
-// `/webhooks/qurl` are genuinely different routes. We do strip a
+// `/webhooks/qurl` are genuinely different routes. QUERY STRINGS are
+// preserved as-is (not normalized) — a sub registered with `?ver=1`
+// is a different route than the unparametrized one. We do strip a
 // trailing slash from the pathname (URL().href preserves it), since
 // `/webhooks/qurl` and `/webhooks/qurl/` hit the same Express handler.
 // Fall back to the raw string on a parse error so a future malformed
@@ -148,7 +150,10 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
     const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
     const path = `/v1/webhooks${qs}`;
     const resp = await callQurlService({ method: 'GET', path, apiEndpoint, apiKey });
-    const subs = (resp && resp.data) || [];
+    // Array.isArray guard — a future contract drift returning
+    // `data: {...}` would otherwise iterate object property values in
+    // a confusing way and silently treat them as subscription objects.
+    const subs = Array.isArray(resp?.data) ? resp.data : [];
     for (const s of subs) {
       if (canonicalUrl(s.url) === target) matches.push(s);
     }
@@ -193,12 +198,21 @@ function pickSurvivor(matches) {
   return sorted[0];
 }
 
+// Max chars for the human-readable description in qurl-service. Sliced
+// at the wire boundary (here) rather than at the caller so future
+// callers don't have to remember the cap. The 200 is defense against
+// a hypothetical future server-side cap that would otherwise 4xx the
+// create into an infinite retry-create loop — qurl-service doesn't
+// document one today.
+const DESCRIPTION_MAX_LEN = 200;
+
 // Note: `description` is set only at create time and is not reconciled
 // on subsequent boots. Region / NODE_ENV captured in the description
 // string can go stale after env rename / region migration; that's
 // observability-only (qurl-service UI label) and not worth a PATCH
 // on every boot.
 async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description }) {
+  const safeDescription = typeof description === 'string' ? description.slice(0, DESCRIPTION_MAX_LEN) : '';
   const resp = await callQurlService({
     method: 'POST',
     path: '/v1/webhooks',
@@ -207,10 +221,18 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
     body: {
       url: bridgeUrl,
       events: [QURL_ACCESSED],
-      description,
+      description: safeDescription,
     },
   });
-  return resp && resp.data;
+  // Defensive: if a future contract drift returns {data: null} or
+  // omits the fields, accessing .webhook_id/.secret would throw a
+  // raw TypeError with no context. Surface the contract violation
+  // explicitly so the boot-log error is greppable.
+  const data = resp?.data;
+  if (!data || typeof data.webhook_id !== 'string' || typeof data.secret !== 'string') {
+    throw new Error('createSubscription: contract drift (response missing webhook_id or secret)');
+  }
+  return data;
 }
 
 async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
@@ -220,7 +242,11 @@ async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
     apiEndpoint,
     apiKey,
   });
-  return resp && resp.data;
+  const data = resp?.data;
+  if (!data || typeof data.secret !== 'string') {
+    throw new Error('rotateSecret: contract drift (response missing secret)');
+  }
+  return data;
 }
 
 async function patchEvents({ apiEndpoint, apiKey, webhookId, events }) {
@@ -331,7 +357,18 @@ async function ensureWebhookSubscription(opts) {
     webhookId = existing.webhook_id;
     secret = initialSecret;
     action = 'reused';
-    await reconcileEvents({ apiEndpoint, apiKey, existing });
+    // Wrap the PATCH in try/catch matching the rotate branch — a
+    // transient 5xx here shouldn't flip the boot log to "self-
+    // registration failed" when the in-memory secret is already
+    // correct (initialSecret). Events drift is recoverable on the
+    // next boot via the same code path.
+    try {
+      await reconcileEvents({ apiEndpoint, apiKey, existing });
+    } catch (err) {
+      logger.error('Webhook subscription events PATCH failed in reuse path (continuing — receiver still works with initialSecret)', {
+        webhookId, op: 'reconcileEvents', error: err.message, status: err.status,
+      });
+    }
     logger.info('Webhook subscription reused (existing found, SSM secret trusted, no rotate)', { webhookId, url: bridgeUrl });
     return { secret, webhookId, action };
   }

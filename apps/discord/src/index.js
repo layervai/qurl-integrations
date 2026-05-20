@@ -27,6 +27,18 @@ const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { ensureWebhookSubscription } = require('./qurl-webhook-registrar');
 // Eager require so a missing dep fails at boot, not at first persist.
 const ssmSdk = require('@aws-sdk/client-ssm');
+// Hoisted to module scope (matches the DynamoDBClient pattern above):
+// consistent client lifecycle, SDK connection-reuse logic gets a fair
+// shot if persistSecret is ever called more than once per boot.
+// Created lazily inside the closure so processes that don't persist
+// (no QURL_WEBHOOK_SECRET_SSM_PARAM) don't pay the construction cost.
+let ssmClientInstance = null;
+function getSsmClient() {
+  if (!ssmClientInstance) {
+    ssmClientInstance = new ssmSdk.SSMClient({ region: process.env.AWS_REGION });
+  }
+  return ssmClientInstance;
+}
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
@@ -1109,12 +1121,7 @@ async function start() {
       // the rejection and degrades to in-memory-only.
       const persistSecret = config.QURL_WEBHOOK_SECRET_SSM_PARAM
         ? async (secret) => {
-          // AWS_REGION stays a direct process.env read — matches the
-          // pattern in event-publisher.js, event-consumer.js, etc.
-          // Pulling it through config.js would be a separate cross-
-          // cutting cleanup.
-          const client = new ssmSdk.SSMClient({ region: process.env.AWS_REGION });
-          const put = client.send(new ssmSdk.PutParameterCommand({
+          const put = getSsmClient().send(new ssmSdk.PutParameterCommand({
             Name: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
             Type: 'SecureString',
             Value: secret,
@@ -1131,10 +1138,10 @@ async function start() {
           }
         }
         : undefined;
-      // 200-char clip in case qurl-service ever applies a length cap
-      // server-side — otherwise the create would 4xx into an infinite
-      // retry-create loop.
-      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'}, env=${process.env.NODE_ENV || 'unset'})`.slice(0, 200);
+      // Length cap lives at the wire boundary (createSubscription in
+      // qurl-webhook-registrar.js). This caller just builds the human-
+      // readable string.
+      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'}, env=${process.env.NODE_ENV || 'unset'})`;
       ensureWebhookSubscription({
         apiEndpoint: config.QURL_ENDPOINT,
         apiKey: config.QURL_API_KEY,
