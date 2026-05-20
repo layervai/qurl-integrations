@@ -718,7 +718,7 @@ func TestCallbackSeedsAdminOnBind(t *testing.T) {
 // failure. Now the bind runs first; if it fails we never reach the
 // mint, so the existing key state is untouched.
 func TestCallbackBindFailureSkipsMint(t *testing.T) {
-	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg, store := newCallbackCfgStore(t)
 	admin := &fakeAdminStore{err: errors.New("ddb timeout")}
 	cfg.AdminStore = admin
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
@@ -732,17 +732,11 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 		t.Fatalf("status: got %d want 500", rec.Code)
 	}
 
-	// store.setArgs == nil is the load-bearing fence: a regression
-	// that re-introduces mint-before-bind would set it. minter.revoked
-	// is redundant under the reorder — no key minted means no revoke
-	// can fire — and read synchronously without an AsyncTracker drain
-	// would risk flake. Trust the deterministic check.
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
 	}
-	_ = minter
 }
 
 // TestCallbackBindIdempotentForSameCaller fences the rotation
@@ -795,7 +789,7 @@ func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
 // the workspace for the existing admin. The reorder makes that
 // failure mode impossible by construction.)
 func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
-	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg, store := newCallbackCfgStore(t)
 	admin := &fakeAdminStore{err: errors.New("workspace already bound")}
 	cfg.AdminStore = admin
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
@@ -816,15 +810,11 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
 	}
 
-	// setArgs==nil is the deterministic fence on the reorder. See
-	// TestCallbackBindFailureSkipsMint for why minter.revoked is
-	// dropped — redundant under the reorder, flaky to read sync.
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run on rebind-refused — would overwrite the existing admin's encrypted key")
 	}
-	_ = minter
 }
 
 // TestCallbackBindRefusedWhenUnverified fences the unverified-conflict
@@ -836,7 +826,7 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 // arm today, but this fence prevents a future split that silently
 // downgrades unverified to "idempotent success."
 func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
-	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg, store := newCallbackCfgStore(t)
 	admin := &fakeAdminStore{err: errors.New("could not confirm bind")}
 	cfg.AdminStore = admin
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
@@ -858,7 +848,6 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run on unverified-rebind — same posture as the cross-admin arm")
 	}
-	_ = minter
 }
 
 // TestCallbackBindSkippedWhenSubMissing fences the hard-failure
@@ -868,7 +857,7 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 // bind-before-mint ordering — must also skip the mint entirely
 // rather than mint then revoke.
 func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
-	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg, store := newCallbackCfgStore(t)
 	admin := &fakeAdminStore{}
 	cfg.AdminStore = admin
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, subErr: errors.New("jwks failed")}
@@ -891,7 +880,6 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	if store.setArgs != nil {
 		t.Error("SetAPIKey must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
 	}
-	_ = minter
 }
 
 // TestCallbackBindSucceedsThenMintFails fences the recovery path
