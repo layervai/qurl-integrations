@@ -307,7 +307,11 @@ async function bestEffortPersist({ persistSecret, value }) {
 // here is harmless. Factored out because the reuse path and the
 // rotate path both need it.
 async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
-  const events = existing?.events ?? [];
+  // Array.isArray guard — a future contract drift returning
+  // `events: "qurl.accessed,qurl.created"` (string) would otherwise
+  // succeed `.includes('qurl.accessed')` via string-contains and
+  // skip the PATCH despite drift. Treat any non-array as missing.
+  const events = Array.isArray(existing?.events) ? existing.events : [];
   if (events.includes(QURL_ACCESSED)) return;
   logger.info('qURL webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId: existing.webhook_id, current: events });
   await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [QURL_ACCESSED] });

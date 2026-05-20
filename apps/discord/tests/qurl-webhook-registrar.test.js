@@ -400,6 +400,56 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
     const result = await ensureWebhookSubscription(BASE_OPTS);
     expect(result.secret).toBe('whsec_in_memory_only');
   });
+
+  it('logs at WARN when persistSecret throws AccessDeniedException (expected IAM-missing path)', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+          webhook_id: 'wh', secret: 'whsec_',
+        } } }),
+      });
+      const accessDenied = new Error('User is not authorized to perform: ssm:PutParameter');
+      accessDenied.name = 'AccessDeniedException';
+      await ensureWebhookSubscription({
+        ...BASE_OPTS,
+        persistSecret: async () => { throw accessDenied; },
+      });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
+      // Critical: NOT error-level. AccessDenied is the "expected
+      // failure mode" — alarm-tier-distinction documented in runbook.
+      expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('logs at ERROR when persistSecret throws anything OTHER than AccessDeniedException (unexpected — alarm-worthy)', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+          webhook_id: 'wh', secret: 'whsec_',
+        } } }),
+      });
+      const throttle = new Error('Rate exceeded');
+      throttle.name = 'ThrottlingException';
+      await ensureWebhookSubscription({
+        ...BASE_OPTS,
+        persistSecret: async () => { throw throttle; },
+      });
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('qURL webhook secret persistence failed'));
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 describe('ensureWebhookSubscription — description length defense', () => {
@@ -567,6 +617,27 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
       'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
     });
     await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' })).rejects.toThrow(/500/);
+  });
+
+  it('rotation does NOT fire when a non-404 DELETE rejects (Promise.all sequencing)', async () => {
+    // The rotate-after-dedupe path runs `await Promise.all(...DELETEs)`
+    // before `rotateSecret`. A rejection there must short-circuit the
+    // rotate so we don't ship a rotated secret while siblings might
+    // still be in-flight or partially failed. Pin the invariant.
+    let rotateHit = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+      ] } }),
+      'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
+      'POST /v1/webhooks/wh_a/secret': () => {
+        rotateHit = true;
+        return { body: { data: { webhook_id: 'wh_a', secret: 'whsec_should_not_happen' } } };
+      },
+    });
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' })).rejects.toThrow(/500/);
+    expect(rotateHit).toBe(false);
   });
 });
 
