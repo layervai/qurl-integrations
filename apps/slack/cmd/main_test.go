@@ -18,6 +18,10 @@ func (noopVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
 	return "", errors.New("noopVerifier: unused in env-var tests")
 }
 
+func (noopVerifier) VerifySub(_ context.Context, _ string) (string, error) {
+	return "", errors.New("noopVerifier: unused in env-var tests")
+}
+
 // newFakeProvider builds the minimum-viable DDBProvider buildOAuthConfig
 // will accept. The test only inspects the (cfg, ok) return — no DDB or
 // KMS calls are made through the returned provider.
@@ -68,7 +72,7 @@ func stubJWKSVerifier(t *testing.T) {
 func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	stubJWKSVerifier(t)
 	applyEnv(t, validEnv())
-	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +97,7 @@ func TestBuildOAuthConfigMissingVar(t *testing.T) {
 			env := validEnv()
 			delete(env, missing)
 			applyEnv(t, env)
-			_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+			_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 			if err != nil {
 				t.Errorf("expected nil error on missing var; got %v", err)
 			}
@@ -109,7 +113,7 @@ func TestBuildOAuthConfigShortSecret(t *testing.T) {
 	env := validEnv()
 	env["OAUTH_STATE_SECRET"] = strings.Repeat("a", 16) // half of the required minimum
 	applyEnv(t, env)
-	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if ok {
 		t.Error("expected ok=false on short OAUTH_STATE_SECRET")
 	}
@@ -128,7 +132,7 @@ func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
 		env := validEnv()
 		env["OAUTH_STATE_SECRET"] = strings.Repeat("a", oauth.StateMinSecret-1)
 		applyEnv(t, env)
-		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 		if ok || !errors.Is(err, errOAuthStateSecretTooShort) {
 			t.Errorf("ok=%v err=%v — want ok=false + errOAuthStateSecretTooShort at StateMinSecret-1 bytes", ok, err)
 		}
@@ -137,7 +141,7 @@ func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
 		env := validEnv()
 		env["OAUTH_STATE_SECRET"] = strings.Repeat("a", oauth.StateMinSecret)
 		applyEnv(t, env)
-		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 		if !ok || err != nil {
 			t.Errorf("ok=%v err=%v — want ok=true at exactly StateMinSecret bytes", ok, err)
 		}
@@ -153,7 +157,7 @@ func TestBuildOAuthConfigRejectsEmptyHostSlackBaseURL(t *testing.T) {
 	env := validEnv()
 	env["SLACK_BASE_URL"] = "https://"
 	applyEnv(t, env)
-	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if ok {
 		t.Error("expected ok=false on empty-host SLACK_BASE_URL")
 	}
@@ -172,7 +176,7 @@ func TestBuildOAuthConfigRejectsNonHTTPSSlackBaseURL(t *testing.T) {
 	env := validEnv()
 	env["SLACK_BASE_URL"] = "http://slack-bot.example"
 	applyEnv(t, env)
-	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if ok {
 		t.Error("expected ok=false on http:// SLACK_BASE_URL")
 	}
@@ -194,7 +198,7 @@ func TestBuildOAuthConfigNormalizesURLEnvVars(t *testing.T) {
 	env["AUTH0_DOMAIN"] = "https://example.auth0.com/"
 	env["QURL_ENDPOINT"] = "https://api.qurl.invalid/"
 	applyEnv(t, env)
-	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -152,43 +152,39 @@ func (f *fakeDDB) SetPutItemHook(hook func(in interface{})) {
 	f.putHook = func(in *dynamodb.PutItemInput) { hook(in) }
 }
 
-// tableNames groups the three table names used across the post-pivot
+// tableNames groups the table names used across the post-pivot
 // production code. Tests construct one of these per fakeDDB so the
 // fake and the Store agree on which table maps to which schema.
 type tableNames struct {
-	workspace      string
-	channelPolicy  string
-	bootstrapCodes string
+	workspace     string
+	channelPolicy string
 }
 
 // defaultTestTableNames returns the canonical table-name set tests
 // use. Lifted as a helper because every newAdminTestHandler call site
-// needs the same triple.
+// needs the same pair.
 func defaultTestTableNames() tableNames {
 	return tableNames{
-		workspace:      "test-workspace-mappings",
-		channelPolicy:  "test-channel-policies",
-		bootstrapCodes: "test-bootstrap-codes",
+		workspace:     "test-workspace-mappings",
+		channelPolicy: "test-channel-policies",
 	}
 }
 
-// newFakeDDB builds an empty in-memory store with the three
-// post-pivot tables registered. `seed` may pre-populate items by
-// table name; if nil the store starts empty. The t parameter is
-// kept for t.Helper / future test-only Fatal calls; today it's
-// referenced only to satisfy the signature.
+// newFakeDDB builds an empty in-memory store with the post-pivot
+// tables registered. `seed` may pre-populate items by table name; if
+// nil the store starts empty. The t parameter is kept for t.Helper /
+// future test-only Fatal calls; today it's referenced only to satisfy
+// the signature.
 func newFakeDDB(t *testing.T, names tableNames, seed map[string][]map[string]ddbtypes.AttributeValue) *fakeDDB {
 	t.Helper()
 	f := &fakeDDB{
 		tables: map[string]map[string]map[string]ddbtypes.AttributeValue{
-			names.workspace:      {},
-			names.channelPolicy:  {},
-			names.bootstrapCodes: {},
+			names.workspace:     {},
+			names.channelPolicy: {},
 		},
 		keySchemas: map[string][]string{
-			names.workspace:      {fAttrSlackTeamID},
-			names.channelPolicy:  {fAttrSlackTeamID, fAttrSlackChannelID},
-			names.bootstrapCodes: {"code_hash"},
+			names.workspace:     {fAttrSlackTeamID},
+			names.channelPolicy: {fAttrSlackTeamID, fAttrSlackChannelID},
 		},
 	}
 	for tbl, items := range seed {
@@ -221,7 +217,7 @@ func newStoreFromFake(t *testing.T, f *fakeDDB, names tableNames, now func() str
 	t.Helper()
 	s, err := slackdata.NewStore(context.Background(),
 		slackdata.WithDynamoDBClient(f),
-		slackdata.WithTableNames(names.workspace, names.channelPolicy, names.bootstrapCodes),
+		slackdata.WithTableNames(names.workspace, names.channelPolicy),
 	)
 	if err != nil {
 		t.Fatalf("newStoreFromFake: %v", err)

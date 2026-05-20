@@ -59,14 +59,23 @@ func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
 	return nil
 }
 
-// fakeIDTokenVerifier always returns the configured email or err.
+// fakeIDTokenVerifier always returns the configured email/sub or err.
 type fakeIDTokenVerifier struct {
-	email string
-	err   error
+	email  string
+	sub    string
+	err    error
+	subErr error
 }
 
 func (f *fakeIDTokenVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
 	return f.email, f.err
+}
+
+func (f *fakeIDTokenVerifier) VerifySub(_ context.Context, _ string) (string, error) {
+	if f.subErr != nil {
+		return "", f.subErr
+	}
+	return f.sub, nil
 }
 
 // fakeSlackClient captures PostDirectMessage calls.
@@ -643,4 +652,189 @@ func TestCallbackDMsConfiguredUser(t *testing.T) {
 	if slackClient.gotUser != testUserID {
 		t.Errorf("DM user: got %q want %q", slackClient.gotUser, testUserID)
 	}
+}
+
+const testAdminSub = "auth0|abc123def456"
+
+type fakeAdminStore struct {
+	mu        sync.Mutex
+	gotTeamID string
+	gotOwner  string
+	gotSeed   string
+	calls     int
+	err       error
+}
+
+func (f *fakeAdminStore) BindWorkspace(_ context.Context, m *WorkspaceMapping, seedAdmin string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.gotTeamID = m.TeamID
+	f.gotOwner = m.OwnerID
+	f.gotSeed = seedAdmin
+	return f.err
+}
+
+// TestCallbackSeedsAdminOnBind fences the load-bearing collapse: a
+// successful /qurl setup must call BindWorkspace with the verified
+// state's userID as seedAdmin and the Auth0 sub as OwnerID. Without
+// this, the workspace gets an API key but no admin row — every
+// subsequent /qurl admin command would reply "you are not an admin."
+func TestCallbackSeedsAdminOnBind(t *testing.T) {
+	cfg, _, _, _ := newCallbackCfg(t) //nolint:dogsled // intentional discard
+	admin := &fakeAdminStore{}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	admin.mu.Lock()
+	defer admin.mu.Unlock()
+	if admin.calls != 1 {
+		t.Fatalf("BindWorkspace calls: got %d want 1", admin.calls)
+	}
+	if admin.gotTeamID != testTeamID {
+		t.Errorf("BindWorkspace TeamID: got %q want %q", admin.gotTeamID, testTeamID)
+	}
+	if admin.gotOwner != testAdminSub {
+		t.Errorf("BindWorkspace OwnerID: got %q want %q (must come from id_token sub claim)", admin.gotOwner, testAdminSub)
+	}
+	if admin.gotSeed != testUserID {
+		t.Errorf("BindWorkspace seedAdmin: got %q want %q (must come from verified state's userID)", admin.gotSeed, testUserID)
+	}
+}
+
+// TestCallbackBindFailureRevokesKey fences the half-install guard.
+// If BindWorkspace fails after SetAPIKey succeeds, the minted key
+// MUST be revoked — otherwise the workspace gets an API key it can
+// use to mint qURLs but no admin row, leaving the workspace stuck
+// half-installed.
+func TestCallbackBindFailureRevokesKey(t *testing.T) {
+	cfg, _, _, minter := newCallbackCfg(t)
+	admin := &fakeAdminStore{err: errors.New("ddb timeout")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return "" }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500", rec.Code)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		minter.revokeMu.Lock()
+		revoked := minter.revoked
+		minter.revokeMu.Unlock()
+		if revoked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("expected RevokeAPIKey to be called after BindWorkspace failure")
+}
+
+// TestCallbackBindIdempotentForSameCaller fences the rotation
+// posture: the same Slack user re-running /qurl setup must succeed
+// idempotently. The new API key is now persisted (key rotated) and
+// the admin set is unchanged. Without this, an admin re-running
+// setup to rotate keys would see the rebind-refused page.
+func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
+	cfg, _, _, minter := newCallbackCfg(t)
+	admin := &fakeAdminStore{err: errors.New("caller already on admin set")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (idempotent rotation, body=%s)", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if minter.revoked {
+		t.Error("idempotent rebind must not revoke the just-minted key")
+	}
+}
+
+// TestCallbackBindRefusedForDifferentAdmin fences the cross-admin
+// rebind guard. A different Slack user attempting to install into
+// an already-bound workspace must NOT overwrite the admin set;
+// instead the rebind-refused page renders and the just-minted key
+// is revoked (half-install guard).
+func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
+	cfg, _, _, minter := newCallbackCfg(t)
+	admin := &fakeAdminStore{err: errors.New("workspace already bound")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBound }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status: got %d want 409 (rebind-refused page)", rec.Code)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		minter.revokeMu.Lock()
+		revoked := minter.revoked
+		minter.revokeMu.Unlock()
+		if revoked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("expected key revoke after rebind-refused")
+}
+
+// TestCallbackBindSkippedWhenSubMissing fences the hard-failure
+// posture: if the id_token's sub claim can't be verified, we have
+// no OwnerID to bind with. The handler must NOT silently skip the
+// bind (which would half-install the workspace) — it must surface
+// 500 and revoke the just-minted key.
+func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
+	cfg, _, _, minter := newCallbackCfg(t)
+	admin := &fakeAdminStore{}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, subErr: errors.New("jwks failed")}
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (cannot bind without sub)", rec.Code)
+	}
+	admin.mu.Lock()
+	if admin.calls != 0 {
+		t.Errorf("BindWorkspace must not be called with empty OwnerID; got %d calls", admin.calls)
+	}
+	admin.mu.Unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		minter.revokeMu.Lock()
+		revoked := minter.revoked
+		minter.revokeMu.Unlock()
+		if revoked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("expected key revoke when sub unavailable")
 }

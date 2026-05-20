@@ -93,6 +93,48 @@ type successPageData struct {
 	Email     string
 }
 
+// rebindRefusedPageTemplate is the page rendered when BindWorkspace
+// returns a 409 indicating a *different* admin already holds the
+// workspace. We do NOT silently overwrite — that was the
+// workspace-rebind primitive Justin flagged. The page tells the
+// installer to coordinate with the existing admin instead.
+//
+// The API key minted earlier in the callback is revoked before we
+// render this page so a refused install doesn't leave a half-installed
+// key behind.
+var rebindRefusedPageTemplate = template.Must(template.New("oauth-rebind-refused").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>qURL setup blocked</title>
+<meta name="robots" content="noindex">
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
+.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
+h1{margin:0 0 .5rem;font-size:1.5rem}
+.kv{margin-top:1rem;font-size:.875rem;color:#374151}
+.warn{color:#b91c1c;font-weight:600}
+code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
+</style>
+</head>
+<body>
+<div class="card">
+<h1><span class="warn">&#9888;</span> qURL setup blocked</h1>
+<p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup</code> was not applied.</p>
+<p>Please ask the existing qURL admin in your workspace to add you, or contact LayerV support if the original admin is no longer reachable.</p>
+<div class="kv">
+<div>Slack workspace: <code>{{.TeamID}}</code></div>
+</div>
+<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab.</p>
+</div>
+</body>
+</html>`))
+
+// rebindRefusedPageData is the model passed to rebindRefusedPageTemplate.
+type rebindRefusedPageData struct {
+	TeamID string
+}
+
 // auth0TokenResponse is the slice of Auth0's /oauth/token response we read.
 type auth0TokenResponse struct {
 	AccessToken string `json:"access_token"`
@@ -105,13 +147,19 @@ type auth0TokenResponse struct {
 //  1. Validate cookie + query.state via timing-safe compare.
 //  2. Validate the state's HMAC + recover (teamID, userID).
 //  3. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
-//  4. Verify id_token signature against Auth0 JWKS (non-fatal — success
-//     page renders without the email line if verify fails).
+//  4. Verify id_token signature against Auth0 JWKS — extract `sub` (used
+//     as the workspace OwnerID; mandatory) and `email` (best-effort for
+//     the success-page readout).
 //  5. POST to qurl-service /v1/api-keys to mint the workspace key.
 //  6. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
 //     revoke on qurl-service.
-//  7. DM the admin (fire-and-forget; failure doesn't block the page).
-//  8. Render success HTML.
+//  7. Seed the workspace_mappings row via AdminStore.BindWorkspace — the
+//     installer becomes the first admin. On a rebind conflict against a
+//     different admin, render the rebind-refused page and revoke the
+//     minted key so we don't leave a half-installed workspace.
+//     Same-user re-entry is idempotent success.
+//  8. DM the admin (fire-and-forget; failure doesn't block the page).
+//  9. Render success HTML.
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API-surface friction.
 func Callback(cfg Config) http.HandlerFunc {
@@ -205,21 +253,71 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		// id_token verification is best-effort; failure suppresses the
-		// success-page email line but never blocks key mint or persist.
-		var qurlEmail string
+		// id_token verification fans out into two consumers with
+		// different posture:
+		//   - email: best-effort. Failure suppresses the success-page
+		//     readout but never blocks bind or mint.
+		//   - sub:   mandatory for BindWorkspace (workspace OwnerID).
+		//     Failure blocks the bind — we can't legitimately seed a
+		//     workspace_mappings row with an empty owner.
+		var (
+			qurlEmail string
+			qurlSub   string
+		)
 		if idToken != "" && cfg.IDTokenVerifier != nil {
 			email, verr := cfg.IDTokenVerifier.VerifyEmail(r.Context(), idToken)
 			if verr != nil {
-				slog.Warn("oauth/callback id_token verify failed (non-fatal)", "error", verr)
+				slog.Warn("oauth/callback id_token email-verify failed (non-fatal)", "error", verr)
 			} else {
 				qurlEmail = email
 			}
+			sub, serr := cfg.IDTokenVerifier.VerifySub(r.Context(), idToken)
+			if serr != nil {
+				slog.Warn("oauth/callback id_token sub-verify failed (non-fatal for mint, blocks bind)", "error", serr)
+			} else {
+				qurlSub = sub
+			}
 		}
 
-		keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
+		_, keyID, keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
 		if !ok {
 			return
+		}
+
+		// Seed the workspace_mappings row so /qurl admin commands work
+		// immediately. Done synchronously: a successful bind is the
+		// difference between "installer becomes admin" and "the very
+		// next /qurl admin command says 'you are not an admin'."
+		//
+		// AdminStore=nil is the sandbox / no-DDB path — log and skip.
+		// qurlSub=="" means the verifier failed; we can't bind without
+		// the OwnerID. Treat the latter as a hard failure (revoke the
+		// minted key, render 500) because half-installing — API key
+		// works, admin verbs don't — is the worst-of-both-worlds state.
+		if cfg.AdminStore != nil {
+			if qurlSub == "" {
+				slog.Error("oauth/callback bind skipped — id_token sub unavailable; revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+					"team_id", verified.TeamID, "key_id", keyID)
+				revokeKeyID := keyID
+				spawnAsync(cfg.AsyncTracker, func() {
+					revokeOrphanKeyAsync(cfg.Minter, accessToken, revokeKeyID, verified.TeamID)
+				})
+				http.Error(w, "qURL key provisioned but workspace identity could not be confirmed — run /qurl setup again", http.StatusInternalServerError)
+				return
+			}
+			bindCtx, bindCancel := context.WithTimeout(context.Background(), persistTimeout)
+			defer bindCancel()
+			bindErr := cfg.AdminStore.BindWorkspace(bindCtx,
+				&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: qurlSub},
+				verified.UserID)
+			if bindErr != nil {
+				if !handleBindError(w, cfg, bindErr, verified.TeamID, accessToken, keyID) {
+					return
+				}
+			}
+		} else {
+			slog.Warn("oauth/callback AdminStore not wired — workspace_mappings not seeded", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+				"team_id", verified.TeamID)
 		}
 
 		slog.Info("oauth/callback completed", "team_id", verified.TeamID, "user_id", verified.UserID, "key_prefix", keyPrefix) //nolint:gosec // G706: slog escapes control bytes in attribute values.
@@ -241,6 +339,54 @@ func Callback(cfg Config) http.HandlerFunc {
 	}
 }
 
+// handleBindError classifies the BindWorkspace error via cfg.BindClassifyError
+// and writes the appropriate response. Returns true if the caller should
+// continue (idempotent same-caller re-entry — bind held, no overwrite,
+// success-page still appropriate) and false if a response has been
+// written (rebind-refused page, or generic 500 + key revoke).
+//
+//nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
+func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID, accessToken, keyID string) bool {
+	var code BindConflictCode
+	if cfg.BindClassifyError != nil {
+		code = cfg.BindClassifyError(bindErr)
+	}
+	switch code {
+	case BindConflictAlreadyBoundToCaller:
+		// Same Slack user re-running /qurl setup — they were already
+		// admin. The new API key is now persisted (SetAPIKey already
+		// ran above), so the operator-visible effect is "key rotated,
+		// admin set unchanged." Idempotent success.
+		slog.Info("oauth/callback rebind idempotent (caller already on admin set)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID)
+		return true
+	case BindConflictAlreadyBound, BindConflictUnverified:
+		// A different admin holds the workspace (or we can't tell —
+		// treat unverified the same way; the safer default is to
+		// refuse the rebind than to potentially overwrite). Revoke
+		// the minted key so we don't leave a half-installed
+		// workspace, then render the rebind-refused page.
+		slog.Warn("oauth/callback rebind refused — workspace held by different admin; revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID, "key_id", keyID, "conflict", string(code), "error", bindErr)
+		spawnAsync(cfg.AsyncTracker, func() {
+			revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+		})
+		renderRebindRefused(w, teamID)
+		return false
+	default:
+		// Transport / validation / unclassified failure. Mirrors the
+		// SetAPIKey-failure branch: half-installed workspace is the
+		// worst state, so revoke the key and surface a generic 500.
+		slog.Error("oauth/callback BindWorkspace failed after key mint — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"team_id", teamID, "key_id", keyID, "error", bindErr)
+		spawnAsync(cfg.AsyncTracker, func() {
+			revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+		})
+		http.Error(w, "qURL key provisioned but workspace not bound — run /qurl setup again", http.StatusInternalServerError)
+		return false
+	}
+}
+
 // spawnAsync routes a goroutine through the AsyncTracker if one is
 // wired, falling back to plain `go` for tests / unconfigured callers.
 func spawnAsync(tracker AsyncTracker, fn func()) {
@@ -253,8 +399,13 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 
 // mintAndPersist runs steps 5 + 6: mint key on qurl-service, persist via
 // WorkspaceStore, fire-and-forget revoke if persist fails. Returns
-// (keyPrefix, true) on success; on failure writes the HTTP error response
-// and returns (_, false).
+// (apiKey, keyID, keyPrefix, true) on success; on failure writes the
+// HTTP error response and returns (_, _, _, false).
+//
+// apiKey + keyID are returned (in addition to keyPrefix) so the caller
+// can drive the BindWorkspace-failure revoke path — a half-installed
+// workspace (key minted + persisted but admin row missing) is the worst-
+// of-both-worlds state, so we mirror the SetAPIKey-failure revoke here.
 //
 // Extracted so Callback stays straight-line and the linter doesn't need
 // gocognit/gocyclo suppressors.
@@ -271,7 +422,7 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 // alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
+func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (apiKey, keyID, keyPrefix string, ok bool) {
 	keyName := "Slack workspace " + teamID
 	// Fresh bounded context for the mint, decoupled from the request
 	// context. TimeoutHandler's 60s deadline could fire mid-mint;
@@ -287,7 +438,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	if err != nil {
 		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		http.Error(w, "could not provision qURL key — run /qurl setup again to retry", http.StatusBadGateway)
-		return "", false
+		return "", "", "", false
 	}
 
 	// Persist with a fresh bounded context, not the request context.
@@ -305,8 +456,14 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		// context) because the request context may be canceling by
 		// the time we get to write the error response; we still want
 		// the revoke to run to bound the orphan-key window.
+		//
+		// Closure captures keyID (a named return) by reference; the
+		// bare `return "", "", "", false` below would overwrite it
+		// concurrently with the goroutine's read. Snapshot to a
+		// fresh local so the closure reads the mint-time value.
+		revokeKeyID := keyID
 		spawnAsync(cfg.AsyncTracker, func() {
-			revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+			revokeOrphanKeyAsync(cfg.Minter, accessToken, revokeKeyID, teamID)
 		})
 		// TODO(#265): revoke is wired only for the persist-failure case.
 		// A TimeoutHandler-induced abandon (outer 60s fires after mint
@@ -314,9 +471,9 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		// and leaks an orphan. Closes when #265's ConditionExpression
 		// shift lets us detect the lost-race case end-to-end.
 		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
-		return "", false
+		return "", "", "", false
 	}
-	return keyPrefix, true
+	return apiKey, keyID, keyPrefix, true
 }
 
 func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID string) {
@@ -340,6 +497,23 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 	if err := client.PostDirectMessage(ctx, userID, msg); err != nil {
 		slog.Warn("oauth/callback DM failed", "error", err, "user_id", userID, "team_id", teamID)
+	}
+}
+
+// renderRebindRefused writes the rebind-refused page. Same defense-in-
+// depth headers as the success page — the only differences are the body
+// template and a 409 status code (so an automated retry surfaces the
+// conflict rather than silently looping).
+func renderRebindRefused(w http.ResponseWriter, teamID string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusConflict)
+	if err := rebindRefusedPageTemplate.Execute(w, rebindRefusedPageData{TeamID: teamID}); err != nil {
+		slog.Warn("oauth/callback rebind-refused page write failed", "error", err)
 	}
 }
 

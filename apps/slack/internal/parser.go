@@ -43,13 +43,6 @@ type AdminAction string
 
 // Recognized admin actions.
 const (
-	// AdminClaim opens the bootstrap-code modal. The code is NEVER passed
-	// as slash-command text — it would land in Slack's audit log in
-	// plaintext. The argument-less form opens a `views.open` modal
-	// (see [AdminClaimModal]) whose `plain_text_input` block accepts
-	// the code; the bot's logging middleware redacts the block on
-	// submission so it never reaches diagnostics either.
-	AdminClaim AdminAction = "claim"
 	// AdminRevoke revokes a single previously minted qURL by its
 	// `qurl_id` (no `$` sigil — operators paste the ID directly out
 	// of an audit trail or a previous mint reply).
@@ -543,12 +536,14 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 }
 
 // parseAdmin dispatches on the second word (the [AdminAction]).
-// `claim` takes no positional args (the code is collected via modal —
-// see Blocker #3 in the plan and [AdminClaimModal]); `revoke` takes a
-// `q_<id>` qurl_id; `add` / `remove` take a `<@U…>` mention; `list`
-// takes no args. Verbs that take no args fail [ErrUnexpectedArgument]
-// when given any — surfacing a typo like `admin list extra` early
-// instead of silently routing it.
+// `revoke` takes a `q_<id>` qurl_id; `add` / `remove` take a `<@U…>`
+// mention; `list` takes no args. Verbs that take no args fail
+// [ErrUnexpectedArgument] when given any — surfacing a typo like
+// `admin list extra` early instead of silently routing it.
+//
+// `admin claim` was retired when /qurl setup absorbed the seed-admin
+// step into the OAuth callback; the parser surfaces `claim` as
+// ErrUnknownAdminAction now, matching `admin frobnicate`.
 func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrMissingAdminAction
@@ -558,21 +553,6 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	cmd.AdminAction = action
 	tail := rest[1:]
 	switch action {
-	case AdminClaim:
-		// Code never appears as text — modal-only flow. The error
-		// message intentionally OMITS the tail token because callers
-		// echo Parse's errors to Slack (and Slack may log them in the
-		// audit log); a user who typed `admin claim BOOT-SECRET`
-		// would otherwise see the bootstrap code repeated in the
-		// reply. The slash-command-line dispatcher in handler.go
-		// catches the case-exact `admin claim ` prefix earlier with
-		// its own (also tail-stripped) hint, but mixed-case input
-		// (`admin CLAIM ...`) falls through to handleAdmin → Parse,
-		// so this error path has to be safe in isolation.
-		if len(tail) > 0 {
-			return nil, fmt.Errorf("%w: use the modal to enter the bootstrap code (no arguments on the slash-command line)", ErrUnexpectedArgument)
-		}
-		return cmd, nil
 	case AdminRevoke:
 		// `revoke` takes a single positional `q_<id>` qurl_id (no
 		// `$` sigil). A `$alias` token here surfaces an

@@ -77,18 +77,17 @@ const (
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
 // between the caller-already-bound and different-admin 409 message
-// variants. The full BindWorkspace call already runs inside the
-// view_submission [interactionAsyncBudget] (2.5s); this sub-budget
-// keeps a slow disambiguating read from consuming whatever budget
-// remains after the failed PutItem and forcing the post-409 PostDM
-// off the wire.
+// variants. BindWorkspace is called from the OAuth callback under
+// its own persistTimeout budget; this sub-budget keeps a slow
+// disambiguating read from consuming whatever budget remains after
+// the failed PutItem.
 //
 // The wrapping [context.WithTimeout](ctx, budget) clamps against
 // the parent ctx, so the effective budget is `min(300ms, parent
 // remaining)` — a near-expired parent ctx yields a tighter cap.
 // On timeout/transport failure the call surfaces
-// [ErrCodeWorkspaceBindUnverified]; the handler renders a
-// "couldn't confirm — please retry" copy.
+// [ErrCodeWorkspaceBindUnverified]; the callback treats that as
+// rebind-refused (the binding IS held; we just can't tell whose).
 const bindDisambiguationBudget = 300 * time.Millisecond
 
 // addAdminDisambiguationBudget mirrors bindDisambiguationBudget for
@@ -147,20 +146,25 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 	return false, ownerID, nil
 }
 
-// BindWorkspace creates the workspace mapping row on first claim.
-// Used by the admin-claim redeem flow once the bootstrap code has
-// been atomically consumed. The seedAdmin becomes the only entry in
-// admin_slack_user_ids — additional admins are added later via a
-// separate "add admin" path (not in this PR).
+// BindWorkspace creates the workspace mapping row on first setup.
+// Called from /oauth/qurl/callback after the API key has been minted
+// on qurl-service and persisted — the installer becomes the
+// workspace's seed admin in the same flow. The seedAdmin becomes the
+// only entry in admin_slack_user_ids; additional admins are added
+// later via /qurl admin add.
 //
-// Returns 409 (via *Error) if the row already exists — a single-use
-// bootstrap code can't legitimately produce a re-bind, so the
-// existing-row case is treated as a fatal "this workspace is already
-// claimed" failure. Surfacing same-owner as 409 (instead of silently
-// overwriting) is intentional: PutItem would replace the entire row
-// including any admin_slack_user_ids added after the first claim.
-// If/when an explicit "rotate" verb lands, it gets its own SET-based
-// UpdateItem rather than reusing this constructor path.
+// Returns 409 (via *Error) if the row already exists. Two sub-cases:
+//   - caller is already on the admin set → ErrCodeWorkspaceAlreadyBoundToCaller.
+//     The callback treats this as idempotent success (re-running
+//     /qurl setup rotates the API key without mutating the admin set).
+//   - a different admin holds the workspace → ErrCodeWorkspaceAlreadyBound.
+//     The callback renders a rebind-refused page and revokes the
+//     just-minted API key so a second admin can't silently install
+//     against an existing workspace's identity.
+//
+// Surfacing same-owner as 409 (instead of silently overwriting) is
+// intentional: PutItem would replace the entire row including any
+// admin_slack_user_ids added after the first bind.
 func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error {
 	if m == nil || m.TeamID == "" || m.OwnerID == "" {
 		return &Error{
@@ -185,12 +189,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		created = now
 	}
 
-	// Conditional PutItem: refuse to overwrite any existing row. The
-	// single-use bootstrap code means we can't legitimately re-enter
-	// this path with the same workspace; an existing row is either a
-	// different-owner conflict (the new owner shouldn't silently win)
-	// OR a same-owner re-entry that would clobber later-added admins.
-	// Both deserve the 409 signal.
+	// Conditional PutItem: refuse to overwrite any existing row. A
+	// rebind attempt is either a different-owner conflict (the new
+	// owner shouldn't silently win) OR a same-owner re-entry that
+	// would clobber later-added admins. Both deserve the 409 signal;
+	// the post-CCFE disambiguation read below distinguishes the two
+	// cases so the callback can branch idempotent vs. rebind-refused.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Item: map[string]ddbtypes.AttributeValue{

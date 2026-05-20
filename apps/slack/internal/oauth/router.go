@@ -132,14 +132,75 @@ type AsyncTracker interface {
 }
 
 // IDTokenVerifier verifies an Auth0 id_token JWT against Auth0's JWKS
-// and returns the email claim (the only field we actually consume).
+// and returns the claims the callback consumes.
 //
-// Returns ("", nil) on verify-failure: the success page renders without
-// the email line per the Discord pattern (failure-to-verify is non-fatal;
-// we never fall back to an unverified decode).
+// Two split methods rather than one combined return so the existing
+// success-page email path (best-effort, suppress-on-error) and the
+// new BindWorkspace OwnerID path (mandatory, fail-the-bind-on-error)
+// can branch independently.
+//
+//   - VerifyEmail returns the email claim. Returns ("", err) on
+//     verify-failure or ("", nil) when the claim is missing /
+//     email_verified is false — the success page renders without the
+//     email line in either case.
+//
+//   - VerifySub returns the Auth0 `sub` claim used as the workspace
+//     OwnerID in BindWorkspace. Returns ("", err) on verify-failure;
+//     callers MUST surface the error (an empty sub can't legitimately
+//     bind a workspace).
 type IDTokenVerifier interface {
 	VerifyEmail(ctx context.Context, idToken string) (email string, err error)
+	VerifySub(ctx context.Context, idToken string) (sub string, err error)
 }
+
+// WorkspaceMapping is the value BindWorkspace persists. Re-declared
+// here (vs importing slackdata) so the oauth package's only inbound
+// dependency stays the shared/auth package — slackdata depends on
+// oauth's interfaces in cmd/main.go but the reverse would create a
+// cycle.
+//
+// Fields mirror slackdata.WorkspaceMapping exactly.
+type WorkspaceMapping struct {
+	TeamID    string
+	OwnerID   string
+	CreatedAt time.Time
+}
+
+// AdminStore is the slice of slackdata.Store the callback hits to
+// persist the workspace_mappings row that seeds the installer as the
+// first admin. Optional — when nil (sandbox / no-DDB deploy) the
+// callback skips the bind with a slog.Warn so the API-key surface
+// stays functional.
+type AdminStore interface {
+	BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error
+}
+
+// BindConflictCode names the slackdata.Error.Code values BindWorkspace
+// surfaces on its 409 paths. The callback branches on these via
+// [Config.BindClassifyError] so this package doesn't have to import
+// slackdata.
+//
+// Values intentionally mirror slackdata.ErrCodeWorkspace* constants
+// verbatim — drift either side and the classifier wiring in
+// cmd/main.go silently routes the wrong 409 to the success-page
+// rebind-refusal branch.
+type BindConflictCode string
+
+const (
+	// BindConflictAlreadyBoundToCaller mirrors
+	// slackdata.ErrCodeWorkspaceAlreadyBoundToCaller. The same Slack
+	// user re-running /qurl setup against a workspace they already
+	// admin — idempotent success on the callback side.
+	BindConflictAlreadyBoundToCaller BindConflictCode = "workspace_already_bound_to_caller"
+	// BindConflictAlreadyBound mirrors slackdata.ErrCodeWorkspaceAlreadyBound.
+	// A different admin holds the workspace — the callback renders a
+	// rebind-refused page rather than silently overwriting.
+	BindConflictAlreadyBound BindConflictCode = "workspace_already_bound"
+	// BindConflictUnverified mirrors slackdata.ErrCodeWorkspaceBindUnverified.
+	// Bind is held but the disambiguation read failed — treated as
+	// rebind-refused, with operator-actionable copy.
+	BindConflictUnverified BindConflictCode = "workspace_bind_unverified"
+)
 
 // Config holds the cross-handler runtime config.
 type Config struct {
@@ -187,6 +248,30 @@ type Config struct {
 	// — fine for tests, leaves a small orphan-key window during
 	// production shutdown.
 	AsyncTracker AsyncTracker
+
+	// AdminStore persists the workspace_mappings row that seeds the
+	// installer as the workspace's first admin. The callback calls
+	// BindWorkspace after the qurl-service key mint + DDB persist
+	// succeed, so /qurl admin verbs work immediately without a
+	// second /qurl admin claim step.
+	//
+	// Nil disables the bind (sandbox / no-DDB deploy) — the callback
+	// emits a slog.Warn and continues with the existing API-key
+	// surface. Production cmd/main.go wires a *slackdata.Store.
+	AdminStore AdminStore
+
+	// BindClassifyError classifies a BindWorkspace error into a
+	// 409 rebind-conflict code (when the error came from the
+	// already-bound branch) or "" when the error is a transport /
+	// validation failure that the callback should treat as a
+	// generic bind failure (revoke + 500).
+	//
+	// Wired in cmd/main.go to a small classifier that errors.As's
+	// the *slackdata.Error and returns its Code field when
+	// StatusCode == 409. Nil falls back to "always treat as
+	// generic bind failure" — preserves the safe default during
+	// rollout.
+	BindClassifyError func(err error) BindConflictCode
 
 	// HTTPClient is used for Auth0 token-exchange calls. Defaults to
 	// &http.Client{Timeout: 15s}.

@@ -19,72 +19,6 @@ import (
 // matches on this to know which path to take.
 const callbackIDSetAliasRebind = "setalias_rebind_confirm"
 
-// callbackIDAdminClaim is the modal callback used by the bootstrap
-// code claim flow. Distinct from the rebind callback so a single
-// submission handler can route by ID.
-const callbackIDAdminClaim = "admin_claim_redeem"
-
-// blockIDClaimCode is the block ID for the bootstrap-code field in
-// the admin-claim modal. Stable so view-submission handlers can pull
-// the value out by a known key — and so the bot's logging middleware
-// (PR-3c.3+) can match on it via [IsRedactedSubmissionBlock] before
-// serializing the payload.
-const blockIDClaimCode = "claim_code_block"
-
-// actionIDClaimCode is the action ID for the bootstrap-code input
-// element. Slack's view_submission payload nests the value as
-// `state.values[block_id][action_id].value`, so both IDs need to be
-// stable.
-const actionIDClaimCode = "claim_code_input"
-
-// redactedSubmissionBlockIDs is the set of view-submission `block_id`
-// values whose `state.values[block_id]` payload MUST NOT be logged or
-// otherwise echoed by the bot. The handler's logging middleware in
-// PR-3c.3+ consults this set via [IsRedactedSubmissionBlock] before
-// serializing a `view_submission` for diagnostics — entries here are
-// replaced with a sentinel.
-//
-// Why a set rather than a Slack-level masking primitive: Slack's
-// Block Kit `plain_text_input` element has no input-masking field
-// (no `private_value`, no `secret`, no `masked` — verified against
-// Slack's reference docs). The Slack client UI will render the
-// bootstrap code in plaintext, and the `view_submission` payload
-// will carry it in `state.values[claim_code_block][claim_code_input]
-// .value`. The mitigation for Blocker #3 ("no plaintext bootstrap
-// codes anywhere user-visible") therefore lives at the bot's
-// logging boundary, not in the modal payload itself: the code
-// transits the wire once (TLS to the bot, then DDB UpdateItem on
-// the in-account `bootstrap_codes` table via in-account IAM — see
-// the 2026-05-12 pivot, qurl-integrations-infra #523) and is never
-// written to logs or telemetry. This map is the single source of
-// truth for that guarantee.
-//
-// Unexported because [IsRedactedSubmissionBlock] is the supported
-// query surface — keeping the map private lets a future change to
-// the storage shape (a sync.Map, a regex set) avoid an API break.
-var redactedSubmissionBlockIDs = map[string]struct{}{
-	blockIDClaimCode: {},
-}
-
-// IsRedactedSubmissionBlock reports whether `blockID` names a
-// view-submission block whose `state.values[blockID]` content must
-// not be logged. The handler middleware in PR-3c.3+ calls this
-// before serializing any `view_submission` payload for diagnostics.
-// Exported so the (separate) handler package can consume it without
-// reaching into an unexported map.
-//
-// TODO(PR-3c.3+): wire this into the view-submission logging
-// middleware so the bootstrap code never reaches diagnostics. Until
-// that lands, [AdminClaimModal] ships without the matching
-// redaction at the logging boundary — the bot must NOT log
-// `view_submission` payloads in the interim. Tracking: this PR
-// (#228) provides the query surface; the consumer is part of the
-// PR-3c.3+ command-implementation stack.
-func IsRedactedSubmissionBlock(blockID string) bool {
-	_, ok := redactedSubmissionBlockIDs[blockID]
-	return ok
-}
-
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
 // in `private_metadata`. JSON-encoded so the view-submission handler
 // (PR-3c.3+) can `json.Unmarshal` into a known struct rather than
@@ -193,46 +127,6 @@ var mrkdwnCodeEscaper = strings.NewReplacer(
 	"\n", " ",
 	"\r", " ",
 )
-
-// AdminClaimModal renders the modal shown when a user runs
-// `/qurl admin claim`. The bootstrap code is collected via a regular
-// `plain_text_input` (Slack's Block Kit has no input-masking
-// primitive — see the redaction-registry comment above for the
-// mitigation strategy). The user-visible `:lock:` context line
-// documents the guarantee: the bot never logs the submitted code;
-// it transits TLS once and is consumed by the DDB-direct redeem
-// path in PR-3c.3+ (`apps/slack/internal/slackdata`).
-//
-// This satisfies Blocker #3 (no plaintext bootstrap codes anywhere
-// user-visible) at the slash-command grammar layer (the parser
-// rejects any `admin claim <args>` form so the code can't be typed
-// into the slash-command box) and at the bot's logging boundary
-// (handler middleware redacts [blockIDClaimCode] before serializing
-// any `view_submission` payload for diagnostics).
-func AdminClaimModal() ([]byte, error) {
-	payload := map[string]any{
-		"type":        "modal",
-		"callback_id": callbackIDAdminClaim,
-		"title":       plainTextObj("Claim qURL workspace"),
-		"submit":      plainTextObj("Submit"),
-		"close":       plainTextObj("Cancel"),
-		"blocks": []any{
-			sectionBlock("Paste the bootstrap code your admin received from LayerV. The code is single-use."),
-			map[string]any{
-				"type":     "input",
-				"block_id": blockIDClaimCode,
-				"label":    plainTextObj("Bootstrap code"),
-				"element": map[string]any{
-					"type":        "plain_text_input",
-					"action_id":   actionIDClaimCode,
-					"placeholder": plainTextObj("e.g. boot_xxxx-xxxx-xxxx"),
-				},
-			},
-			contextBlock(":lock: The bot never logs this code. It is sent once to LayerV over TLS and discarded from memory after redemption."),
-		},
-	}
-	return json.Marshal(payload)
-}
 
 // ErrorResponse renders an ephemeral-channel error message via the
 // `response_url` shape. Used by every parser/handler error path so

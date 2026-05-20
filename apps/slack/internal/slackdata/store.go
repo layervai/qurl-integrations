@@ -1,4 +1,9 @@
 // Package slackdata is the DDB-direct replacement for the old
+// admin_client.go HTTP wrapper. /qurl setup now seeds the
+// workspace admin row from the OAuth callback (no bootstrap codes,
+// no separate redeem step), so the bootstrap_codes table is gone
+// and this package owns only workspace_mappings + channel_policies.
+//
 // admin_client.go HTTP wrapper around qurl-service `/internal/v1/admin/*`.
 //
 // Justin's 2026-05-12 pivot (see SLACK_QURL_ROLLOUT.md and
@@ -52,10 +57,10 @@ import (
 
 // Env var names — operator-set via the Fargate task definition (the
 // qurl-bot-slack TF wires these from modules/qurl-slack-ddb's
-// `output.table_names`). The three tables are named with the env-
-// scoped prefix `qurl-bot-slack-<env>-<table>` so a misrouted call
-// hits NoSuchTable instead of the wrong env's data — see the
-// "blast-radius control" rationale in modules/qurl-slack-ddb/main.tf.
+// `output.table_names`). The tables are named with the env-scoped
+// prefix `qurl-bot-slack-<env>-<table>` so a misrouted call hits
+// NoSuchTable instead of the wrong env's data — see the "blast-radius
+// control" rationale in modules/qurl-slack-ddb/main.tf.
 const (
 	// EnvWorkspaceMappingsTable holds the DDB table name for the
 	// 1:1 Slack team_id → qurl owner mapping table.
@@ -63,9 +68,6 @@ const (
 	// EnvChannelPoliciesTable holds the DDB table name for the per-
 	// channel allowed-resource-id policy table.
 	EnvChannelPoliciesTable = "QURL_CHANNEL_POLICIES_TABLE"
-	// EnvBootstrapCodesTable holds the DDB table name for the
-	// single-use bootstrap-code table.
-	EnvBootstrapCodesTable = "QURL_BOOTSTRAP_CODES_TABLE"
 )
 
 // DynamoDBClient is the slice of *dynamodb.Client the Store uses.
@@ -80,7 +82,7 @@ type DynamoDBClient interface {
 }
 
 // Store is the DDB-direct replacement for the old `AdminClient`. It
-// owns three DDB tables (workspace, policies, bootstrap codes) and
+// owns two DDB tables (workspace_mappings, channel_policies) and
 // surfaces the same method set the old HTTP client had so the
 // slash-command handlers don't need restructuring.
 //
@@ -90,33 +92,21 @@ type Store struct {
 	Client                DynamoDBClient
 	WorkspaceMappingsName string
 	ChannelPoliciesName   string
-	BootstrapCodesName    string
 
 	// Now is injected so tests can pin the clock for created_at /
-	// updated_at / expires_at-vs-now assertions without poking a
-	// package-global. Defaults to time.Now.
+	// updated_at assertions without poking a package-global.
+	// Defaults to time.Now.
 	Now func() time.Time
-
-	// ExternalIdentityBindings is the optional client for the
-	// new `POST /v1/external-identity-bindings` qurl-service surface
-	// (see SLACK_QURL_ROLLOUT.md Appendix A). The endpoint doesn't
-	// exist yet — the redeem path leaves this nil and skips the
-	// HTTP call until the qurl-service PR lands. When non-nil,
-	// RedeemBootstrap calls into it after the conditional UpdateItem
-	// on bootstrap_codes succeeds.
-	ExternalIdentityBindings ExternalIdentityBindingsClient
 }
 
 // StoreOption configures [NewStore].
 type StoreOption func(*storeOptions)
 
 type storeOptions struct {
-	workspaceMappingsName    string
-	channelPoliciesName      string
-	bootstrapCodesName       string
-	ddbClient                DynamoDBClient
-	externalIdentityBindings ExternalIdentityBindingsClient
-	awsConfigFns             []func(*awsconfig.LoadOptions) error
+	workspaceMappingsName string
+	channelPoliciesName   string
+	ddbClient             DynamoDBClient
+	awsConfigFns          []func(*awsconfig.LoadOptions) error
 }
 
 // WithDynamoDBClient injects a DDB client. Primarily for tests; in
@@ -127,27 +117,18 @@ func WithDynamoDBClient(c DynamoDBClient) StoreOption {
 
 // WithTableNames overrides the per-table names. Any empty argument
 // falls back to the matching env var. Primarily for tests.
-func WithTableNames(workspaceMappings, channelPolicies, bootstrapCodes string) StoreOption {
+func WithTableNames(workspaceMappings, channelPolicies string) StoreOption {
 	return func(o *storeOptions) {
 		o.workspaceMappingsName = workspaceMappings
 		o.channelPoliciesName = channelPolicies
-		o.bootstrapCodesName = bootstrapCodes
 	}
 }
 
-// WithExternalIdentityBindings injects the qurl-service binding
-// client for the redeem flow. Optional — leave nil until the
-// `/v1/external-identity-bindings` endpoint ships (see Appendix A
-// of SLACK_QURL_ROLLOUT.md).
-func WithExternalIdentityBindings(c ExternalIdentityBindingsClient) StoreOption {
-	return func(o *storeOptions) { o.externalIdentityBindings = c }
-}
-
 // NewStore constructs a [Store], loading AWS config from the ambient
-// environment unless overridden via options. Returns an error if any
-// of the three table names is missing — there is no sane fallback for
-// "which env's data am I supposed to write to" so failing fast at
-// boot is the only safe move.
+// environment unless overridden via options. Returns an error if a
+// table name is missing — there is no sane fallback for "which env's
+// data am I supposed to write to" so failing fast at boot is the
+// only safe move.
 func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	o := &storeOptions{}
 	for _, fn := range opts {
@@ -160,17 +141,12 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	if o.channelPoliciesName == "" {
 		o.channelPoliciesName = os.Getenv(EnvChannelPoliciesTable)
 	}
-	if o.bootstrapCodesName == "" {
-		o.bootstrapCodesName = os.Getenv(EnvBootstrapCodesTable)
-	}
 
 	switch {
 	case o.workspaceMappingsName == "":
 		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvWorkspaceMappingsTable)
 	case o.channelPoliciesName == "":
 		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvChannelPoliciesTable)
-	case o.bootstrapCodesName == "":
-		return nil, fmt.Errorf("slackdata.NewStore: %s is required", EnvBootstrapCodesTable)
 	}
 
 	if o.ddbClient == nil {
@@ -182,12 +158,10 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	}
 
 	return &Store{
-		Client:                   o.ddbClient,
-		WorkspaceMappingsName:    o.workspaceMappingsName,
-		ChannelPoliciesName:      o.channelPoliciesName,
-		BootstrapCodesName:       o.bootstrapCodesName,
-		Now:                      time.Now,
-		ExternalIdentityBindings: o.externalIdentityBindings,
+		Client:                o.ddbClient,
+		WorkspaceMappingsName: o.workspaceMappingsName,
+		ChannelPoliciesName:   o.channelPoliciesName,
+		Now:                   time.Now,
 	}, nil
 }
 

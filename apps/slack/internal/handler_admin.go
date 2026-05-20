@@ -21,15 +21,19 @@ import (
 // ack window without the async runAsync hop. Async verbs were retired
 // with the v1 admin-surface scope cut.
 //
-// Parse runs first, then `admin claim` short-circuits, then
-// requireAdminStoreSync gates the rest. So on a sandbox deploy without
-// the three QURL_*_TABLE env vars: malformed/unknown admin text
-// surfaces as a parser error (`:warning: unknown admin action`,
-// `:warning: missing @user mention`, etc.); parser-valid verbs other
-// than `claim` reply with "Admin features are not configured". The
-// distinction is intentional — parser errors are useful feedback
-// regardless of DDB wiring, and reordering the checks would mask
-// shape errors behind the not-configured surface.
+// Parse runs first, then requireAdminStoreSync gates the rest. So on
+// a sandbox deploy without the QURL_*_TABLE env vars:
+// malformed/unknown admin text surfaces as a parser error
+// (`:warning: unknown admin action`, `:warning: missing @user
+// mention`, etc.); parser-valid verbs reply with "Admin features are
+// not configured". The distinction is intentional — parser errors
+// are useful feedback regardless of DDB wiring, and reordering the
+// checks would mask shape errors behind the not-configured surface.
+//
+// The retired `admin claim` verb is rejected at the parser layer
+// (ErrUnknownAdminAction) since /qurl setup now seeds the workspace
+// admin in the OAuth callback. There is no in-bot path that hands a
+// bootstrap code to the user anymore.
 func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
@@ -49,43 +53,12 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	// requireAdminSync's `== ""` check.
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
 	userID := strings.TrimSpace(values.Get(fieldUserID))
-	// `admin claim` is routed to [Handler.handleAdminClaim] directly
-	// by handleSlashCommand BEFORE this dispatcher (see handler.go).
-	// It never reaches handleAdmin in normal Slack traffic. The
-	// short-circuit here catches a defensive misroute (e.g. a
-	// synthetic test that posts `text=admin claim` through this entry
-	// point) AND bypasses requireAdminStoreSync — the whole point of
-	// the claim flow is to create the first admin from a bootstrap
-	// code on a workspace where CheckAdmin returns (false, "") and
-	// AdminStore presence is irrelevant to the modal-open call.
-	if cmd.AdminAction == AdminClaim {
-		h.handleAdminClaim(w, values)
-		return
-	}
-	// Every other verb needs AdminStore. Short-circuit once here
+	// Every recognized verb needs AdminStore. Short-circuit once here
 	// instead of repeating the guard in each switch arm.
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	// AdminClaim is short-circuited above so its case here is
-	// unreachable in practice — but the `exhaustive` linter requires
-	// it to be listed explicitly (a `default:` arm doesn't satisfy
-	// the check when an enumerated value is omitted).
 	switch cmd.AdminAction {
-	case AdminClaim: // unreachable in practice — short-circuited above
-		// Warn (not Error) so a synthetic test or a misroute is
-		// visible in CloudWatch without paging on-call. Operators
-		// want to see this; they don't need to be woken up for it.
-		// The arm intentionally does NOT re-dispatch to
-		// handleAdminClaim — the short-circuit above already returned
-		// for the in-practice case, and re-dispatching here would
-		// risk a double-write if a future refactor changed the
-		// short-circuit. Reuse the generic default-arm copy so the
-		// user-visible reply doesn't reference internal routing
-		// terminology; the slog.Warn above is the operator-facing
-		// signal.
-		slog.Warn("admin claim reached dispatcher switch — defensive misroute (short-circuit above should have caught it)", "team_id", teamID, "user_id", userID)
-		respondSlack(w, "Unknown admin action. Try `/qurl help`.")
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:
@@ -101,9 +74,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		// cmd.AdminAction; even though it's parser-enumerated today,
 		// a future parser drift could land an arbitrary string here,
 		// and echoing it back risks confusing copy on already-confused
-		// input. The user already knows what they typed. Symmetric
-		// with the AdminClaim defensive arm: slog.Warn surfaces the
-		// drift to operators; user-visible copy stays generic.
+		// input. The user already knows what they typed.
 		slog.Warn("admin dispatcher: unknown action reached default arm — parser drift?", "team_id", teamID, "user_id", userID, "action", string(cmd.AdminAction))
 		respondSlack(w, "Unknown admin action. Try `/qurl help`.")
 	}
