@@ -143,6 +143,15 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
       .finally(() => {
         inFlightSends.delete(sendPromise);
       });
+    // Track the .catch().finally() chain (post-cleanup promise) rather
+    // than the raw sqsClient.send(...) promise. Diverges from
+    // event-publisher.js's shape — there the raw send is tracked so
+    // Promise.allSettled in stop() sees the rejection shape. Here the
+    // chain always resolves (the .catch swallows + logs), so allSettled
+    // never sees a rejected entry — and the .finally has already
+    // cleaned up the Set entry by the time allSettled resolves the
+    // tracking promise. Both shapes drain correctly; this one trades
+    // sibling-symmetry for slightly tidier post-allSettled state.
     inFlightSends.add(sendPromise);
   } catch (err) {
     // Sync throw — SDK input validation, JSON.stringify cycle, etc.
@@ -181,14 +190,13 @@ function start() {
 // Drain in-flight SendMessage promises up to DRAIN_DEADLINE_MS.
 // Mirrors event-publisher.stop()'s discipline.
 //
-// publish() → drain race: a publish() that observed running=true
-// synchronously can land on inFlightSends.add(...) AFTER stop()
-// snapshotted the set via [...inFlightSends] below. The post-snapshot
-// send completes detached without drain coverage. Same posture as
-// event-publisher.js. Acceptable in this module because the polling
-// fallback at the render layer catches the resulting view-counter
-// miss; flagged for parity with the sibling so a future drain-
-// hardening pass touches both files together.
+// stop()-vs-publish() ordering: single-threaded JS means there's no
+// actual race here — publish()'s synchronous path (running check
+// through inFlightSends.add) cannot interleave with stop()'s
+// synchronous path (running=false through [...inFlightSends]
+// snapshot). Kept this comment block (and the shape of stop()) for
+// parity with event-publisher.js so a future drain-hardening pass
+// reads both modules identically.
 async function stop() {
   if (!running) return;
   running = false;

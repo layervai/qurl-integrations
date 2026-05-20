@@ -138,6 +138,13 @@ async function deleteMessageBatch(messages) {
     // posture below). Consistency point with the receive path.
     const resp = await sqsClient.send(new DeleteMessageBatchCommand({
       QueueUrl: config.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
+      // Id: the per-batch entry identifier. SQS requires
+      // [a-zA-Z0-9_-]+ and uniqueness within the batch. The array
+      // index satisfies both for 0..MAX_MESSAGES_PER_RECEIVE-1 (=10
+      // max digits, no special chars). A future refactor that
+      // switches to Id: m.MessageId would need to re-derive that
+      // SQS's MessageId pattern (alphanumeric + few specials) is
+      // also batch-Id-safe.
       Entries: messages.map((m, i) => ({
         Id: String(i),
         ReceiptHandle: m.ReceiptHandle,

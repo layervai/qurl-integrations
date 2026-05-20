@@ -265,6 +265,28 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(res.body).toEqual({ status: 'invalid-payload' });
   });
 
+  it('returns 200 invalid-payload when access_count is 0 (parity with publisher gate)', async () => {
+    // qurl.accessed events always carry access_count >= 1 by
+    // contract. Rejecting 0 here keeps the wire boundary as the
+    // single source of truth — without this gate, a 0-count event
+    // would record in DDB and then trip the publisher's
+    // "invalid accessCount" warn, producing an asymmetric log pair.
+    const payload = {
+      id: 'evt-zero', type: 'qurl.accessed',
+      data: { qurl_id: 'q_aaaaaaaaaa1', access_count: 0, consumed: false },
+    };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'invalid-payload' });
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+    expect(mockViewUpdatePublish).not.toHaveBeenCalled();
+  });
+
   it('surfaces store dedup result on replay', async () => {
     mockRecordQurlView.mockResolvedValueOnce('dedup');
     const raw = JSON.stringify(VALID_PAYLOAD);

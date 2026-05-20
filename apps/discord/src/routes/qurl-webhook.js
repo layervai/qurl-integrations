@@ -111,8 +111,14 @@ router.post('/qurl', async (req, res) => {
   // (NOT just isFinite + >= 0) catches the float case + the unsafe-
   // int case in one check. Also blocks Number(null)===0 from slipping
   // through, which would otherwise cost a DDB write per such event.
-  if (!Number.isSafeInteger(data.access_count) || data.access_count < 0) {
-    logger.warn('qURL webhook access_count not a non-negative integer', { qurl_id: data.qurl_id, access_count: data.access_count });
+  // Strict positive integer — qurl.accessed events always carry
+  // access_count >= 1 by contract. Reject 0 here (vs accepting 0 +
+  // writing to DDB + publisher dropping at SQS layer) to avoid the
+  // asymmetric log pair where the webhook returns "recorded" and the
+  // view-update-publisher then warns "invalid accessCount" on the
+  // same event. One source of truth at the wire boundary.
+  if (!Number.isSafeInteger(data.access_count) || data.access_count <= 0) {
+    logger.warn('qURL webhook access_count not a positive integer', { qurl_id: data.qurl_id, access_count: data.access_count });
     return res.status(200).json({ status: 'invalid-payload' });
   }
   const accessCount = data.access_count;
