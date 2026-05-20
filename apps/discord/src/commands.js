@@ -19,6 +19,8 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
+const viewUpdateRegistry = require('./view-update-registry');
+const { createHandleViewUpdate } = require('./view-update-handler');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
@@ -1153,11 +1155,59 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
+  // Hoisted so the createHandleViewUpdate factory closes over the
+  // live `let` binding rather than a pre-initialized TDZ slot — a
+  // future synchronous-handler refactor would otherwise hit
+  // ReferenceError on getViewed/setViewed.
+  let viewed = 0;
+  let allDone = false;
+
+  // View-update push (feat #60). Shared callback per monitor —
+  // registered against every tracked qurl_id; render goes through
+  // linkStatus mutation + safeEdit (NOT runTick) to avoid the
+  // per-event DDB BatchGet. Polling tick remains the correctness
+  // primitive. Handler factory in view-update-handler.js so the
+  // state matrix is unit-testable without a full monitor closure.
+  //
+  // Unregister at stop() iterates `trackedQurlIds` directly (set
+  // cleared AFTER the unregister loop). Registry.unregister is a
+  // no-op for keys never registered (e.g. when the flag is off), so
+  // iterating the superset is safe.
+  const handleViewUpdate = createHandleViewUpdate({
+    sendId,
+    linkStatus,
+    getButtonRow: () => buttonRow,
+    isStopped: () => stopped,
+    isViewCounterDegraded: () => viewCounterDegraded,
+    hasInteraction: () => !!interaction,
+    getViewed: () => viewed,
+    setViewed: (n) => { viewed = n; },
+    getExpectedCount: () => expectedCount,
+    buildStatusMsg,
+    safeEdit,
+    onAllDone: () => {
+      allDone = true;
+      clearInterval(timer);
+    },
+    logger,
+  });
+  // Hoist the flag read once per monitor — registerViewUpdateFor
+  // is called up to QURL_SEND_MAX_RECIPIENTS times (50 today) on
+  // construction + once per /qurl add. Re-reading config on every
+  // call is negligible but the hoist reads cleaner.
+  const viewUpdatePushEnabled = config.ENABLE_VIEW_UPDATE_PUSH;
+  function registerViewUpdateFor(qurlId) {
+    if (!viewUpdatePushEnabled) return;
+    viewUpdateRegistry.register(qurlId, handleViewUpdate);
+  }
+  for (const qurlId of trackedQurlIds) {
+    registerViewUpdateFor(qurlId);
+  }
+
   // Bumped by addRecipients. A tick whose getQurlViews resolves after
   // generation advanced must skip its render — the views map was built
   // against the pre-add tracked set and could under-report.
   let trackingGeneration = 0;
-  let allDone = false;
 
   const control = {
     // newLinks: Array<{qurlId, username}> aligned per-recipient. Must
@@ -1165,6 +1215,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     // the tracked set means runTick's view-flip lookup misses the new
     // qurl_ids and the counter never advances for /qurl add recipients.
     addRecipients(count, newLinks) {
+      // Early-out if this monitor has already been stopped. Without
+      // this guard a post-stop addRecipients call would extend
+      // expectedCount, linkStatus, AND register new view-update
+      // callbacks against the registry — the latter wouldn't be
+      // unregistered (stop() has already iterated trackedQurlIds),
+      // pinning the closure (linkStatus + safeEdit) until process
+      // restart. Pre-#60 fields (expectedCount,
+      // linkStatus) also leaked into a dead monitor; this guard
+      // closes both the new + pre-existing leak surfaces.
+      if (stopped) return;
       expectedCount += count;
       if (Array.isArray(newLinks)) {
         for (const item of newLinks) {
@@ -1183,6 +1243,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           if (!trackedQurlIds.has(qid)) {
             trackedQurlIds.add(qid);
             linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
+            // Register the new qurl_id for view-update push (feat #60).
+            // Symmetric with the construction-time loop above — the
+            // tracked set and the registry must extend together or the
+            // new recipients never get sub-second updates (the polling
+            // path catches them on the next interval regardless).
+            registerViewUpdateFor(qid);
           }
         }
       }
@@ -1216,6 +1282,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       stopped = true;
       clearInterval(timer);
       activeMonitors.delete(control);
+      // Unregister the shared callback from every tracked qurl_id so
+      // the registry doesn't pin this monitor's closure state past
+      // stop() (feat #60). Load-bearing: a long-running monitor that
+      // never unregisters would otherwise hold linkStatus + safeEdit
+      // references via the shared closure until process restart.
+      // Iterates trackedQurlIds directly (no parallel bookkeeping
+      // array) — set cleared in the next two lines, so order matters.
+      for (const qurlId of trackedQurlIds) {
+        viewUpdateRegistry.unregister(qurlId, handleViewUpdate);
+      }
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;
@@ -1257,10 +1333,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     await interaction.editReply(payload).catch(logIgnoredDiscordErr);
   }
 
-  // `viewed` counter is closure-tracked so we don't re-walk linkStatus
-  // on each render. Incremented when a link flips pending → opened in
-  // runTick; never decreases.
-  let viewed = 0;
+  // `viewed` already declared above the createHandleViewUpdate factory
+  // call so the factory closes over the live binding. Closure-tracked
+  // so we don't re-walk linkStatus on each render; incremented when a
+  // link flips pending → opened in either runTick OR the view-update
+  // handler; never decreases.
 
   // No explicit `expired` state in the rendered counter: qurl.accessed
   // is the only event we receive, and the 1h monitor cap covers the

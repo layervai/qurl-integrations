@@ -638,6 +638,24 @@ module.exports = {
   // the producer side.
   QURL_BOT_EVENTS_QUEUE_URL: process.env.QURL_BOT_EVENTS_QUEUE_URL,
 
+  // View-update push (feat #60, sub-second view counter). When true,
+  // qurl-webhook.js publishes view events to a separate SQS queue
+  // after a successful recordQurlView; the HTTP tier (same process
+  // that owns the webhook receiver and the live monitorLinkStatus
+  // instances) drains the queue and dispatches into the process-
+  // local view-update-registry. The polling fallback in
+  // commands.js stays as the correctness primitive — this flag gates
+  // ONLY the latency-optimization path. Default false so a deploy
+  // without the flag behaves identically to the legacy polling shape.
+  // Must be the literal string "true" (same parsing posture as
+  // ENABLE_EVENT_SHIPPER) so an env-var typo can't flip prod.
+  ENABLE_VIEW_UPDATE_PUSH: process.env.ENABLE_VIEW_UPDATE_PUSH === 'true',
+
+  // SQS Standard queue for view updates (separate from
+  // QURL_BOT_EVENTS_QUEUE_URL, which carries Discord interactions).
+  // Required when ENABLE_VIEW_UPDATE_PUSH=true.
+  QURL_BOT_VIEW_UPDATES_QUEUE_URL: process.env.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
+
   // Backpressure cap for the event consumer's in-flight handler
   // tracker (see src/event-consumer.js module header). Read here
   // instead of in event-consumer.js so the value goes through the

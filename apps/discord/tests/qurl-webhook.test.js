@@ -36,6 +36,17 @@ jest.mock('../src/store', () => ({
   getStats: jest.fn(() => ({})),
 }));
 
+// Mock the view-update publisher (feat #60) so the route's
+// `if (result === 'recorded') publish(...)` gate is observable.
+// Without this mock, publish() would no-op against an unstarted
+// publisher and the gate would be untestable.
+const mockViewUpdatePublish = jest.fn();
+jest.mock('../src/view-update-publisher', () => ({
+  publish: mockViewUpdatePublish,
+  start: jest.fn(),
+  stop: jest.fn(),
+}));
+
 process.env.QURL_WEBHOOK_SECRET = 'test-qurl-secret';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 process.env.AWS_REGION = 'us-east-2';
@@ -60,6 +71,55 @@ const VALID_PAYLOAD = {
 beforeEach(() => {
   jest.clearAllMocks();
   mockRecordQurlView.mockImplementation(async () => 'recorded');
+  mockViewUpdatePublish.mockReset();
+});
+
+describe('POST /webhooks/qurl — view-update push gate (feat #60)', () => {
+  // The route calls viewUpdatePublisher.publish() ONLY when
+  // recordQurlView returns the literal 'recorded' (real new view) —
+  // NOT on dedup hits or any other status. A regression that flipped
+  // to truthy-check (`if (result)`) would send SQS messages for every
+  // dedup replay too, exhausting the queue + amplifying CloudWatch
+  // costs on a high-replay-rate qurl.
+  const signedRequest = (payload) => {
+    const raw = JSON.stringify(payload);
+    return request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+  };
+
+  it('publishes on result === "recorded"', async () => {
+    mockRecordQurlView.mockImplementation(async () => 'recorded');
+    const res = await signedRequest(VALID_PAYLOAD);
+    expect(res.status).toBe(200);
+    expect(mockViewUpdatePublish).toHaveBeenCalledTimes(1);
+    expect(mockViewUpdatePublish).toHaveBeenCalledWith({
+      qurlId: VALID_PAYLOAD.data.qurl_id,
+      accessCount: VALID_PAYLOAD.data.access_count,
+      eventId: VALID_PAYLOAD.id,
+    });
+  });
+
+  it('does NOT publish on dedup result (e.g. "deduped")', async () => {
+    mockRecordQurlView.mockImplementation(async () => 'deduped');
+    const res = await signedRequest(VALID_PAYLOAD);
+    expect(res.status).toBe(200);
+    expect(mockViewUpdatePublish).not.toHaveBeenCalled();
+  });
+
+  it('does NOT publish on any non-"recorded" result', async () => {
+    // Strict-equality guard catches a future store regression that
+    // returned 'updated' or other truthy strings — those should NOT
+    // trigger a push.
+    for (const result of ['updated', 'noop', 'replayed', '', null, undefined]) {
+      jest.clearAllMocks();
+      mockRecordQurlView.mockImplementation(async () => result);
+      await signedRequest(VALID_PAYLOAD);
+      expect(mockViewUpdatePublish).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe('POST /webhooks/qurl — unconfigured secret returns 503 (retriable)', () => {
@@ -202,6 +262,28 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .send(raw);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
+  });
+
+  it('returns 200 invalid-payload when access_count is 0 (parity with publisher gate)', async () => {
+    // qurl.accessed events always carry access_count >= 1 by
+    // contract. Rejecting 0 here keeps the wire boundary as the
+    // single source of truth — without this gate, a 0-count event
+    // would record in DDB and then trip the publisher's
+    // "invalid accessCount" warn, producing an asymmetric log pair.
+    const payload = {
+      id: 'evt-zero', type: 'qurl.accessed',
+      data: { qurl_id: 'q_aaaaaaaaaa1', access_count: 0, consumed: false },
+    };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'invalid-payload' });
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+    expect(mockViewUpdatePublish).not.toHaveBeenCalled();
   });
 
   it('surfaces store dedup result on replay', async () => {

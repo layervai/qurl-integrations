@@ -17,6 +17,7 @@ const db = require('../store');
 const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
+const viewUpdatePublisher = require('../view-update-publisher');
 
 const router = express.Router();
 
@@ -110,8 +111,14 @@ router.post('/qurl', async (req, res) => {
   // (NOT just isFinite + >= 0) catches the float case + the unsafe-
   // int case in one check. Also blocks Number(null)===0 from slipping
   // through, which would otherwise cost a DDB write per such event.
-  if (!Number.isSafeInteger(data.access_count) || data.access_count < 0) {
-    logger.warn('qURL webhook access_count not a non-negative integer', { qurl_id: data.qurl_id, access_count: data.access_count });
+  // Strict positive integer — qurl.accessed events always carry
+  // access_count >= 1 by contract. Reject 0 here (vs accepting 0 +
+  // writing to DDB + publisher dropping at SQS layer) to avoid the
+  // asymmetric log pair where the webhook returns "recorded" and the
+  // view-update-publisher then warns "invalid accessCount" on the
+  // same event. One source of truth at the wire boundary.
+  if (!Number.isSafeInteger(data.access_count) || data.access_count <= 0) {
+    logger.warn('qURL webhook access_count not a positive integer', { qurl_id: data.qurl_id, access_count: data.access_count });
     return res.status(200).json({ status: 'invalid-payload' });
   }
   const accessCount = data.access_count;
@@ -130,6 +137,19 @@ router.post('/qurl', async (req, res) => {
     });
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result });
+    // Sub-second view counter (feat #60): publish to SQS only on
+    // result === 'recorded' (a real new view, not a per-event dedup
+    // replay). Fire-and-log — the polling fallback in
+    // monitorLinkStatus catches anything the publisher drops. No
+    // await: the HTTP response must come back to qurl-service
+    // promptly so it doesn't retry on its own.
+    if (result === 'recorded') {
+      viewUpdatePublisher.publish({
+        qurlId: data.qurl_id,
+        accessCount,
+        eventId,
+      });
+    }
     return res.status(200).json({ status: result });
   } catch (err) {
     // 5xx so qurl-service retries — transient DDB throttle should not

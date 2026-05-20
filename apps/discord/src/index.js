@@ -33,6 +33,7 @@ const {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  missingViewUpdatePushKeys,
   missingMapCommandKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -45,6 +46,8 @@ const {
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
+const viewUpdateConsumer = require('./view-update-consumer');
+const viewUpdatePublisher = require('./view-update-publisher');
 const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
@@ -295,6 +298,15 @@ if (process.env.NODE_ENV === 'production') {
 const eventShipperMissing = missingEventShipperKeys(config);
 if (eventShipperMissing.length > 0) {
   logger.error(`ENABLE_EVENT_SHIPPER=true but missing required env vars: ${eventShipperMissing.join(', ')}`);
+  process.exit(1);
+}
+
+// View-update push (feat #60). Same boot-time refusal pattern: if
+// the flag is on but the queue URL is missing, fail closed at boot
+// rather than silently dropping every view event at runtime.
+const viewUpdatePushMissing = missingViewUpdatePushKeys(config);
+if (viewUpdatePushMissing.length > 0) {
+  logger.error(`ENABLE_VIEW_UPDATE_PUSH=true but missing required env vars: ${viewUpdatePushMissing.join(', ')}`);
   process.exit(1);
 }
 
@@ -709,6 +721,18 @@ async function gracefulShutdown(code = 0) {
     // actually running per process (combined + flag-on is rejected
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
+    // View-update plumbing drain (feat #60). Same idempotent shape;
+    // unconditional. Consumer + publisher are stopped in parallel
+    // via Promise.all so the combined drain stays within the
+    // gracefulShutdown 10s budget — sequencing each module's
+    // DRAIN_DEADLINE_MS (3s each) plus the event-shipper drains
+    // above would push worst-case past 10s. Order-independence is
+    // safe: publisher.stop() snapshots inFlightSends; consumer.stop()
+    // aborts the long-poll; neither depends on the other's state.
+    await Promise.all([
+      viewUpdateConsumer.stop(),
+      viewUpdatePublisher.stop(),
+    ]);
     // Periodic REST refreshCache in http-only mode is .unref()ed so it
     // wouldn't block exit on its own, but clearing explicitly keeps
     // shutdown symmetric with the other intervals (server.js, oauth.js
@@ -1182,6 +1206,25 @@ async function start() {
   // Same shutdown-race guard as the consumer above.
   if (isGateway && config.ENABLE_EVENT_SHIPPER && !isShuttingDown) {
     eventPublisher.start();
+  }
+
+  // View-update SQS plumbing (feat #60, sub-second view counter).
+  // Independent of the event-shipper gates above; gated only on
+  // `config.ENABLE_VIEW_UPDATE_PUSH` AND `isHttp` (the tier that
+  // owns BOTH the webhook receiver — publisher — and the
+  // monitorLinkStatus instances — consumer). Same shutdown-race
+  // guard as the event-shipper sibling above.
+  //
+  // Combined mode is intentionally NOT rejected here (unlike
+  // ENABLE_EVENT_SHIPPER): there's no in-process direct-dispatch
+  // path competing with the SQS round-trip — both paths converge
+  // in consumer → registry → monitor. Combined mode just means
+  // the publisher and consumer live in the same process; messages
+  // still round-trip through SQS, and registry dispatch + status
+  // === 'opened' guards handle any race or redelivery.
+  if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
+    viewUpdatePublisher.start();
+    viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });
   }
 
   // Open the Discord gateway WebSocket. Two disjoint paths:

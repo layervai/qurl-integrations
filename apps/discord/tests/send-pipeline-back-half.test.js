@@ -614,6 +614,38 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     monitor.stop();
   });
 
+  it('addRecipients() called AFTER stop() is a strict no-op', async () => {
+    // Defends the GC leak surface: a post-stop addRecipients would
+    // otherwise extend expectedCount + linkStatus + register new
+    // view-update callbacks against the registry that the unregister
+    // loop (already iterated) won't pick up — pinning closure state
+    // to process restart. The early-out at the top of addRecipients
+    // closes both the pre-#60 (expectedCount/linkStatus) and post-#60
+    // (registry register) leak shapes.
+    const monitor = monitorLinkStatus(
+      'send-after-stop', makeInteraction(),
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent to 1 user', { components: [] }, 1,
+    );
+
+    // Snapshot the monitor's pre-stop render state so we can assert
+    // it doesn't change after the post-stop addRecipients call.
+    const preStopMsg = monitor.getFullMsg();
+    monitor.stop();
+
+    // Post-stop addRecipients call. Without the guard this would
+    // bump expectedCount from 1 to 2 and visibly change the render
+    // (pending count would increment).
+    monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+    // expectedCount unchanged → buildStatusMsg returns the same
+    // string. (getFullMsg() also returns the post-stop sentinel
+    // depending on internal state — equality with the pre-stop
+    // snapshot is the assertion that matters.)
+    expect(monitor.getFullMsg()).toBe(preStopMsg);
+  });
+
   it('stop() called concurrently with a running tick — no unhandled rejection', async () => {
     const interaction = makeInteraction();
     mockDb.getQurlViews.mockImplementation(() => new Promise(resolve =>
