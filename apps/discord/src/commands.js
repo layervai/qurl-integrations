@@ -1155,6 +1155,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
+  // `viewed` and `allDone` declared up-front (vs at their original
+  // mid-monitor positions) so the createHandleViewUpdate factory
+  // closes over them directly. Without this, the factory was capturing
+  // pre-initialization variables — safe in practice (callbacks fire
+  // async) but a future refactor that called the handler synchronously
+  // would surface as a ReferenceError. Move-up eliminates the footgun.
+  let viewed = 0;
+  let allDone = false;
+
   // View-update push (feat #60). Shared callback per monitor —
   // registered against every tracked qurl_id; render goes through
   // linkStatus mutation + safeEdit (NOT runTick) to avoid the
@@ -1185,8 +1194,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     viewUpdateRegistry.register(qurlId, handleViewUpdate);
     viewUpdateRegisteredQurlIds.push(qurlId);
   }
-  // Registration pre-dates `let viewed = 0` further down; safe because
-  // the callback only fires async (after monitorLinkStatus returns).
   for (const qurlId of trackedQurlIds) {
     registerViewUpdateFor(qurlId);
   }
@@ -1195,7 +1202,10 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // generation advanced must skip its render — the views map was built
   // against the pre-add tracked set and could under-report.
   let trackingGeneration = 0;
-  let allDone = false;
+  // `allDone` already declared above the createHandleViewUpdate factory
+  // call (the factory's onAllDone closure references it). Kept here as
+  // a no-op marker comment — there was a `let allDone = false;` here
+  // pre-#60.
 
   const control = {
     // newLinks: Array<{qurlId, username}> aligned per-recipient. Must
@@ -1310,10 +1320,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     await interaction.editReply(payload).catch(logIgnoredDiscordErr);
   }
 
-  // `viewed` counter is closure-tracked so we don't re-walk linkStatus
-  // on each render. Incremented when a link flips pending → opened in
-  // runTick; never decreases.
-  let viewed = 0;
+  // `viewed` already declared above the createHandleViewUpdate factory
+  // call so the factory closes over the live binding. Closure-tracked
+  // so we don't re-walk linkStatus on each render; incremented when a
+  // link flips pending → opened in either runTick OR the view-update
+  // handler; never decreases.
 
   // No explicit `expired` state in the rendered counter: qurl.accessed
   // is the only event we receive, and the 1h monitor cap covers the

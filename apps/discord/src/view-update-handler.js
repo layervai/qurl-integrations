@@ -56,6 +56,17 @@ function createHandleViewUpdate({
     if (!current || current.status === 'opened') return;
     linkStatus.set(qurlId, { ...current, status: 'opened' });
     setViewed(getViewed() + 1);
+    // Asymmetry vs runTick (commands.js): the poll path's
+    // `if (!interaction) return` GATES before its views loop, so it
+    // never bumps `viewed` on a nulled-interaction tick. The push
+    // path here bumps first so the in-memory counter stays consistent
+    // with the eventual DDB state. Unreachable in practice today —
+    // `interaction` is only nulled by stop(), after which isStopped()
+    // gates above — but the order matters if a future refactor adds
+    // a token-expiry path that nulls interaction without going
+    // through stop(). Either-shape behavior is documented; do not
+    // "fix" the asymmetry without verifying the polling-path branch
+    // too. Same applies to onAllDone below.
     if (!hasInteraction()) return;
     const pending = Math.max(0, getExpectedCount() - getViewed());
     // getButtonRow() is a getter (vs. capturing the value) because

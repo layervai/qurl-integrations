@@ -178,16 +178,17 @@ describe('createHandleViewUpdate', () => {
       expect(deps.safeEdit).not.toHaveBeenCalled();
     });
 
-    test('onAllDone still fires when all viewed (counter tracking continues)', () => {
+    test('onAllDone does NOT fire when hasInteraction()=false (handler returns before the pending check)', () => {
       const deps = buildDeps({ hasInteraction: () => false, getExpectedCount: () => 1 });
       deps.linkStatus.set('qrl_a', { status: 'pending', username: 'a' });
       const handler = createHandleViewUpdate(deps);
       handler({ accessCount: 1 }, 'qrl_a');
-      // No safeEdit, but the counter still hit 0 so the timer should clear.
-      // ... wait, this branch returns BEFORE onAllDone. Confirming current
-      // contract: post-token-expiry, the safeEdit-related allDone check
-      // is also skipped. The polling tick will catch the all-done state
-      // on its next iteration (or hit isTerminated() first).
+      // Contract: when interaction is nulled (post-stop or post-token-
+      // expiry), the handler mutates linkStatus + viewed but returns
+      // before the pending-check + onAllDone fire. The polling tick's
+      // isTerminated() or maxMonitorMs cap catches the all-done state
+      // on the next iteration. See the asymmetry comment in
+      // view-update-handler.js.
       expect(deps.onAllDone).not.toHaveBeenCalled();
     });
   });
@@ -220,7 +221,7 @@ describe('createHandleViewUpdate', () => {
   });
 
   describe('getButtonRow() called fresh each invocation', () => {
-    test('reflects post-stop() null reassignment without stale capture', () => {
+    test('reflects post-construction reassignment without stale capture', () => {
       let buttonRow = { type: 1, components: [{ id: 'btn' }] };
       // expectedCount=3 so two flips leave pending=1 (buttonRow stays
       // in the components array). Default expectedCount=2 would render

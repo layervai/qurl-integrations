@@ -118,13 +118,16 @@ function isAbortError(err) {
 async function deleteMessageBatch(messages) {
   if (messages.length === 0) return;
   try {
+    // Pass abortSignal so a graceful-shutdown that lands mid-delete
+    // returns within tens of ms (matches the ReceiveMessage abort
+    // posture below). Consistency point with the receive path.
     const resp = await sqsClient.send(new DeleteMessageBatchCommand({
       QueueUrl: config.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
       Entries: messages.map((m, i) => ({
         Id: String(i),
         ReceiptHandle: m.ReceiptHandle,
       })),
-    }));
+    }), { abortSignal: stopController?.signal });
     if (resp.Failed && resp.Failed.length > 0) {
       logger.warn('view-update-consumer: DeleteMessageBatch had partial failures', {
         failed_count: resp.Failed.length,

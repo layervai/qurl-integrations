@@ -282,6 +282,26 @@ describe('view-update-consumer', () => {
       await consumer.stop();
     });
 
+    test('SDK response missing Messages property is handled (defensive ?? [])', async () => {
+      // SDK upgrade or wire-shape change could elide the Messages
+      // field on an empty response. The `resp.Messages || []`
+      // defensive default at the use site keeps the for-loop happy;
+      // pin that contract so a future refactor that drops the
+      // default fails this test loudly.
+      sqsMock.on(ReceiveMessageCommand).resolves({ /* no Messages key */ });
+
+      consumer.start();
+      await consumer._test.pollOnce();
+
+      // No callback fired, no log line about parsing failure.
+      const errLogs = logger.warn.mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('malformed'),
+      );
+      expect(errLogs).toHaveLength(0);
+
+      await consumer.stop();
+    });
+
     test('non-AbortError on ReceiveMessage is logged + returns cleanly', async () => {
       sqsMock.on(ReceiveMessageCommand).rejects(new Error('SQS throttled'));
 
