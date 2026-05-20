@@ -6,7 +6,7 @@
 //   GET  /v1/webhooks                  → lists for owner
 //   PATCH /v1/webhooks/{id}            → updates events list
 
-const { ensureWebhookSubscription, _internals } = require('../src/qurl-webhook-registrar');
+const { ensureWebhookSubscription, buildSsmPersistSecret, _internals } = require('../src/qurl-webhook-registrar');
 
 const ORIGINAL_FETCH = global.fetch;
 
@@ -736,6 +736,37 @@ describe('redactSecret — recursive scrubbing', () => {
     const json = JSON.stringify(out);
     expect(json).not.toContain('whsec_deeply_nested');
     expect(json).toContain('[TRUNCATED]');
+  });
+});
+
+describe('buildSsmPersistSecret — abortSignal placement (regression guard for cr round-8)', () => {
+  it('passes abortSignal on send\'s SECOND arg, not on the Command constructor (constructor would silently drop it)', async () => {
+    // The bug round-8 caught: putting {abortSignal: ...} as the second
+    // arg to `new PutParameterCommand({...}, ...)` is silently dropped
+    // because the Command takes only `input`. Has to land on
+    // `client.send(cmd, { abortSignal })`.
+    let sendCalls = [];
+    const fakeSsmClient = { send: jest.fn(async (cmd, opts) => { sendCalls.push({ cmd, opts }); }) };
+    class FakePutParameterCommand {
+      constructor(input) { this.input = input; }
+    }
+    const persist = buildSsmPersistSecret({
+      ssmClient: fakeSsmClient,
+      paramName: '/test/QURL_WEBHOOK_SECRET',
+      PutParameterCommand: FakePutParameterCommand,
+    });
+    await persist('whsec_new_value');
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].cmd.input).toEqual({
+      Name: '/test/QURL_WEBHOOK_SECRET',
+      Type: 'SecureString',
+      Value: 'whsec_new_value',
+      Overwrite: true,
+    });
+    // Critical assertion — abortSignal lives on the send-call options,
+    // NOT swallowed by the Command constructor.
+    expect(sendCalls[0].opts).toEqual({ abortSignal: expect.any(AbortSignal) });
+    expect(sendCalls[0].opts.abortSignal.aborted).toBe(false);
   });
 });
 

@@ -24,7 +24,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { handleFlowInteraction } = require('./flow-dispatch');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
-const { ensureWebhookSubscription } = require('./qurl-webhook-registrar');
+const { ensureWebhookSubscription, buildSsmPersistSecret } = require('./qurl-webhook-registrar');
 // Eager require so a missing dep fails at boot, not at first persist.
 const ssmSdk = require('@aws-sdk/client-ssm');
 // Hoisted to module scope (matches the DynamoDBClient pattern above):
@@ -1120,20 +1120,11 @@ async function start() {
       // strand the receiver on PLACEHOLDER. bestEffortPersist swallows
       // the rejection and degrades to in-memory-only.
       const persistSecret = config.QURL_WEBHOOK_SECRET_SSM_PARAM
-        ? async (secret) => {
-          // abortSignal on the SDK call so a 5s timeout actually
-          // cancels the underlying HTTP request, freeing the socket /
-          // credentials sooner. Without this, Promise.race would
-          // resolve after 5s but the SDK send would keep running in
-          // the background (idempotent because Overwrite=true, but
-          // wasteful).
-          await getSsmClient().send(new ssmSdk.PutParameterCommand({
-            Name: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
-            Type: 'SecureString',
-            Value: secret,
-            Overwrite: true,
-          }, { abortSignal: AbortSignal.timeout(5_000) }));
-        }
+        ? buildSsmPersistSecret({
+          ssmClient: getSsmClient(),
+          paramName: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
+          PutParameterCommand: ssmSdk.PutParameterCommand,
+        })
         : undefined;
       // Length cap lives at the wire boundary (createSubscription in
       // qurl-webhook-registrar.js). The env label uses region only —

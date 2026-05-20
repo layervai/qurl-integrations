@@ -358,7 +358,11 @@ async function ensureWebhookSubscription(opts) {
     // Parallel — each DELETE is independent + the 404-on-concurrent-
     // delete path is already swallowed per-loser, so concurrency is
     // safe. N=2-5 in practice (replica count); sequential would add
-    // ~100-200ms per loser on the recovery boot.
+    // ~100-200ms per loser on the recovery boot. Note: Promise.all
+    // propagates the FIRST non-404 rejection; siblings keep running
+    // detached. That's acceptable here — we already lost the race for
+    // a clean delete state, and the boot path will fail loudly on the
+    // first error rather than logging N of them.
     await Promise.all(losers.map(loser =>
       deleteSubscription({ apiEndpoint, apiKey, webhookId: loser.webhook_id }),
     ));
@@ -432,17 +436,40 @@ async function ensureWebhookSubscription(opts) {
     logger.info('qURL webhook subscription created', { webhookId, url: bridgeUrl });
   }
 
-  if (!secret) {
-    throw new Error(`Webhook subscription ${action} but no secret in response (qurl-service contract drift?)`);
-  }
+  // Note: no `if (!secret)` guard here — `createSubscription` and
+  // `rotateSecret` both validate `typeof data.secret === 'string'`
+  // and throw their own contract-drift error before returning. A
+  // second check at this point would be unreachable.
 
   await bestEffortPersist({ persistSecret, value: secret });
 
   return { secret, webhookId, action };
 }
 
+// Build a persistSecret callback that writes the rotated secret to an
+// SSM SecureString parameter with a 5s timeout. Extracted from
+// index.js so the timeout-placement (abortSignal on send's second arg,
+// NOT on the Command constructor — the constructor silently drops
+// extra args and defeats the timeout) is greppable and pinnable in
+// tests. Callers inject the SDK module + client to keep this file
+// SDK-import-free (so unit tests don't have to mock SSM SDK eagerly).
+function buildSsmPersistSecret({ ssmClient, paramName, PutParameterCommand, timeoutMs = 5_000 }) {
+  return async (secret) => {
+    await ssmClient.send(
+      new PutParameterCommand({
+        Name: paramName,
+        Type: 'SecureString',
+        Value: secret,
+        Overwrite: true,
+      }),
+      { abortSignal: AbortSignal.timeout(timeoutMs) },
+    );
+  };
+}
+
 module.exports = {
   ensureWebhookSubscription,
+  buildSsmPersistSecret,
   PLACEHOLDER_SECRET,
   _internals: {
     canonicalUrl,
