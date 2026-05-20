@@ -80,10 +80,12 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		// handleAdminClaim — the short-circuit above already returned
 		// for the in-practice case, and re-dispatching here would
 		// risk a double-write if a future refactor changed the
-		// short-circuit. Render a generic error so a misrouted
-		// caller still gets a Slack reply rather than a timeout.
+		// short-circuit. Reuse the generic default-arm copy so the
+		// user-visible reply doesn't reference internal routing
+		// terminology; the slog.Warn above is the operator-facing
+		// signal.
 		slog.Warn("admin claim reached dispatcher switch — defensive misroute (short-circuit above should have caught it)", "team_id", teamID, "user_id", userID)
-		respondSlack(w, ":warning: unexpected admin-claim routing — try `/qurl admin claim` again, or see logs.")
+		respondSlack(w, "Unknown admin action. Try `/qurl help`.")
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:
@@ -410,27 +412,29 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// who pulled the admin roster when. Mirrors the success slog on
 	// add/remove/revoke. `admin_set_size_raw` is the unfiltered
 	// `readStringSet` return (counts whatever DDB returned, including
-	// empties that the render loop filters defensively);
-	// `displayed_admins` is what the user-visible "Admins:" line
-	// rendered after the owner filter. The split keeps the log
-	// self-describing if a future readStringSet contract change ever
-	// surfaces empty members.
-	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size_raw", len(admins), "displayed_admins", len(otherAdmins))
+	// empties / shape-bad members that the render loop filters
+	// defensively); `non_owner_admin_count` is the count rendered on
+	// the user-visible "Admins:" line (after owner + shape filters).
+	// Owner is always rendered on its own line; "displayed" would be
+	// misleading because both counts contribute to the final reply.
+	slog.Info("admin list succeeded", "team_id", teamID, "user_id", callerUserID, "admin_set_size_raw", len(admins), "non_owner_admin_count", len(otherAdmins))
 	respondSlack(w, body)
 }
 
 // looksLikeSlackUserID reports whether s matches Slack's documented
-// user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid) prefix
-// followed by 1+ uppercase-alphanumeric chars. Used as a defensive
-// guard on values read from DDB before interpolating into Slack
-// mrkdwn `<@%s>` mentions: the parser-level userMentionPattern
-// already constrains values written through admin add/remove, but
-// owner_id is written by BindWorkspace from the OAuth callback (a
-// different code path), and admin_slack_user_ids could in principle
-// be hand-mutated. Cheap insurance against a malformed value
-// breaking out of the mention surface.
+// user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid)
+// prefix followed by 8+ uppercase-alphanumeric chars. The 9-char
+// floor matches the parser-side userMentionPattern (`[UW][A-Z0-9]{8,63}`)
+// so a value rejected at parse time is also rejected here. Used as
+// a defensive guard on values read from DDB before interpolating
+// into Slack mrkdwn `<@%s>` mentions: the parser already constrains
+// values written through admin add/remove, but owner_id is written
+// by BindWorkspace from the OAuth callback (a different code path),
+// and admin_slack_user_ids could in principle be hand-mutated. Cheap
+// insurance against a malformed value breaking out of the mention
+// surface.
 func looksLikeSlackUserID(s string) bool {
-	if len(s) < 2 {
+	if len(s) < 9 {
 		return false
 	}
 	if s[0] != 'U' && s[0] != 'W' {

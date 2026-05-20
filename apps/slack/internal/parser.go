@@ -586,7 +586,7 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 			return nil, fmt.Errorf("%w: %q (admin revoke takes a `q_<id>` qurl_id, not an `$alias`)", ErrUnexpectedArgument, tail[0])
 		}
 		if !qurlIDPattern.MatchString(tail[0]) {
-			return nil, fmt.Errorf("%w: %q (expected `q_<id>`)", ErrInvalidQURLID, tail[0])
+			return nil, fmt.Errorf("%w: %q (expected `q_<id>`)", ErrInvalidQURLID, truncateForError(tail[0]))
 		}
 		cmd.Target = tail[0]
 		if len(tail) > 1 {
@@ -629,6 +629,20 @@ func matchUserMention(tok string) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+// truncateForError caps a token at 32 runes for echo in error
+// messages. qurlIDPattern's {16,64} ceiling allows up to 64-char
+// values; a pathological paste would echo 64+ chars back to the
+// user, which is noisy. The cap is rune-aware (Slack pastes can
+// contain non-ASCII when the user fat-pastes the wrong content).
+func truncateForError(s string) string {
+	const maxRunes = 32
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 // parseAliasToken enforces the `$` sigil, strips it, and validates the

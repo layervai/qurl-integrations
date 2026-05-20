@@ -95,6 +95,10 @@ func TestHandleAdminRevoke_InvalidQURLID(t *testing.T) {
 // rotated workspace API key surfaces a "re-run /qurl setup" hint
 // instead of the generic upstream-error copy, so the admin has a
 // concrete next step.
+//
+// addCustomer uses map-assignment for routes, so the per-iteration
+// re-register replaces the previous handler — the second iteration
+// genuinely exercises the 403 status, not a stale 401.
 func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -113,6 +117,35 @@ func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleAdminRevoke_CheckAdminError fences the 5xx surface on
+// the admin-gate path: a DDB transient failure during CheckAdmin
+// (the GetItem against workspace_mappings) renders the generic
+// "failed to verify admin status" reply rather than misclassifying
+// the user as non-admin. The slog.Error audit attribution is
+// implicitly fenced (test exercises the code path; CloudWatch
+// readers see the captured "error" attr).
+func TestHandleAdminRevoke_CheckAdminError(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "failed to verify admin status") {
+		t.Errorf("reply missing CheckAdmin-error surface: %q", reply)
+	}
+}
+
+// errString is a tiny test-only error type for injecting transient
+// DDB failures. Production code wraps these through ddbToError into
+// the *slackdata.Error shape, so the underlying type doesn't need to
+// be a DDB exception.
+type errString string
+
+func (e errString) Error() string { return string(e) }
 
 // TestHandleAdminRevoke_NonAdmin fences the admin-only gate on revoke.
 func TestHandleAdminRevoke_NonAdmin(t *testing.T) {

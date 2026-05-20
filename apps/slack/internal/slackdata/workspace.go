@@ -3,6 +3,7 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"time"
@@ -423,7 +424,16 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 			Title:      "RemoveAdmin: workspace is not bound",
 		}
 	}
-	if ownerID := readString(out.Item, attrOwnerID); ownerID != "" && ownerID == targetUserID {
+	ownerID := readString(out.Item, attrOwnerID)
+	switch ownerID {
+	case "":
+		// BindWorkspace stamps owner_id on first claim, so an empty
+		// value would only fire on storage corruption. The owner-
+		// check would no-op silently — log the corruption signal so
+		// on-call sees it (the admin still gets the normal
+		// CCFE-or-success path from the UpdateItem below).
+		slog.Warn("RemoveAdmin: workspace_mappings row missing owner_id (storage corruption); owner-check bypassed", "team_id", teamID, "target_user_id", targetUserID)
+	case targetUserID:
 		return &Error{
 			StatusCode: http.StatusBadRequest,
 			Code:       ErrCodeCannotRemoveOwner,
