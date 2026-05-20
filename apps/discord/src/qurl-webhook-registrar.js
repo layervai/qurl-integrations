@@ -120,8 +120,20 @@ async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeou
   }
   const text = await resp.text();
   let parsed = text;
-  try { parsed = text ? JSON.parse(text) : null; } catch { /* keep as text */ }
-  if (!resp.ok) throw new QurlServiceError(resp.status, parsed, op);
+  let parsedJson = true;
+  try { parsed = text ? JSON.parse(text) : null; } catch { parsedJson = false; }
+  if (!resp.ok) {
+    // Defense-in-depth scrub for the non-JSON branch — redactSecret
+    // is a no-op on strings (it only walks object keys), so a 5xx
+    // with the secret embedded in a plaintext stack trace or proxy-
+    // injected HTML would otherwise reach the log via the QurlServiceError
+    // message. Match any 32+ hex-character run (qurl-service emits
+    // 64-hex `whsec_...` per its API contract) before stringification.
+    if (!parsedJson && typeof parsed === 'string') {
+      parsed = parsed.replace(/[0-9a-f]{32,}/gi, '[REDACTED]');
+    }
+    throw new QurlServiceError(resp.status, parsed, op);
+  }
   return parsed;
 }
 
@@ -147,12 +159,17 @@ function canonicalUrl(u) {
   } catch { return u; }
 }
 
+// Page-walk bound — 50 × 100 = 5000 subscriptions. Combined with the
+// explicit `?limit=100` below, a misbehaving cursor can't spin forever.
+// Named constant for grep-parity with REDACT_MAX_DEPTH / DESCRIPTION_MAX_LEN.
+const MAX_PAGINATION_PAGES = 50;
+
 // Returns ALL subscriptions matching our URL (typically 0 or 1; >1
 // only after a cold-bootstrap race created duplicates — see the
 // dedupe path in ensureWebhookSubscription). Paginates so a caller
 // with many subs doesn't lose the match on page 2. Page size 100
-// requested explicitly; loop bounded at 50 iterations (5000 subs)
-// so a misbehaving cursor can't spin forever.
+// requested explicitly; loop bounded by MAX_PAGINATION_PAGES so a
+// misbehaving cursor can't spin forever.
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
@@ -164,7 +181,7 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
   const target = canonicalUrl(bridgeUrl);
   const matches = [];
   let cursor = '';
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < MAX_PAGINATION_PAGES; i++) {
     // Explicit limit=100 (vs relying on a server default that could
     // silently change). Combined with the 50-page cap, bounds the
     // total walk at 5000 subs.
@@ -182,7 +199,7 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
     if (!next) return matches;
     cursor = next;
   }
-  throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
+  throw new Error(`findExistingSubscriptions: pagination cap hit (${MAX_PAGINATION_PAGES} pages, ~${MAX_PAGINATION_PAGES * 100} subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates`);
 }
 
 async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
@@ -313,6 +330,14 @@ async function bestEffortPersist({ persistSecret, value }) {
 // includes qurl.accessed. PATCH is idempotent so two replicas racing
 // here is harmless. Factored out because the reuse path and the
 // rotate path both need it.
+//
+// Inclusion-only policy: we only PATCH when qurl.accessed is MISSING
+// — we don't trim extra event types that an operator or future
+// server-side default may have added (qurl.created, qurl.revoked,
+// etc.). Additive drift is tolerated because the receiver
+// 200-ignores any non-qurl.accessed type, so the bot doesn't care
+// what else is subscribed. Trimming here would fight a legitimate
+// operator action without coordination.
 async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
   const events = existing?.events ?? [];
   if (events.includes(QURL_ACCESSED)) return;

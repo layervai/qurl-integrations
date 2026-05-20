@@ -72,7 +72,10 @@ describe('POST /webhooks/qurl — boot-race PLACEHOLDER handling', () => {
     // eslint-disable-next-line global-require
     const config = require('../src/config');
     const original = config.QURL_WEBHOOK_SECRET;
-    config.QURL_WEBHOOK_SECRET = 'PLACEHOLDER';
+    // Use the setter (not direct mutation) — single canonical path
+    // means a future rename of QURL_WEBHOOK_SECRET → setSecret would
+    // fail this test loudly rather than silently mutate the wrong key.
+    config.setQurlWebhookSecret('PLACEHOLDER');
     try {
       const res = await request(app)
         .post('/webhooks/qurl')
@@ -82,7 +85,7 @@ describe('POST /webhooks/qurl — boot-race PLACEHOLDER handling', () => {
       expect(res.status).toBe(503);
       expect(res.body).toEqual({ error: 'Webhook receiver not configured' });
     } finally {
-      config.QURL_WEBHOOK_SECRET = original;
+      config.setQurlWebhookSecret(original);
     }
   });
 });

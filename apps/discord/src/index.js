@@ -27,18 +27,10 @@ const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { ensureWebhookSubscription, buildSsmPersistSecret } = require('./qurl-webhook-registrar');
 // Eager require so a missing dep fails at boot, not at first persist.
 const ssmSdk = require('@aws-sdk/client-ssm');
-// Hoisted to module scope (matches the DynamoDBClient pattern above):
-// consistent client lifecycle, SDK connection-reuse logic gets a fair
-// shot if persistSecret is ever called more than once per boot.
-// Created lazily inside the closure so processes that don't persist
-// (no QURL_WEBHOOK_SECRET_SSM_PARAM) don't pay the construction cost.
-let ssmClientInstance = null;
-function getSsmClient() {
-  if (!ssmClientInstance) {
-    ssmClientInstance = new ssmSdk.SSMClient({ region: process.env.AWS_REGION });
-  }
-  return ssmClientInstance;
-}
+// SSM client constructed inside the persistSecret factory below at
+// the single call-site. The lazy-init wrapper was over-engineered:
+// persistSecret runs at most once per boot, so there's nothing to
+// amortize across multiple calls.
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
@@ -1121,7 +1113,7 @@ async function start() {
       // the rejection and degrades to in-memory-only.
       const persistSecret = config.QURL_WEBHOOK_SECRET_SSM_PARAM
         ? buildSsmPersistSecret({
-          ssmClient: getSsmClient(),
+          ssmClient: new ssmSdk.SSMClient({ region: process.env.AWS_REGION }),
           paramName: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
           PutParameterCommand: ssmSdk.PutParameterCommand,
         })
@@ -1133,7 +1125,9 @@ async function start() {
       // and not actually disambiguate. Region is the meaningful
       // breakdown; operators distinguishing sandbox/prod use the
       // subscription's owner_id or URL host instead.
-      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'})`;
+      // `unknown` (not `unset`) so the qurl-service UI label reads as
+      // a missing-value diagnostic rather than a configured value.
+      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unknown'})`;
       ensureWebhookSubscription({
         apiEndpoint: config.QURL_ENDPOINT,
         apiKey: config.QURL_API_KEY,

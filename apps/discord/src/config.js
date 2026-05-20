@@ -358,6 +358,13 @@ module.exports = {
 
   // qURL webhook receiver HMAC; peer is the qurl-service subscription's
   // `secret` field on POST /v1/webhooks (must match exactly).
+  // CONSUMERS: ALWAYS read via `config.QURL_WEBHOOK_SECRET` (property
+  // access on the exports object). Do NOT destructure
+  // `const { QURL_WEBHOOK_SECRET } = require('./config')` — that
+  // captures the pre-rotation value and 401s every webhook after
+  // setQurlWebhookSecret runs, with no rebind on rotation. The
+  // receiver in routes/qurl-webhook.js reads `config.QURL_WEBHOOK_SECRET`
+  // on every request precisely so the rotated value takes effect.
   QURL_WEBHOOK_SECRET: process.env.QURL_WEBHOOK_SECRET,
   // SSM parameter name where the auto-register path persists the
   // rotated webhook secret. Unset = in-memory-only (every restart
