@@ -62,6 +62,31 @@ beforeEach(() => {
   mockRecordQurlView.mockImplementation(async () => 'recorded');
 });
 
+describe('POST /webhooks/qurl — boot-race PLACEHOLDER handling', () => {
+  // During the brief window between server-listen and auto-register
+  // resolving, config.QURL_WEBHOOK_SECRET may still hold the
+  // terraform-seeded PLACEHOLDER. The receiver MUST 503 (qurl-service
+  // retriable) on this case rather than 401 (non-retriable) — a 401
+  // would drop in-flight events permanently.
+  it('returns 503 when secret is the literal PLACEHOLDER (boot race)', async () => {
+    // eslint-disable-next-line global-require
+    const config = require('../src/config');
+    const original = config.QURL_WEBHOOK_SECRET;
+    config.QURL_WEBHOOK_SECRET = 'PLACEHOLDER';
+    try {
+      const res = await request(app)
+        .post('/webhooks/qurl')
+        .set('Content-Type', 'application/json')
+        .set('QURL-Signature', '0'.repeat(64))
+        .send('{}');
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'Webhook receiver not configured' });
+    } finally {
+      config.QURL_WEBHOOK_SECRET = original;
+    }
+  });
+});
+
 describe('POST /webhooks/qurl — signature verification', () => {
   it('accepts a request with a valid bare-hex HMAC over the raw body', async () => {
     const raw = JSON.stringify(VALID_PAYLOAD);

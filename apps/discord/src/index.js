@@ -1128,11 +1128,13 @@ async function start() {
         initialSecret: config.QURL_WEBHOOK_SECRET,
         persistSecret,
       }).then(result => {
-        // Update the in-memory secret so the receiver uses what the
-        // registrar just got (especially important when persistSecret
-        // is denied or skipped — without this update the receiver
-        // would still verify against the OLD config.QURL_WEBHOOK_SECRET).
-        config.QURL_WEBHOOK_SECRET = result.secret;
+        // Wire the registrar's secret into the receiver via the
+        // config setter. The receiver reads config.QURL_WEBHOOK_SECRET
+        // every request; updating it here makes the new secret
+        // visible immediately. Setter (vs direct mutation) keeps
+        // the test surface for "receiver verifies the new secret"
+        // explicit + greppable.
+        config.setQurlWebhookSecret(result.secret);
         logger.info('qURL webhook self-registration complete', {
           webhook_id: result.webhookId,
           action: result.action,

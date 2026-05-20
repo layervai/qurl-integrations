@@ -57,9 +57,15 @@ router.post('/qurl', async (req, res) => {
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
-  // 503 vs 401: 503 says "receiver is up but unconfigured" (set
-  // QURL_WEBHOOK_SECRET in SSM); 401 says "real signature mismatch."
-  if (!config.QURL_WEBHOOK_SECRET) {
+  // 503 vs 401: 503 says "receiver is up but unconfigured"; 401 says
+  // "real signature mismatch." `PLACEHOLDER` is the terraform-seeded
+  // sentinel — treating it as "unconfigured" handles the boot race
+  // where a webhook arrives in the brief window AFTER the listener
+  // opens but BEFORE auto-register has updated config with the real
+  // secret. qurl-service retries 503 deliveries; what we'd return
+  // otherwise (401 against the placeholder) is non-retriable from
+  // qurl-service's perspective and would drop the event.
+  if (!config.QURL_WEBHOOK_SECRET || config.QURL_WEBHOOK_SECRET === 'PLACEHOLDER') {
     return res.status(503).json({ error: 'Webhook receiver not configured' });
   }
 

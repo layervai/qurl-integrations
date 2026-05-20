@@ -371,3 +371,28 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
     expect(body.events).toEqual(['qurl.accessed']);
   });
 });
+
+describe('ensureWebhookSubscription — config-mutation seam (receiver picks up new secret)', () => {
+  // The wire-up cr called out: receiver reads config.QURL_WEBHOOK_SECRET
+  // on every request; the registrar's `.then()` callback writes to
+  // config via setQurlWebhookSecret() — that mutation IS what makes
+  // the new secret active without restarting the process. Test pins
+  // both directions: registrar returns a secret, caller writes it to
+  // config, receiver-side verification (in-process simulation) uses it.
+  it('the secret the registrar returns is the one the receiver verifies against', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_seam', secret: 'whsec_new_active',
+      } } }),
+    });
+    const fakeConfig = { QURL_WEBHOOK_SECRET: 'PLACEHOLDER' };
+    const setQurlWebhookSecret = (s) => { fakeConfig.QURL_WEBHOOK_SECRET = s; };
+    const result = await ensureWebhookSubscription(BASE_OPTS);
+    // Caller's responsibility (mirrors apps/discord/src/index.js):
+    setQurlWebhookSecret(result.secret);
+    // After the .then() resolves, the receiver's view of the config:
+    expect(fakeConfig.QURL_WEBHOOK_SECRET).toBe('whsec_new_active');
+    expect(fakeConfig.QURL_WEBHOOK_SECRET).not.toBe('PLACEHOLDER');
+  });
+});

@@ -664,4 +664,17 @@ module.exports = {
   // Exposed as a function, NOT a property — second call returns
   // undefined.
   takeGatewayHandoffHmac,
+
+  // Explicit setter for QURL_WEBHOOK_SECRET that the auto-register
+  // path (apps/discord/src/qurl-webhook-registrar.js) calls after
+  // it learns the canonical secret from qurl-service. The receiver
+  // (routes/qurl-webhook.js) reads `config.QURL_WEBHOOK_SECRET`
+  // straight from this object, so the assignment IS what makes the
+  // newly-registered secret visible. Surface as a setter rather
+  // than a bare property mutation so the wiring is greppable and
+  // the test surface (`config.setQurlWebhookSecret(...)` →
+  // receiver verifies new secret) is obvious.
+  setQurlWebhookSecret(secret) {
+    this.QURL_WEBHOOK_SECRET = secret;
+  },
 };
