@@ -24,21 +24,6 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { handleFlowInteraction } = require('./flow-dispatch');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
-const { ensureWebhookSubscription, buildSsmPersistSecret } = require('./qurl-webhook-registrar');
-// Eager require so a missing dep fails at boot, not at first persist.
-const ssmSdk = require('@aws-sdk/client-ssm');
-// Hoisted to module scope (matches the DynamoDBClient pattern above):
-// consistent client lifecycle, SDK connection-reuse logic gets a fair
-// shot if persistSecret is ever called more than once per boot.
-// Created lazily inside the closure so processes that don't persist
-// (no QURL_WEBHOOK_SECRET_SSM_PARAM) don't pay the construction cost.
-let ssmClientInstance = null;
-function getSsmClient() {
-  if (!ssmClientInstance) {
-    ssmClientInstance = new ssmSdk.SSMClient({ region: process.env.AWS_REGION });
-  }
-  return ssmClientInstance;
-}
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
@@ -1109,79 +1094,13 @@ async function start() {
   //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
-    // Self-register the qurl.accessed webhook subscription post-listen,
-    // pre-traffic. Fire-and-forget — failures log loudly but don't
-    // crash the boot path because the manual operator-curl recovery
-    // route still works. config.QURL_API_KEY + BASE_URL must be set
-    // (already required for /qurl send to function).
-    if (config.QURL_API_KEY && config.QURL_ENDPOINT && config.BASE_URL) {
-      // 5s timeout so a hung IMDS / network blackhole can't leave the
-      // registrar's `.then(setQurlWebhookSecret)` pending forever and
-      // strand the receiver on PLACEHOLDER. bestEffortPersist swallows
-      // the rejection and degrades to in-memory-only.
-      const persistSecret = config.QURL_WEBHOOK_SECRET_SSM_PARAM
-        ? buildSsmPersistSecret({
-          ssmClient: getSsmClient(),
-          paramName: config.QURL_WEBHOOK_SECRET_SSM_PARAM,
-          PutParameterCommand: ssmSdk.PutParameterCommand,
-        })
-        : undefined;
-      // Length cap lives at the wire boundary (createSubscription in
-      // qurl-webhook-registrar.js). The env label uses region only —
-      // NODE_ENV is conventionally `production` for both sandbox and
-      // prod deploys, so it would render `env=production` everywhere
-      // and not actually disambiguate. Region is the meaningful
-      // breakdown; operators distinguishing sandbox/prod use the
-      // subscription's owner_id or URL host instead.
-      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'})`;
-      ensureWebhookSubscription({
-        apiEndpoint: config.QURL_ENDPOINT,
-        apiKey: config.QURL_API_KEY,
-        // Strip a trailing slash so `BASE_URL=https://bot/` doesn't
-        // produce `https://bot//webhooks/qurl` — canonicalUrl can
-        // normalize trailing-slash drift between subs, but not an
-        // internal double slash, which would silently fail to match
-        // any hand-registered sub that lacks it.
-        bridgeUrl: `${config.BASE_URL.replace(/\/$/, '')}/webhooks/qurl`,
-        description,
-        // Pass the SSM-loaded secret so the registrar can skip rotation
-        // when steady-state (existing sub + non-PLACEHOLDER secret) —
-        // prevents multi-replica HTTP-fleet boots from rotating each
-        // other's secrets into uselessness.
-        initialSecret: config.QURL_WEBHOOK_SECRET,
-        persistSecret,
-      }).then(result => {
-        // Wire the registrar's secret into the receiver via the
-        // config setter. The receiver reads config.QURL_WEBHOOK_SECRET
-        // every request; updating it here makes the new secret
-        // visible immediately. Setter (vs direct mutation) keeps
-        // the test surface for "receiver verifies the new secret"
-        // explicit + greppable.
-        config.setQurlWebhookSecret(result.secret);
-        logger.info('qURL webhook self-registration complete', {
-          webhook_id: result.webhookId,
-          action: result.action,
-        });
-      }).catch(err => {
-        // Don't crash the boot path — manual curl is still a recovery
-        // route. But log loudly so the failure is visible without
-        // user-facing symptoms.
-        // Cap err.message — most failures are short (HTTP status +
-        // op), but a TypeError stack or a non-QurlServiceError raw
-        // throw could include a long message that survived redactSecret
-        // (which only walks parsed bodies, not free-form strings).
-        // 500 chars covers typical stack tops without unbounded log
-        // lines.
-        const errMsg = typeof err.message === 'string' ? err.message.slice(0, 500) : '';
-        logger.error('qURL webhook self-registration failed', {
-          error: errMsg,
-          status: err.status,
-          op: err.op,
-        });
-      });
-    } else {
-      logger.warn('qURL webhook self-registration skipped — QURL_API_KEY / QURL_ENDPOINT / BASE_URL missing');
-    }
+    // Webhook subscription registration is OUT-OF-PROCESS as of the
+    // webhook-registrar Lambda (see `apps/discord/lambda/webhook-registrar/`).
+    // The Lambda is invoked once per deploy via Terraform, writes the
+    // rotated/created secret to SSM, and the bot reads
+    // `QURL_WEBHOOK_SECRET` from env at boot — single-instance Lambda
+    // is race-free by construction, no in-app dedupe/lock logic needed.
+    // Rotation: re-invoke the Lambda + force-redeploy the bot.
   } else if (isGateway) {
     // Returns 503 until isReady() flips true (after READY from the
     // Discord gateway). Dockerfile --start-period=30s covers this

@@ -571,37 +571,10 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   });
 });
 
-describe('ensureWebhookSubscription — real config integration (setQurlWebhookSecret)', () => {
-  // The fakeConfig-based mutation-seam test (above) keeps the unit
-  // hermetic but pins a synthesized shape. This test exercises the
-  // REAL `setQurlWebhookSecret` from src/config.js so a future rename
-  // or signature change is caught loudly here instead of at boot.
-  it('writing through the real config setter updates the canonical export', () => {
-    const config = require('../src/config');
-    const prev = config.QURL_WEBHOOK_SECRET;
-    try {
-      config.setQurlWebhookSecret('whsec_integration_test');
-      expect(config.QURL_WEBHOOK_SECRET).toBe('whsec_integration_test');
-    } finally {
-      config.setQurlWebhookSecret(prev);
-    }
-  });
-
-  it('works even when destructured-and-called (closure-captures module.exports, not `this`)', () => {
-    const { setQurlWebhookSecret } = require('../src/config');
-    const config = require('../src/config');
-    const prev = config.QURL_WEBHOOK_SECRET;
-    try {
-      // Pre-fix shorthand `setQurlWebhookSecret(secret) { this.X = secret }`
-      // would silently TypeError here because `this` is undefined in
-      // strict-mode standalone calls.
-      setQurlWebhookSecret('whsec_destructured');
-      expect(config.QURL_WEBHOOK_SECRET).toBe('whsec_destructured');
-    } finally {
-      setQurlWebhookSecret(prev);
-    }
-  });
-});
+// Real-config setter tests removed: webhook-registrar Lambda is the
+// sole writer of QURL_WEBHOOK_SECRET (via SSM). The bot reads it
+// once at boot from env and never mutates it in-process, so there
+// is no setter seam to pin.
 
 describe('ensureWebhookSubscription — multi-subscription scan', () => {
   it('matches the correct sub when several non-matching ones share the page', async () => {
@@ -808,27 +781,25 @@ describe('pickSurvivor — deterministic across replicas', () => {
   });
 });
 
-describe('ensureWebhookSubscription — config-mutation seam (receiver picks up new secret)', () => {
-  // The wire-up cr called out: receiver reads config.QURL_WEBHOOK_SECRET
-  // on every request; the registrar's `.then()` callback writes to
-  // config via setQurlWebhookSecret() — that mutation IS what makes
-  // the new secret active without restarting the process. Test pins
-  // both directions: registrar returns a secret, caller writes it to
-  // config, receiver-side verification (in-process simulation) uses it.
-  it('the secret the registrar returns is the one the receiver verifies against', async () => {
+describe('ensureWebhookSubscription — return-shape pin (Lambda persists then bot reads from SSM)', () => {
+  // Lambda flow: ensureWebhookSubscription returns a secret →
+  // persistSecret callback writes it to SSM → bot reads it from env
+  // at next deploy. This test pins the return-shape contract that the
+  // Lambda relies on: the secret in result.secret is exactly what the
+  // bot will end up verifying webhooks against.
+  it('the secret the registrar returns matches the value the persistSecret callback receives', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
         webhook_id: 'wh_seam', secret: 'whsec_new_active',
       } } }),
     });
-    const fakeConfig = { QURL_WEBHOOK_SECRET: 'PLACEHOLDER' };
-    const setQurlWebhookSecret = (s) => { fakeConfig.QURL_WEBHOOK_SECRET = s; };
-    const result = await ensureWebhookSubscription(BASE_OPTS);
-    // Caller's responsibility (mirrors apps/discord/src/index.js):
-    setQurlWebhookSecret(result.secret);
-    // After the .then() resolves, the receiver's view of the config:
-    expect(fakeConfig.QURL_WEBHOOK_SECRET).toBe('whsec_new_active');
-    expect(fakeConfig.QURL_WEBHOOK_SECRET).not.toBe('PLACEHOLDER');
+    const persisted = [];
+    const result = await ensureWebhookSubscription({
+      ...BASE_OPTS,
+      persistSecret: async (s) => { persisted.push(s); },
+    });
+    expect(result.secret).toBe('whsec_new_active');
+    expect(persisted).toEqual(['whsec_new_active']);
   });
 });

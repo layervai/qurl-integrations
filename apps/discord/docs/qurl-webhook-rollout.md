@@ -9,42 +9,80 @@ type=transit resources (every Discord bot send is transit).
 
 This rollout replaces the poll with a `qurl.accessed` webhook receiver.
 
-## Rollout order
+## Architecture
 
-1. **`qurl-views` DDB table.** Provisioned by the deploying
-   organization's infrastructure (separate from this repo). Without
-   it, the bot's monitor `BatchGet` returns the empty map and the
-   counter silently stays at `0 viewed / N pending` forever. Confirm
-   with:
-   ```
-   aws dynamodb describe-table \
-     --table-name <DDB_TABLE_PREFIX>qurl-views \
-     --region <env-region>
-   ```
-2. **Deploy the bot.** On `isHttp` boot, the bot self-registers its
-   `qurl.accessed` webhook subscription with qurl-service using its
-   own `QURL_API_KEY` (the same key it uses to mint qURLs — so the
-   subscription's `owner_id` matches the qURLs the bot creates).
-   Steady-state reuses the secret already in SSM/env. Bootstrap (no
-   subscription yet, or SSM seeded with `PLACEHOLDER`) creates or
-   rotates the subscription and best-effort writes the secret back
-   to SSM via `ssm:PutParameter`.
+Three pieces:
 
-   No manual operator curl required. The bot's `qURL webhook self-
-   registration complete` log line confirms the registration on each
-   boot.
+1. **`qurl-views` DDB table** — bot writes view events here on inbound
+   webhook receipt; the slash-command monitor reads it.
+2. **Bot HTTP service** — receives signed webhooks at `/webhooks/qurl`,
+   verifies HMAC against `QURL_WEBHOOK_SECRET` (read once at boot from
+   env-injected SSM), writes views to DDB.
+3. **`webhook-registrar` Lambda** —
+   [`apps/discord/lambda/webhook-registrar/`](../lambda/webhook-registrar/).
+   Single-instance, race-free by construction. Runs once per deploy via
+   Terraform `aws_lambda_invocation`. Creates / rotates / reuses the
+   `qurl.accessed` subscription against qurl-service, writes the secret
+   to SSM. Bot never registers itself.
 
-   Recovery if auto-register fails: the registrar logs at error
-   level and the bot continues booting; manual fallback is the
-   `curl` step in the [appendix](#appendix-manual-recovery) below.
+## Why a Lambda (not on-boot self-registration)
+
+An earlier auto-register-on-boot design ran the same registration code
+inside the bot's HTTP-tier boot path. That has an unavoidable cold-
+bootstrap race: on the very first deploy to a fresh environment, N
+HTTP replicas concurrently `POST /v1/webhooks` → N duplicate
+subscriptions, each with a distinct server-generated secret. SSM's
+last-write-wins picks one; the surviving N-1 deliver to dead-secret
+subs until manual cleanup. Mitigation in-app (dedupe-on-next-boot,
+force-rotate) recovers but leaves a duplicate-webhook-traffic window
+between the bad deploy and the next restart.
+
+A single-instance Lambda triggered by Terraform sidesteps the race
+entirely: only one execution per deploy, fail-fast on error (deploy
+itself fails), no in-app coordination needed.
+
+## Deploy flow
+
+Terraform-side ordering (config lives in `qurl-integrations-infra`):
+
+1. Apply the `qurl-views` DDB table + `QURL_WEBHOOK_SECRET` SSM
+   SecureString parameter (seeded as `PLACEHOLDER` on first apply).
+2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
+   the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
+   on the `QURL_WEBHOOK_SECRET` path; `logs:*`).
+3. `aws_lambda_invocation.webhook_registrar` runs synchronously during
+   apply with the deploy-specific input (bridge URL, region, param
+   names). If the Lambda fails (qurl-service down, IAM missing, etc.),
+   the apply fails and the bot's task-def update doesn't fire — no
+   half-registered state.
+4. Bot ECS service task-def updates with the just-rotated
+   `QURL_WEBHOOK_SECRET` injected from SSM as a `secrets` entry.
+   Rolling deploy replaces tasks; new tasks read the current secret;
+   receiver verifies inbound webhooks.
+
+## Rotation
+
+Re-invoke the Lambda (manual `aws lambda invoke`, scheduled EventBridge
+rule, or operator-triggered Terraform plan) → SSM updated → force-
+redeploy the bot's ECS service to pick up the new secret:
+
+```
+aws lambda invoke --function-name <name> --payload '{...}' /tmp/out.json
+aws ecs update-service --cluster <c> --service <s> --force-new-deployment ...
+```
+
+The Lambda's reuse-path semantics mean a rotation only fires a server-
+side `POST /v1/webhooks/{id}/secret` if the SSM secret has actually
+changed. Re-invoking a stable system is idempotent (the registrar
+finds the existing sub, sees the SSM secret matches, returns `reused`).
 
 ## Wire shape (pinned)
 
 - Header: `QURL-Signature` = bare-hex HMAC-SHA256 over the raw body.
   No `sha256=` prefix — that's the GitHub wire shape, NOT this one.
-- Body: `{id, type, data:{qurl_id, resource_id, access_count, consumed}, owner_id, timestamp, api_version}`
-  (peer is qurl-service's `WebhookEvent` payload shape per its
-  published API contract). Field names matter: `type` is the event
+- Body: `{id, type, data:{qurl_id, resource_id, access_count, consumed},
+  owner_id, timestamp, api_version}` (peer is qurl-service's
+  `WebhookEvent` payload). Field names matter: `type` is the event
   type, `id` is the per-event replay key. Receiver does NOT accept
   `event` / `event_id` as synonyms — see the regression test in
   `tests/qurl-webhook.test.js`.
@@ -54,150 +92,48 @@ This rollout replaces the poll with a `qurl.accessed` webhook receiver.
 
 ## Failure modes
 
-- **Bot starts, but no secret set.** Boot log emits `QURL_WEBHOOK_SECRET
-  unset — qURL webhook receiver mounted but will reject all inbound
-  traffic with 503`. The view counter renders `0 viewed / N pending`
-  on every send (the monitor's `BatchGet` returns the default empty
-  map). Recover via step 3 above.
-- **Secret rotates without restarting qurl-service subscription.**
-  All inbound webhooks return 401 (signature mismatch). The bot's
-  per-IP `BAD_SIG_MAX=30` rate limit kicks in after 30 attempts and
-  switches to 429. Recover by updating the subscription's `secret`
-  field (PATCH the subscription) — but if the lockout already
-  triggered, expect a **~1 min blackout** before legit traffic
-  unsticks (the rate-limit window is 60s from the last failed sig).
-  Operators rotating in production should pre-stage both the SSM
-  update and the subscription PATCH so the failed-sig window is as
-  narrow as possible.
-  - **Paging note**: a >10-min rotation gap will fire both alarms
-    in sequence — `qurl-bot-discord-qurl-webhook-signature-invalid`
-    at ~5min, then `…-rate-limited` at ~10min — with the same root
-    cause. If `signature_invalid` already paged for the same time
-    window, ack `rate_limited` as the tail of that incident; do not
-    treat it as a new event.
-- **`qurl-views` table missing.** The bot's monitor `BatchGet` throws
-  `ResourceNotFoundException`. The setInterval's try/catch swallows
-  it and logs `Link monitor poll failed` — the counter sticks at
+- **Lambda fails during deploy.** Terraform apply fails, the bot
+  task-def update is skipped, no traffic shifts. Existing bot tasks
+  keep running with the previous (still-valid) secret. Root-cause in
+  CloudWatch logs for the Lambda; re-run apply when fixed.
+- **Bot reads `PLACEHOLDER` from SSM.** Means the Lambda never ran
+  successfully — typically because step 1 (SSM parameter seed)
+  shipped but step 3 (Lambda invocation) didn't. Receiver returns
+  503 (qurl-service retries). Recover by running the Lambda.
+- **`qurl-views` table missing.** Bot's monitor `BatchGet` throws
+  `ResourceNotFoundException`; the setInterval's try/catch logs
+  `Link monitor poll failed` and the counter sticks at
   `0 viewed / N pending`. Recover by applying the terraform.
-- **Some links missing `qurl_id`.** Connector running an older
-  version (before `qurl_id` was surfaced from `MintLink`) — the bot's
-  empty-`qurlId` boundary guard degrades the WHOLE monitor to the
-  bare base message (no `👀` line at all) and emits one WARN per
-  affected send. Recover by deploying the connector forward.
+- **Some links missing `qurl_id`.** Connector running an older version
+  (before `qurl_id` was surfaced from `MintLink`) — the bot's empty-
+  `qurlId` boundary guard degrades the WHOLE monitor to the bare base
+  message (no `👀` line at all) and emits one WARN per affected send.
+  Recover by deploying the connector forward.
 
-## Multi-replica safety
+## Operational notes
 
-Multiple HTTP replicas booting concurrently used to race on
-`POST /v1/webhooks/{id}/secret` — server-side last-write-wins meant
-N-1 replicas held a stale secret in memory, and the ALB-routed
-traffic across them 401'd on roughly `(N-1)/N` of inbound webhooks
-until the next restart settled the fleet. The registrar now skips
-rotation when (a) an existing subscription is found AND (b) the
-SSM-loaded secret is non-empty and non-`PLACEHOLDER`. Steady-state
-restarts reuse the SSM value; only the bootstrap path (no sub yet,
-or seeded `PLACEHOLDER`) rotates.
+- **`description` field staleness**: the human-readable description on
+  the qurl-service subscription is written at create-time and not
+  reconciled by subsequent Lambda invocations. Region/env rename
+  leaves the qurl-service UI label stale until the subscription is
+  recreated. Observability-only — the bot keeps working.
+- **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
+  create / PATCH / rotate-secret / DELETE webhook subscriptions in
+  addition to minting qURLs. Factor into rotation drills.
+- **Higher-severity log signal** (alarm on this): `webhook-registrar
+  Lambda` CloudWatch error logs. The Lambda is the sole webhook-
+  registration code path; failures cascade to "bot can't verify any
+  inbound webhook." The bot's `Webhook receiver not configured`
+  503-response log is the downstream symptom.
 
-### Cold-bootstrap of a fresh environment — DEPLOY AT desired_count=1 FIRST
+## Appendix — manual operator recovery
 
-On the very first deploy to a fresh environment, no subscription
-exists yet AND no SSM secret exists yet. If N replicas boot
-concurrently in that state, each replica independently `POST`s
-`/v1/webhooks` and N duplicate subscriptions are created, each with
-a distinct server-generated secret. SSM is last-write-wins so only
-one replica's secret persists; the N-1 surviving duplicate
-subscriptions deliver events to dead secrets and 401 forever until
-manual cleanup.
-
-The registrar's dedupe path (next boot finds the duplicates and
-deletes all but the oldest survivor by `created_at`) is RECOVERY,
-not prevention. To avoid the race entirely on a fresh environment:
-
-1. Scale the bot HTTP service to `desired_count=1` before the first
-   deploy.
-2. Confirm one boot completed cleanly (`qURL webhook self-
-   registration complete` log line + `created` action).
-3. Scale back to the target desired_count.
-
-This procedure is only required on the first deploy of a brand-new
-environment. Every subsequent deploy (rolling, blue/green, redeploy)
-falls into the steady-state `reused` path because the subscription
-already exists and the SSM secret is populated. The durable upstream
-fix — making `POST /v1/webhooks` idempotent on `(owner_id, url)` —
-is tracked separately.
-
-**Dedupe-recovery boot also needs `desired_count=1`.** If the first
-deploy was accidentally run at `desired_count>1` and produced
-duplicate subscriptions, the *next* boot enters the dedupe-recovery
-path: it deletes the non-survivor duplicates AND force-rotates the
-survivor's secret (the survivor's pre-rotate secret belongs to a
-deleted replica's POST, so SSM almost certainly disagrees). That
-force-rotate runs on every replica concurrently, with the same
-last-write-wins SSM race that the steady-state reuse path was
-designed to avoid. To exit the duplicate state cleanly:
-
-1. Scale to `desired_count=1`.
-2. Confirm one boot completed cleanly (`Webhook subscription
-   reconciled (existing found, bootstrap rotate)` + the warn line
-   for `Webhook subscription duplicates detected — deleting
-   non-survivors`).
-3. Scale back to target desired_count.
-
-### Persistence env var
-
-The registrar writes the active secret back to AWS Systems Manager
-Parameter Store when `QURL_WEBHOOK_SECRET_SSM_PARAM` is set in the
-bot's environment. The value is the full SSM parameter name (e.g.
-`/discord-bot/sandbox/QURL_WEBHOOK_SECRET`). When unset, the
-registrar runs in-memory-only — usable for local dev but every
-restart rotates the secret because there's no place to read the
-previous one from.
-
-The IAM role for the bot's task needs `ssm:PutParameter` on that
-specific parameter. The bot tolerates `AccessDeniedException`
-gracefully (logs `warn`, continues with in-memory secret) so a
-missing grant degrades to "the secret rotates each boot, but the
-bot still works" rather than a crashloop.
-
-**Latent risk if persistence stays broken**: every replica restart
-hits the bootstrap-rotate path (no real SSM secret available), which
-re-introduces the multi-replica rotate race on every redeploy. The
-warn log `qURL webhook secret persistence failed (auto-register
-continues with in-memory secret only)` is the early-warning signal —
-alarm on it if oncall hasn't built a CloudWatch rule yet.
-
-**Higher-severity signal** — alarm on the outer error too:
-`qURL webhook self-registration failed`. This fires when GET/POST/
-PATCH/DELETE against qurl-service fails (transient 5xx, network
-abort, etc.) and the bot fell back to the manual-curl recovery path.
-Without an alarm, the failure is invisible until users notice
-"counter sat at 0" — exactly the gap this PR was built to close.
-
-**Operational note — `description` field staleness**: the
-`description` shown in the qurl-service webhook UI is captured at
-create time (e.g. `Discord bot view counter (region=us-east-2,
-env=sandbox)`) and is NOT reconciled by subsequent boots. If the
-environment is renamed or migrated to a new region, the UI label
-stays stale until the subscription is deleted and recreated.
-Observability-only — the bot keeps working — but operators sweeping
-the qurl-service UI for "which sub belongs to which env" should not
-trust the description as authoritative.
-
-## What the bot does NOT need
-
-- The full `qurl.accessed` payload's `src_ip` / `user_agent` fields —
-  they're stripped for transit resources at the qurl-service boundary,
-  per the connector-owned redaction policy.
-
-## Appendix — manual recovery
-
-Use this only if auto-register failed and the bot logs show
-`qURL webhook self-registration failed` repeatedly. Replace the
-placeholder values:
+If the Lambda is unavailable and you need to register manually:
 
 ```
-# 1. Create or rotate the subscription with the bot's own API key
-#    (NOT an admin token — owner_id must match the bot's qURL-mint
-#    owner_id, otherwise events get filtered out before delivery).
+# 1. Create the subscription (use the bot's QURL_API_KEY for owner-
+#    scope; an admin token would attach the sub to the wrong owner_id
+#    and events would silently filter out before delivery).
 curl -X POST https://<qurl-service-host>/v1/webhooks \
   -H "Authorization: Bearer $(aws ssm get-parameter --name /<project>/QURL_API_KEY --with-decryption --query 'Parameter.Value' --output text)" \
   -H "Content-Type: application/json" \
@@ -208,7 +144,7 @@ curl -X POST https://<qurl-service-host>/v1/webhooks \
   }'
 # Capture the `secret` from the response.
 
-# 2. Put it in SSM so the next bot boot picks it up.
+# 2. Write it to SSM so the next bot deploy picks it up.
 aws ssm put-parameter \
   --name "/<project>/QURL_WEBHOOK_SECRET" \
   --type SecureString \
@@ -216,7 +152,7 @@ aws ssm put-parameter \
   --overwrite \
   --region <env-region>
 
-# 3. Force a redeploy.
+# 3. Force a bot redeploy so tasks pick up the new secret from env.
 aws ecs update-service \
   --cluster <cluster> \
   --service <bot-http-service> \
@@ -224,7 +160,6 @@ aws ecs update-service \
   --region <env-region>
 ```
 
-After step 3, the bot will boot with the SSM secret in env,
-the auto-register will find the existing sub + the real
-SSM-loaded secret, take the reuse path, and the rotation race
-is gone for steady-state.
+Once the Lambda is restored, the next invocation will find the
+manually-created subscription, see the SSM secret matches, and return
+`reused` — no double-registration.
