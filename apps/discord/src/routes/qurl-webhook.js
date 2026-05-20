@@ -17,6 +17,7 @@ const db = require('../store');
 const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
+const { PLACEHOLDER_SECRET } = require('../qurl-webhook-registrar');
 
 const router = express.Router();
 
@@ -65,7 +66,7 @@ router.post('/qurl', async (req, res) => {
   // secret. qurl-service retries 503 deliveries; what we'd return
   // otherwise (401 against the placeholder) is non-retriable from
   // qurl-service's perspective and would drop the event.
-  if (!config.QURL_WEBHOOK_SECRET || config.QURL_WEBHOOK_SECRET === 'PLACEHOLDER') {
+  if (!config.QURL_WEBHOOK_SECRET || config.QURL_WEBHOOK_SECRET === PLACEHOLDER_SECRET) {
     return res.status(503).json({ error: 'Webhook receiver not configured' });
   }
 

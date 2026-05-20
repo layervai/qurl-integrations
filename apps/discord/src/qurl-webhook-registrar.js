@@ -6,8 +6,8 @@
 // looked healthy but the counter never advanced. The sandbox rollout
 // of #465 burned ~20 minutes on this exact gap.
 //
-// Multi-replica safety: an HTTP fleet of N replicas all booting
-// together used to race on POST /v1/webhooks/{id}/secret —
+// Multi-replica safety (steady-state): an HTTP fleet of N replicas
+// all booting together used to race on POST /v1/webhooks/{id}/secret —
 // server-side last-write-wins meant (N-1) replicas held a stale
 // secret in their in-memory config.QURL_WEBHOOK_SECRET, and the
 // ALB-routed traffic across all of them 401'd on ~(N-1)/N of
@@ -18,6 +18,20 @@
 // to the terraform-seeded PLACEHOLDER). Steady-state restarts find
 // (existing sub + real SSM secret) and skip the rotate — every
 // replica reads the same secret from SSM/env and stays in lock-step.
+//
+// Cold-bootstrap race (open): on the very first deploy to a fresh
+// environment, no subscription exists yet AND no SSM secret exists
+// yet, so all N replicas independently call POST /v1/webhooks →
+// create N duplicate subscriptions, each with a distinct server-
+// generated secret. SSM's PutParameter is last-write-wins so SSM
+// converges to one replica's secret; the other N-1 replicas hold
+// dead-secret subscriptions that 401 inbound deliveries forever.
+// `dedupeSubscriptions` below is RECOVERY (next boot cleans up the
+// duplicates) — it does NOT prevent the create-race on the first
+// boot. The durable fix is upstream: qurl-service making POST
+// /v1/webhooks idempotent on (owner_id, url). Until then, runbook
+// pins the first deploy of a fresh environment to a single-replica
+// rollout — see docs/qurl-webhook-rollout.md.
 //
 // Boot ordering note: the HTTP listener opens BEFORE the registrar
 // resolves, so a webhook that arrives in the brief startup window
@@ -32,8 +46,9 @@
 // qURLs the bot creates — matching what /qurl send users care about.
 
 const logger = require('./logger');
+const { QURL_WEBHOOK_EVENTS } = require('./constants');
 
-const QURL_ACCESSED = 'qurl.accessed';
+const QURL_ACCESSED = QURL_WEBHOOK_EVENTS.ACCESSED;
 
 // `PLACEHOLDER` is the terraform-seeded sentinel value for the
 // QURL_WEBHOOK_SECRET SSM parameter — before any registrar run has
@@ -42,17 +57,23 @@ const QURL_ACCESSED = 'qurl.accessed';
 // rotation without permanently re-rotating every restart afterward.
 const PLACEHOLDER_SECRET = 'PLACEHOLDER';
 
-// Strip the `secret` field from a parsed body before stringifying.
+// Strip `secret` fields anywhere in a parsed body before stringifying.
 // Error messages echo response bodies into CloudWatch; defense-in-
 // depth scrubbing avoids the secret leaking via a logger error.
-function redactSecret(body) {
+// Walks objects + arrays recursively because qurl-service's error
+// envelope shape isn't pinned — `data.webhook.secret`,
+// `data[0].secret`, or `error.detail.secret` would all bypass a
+// top-level-only redactor.
+const REDACT_MAX_DEPTH = 8;
+function redactSecret(body, depth = 0) {
+  if (depth > REDACT_MAX_DEPTH) return body;
   if (!body || typeof body !== 'object') return body;
-  const clone = Array.isArray(body) ? [...body] : { ...body };
-  if (clone.data && typeof clone.data === 'object' && 'secret' in clone.data) {
-    clone.data = { ...clone.data, secret: '[REDACTED]' };
+  if (Array.isArray(body)) return body.map(v => redactSecret(v, depth + 1));
+  const out = {};
+  for (const [k, v] of Object.entries(body)) {
+    out[k] = (k === 'secret') ? '[REDACTED]' : redactSecret(v, depth + 1);
   }
-  if ('secret' in clone) clone.secret = '[REDACTED]';
-  return clone;
+  return out;
 }
 
 class QurlServiceError extends Error {
@@ -84,12 +105,15 @@ async function callQurlService({ method, path, apiEndpoint, apiKey, body, timeou
 }
 
 // Canonicalize URL for comparison — strict equality (`s.url === bridgeUrl`)
-// misses trailing-slash / default-port / case-difference drift. Using
-// URL().href round-trip handles case + default-port. We also strip
-// any trailing slash from the pathname (URL().href preserves it),
-// since `/webhooks/qurl` and `/webhooks/qurl/` are equivalent
-// receivers for our routing. Fall back to the raw string on a parse
-// error so a future malformed URL doesn't crash boot.
+// misses trailing-slash / default-port / host-case drift. URL().href
+// round-trip handles HOST case (lowercased) + default ports (:80/:443
+// elided). PATHNAME case is intentionally NOT folded — Express and
+// qurl-service both route case-sensitively, so `/Webhooks/qurl` and
+// `/webhooks/qurl` are genuinely different routes. We do strip a
+// trailing slash from the pathname (URL().href preserves it), since
+// `/webhooks/qurl` and `/webhooks/qurl/` hit the same Express handler.
+// Fall back to the raw string on a parse error so a future malformed
+// URL doesn't crash boot.
 function canonicalUrl(u) {
   try {
     const url = new URL(u);
@@ -100,25 +124,69 @@ function canonicalUrl(u) {
   } catch { return u; }
 }
 
-// Returns the existing subscription for our URL, or null. Paginates so a
-// caller with many subs doesn't lose the match on page 2. Page size of
-// 100 is the qurl-service default cap; loop bounded at 50 iterations
+// Returns ALL subscriptions matching our URL (typically 0 or 1; >1
+// only after a cold-bootstrap race created duplicates — see the
+// dedupe path in ensureWebhookSubscription). Paginates so a caller
+// with many subs doesn't lose the match on page 2. Page size 100 is
+// the qurl-service default cap; loop bounded at 50 iterations
 // (5000 subs) so a misbehaving cursor can't spin forever.
-async function findExistingSubscription({ apiEndpoint, apiKey, bridgeUrl }) {
+//
+// Two terminal states to distinguish:
+//   - natural exhaustion (cursor walk ends, no more pages) → returns
+//     [] (possibly with no matches), caller takes create-fresh path.
+//   - 50-page cap hit (cursor never ends) → THROWS, refuses to fall
+//     through to create-fresh which would silently compound
+//     duplicates on every restart.
+async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
   const target = canonicalUrl(bridgeUrl);
+  const matches = [];
   let cursor = '';
   for (let i = 0; i < 50; i++) {
     const path = `/v1/webhooks${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
     const resp = await callQurlService({ method: 'GET', path, apiEndpoint, apiKey });
     const subs = (resp && resp.data) || [];
-    const match = subs.find(s => canonicalUrl(s.url) === target);
-    if (match) return match;
+    for (const s of subs) {
+      if (canonicalUrl(s.url) === target) matches.push(s);
+    }
     const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return null;
+    if (!next) return matches;
     cursor = next;
   }
-  logger.warn('findExistingSubscription: pagination cap hit (50 pages); possible stuck cursor');
-  return null;
+  throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
+}
+
+async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
+  try {
+    await callQurlService({
+      method: 'DELETE',
+      path: `/v1/webhooks/${webhookId}`,
+      apiEndpoint,
+      apiKey,
+    });
+  } catch (err) {
+    // 404 = another replica deleted it concurrently. Treat as
+    // success — the goal state ("this duplicate is gone") is met.
+    if (err.status !== 404) throw err;
+  }
+}
+
+// Pick a deterministic survivor across replicas so two replicas racing
+// on dedupe converge on the same one without coordination. Oldest-by-
+// created_at is the natural choice (first-to-exist wins); fall back to
+// lexicographic webhook_id when qurl-service omits the timestamp. Both
+// keys are independent of replica identity, so both replicas pick the
+// same survivor and both call DELETE on the same set of duplicates
+// (404-on-second is handled in `deleteSubscription`).
+function pickSurvivor(matches) {
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+  const sorted = [...matches].sort((a, b) => {
+    if (a.created_at && b.created_at && a.created_at !== b.created_at) {
+      return a.created_at < b.created_at ? -1 : 1;
+    }
+    return (a.webhook_id || '') < (b.webhook_id || '') ? -1 : 1;
+  });
+  return sorted[0];
 }
 
 async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description }) {
@@ -174,6 +242,17 @@ async function bestEffortPersist({ persistSecret, value }) {
   }
 }
 
+// Reconcile the events list on an existing subscription so it
+// includes qurl.accessed. PATCH is idempotent so two replicas racing
+// here is harmless. Factored out because the reuse path and the
+// rotate path both need it.
+async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
+  const events = existing?.events ?? [];
+  if (events.includes(QURL_ACCESSED)) return;
+  logger.info('Webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId: existing.webhook_id, current: events });
+  await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [QURL_ACCESSED] });
+}
+
 /**
  * Ensure a qurl.accessed subscription exists for the bot's bridge URL.
  * Returns the secret to use for HMAC verification.
@@ -193,7 +272,26 @@ async function ensureWebhookSubscription(opts) {
     throw new Error('ensureWebhookSubscription: apiEndpoint, apiKey, bridgeUrl all required');
   }
 
-  const existing = await findExistingSubscription({ apiEndpoint, apiKey, bridgeUrl });
+  // Find all subs matching our URL. Normally 0 or 1. >1 means a prior
+  // cold-bootstrap created duplicates — RECOVER by keeping the
+  // deterministic survivor + deleting the rest. Both replicas independently
+  // pick the same survivor (oldest by created_at) so concurrent dedupe
+  // converges without coordination.
+  const matches = await findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl });
+  const existing = pickSurvivor(matches);
+  if (matches.length > 1 && existing) {
+    const losers = matches.filter(s => s.webhook_id !== existing.webhook_id);
+    logger.warn('Webhook subscription duplicates detected — deleting non-survivors', {
+      total: matches.length,
+      survivor: existing.webhook_id,
+      losers: losers.map(s => s.webhook_id),
+      url: bridgeUrl,
+    });
+    for (const loser of losers) {
+      await deleteSubscription({ apiEndpoint, apiKey, webhookId: loser.webhook_id });
+    }
+  }
+
   let webhookId;
   let secret;
   let action;
@@ -210,33 +308,31 @@ async function ensureWebhookSubscription(opts) {
     webhookId = existing.webhook_id;
     secret = initialSecret;
     action = 'reused';
-    // Reconcile events list if drifted — PATCH is idempotent so two
-    // replicas racing here is harmless.
-    const eventsMatch = Array.isArray(existing.events) && existing.events.includes(QURL_ACCESSED);
-    if (!eventsMatch) {
-      logger.info('Webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId, current: existing.events });
-      await patchEvents({ apiEndpoint, apiKey, webhookId, events: [QURL_ACCESSED] });
-    }
+    await reconcileEvents({ apiEndpoint, apiKey, existing });
     logger.info('Webhook subscription reused (existing found, SSM secret trusted, no rotate)', { webhookId, url: bridgeUrl });
     return { secret, webhookId, action };
   }
 
   if (existing) {
     // Bootstrap path: subscription exists but we don't have a usable
-    // secret in-memory (placeholder or empty). Rotate to recover.
-    // Multi-replica race here is bounded — qurl-service is last-
-    // write-wins, and the steady-state guard above means this branch
-    // only fires until SSM has a real secret. After the first
-    // successful persist, subsequent restarts hit the reuse path.
+    // secret in-memory (placeholder or empty). Rotate FIRST so the
+    // boot can succeed even if the events PATCH fails — a stuck PATCH
+    // shouldn't block secret recovery, otherwise the receiver stays
+    // on PLACEHOLDER and 503s every webhook until manual intervention.
     webhookId = existing.webhook_id;
-    const eventsMatch = Array.isArray(existing.events) && existing.events.includes(QURL_ACCESSED);
-    if (!eventsMatch) {
-      logger.info('Webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId, current: existing.events });
-      await patchEvents({ apiEndpoint, apiKey, webhookId, events: [QURL_ACCESSED] });
-    }
     const rotated = await rotateSecret({ apiEndpoint, apiKey, webhookId });
     secret = rotated.secret;
     action = 'rotated';
+    try {
+      await reconcileEvents({ apiEndpoint, apiKey, existing });
+    } catch (err) {
+      // Log + continue: rotation already landed, so the bot is
+      // functionally healthy. Events drift can be reconciled on the
+      // next boot or via a manual PATCH.
+      logger.error('Webhook subscription events PATCH failed after rotate (continuing — rotation succeeded)', {
+        webhookId, op: 'reconcileEvents', error: err.message, status: err.status,
+      });
+    }
     logger.info('Webhook subscription reconciled (existing found, bootstrap rotate)', { webhookId, url: bridgeUrl });
   } else {
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
@@ -258,14 +354,9 @@ async function ensureWebhookSubscription(opts) {
 module.exports = {
   ensureWebhookSubscription,
   PLACEHOLDER_SECRET,
-  // Exported for tests:
   _internals: {
-    findExistingSubscription,
-    createSubscription,
-    rotateSecret,
-    patchEvents,
-    bestEffortPersist,
     canonicalUrl,
+    pickSurvivor,
     redactSecret,
     QurlServiceError,
   },
