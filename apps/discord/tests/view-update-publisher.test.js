@@ -89,7 +89,7 @@ describe('view-update-publisher', () => {
 
   describe('publish()', () => {
     test('safe no-op when not running (pre-start drop)', () => {
-      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: false, eventId: 'evt_1' });
+      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, eventId: 'evt_1' });
       expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
     });
 
@@ -100,7 +100,6 @@ describe('view-update-publisher', () => {
       publisher.publish({
         qurlId: 'qrl_xyz',
         accessCount: 5,
-        consumed: false,
         eventId: 'evt_xyz',
       });
 
@@ -116,44 +115,19 @@ describe('view-update-publisher', () => {
       const body = JSON.parse(input.MessageBody);
       expect(body.qurl_id).toBe('qrl_xyz');
       expect(body.access_count).toBe(5);
-      expect(body.consumed).toBe(false);
       expect(body.event_id).toBe('evt_xyz');
       expect(typeof body.published_at_ms).toBe('number');
-    });
-
-    test('non-boolean consumed logs warning + coerces to false', async () => {
-      sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
-      publisher.start();
-      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: 'truthy-string', eventId: 'evt_a' });
-      await publisher.stop();
-      const body = JSON.parse(sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody);
-      expect(body.consumed).toBe(false);
-      // Contract regression must surface in logs (vs silent flip).
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('consumed is not a boolean'),
-        expect.objectContaining({ qurl_id: 'qrl_a', consumed_type: 'string' }),
-      );
-    });
-
-    test('explicit boolean true passes through without warn', async () => {
-      sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
-      publisher.start();
-      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: true, eventId: 'evt_a' });
-      await publisher.stop();
-      const body = JSON.parse(sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody);
-      expect(body.consumed).toBe(true);
-      // No contract-regression warn for the happy path.
-      const contractWarns = logger.warn.mock.calls.filter(
-        ([msg]) => typeof msg === 'string' && msg.includes('consumed is not a boolean'),
-      );
-      expect(contractWarns).toHaveLength(0);
+      // `consumed` deliberately omitted from envelope (cr round-14 #3)
+      // — handler doesn't read it. Pin the absence so a re-add lands
+      // alongside the envelope-contract module follow-up (#476).
+      expect(body).not.toHaveProperty('consumed');
     });
 
     test('rejects invalid qurlId without sending', () => {
       publisher.start();
-      publisher.publish({ qurlId: '', accessCount: 1, consumed: false, eventId: 'evt' });
-      publisher.publish({ qurlId: null, accessCount: 1, consumed: false, eventId: 'evt' });
-      publisher.publish({ qurlId: 123, accessCount: 1, consumed: false, eventId: 'evt' });
+      publisher.publish({ qurlId: '', accessCount: 1, eventId: 'evt' });
+      publisher.publish({ qurlId: null, accessCount: 1, eventId: 'evt' });
+      publisher.publish({ qurlId: 123, accessCount: 1, eventId: 'evt' });
       expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('invalid qurlId'),
@@ -161,10 +135,42 @@ describe('view-update-publisher', () => {
       );
     });
 
+    test('drops with log when inFlightSends cap reached (backpressure)', async () => {
+      // Stub send to return a never-resolving promise so each publish
+      // accumulates in inFlightSends without ever cleaning up. Then
+      // observe that the (MAX+1)th publish is dropped.
+      const neverResolves = new Promise(() => {});
+      sqsMock.on(SendMessageCommand).callsFake(() => neverResolves);
+      publisher.start();
+      // Cap is 1000 (MAX_INFLIGHT_SENDS); fire 1000 to fill it, then
+      // assert the 1001st drops. Each call queues a microtask via the
+      // .catch().finally() chain, so we don't need awaits between.
+      for (let i = 0; i < 1000; i++) {
+        publisher.publish({ qurlId: `qrl_${i}`, accessCount: 1, eventId: `evt_${i}` });
+      }
+      expect(publisher._test.getInFlightCount()).toBe(1000);
+      const sendCallsAtCap = sqsMock.commandCalls(SendMessageCommand).length;
+      // The next publish should drop without firing a send.
+      publisher.publish({ qurlId: 'qrl_overflow', accessCount: 1, eventId: 'evt_overflow' });
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(sendCallsAtCap);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('in-flight cap reached'),
+        expect.objectContaining({
+          qurl_id: 'qrl_overflow',
+          in_flight: 1000,
+          cap: 1000,
+          kind: 'viewUpdatePublishFail',
+        }),
+      );
+      // Cleanup: skip stop()'s drain (would hang on the never-
+      // resolving promises) by hard-resetting module state.
+      publisher._test._resetStateForTest();
+    });
+
     test('rejects invalid accessCount without sending (parity with consumer gate)', () => {
       publisher.start();
       for (const ac of [0, -1, 1.5, NaN, 'one', null, undefined]) {
-        publisher.publish({ qurlId: 'qrl_a', accessCount: ac, consumed: false, eventId: 'evt' });
+        publisher.publish({ qurlId: 'qrl_a', accessCount: ac, eventId: 'evt' });
       }
       expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
       expect(logger.warn).toHaveBeenCalledWith(
@@ -176,7 +182,7 @@ describe('view-update-publisher', () => {
     test('SendMessage failure is fire-and-log (no unhandled rejection)', async () => {
       sqsMock.on(SendMessageCommand).rejects(new Error('SQS throttled'));
       publisher.start();
-      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: false, eventId: 'evt_a' });
+      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, eventId: 'evt_a' });
       await publisher.stop(); // drain
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('SendMessage failed'),
@@ -200,7 +206,6 @@ describe('view-update-publisher', () => {
       expect(() => publisher.publish({
         qurlId: 'qrl_a',
         accessCount: 1,
-        consumed: false,
         eventId: 'evt_a',
       })).not.toThrow();
       expect(logger.warn).toHaveBeenCalledWith(

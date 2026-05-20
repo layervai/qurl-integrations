@@ -99,7 +99,6 @@ describe('view-update-consumer', () => {
         Body: JSON.stringify({
           qurl_id: 'qrl_x',
           access_count: 7,
-          consumed: false,
           event_id: 'evt_x',
           published_at_ms: 1739462812345,
         }),
@@ -108,7 +107,6 @@ describe('view-update-consumer', () => {
       expect(cb).toHaveBeenCalledWith(
         expect.objectContaining({
           accessCount: 7,
-          consumed: false,
           eventId: 'evt_x',
           publishedAtMs: 1739462812345,
         }),
@@ -195,7 +193,7 @@ describe('view-update-consumer', () => {
       // called — the (N-1)/N miss rate would otherwise create
       // unbounded log volume with low signal.
       consumer._test.processMessage({
-        Body: JSON.stringify({ qurl_id: 'qrl_nope', access_count: 1, consumed: false }),
+        Body: JSON.stringify({ qurl_id: 'qrl_nope', access_count: 1 }),
         ReceiptHandle: 'rh-1',
       });
       expect(logger.warn).not.toHaveBeenCalled();
@@ -217,7 +215,7 @@ describe('view-update-consumer', () => {
           {
             MessageId: 'm1',
             ReceiptHandle: 'rh-1',
-            Body: JSON.stringify({ qurl_id: 'qrl_x', access_count: 3, consumed: false }),
+            Body: JSON.stringify({ qurl_id: 'qrl_x', access_count: 3 }),
           },
         ],
       });
@@ -242,7 +240,7 @@ describe('view-update-consumer', () => {
           {
             MessageId: 'm1',
             ReceiptHandle: 'rh-1',
-            Body: JSON.stringify({ qurl_id: 'qrl_nobody_home', access_count: 1, consumed: false }),
+            Body: JSON.stringify({ qurl_id: 'qrl_nobody_home', access_count: 1 }),
           },
         ],
       });

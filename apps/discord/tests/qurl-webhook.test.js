@@ -98,7 +98,6 @@ describe('POST /webhooks/qurl — view-update push gate (feat #60)', () => {
     expect(mockViewUpdatePublish).toHaveBeenCalledWith({
       qurlId: VALID_PAYLOAD.data.qurl_id,
       accessCount: VALID_PAYLOAD.data.access_count,
-      consumed: VALID_PAYLOAD.data.consumed,
       eventId: VALID_PAYLOAD.id,
     });
   });

@@ -205,7 +205,6 @@ function processMessage(message) {
   }
   registry.dispatch(qurlId, {
     accessCount,
-    consumed: envelope.consumed === true,
     // TODO(view-update-dedup, #476): eventId is plumbed end-to-end so a
     // future dedup layer (in the registry or the monitor's
     // handleViewUpdate) can drop SQS at-least-once duplicates without

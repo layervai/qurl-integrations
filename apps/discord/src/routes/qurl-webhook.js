@@ -147,7 +147,6 @@ router.post('/qurl', async (req, res) => {
       viewUpdatePublisher.publish({
         qurlId: data.qurl_id,
         accessCount,
-        consumed,
         eventId,
       });
     }

@@ -60,23 +60,13 @@ function createHandleViewUpdate({
     if (!current || current.status === 'opened') return;
     linkStatus.set(qurlId, { ...current, status: 'opened' });
     setViewed(getViewed() + 1);
-    // Asymmetry vs runTick (commands.js): the poll path's
-    // `if (!interaction) return` gates before its views loop, so it
-    // never bumps `viewed` on a nulled-interaction tick. The push
-    // path here bumps first so the in-memory counter stays consistent
-    // with the eventual DDB state. Unreachable in practice today —
-    // `interaction` is only nulled by stop(), after which isStopped()
-    // gates above — but the order matters if a future refactor adds
-    // a token-expiry path that nulls interaction without going
-    // through stop().
+    // Invariant: push path mutates linkStatus + viewed BEFORE the
+    // hasInteraction gate (vs runTick's gate-before-loop in
+    // commands.js). Keeps the in-memory counter consistent with the
+    // eventual DDB state regardless of render reachability.
     const pending = Math.max(0, getExpectedCount() - getViewed());
-    // Hoisted ABOVE the hasInteraction() gate so a push event that
-    // takes pending to 0 tears down the interval even when the
-    // interaction token is null. onAllDone()'s side
-    // effects (allDone=true + clearInterval(timer)) are safe with a
-    // nulled interaction; without this hoist, a polling-path
-    // refactor that nulled interaction outside stop() would leave
-    // the interval spinning until the 14-min maxMonitorMs cap.
+    // onAllDone is interaction-independent (clearInterval +
+    // allDone=true), so fire it before the hasInteraction gate.
     if (pending === 0) onAllDone();
     if (!hasInteraction()) return;
     // getButtonRow() is a getter (vs. capturing the value) because
@@ -85,19 +75,14 @@ function createHandleViewUpdate({
     // .catch is defense-in-depth — `safeEdit` in commands.js already
     // swallows the Discord-side rejection via `logIgnoredDiscordErr`,
     // so this catch only fires if `logIgnoredDiscordErr` itself
-    // throws (effectively never). Kept so a future refactor that
-    // removes safeEdit's internal swallow can't surface as an
-    // UnhandledRejection from this fire-and-forget dispatch.
-    //
-    // Relies on safeEdit being `async` (returns a Promise). A future
-    // refactor that switches safeEdit to a sync-return shape would
-    // make this `.catch` throw at runtime — pin the async return
-    // shape if that refactor is contemplated, or wrap with
-    // `Promise.resolve(safeEdit(...))` for paranoid safety.
-    safeEdit({
+    // throws (effectively never). Promise.resolve wrap hardens
+    // against a future refactor that switches safeEdit to a sync-
+    // return shape — without it, a sync-return safeEdit would make
+    // `.catch` throw at runtime.
+    Promise.resolve(safeEdit({
       content: buildStatusMsg(),
       components: pending > 0 ? [getButtonRow()] : [],
-    }).catch((err) => {
+    })).catch((err) => {
       logger.warn('view-update render failed', {
         sendId,
         qurl_id: qurlId,

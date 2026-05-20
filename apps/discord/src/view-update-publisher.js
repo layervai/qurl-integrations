@@ -10,7 +10,9 @@
 //   {
 //     "qurl_id":         "qrl_xxxx",
 //     "access_count":    42,           // int from qurl-service WebhookEvent.Data
-//     "consumed":        false,        // bool
+//     // `consumed` deliberately omitted (cr round-14 #3) — handler
+//     // doesn't read it; re-add in the envelope-contract module
+//     // when a render path needs it.
 //     "event_id":        "evt_xxxx",   // qurl-service-emitted dedup key
 //     "published_at_ms": 1739462812345 // Date.now() at envelope build
 //   }
@@ -34,14 +36,13 @@
 // `kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL` (NOT UNHANDLED_REJECTION)
 // keeps the paging pivot separate from event-shipper alerts.
 //
-// `consumed` rendered-state asymmetry: the field is plumbed end-to-end
-// but discarded at the handler today (view-update-handler.js does not
-// read `update.consumed`; only `accessCount`). The strict-coerce-to-
-// false on non-boolean is
-// loud (warn-logged with consumed_type) but the rendered state will
-// be wrong if an upstream regression sends `"true"` string — academic
-// today; surface in CloudWatch via the LOG_KINDS pivot before any
-// future render path starts using `consumed`.
+// `consumed` from the webhook is intentionally NOT plumbed through
+// the envelope today — the handler doesn't read it, and carrying an
+// unused field would create a contract-regression surface (silent
+// coerce-to-false if upstream emits a string) for code that nothing
+// consumes. Re-introduce as one struct field when a future render
+// path needs the boolean (see #476 envelope-contract module
+// follow-up).
 //
 // Process-singleton: module-level state. At most one publisher per
 // process. start() is no-op-with-warn on second call.
@@ -50,6 +51,13 @@ const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
 const logger = require('./logger');
 const { LOG_KINDS } = require('./constants');
+
+// Backpressure cap on in-flight SendMessage promises. Drops with
+// log when reached — fire-and-log + polling fallback bound the
+// correctness cost. Cap is high enough that a steady-state webhook
+// rate won't trip it; a sustained SQS throttle (region partition,
+// IAM rotation) is the failure mode this protects against.
+const MAX_INFLIGHT_SENDS = 1000;
 
 // Mutable so tests can shrink the deadline. INITIAL_DRAIN_DEADLINE_MS
 // captures the module-load value so `_resetStateForTest` restores
@@ -86,7 +94,7 @@ function createSqsClient() {
 // (SDK input validation, JSON.stringify pathological cases) so the
 // route's catch block doesn't flip a successful 200 into a retried
 // 500. Same posture as event-publisher.js's publish().
-function publish({ qurlId, accessCount, consumed, eventId }) {
+function publish({ qurlId, accessCount, eventId }) {
   if (!running) return; // safe no-op when disabled
   if (typeof qurlId !== 'string' || !qurlId) {
     // Defensive — the caller already validates the shape. A regression
@@ -107,24 +115,23 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
     });
     return;
   }
-  // The webhook handler (qurl-webhook.js) already strict-coerces
-  // `data.consumed` to a literal boolean before calling here, so
-  // anything other than `true` / `false` arriving at this point is a
-  // caller-side regression worth surfacing. Log + coerce-to-false
-  // rather than silently flipping a string into a false-boolean.
-  let consumedBool = consumed;
-  if (typeof consumedBool !== 'boolean') {
-    logger.warn('view-update-publisher: consumed is not a boolean (contract regression)', {
+  // Backpressure cap: drop-with-log when inFlightSends would exceed
+  // the cap. Sustained SQS throttle (region partition, IAM rotation)
+  // would otherwise let the set grow with webhook arrival rate.
+  // Polling fallback covers any view that's dropped here.
+  if (inFlightSends.size >= MAX_INFLIGHT_SENDS) {
+    logger.warn('view-update-publisher: in-flight cap reached, dropping send', {
       qurl_id: qurlId,
-      consumed_type: typeof consumed,
+      in_flight: inFlightSends.size,
+      cap: MAX_INFLIGHT_SENDS,
+      kind: LOG_KINDS.VIEW_UPDATE_PUBLISH_FAIL,
     });
-    consumedBool = false;
+    return;
   }
   try {
     const envelope = {
       qurl_id: qurlId,
       access_count: accessCount,
-      consumed: consumedBool,
       event_id: eventId,
       published_at_ms: Date.now(),
     };

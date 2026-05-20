@@ -722,13 +722,17 @@ async function gracefulShutdown(code = 0) {
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
     // View-update plumbing drain (feat #60). Same idempotent shape;
-    // unconditional. Consumer first: stop() aborts the in-flight
-    // ReceiveMessage long-poll (via AbortController) so no NEW
-    // batches start; whatever was mid-processMessage at the time
-    // unwinds via its outer for-loop. The publisher's drain catches
-    // any view events the HTTP receiver pushed in the same window.
-    await viewUpdateConsumer.stop();
-    await viewUpdatePublisher.stop();
+    // unconditional. Consumer + publisher are stopped in parallel
+    // via Promise.all so the combined drain stays within the
+    // gracefulShutdown 10s budget — sequencing each module's
+    // DRAIN_DEADLINE_MS (3s each) plus the event-shipper drains
+    // above would push worst-case past 10s. Order-independence is
+    // safe: publisher.stop() snapshots inFlightSends; consumer.stop()
+    // aborts the long-poll; neither depends on the other's state.
+    await Promise.all([
+      viewUpdateConsumer.stop(),
+      viewUpdatePublisher.stop(),
+    ]);
     // Periodic REST refreshCache in http-only mode is .unref()ed so it
     // wouldn't block exit on its own, but clearing explicitly keeps
     // shutdown symmetric with the other intervals (server.js, oauth.js
