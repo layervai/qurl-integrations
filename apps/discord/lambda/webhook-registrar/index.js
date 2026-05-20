@@ -45,17 +45,25 @@
 // `/`. Strip in the Terraform input so `https://bot/` doesn't produce
 // `https://bot//webhooks/qurl`.
 //
-// Input shape (set in Terraform invocation):
+// Input shape (set in Terraform invocation) — all 6 fields are required:
 //   {
-//     apiEndpoint:  string,  // qurl-service base URL (e.g. https://api.qurl.layerv.xyz)
-//     bridgeUrl:    string,  // public bot URL (e.g. https://discord-bot.sandbox.qurl.layerv.xyz/webhooks/qurl)
-//     description:  string,  // human-readable, surfaces in qurl-service UI
-//     ssmParamName: string,  // SSM SecureString parameter to write the rotated secret to
-//     ssmRegion:    string,  // AWS region for SSM (typically matches Lambda region)
+//     apiEndpoint:         string,  // qurl-service base URL (e.g. https://api.qurl.layerv.xyz)
+//     bridgeUrl:           string,  // public bot URL (e.g. https://discord-bot.sandbox.qurl.layerv.xyz/webhooks/qurl)
+//     description:         string,  // human-readable, surfaces in qurl-service UI
+//     ssmParamName:        string,  // SSM SecureString parameter to write the rotated webhook secret to
+//     ssmRegion:           string,  // AWS region for SSM (typically matches Lambda region)
+//     apiKeySsmParamName:  string,  // SSM SecureString parameter holding the qurl-service API key
 //   }
-// The qurl-service API key is read from SSM by name (env-supplied to
-// the Lambda task) so the value never appears in CloudWatch invocation
-// logs.
+// The qurl-service API key is read from SSM by NAME (not passed by
+// value in the event body) so the value never appears in CloudWatch
+// invocation logs or Terraform state.
+//
+// validateInput trims trailing `/` from bridgeUrl — the registrar's
+// canonicalUrl normalizes trailing-slash drift between matched subs,
+// but a `BASE_URL` ending in `/` would still concatenate to
+// `https://bot//webhooks/qurl` and silently fail to match the bot's
+// actual route. Defense-in-depth so caller (Terraform) discipline
+// isn't load-bearing.
 //
 // Output shape (returned to Terraform):
 //   {
@@ -117,13 +125,21 @@ async function readSsmSecureString({ ssmClient, name }) {
   }
 }
 
-function validateInput(event) {
+// Validates required fields and returns a NORMALIZED event (no
+// mutation of the input). Defensive trailing-slash strip on bridgeUrl:
+// caller (Terraform) should already normalize, but a stale
+// `BASE_URL=https://bot/` would otherwise produce
+// `https://bot//webhooks/qurl` and silently fail to match the bot's
+// actual receiver path. canonicalUrl normalizes drift BETWEEN subs
+// but not an internal `//`.
+function validateAndNormalizeInput(event) {
   const required = ['apiEndpoint', 'bridgeUrl', 'description', 'ssmParamName', 'ssmRegion', 'apiKeySsmParamName'];
   for (const k of required) {
     if (typeof event[k] !== 'string' || !event[k]) {
       throw new Error(`webhook-registrar: missing or invalid input field: ${k}`);
     }
   }
+  return { ...event, bridgeUrl: event.bridgeUrl.replace(/\/$/, '') };
 }
 
 exports._internals = { getSsmClient, _resetSsmClientCacheForTests };
@@ -141,7 +157,10 @@ exports.handler = async (event, context) => {
     ssmRegion: event?.ssmRegion,
   }));
 
-  validateInput(event);
+  // Shadow `event` with the normalized one — all downstream reads
+  // get the trailing-slash-stripped bridgeUrl.
+  // eslint-disable-next-line no-param-reassign
+  event = validateAndNormalizeInput(event);
 
   const ssmClient = getSsmClient(event.ssmRegion);
 
@@ -151,7 +170,10 @@ exports.handler = async (event, context) => {
   // (scoped in qurl-integrations-infra).
   const apiKey = await readSsmSecureString({ ssmClient, name: event.apiKeySsmParamName });
   if (!apiKey) {
-    throw new Error(`webhook-registrar: SSM parameter ${event.apiKeySsmParamName} returned null (ParameterNotFound or empty value)`);
+    // Falsy catches both `null` (ParameterNotFound mapped) and `''`
+    // (parameter present but empty value). Message lists both so a
+    // future re-throw / test reader knows what fired.
+    throw new Error(`webhook-registrar: SSM parameter ${event.apiKeySsmParamName} returned empty or missing (ParameterNotFound or zero-length value)`);
   }
 
   // Read existing webhook secret (if any) so the registrar can take

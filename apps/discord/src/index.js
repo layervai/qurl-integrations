@@ -1095,7 +1095,10 @@ async function start() {
   if (isHttp) {
     httpServer = startServer();
     // Webhook subscription registration is OUT-OF-PROCESS as of the
-    // webhook-registrar Lambda (see `apps/discord/lambda/webhook-registrar/`).
+    // webhook-registrar Lambda — see
+    //   apps/discord/lambda/webhook-registrar/index.js  (handler)
+    //   apps/discord/lambda/webhook-registrar/README.md  (bundling)
+    //   apps/discord/docs/qurl-webhook-rollout.md        (operator flow)
     // The Lambda is invoked once per deploy via Terraform, writes the
     // rotated/created secret to SSM, and the bot reads
     // `QURL_WEBHOOK_SECRET` from env at boot — single-instance Lambda

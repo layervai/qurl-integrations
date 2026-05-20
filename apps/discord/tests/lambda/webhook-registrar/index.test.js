@@ -150,15 +150,80 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
   });
 });
 
+describe('webhook-registrar Lambda — bootstrap rotate (existing sub, PLACEHOLDER in SSM)', () => {
+  // Path that fires on every fresh-env first-deploy: terraform seeded
+  // SSM with `PLACEHOLDER`, an operator-or-prior-deploy created the
+  // subscription, this Lambda invocation rotates the secret to a
+  // known value and persists it.
+  it('rotates the existing sub when SSM holds the PLACEHOLDER sentinel', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'PLACEHOLDER' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    let rotateHit = false;
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => {
+        rotateHit = true;
+        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated_by_lambda' } } };
+      },
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(rotateHit).toBe(true);
+    expect(result).toEqual({ webhookId: 'wh_existing', action: 'rotated' });
+    const putCalls = ssmMock.commandCalls(PutParameterCommand);
+    expect(putCalls[0].args[0].input.Value).toBe('whsec_rotated_by_lambda');
+  });
+});
+
+describe('webhook-registrar Lambda — bridgeUrl normalization', () => {
+  it('strips a trailing slash on bridgeUrl before sending to qurl-service', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+      .on(PutParameterCommand)
+      .resolves({});
+    let createBody = null;
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': (opts) => {
+        createBody = JSON.parse(opts.body);
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+      },
+    });
+    await handler({ ...BASE_EVENT, bridgeUrl: 'https://bot.test.example/webhooks/qurl/' }, CONTEXT);
+    // No trailing slash on the wire. canonicalUrl in the registrar
+    // normalizes trailing-slash drift BETWEEN matched subs but not
+    // an internal `//` from a stale `BASE_URL=https://bot/`.
+    expect(createBody.url).toBe('https://bot.test.example/webhooks/qurl');
+  });
+});
+
 describe('webhook-registrar Lambda — failure surfacing', () => {
-  it('throws when SSM API key returns null (lambda fails → Terraform fails the deploy)', async () => {
+  it('throws when SSM API key is missing — ParameterNotFound (lambda fails → Terraform fails the deploy)', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }));
-    
-    // Tight regex — `/A|null/` would match the bare `null` token in
-    // most error messages and pass for the wrong reason.
-    await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/SSM parameter.*returned null/);
+    await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/SSM parameter.*returned empty or missing/);
+  });
+
+  it('throws the same error when SSM API key value is present but empty', async () => {
+    // SSM returning Value: '' (operator put-parameter --value "") is a
+    // distinct cold-fail mode from ParameterNotFound — but both indicate
+    // unusable API key state. The same error fires for grep parity.
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: '' } });
+    await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/SSM parameter.*returned empty or missing/);
   });
 
   it('propagates qurl-service errors so Terraform deploy fails fast', async () => {
