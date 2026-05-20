@@ -45,8 +45,12 @@ itself fails), no in-app coordination needed.
 
 Terraform-side ordering (config lives in `qurl-integrations-infra`):
 
-1. Apply the `qurl-views` DDB table + `QURL_WEBHOOK_SECRET` SSM
-   SecureString parameter (seeded as `PLACEHOLDER` on first apply).
+1. Apply the `qurl-views` DDB table. The `QURL_WEBHOOK_SECRET` SSM
+   SecureString parameter is created by the Lambda's `PutParameter`
+   call on first invocation — Terraform does NOT pre-seed it with a
+   sentinel value. If the Lambda hasn't run yet, the bot's receiver
+   503s on inbound webhooks (qurl-service retries), which is the
+   correct unconfigured-state behavior.
 2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
    the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
    on the `QURL_WEBHOOK_SECRET` path; `logs:*`).
@@ -96,10 +100,10 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   task-def update is skipped, no traffic shifts. Existing bot tasks
   keep running with the previous (still-valid) secret. Root-cause in
   CloudWatch logs for the Lambda; re-run apply when fixed.
-- **Bot reads `PLACEHOLDER` from SSM.** Means the Lambda never ran
-  successfully — typically because step 1 (SSM parameter seed)
-  shipped but step 3 (Lambda invocation) didn't. Receiver returns
-  503 (qurl-service retries). Recover by running the Lambda.
+- **Bot reads empty `QURL_WEBHOOK_SECRET`.** Means the Lambda never
+  ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
+  Receiver returns 503 (qurl-service retries). Recover by running the
+  Lambda manually and verifying CloudWatch logs for the persist call.
 - **`qurl-views` table missing.** Bot's monitor `BatchGet` throws
   `ResourceNotFoundException`; the setInterval's try/catch logs
   `Link monitor poll failed` and the counter sticks at

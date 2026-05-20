@@ -62,17 +62,16 @@ beforeEach(() => {
   mockRecordQurlView.mockImplementation(async () => 'recorded');
 });
 
-describe('POST /webhooks/qurl — boot-race PLACEHOLDER handling', () => {
-  // During the brief window between server-listen and auto-register
-  // resolving, config.QURL_WEBHOOK_SECRET may still hold the
-  // terraform-seeded PLACEHOLDER. The receiver MUST 503 (qurl-service
-  // retriable) on this case rather than 401 (non-retriable) — a 401
-  // would drop in-flight events permanently.
-  it('returns 503 when secret is the literal PLACEHOLDER (boot race)', async () => {
+describe('POST /webhooks/qurl — unconfigured secret returns 503 (retriable)', () => {
+  // If the webhook-registrar Lambda hasn't populated SSM yet, or the
+  // ECS task started before SSM secret injection completed, the bot's
+  // config.QURL_WEBHOOK_SECRET will be empty. MUST 503 (qurl-service
+  // retries) not 401 (non-retriable, drops the event).
+  it('returns 503 when secret is empty', async () => {
     // eslint-disable-next-line global-require
     const config = require('../src/config');
     const original = config.QURL_WEBHOOK_SECRET;
-    config.QURL_WEBHOOK_SECRET = 'PLACEHOLDER';
+    config.QURL_WEBHOOK_SECRET = '';
     try {
       const res = await request(app)
         .post('/webhooks/qurl')

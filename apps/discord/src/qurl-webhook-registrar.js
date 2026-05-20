@@ -14,10 +14,10 @@
 // inbound webhooks until eventual restart. Fix in this rev: rotate
 // the secret ONLY if (a) no subscription exists yet, or (b) the
 // existing one matches our URL but the caller can't supply a
-// known-good secret to verify against (initialSecret unset / set
-// to the terraform-seeded PLACEHOLDER). Steady-state restarts find
-// (existing sub + real SSM secret) and skip the rotate — every
-// replica reads the same secret from SSM/env and stays in lock-step.
+// known-good secret to verify against (initialSecret unset/empty).
+// Steady-state restarts find (existing sub + real SSM secret) and
+// skip the rotate — every replica reads the same secret from SSM/env
+// and stays in lock-step.
 //
 // Cold-bootstrap race (open): on the very first deploy to a fresh
 // environment, no subscription exists yet AND no SSM secret exists
@@ -49,13 +49,6 @@ const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
 
 const QURL_ACCESSED = QURL_WEBHOOK_EVENTS.ACCESSED;
-
-// `PLACEHOLDER` is the terraform-seeded sentinel value for the
-// QURL_WEBHOOK_SECRET SSM parameter — before any registrar run has
-// landed a real secret, the parameter holds this literal. Treat it
-// as "no real secret yet" so the bootstrap path can land a fresh
-// rotation without permanently re-rotating every restart afterward.
-const PLACEHOLDER_SECRET = 'PLACEHOLDER';
 
 // Strip secret-shaped fields anywhere in a parsed body before
 // stringifying. Error messages echo response bodies into CloudWatch;
@@ -384,8 +377,7 @@ async function ensureWebhookSubscription(opts) {
   // Force a rotate so SSM gets a known-good value tied to the
   // survivor. One-time cost on dedupe; subsequent restarts reuse.
   const initialIsRealSecret = typeof initialSecret === 'string'
-    && initialSecret.length > 0
-    && initialSecret !== PLACEHOLDER_SECRET;
+    && initialSecret.length > 0;
 
   if (existing && initialIsRealSecret && !wasDedupe) {
     webhookId = existing.webhook_id;
@@ -409,10 +401,9 @@ async function ensureWebhookSubscription(opts) {
 
   if (existing) {
     // Bootstrap path: subscription exists but we don't have a usable
-    // secret in-memory (placeholder or empty). Rotate FIRST so the
-    // boot can succeed even if the events PATCH fails — a stuck PATCH
-    // shouldn't block secret recovery, otherwise the receiver stays
-    // on PLACEHOLDER and 503s every webhook until manual intervention.
+    // secret in-memory (initialSecret empty or unset). Rotate FIRST
+    // so the boot can succeed even if the events PATCH fails — a
+    // stuck PATCH shouldn't block secret recovery.
     webhookId = existing.webhook_id;
     const rotated = await rotateSecret({ apiEndpoint, apiKey, webhookId });
     secret = rotated.secret;
@@ -470,7 +461,6 @@ function buildSsmPersistSecret({ ssmClient, paramName, PutParameterCommand, time
 module.exports = {
   ensureWebhookSubscription,
   buildSsmPersistSecret,
-  PLACEHOLDER_SECRET,
   _internals: {
     canonicalUrl,
     pickSurvivor,

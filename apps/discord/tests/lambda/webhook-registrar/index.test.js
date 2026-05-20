@@ -150,17 +150,18 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
   });
 });
 
-describe('webhook-registrar Lambda — bootstrap rotate (existing sub, PLACEHOLDER in SSM)', () => {
-  // Path that fires on every fresh-env first-deploy: terraform seeded
-  // SSM with `PLACEHOLDER`, an operator-or-prior-deploy created the
-  // subscription, this Lambda invocation rotates the secret to a
-  // known value and persists it.
-  it('rotates the existing sub when SSM holds the PLACEHOLDER sentinel', async () => {
+describe('webhook-registrar Lambda — bootstrap rotate (existing sub, SSM empty)', () => {
+  // Path that fires when an operator-or-prior-deploy created the
+  // subscription out-of-band but the Lambda hasn't populated the
+  // SSM secret yet. The Lambda rotates the secret to a known value
+  // and persists it. Common during a manual-recovery → automated-
+  // takeover transition.
+  it('rotates the existing sub when SSM returns empty/missing', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
       .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
-      .resolves({ Parameter: { Value: 'PLACEHOLDER' } })
+      .resolves({ Parameter: { Value: '' } })
       .on(PutParameterCommand)
       .resolves({});
     let rotateHit = false;

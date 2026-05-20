@@ -46,12 +46,11 @@ const BASE_OPTS = {
 
 describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no real initialSecret) → creates', () => {
   // The first-deploy-of-a-fresh-environment path. `initialSecret` is
-  // either unset (env never had QURL_WEBHOOK_SECRET) or set to the
-  // terraform-seeded PLACEHOLDER. Either way, action='created'.
+  // either unset (env never had QURL_WEBHOOK_SECRET) or an empty
+  // string (SSM parameter not yet populated). Either way, action='created'.
   it.each([
     ['initialSecret undefined', undefined],
     ['initialSecret empty string', ''],
-    ['initialSecret PLACEHOLDER literal', 'PLACEHOLDER'],
   ])('creates a fresh subscription when no existing matches the bridge URL — %s', async (_label, initialSecret) => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
@@ -121,7 +120,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
     });
   });
 
-  it('also rotates when initialSecret is the terraform PLACEHOLDER sentinel', async () => {
+  it('also rotates when initialSecret is the empty string (SSM param not yet populated)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
@@ -130,7 +129,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
         body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } },
       }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'PLACEHOLDER' });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: '' });
     expect(result.action).toBe('rotated');
     expect(result.secret).toBe('whsec_post_bootstrap');
   });
@@ -594,11 +593,12 @@ describe('ensureWebhookSubscription — multi-subscription scan', () => {
 describe('ensureWebhookSubscription — rotation survives PATCH failure', () => {
   it('returns the rotated secret even when the events PATCH fails', async () => {
     // Behavior pin: if PATCH ran before rotate and threw, the bot
-    // would never get a usable secret on this boot — receiver stays on
-    // PLACEHOLDER, 503s forever. Asserting the rotated secret made it
-    // out implicitly proves rotation ran (and succeeded) despite the
-    // PATCH 500. Doesn't pin call order, so a future refactor that
-    // makes rotation+PATCH independent still passes.
+    // would never get a usable secret on this boot — receiver stays
+    // unconfigured and 503s every webhook. Asserting the rotated
+    // secret made it out implicitly proves rotation ran (and
+    // succeeded) despite the PATCH 500. Doesn't pin call order, so
+    // a future refactor that makes rotation+PATCH independent still
+    // passes.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
