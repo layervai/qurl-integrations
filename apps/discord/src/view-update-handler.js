@@ -51,7 +51,11 @@ function createHandleViewUpdate({
   return function handleViewUpdate(update, qurlId) {
     if (isStopped()) return;
     if (isViewCounterDegraded()) return;
-    if (!(update && update.accessCount > 0)) return;
+    // Number.isSafeInteger guard mirrors the consumer's parse-time
+    // gate. `"3" > 0` would coerce truthy; tightening to strict
+    // integer keeps the handler boundary symmetric with the wire
+    // boundary so a stringly-typed regression can't slip through.
+    if (!(update && Number.isSafeInteger(update.accessCount) && update.accessCount > 0)) return;
     const current = linkStatus.get(qurlId);
     if (!current || current.status === 'opened') return;
     linkStatus.set(qurlId, { ...current, status: 'opened' });
@@ -78,6 +82,12 @@ function createHandleViewUpdate({
     // getButtonRow() is a getter (vs. capturing the value) because
     // the monitor reassigns buttonRow to null in stop(); a snapshot
     // at factory-call time would pin a stale reference past stop().
+    // .catch is defense-in-depth — `safeEdit` in commands.js already
+    // swallows the Discord-side rejection via `logIgnoredDiscordErr`,
+    // so this catch only fires if `logIgnoredDiscordErr` itself
+    // throws (effectively never). Kept so a future refactor that
+    // removes safeEdit's internal swallow can't surface as an
+    // UnhandledRejection from this fire-and-forget dispatch.
     safeEdit({
       content: buildStatusMsg(),
       components: pending > 0 ? [getButtonRow()] : [],

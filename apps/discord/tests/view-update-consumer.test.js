@@ -340,26 +340,13 @@ describe('view-update-consumer', () => {
       await consumer.stop();
     });
 
-    test('pollLoop defense-in-depth path flips running=false before invoking onFatalCb', () => {
-      // Direct test of the defense-in-depth fatal-path order: the
-      // module-state flip (running=false) must precede onFatalCb so a
-      // caller without an onFatal handler doesn't end up wedged with
-      // isRunning()=true but no actual polling. Verified by stubbing
-      // onFatal as a sync function that observes the state at the
-      // moment of invocation. Direct exercise via the start({onFatal})
-      // contract would require mocking pollOnce to throw across an
-      // await — heavier than testing the order via inspection here.
-      const observedRunningInOnFatal = [];
-      consumer._test._setRunningForTest(true);
-      // Simulate the fatal-path code's sequence directly by setting
-      // running=false before invoking the callback, then asserting
-      // the callback observed the flipped state. The actual production
-      // path is in pollLoop's catch block — this test pins the order.
-      const onFatal = () => observedRunningInOnFatal.push(consumer._test.isRunning());
-      // Mirror the pollLoop sequence: flip first, then invoke.
-      consumer._test._setRunningForTest(false);
-      onFatal();
-      expect(observedRunningInOnFatal).toEqual([false]);
-    });
+    // pollLoop's defense-in-depth fatal-path order (running = false
+    // BEFORE onFatalCb invocation) is one-line production code that's
+    // verifiable by inspection — the prior simulation test added
+    // coverage without exercising the path, and driving the real
+    // path requires mocking the SDK + logger to throw across awaits
+    // in a brittle setup that races microtask scheduling (cr round-12
+    // #3). Deleted per cr's option (a). The contract is documented
+    // inline at view-update-consumer.js's pollLoop catch block.
   });
 });
