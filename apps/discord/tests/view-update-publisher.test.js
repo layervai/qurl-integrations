@@ -120,13 +120,32 @@ describe('view-update-publisher', () => {
       expect(typeof body.published_at_ms).toBe('number');
     });
 
-    test('coerces consumed to a boolean', async () => {
+    test('non-boolean consumed logs warning + coerces to false (cr round-3 #8)', async () => {
       sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
       publisher.start();
       publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: 'truthy-string', eventId: 'evt_a' });
       await publisher.stop();
       const body = JSON.parse(sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody);
-      expect(body.consumed).toBe(false); // strict equality to true required
+      expect(body.consumed).toBe(false);
+      // Contract regression must surface in logs (vs silent flip).
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('consumed is not a boolean'),
+        expect.objectContaining({ qurl_id: 'qrl_a', consumed_type: 'string' }),
+      );
+    });
+
+    test('explicit boolean true passes through without warn', async () => {
+      sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
+      publisher.start();
+      publisher.publish({ qurlId: 'qrl_a', accessCount: 1, consumed: true, eventId: 'evt_a' });
+      await publisher.stop();
+      const body = JSON.parse(sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody);
+      expect(body.consumed).toBe(true);
+      // No contract-regression warn for the happy path.
+      const contractWarns = logger.warn.mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('consumed is not a boolean'),
+      );
+      expect(contractWarns).toHaveLength(0);
     });
 
     test('rejects invalid qurlId without sending', () => {

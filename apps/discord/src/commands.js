@@ -20,6 +20,7 @@ const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
 const viewUpdateRegistry = require('./view-update-registry');
+const { createHandleViewUpdate } = require('./view-update-handler');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
@@ -1154,63 +1155,38 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // View-update push registration (feat #60). One SHARED callback
-  // registers against every tracked qurl_id — the callback uses the
-  // qurlId it's invoked with (registry passes it as the second arg)
-  // to look up the per-recipient linkStatus row directly.
-  //
-  // Shared-callback shape (vs. per-id closures) collapses the 50-
-  // closure footprint of a max-recipients send to one. The registry
-  // still keys by qurl_id so dispatch lookup stays O(1).
-  //
-  // Render path is envelope-driven (NOT runTick). The envelope already
-  // carries access_count + consumed; mutating linkStatus directly and
-  // calling safeEdit avoids the DDB BatchGet that runTick would do
-  // on every view event (would be O(tracked_qurl_ids) per event —
-  // 50× amplification on a max-recipients send). The polling tick in
-  // runTick remains the correctness primitive: any push that this
-  // path drops (silent-drop-on-miss, transient consumer error) is
-  // reconciled on the next interval via DDB.
-  //
-  // Concurrency with runTick: the `status === 'opened' continue`
-  // guard at the linkStatus mutation site is the same protection
-  // runTick uses (commands.js, runTick render path). Two paths
-  // can't double-flip the same qurl_id; `viewed` never regresses.
-  //
-  // GC: the shared callback pins closure state (linkStatus, safeEdit,
-  // viewed) until unregistered. stop() below must drain the registry
-  // keys this monitor registered against — mirrors the closure-mutable-
-  // rebind discipline for interaction/qurlLinks.
+  // View-update push (feat #60). Shared callback per monitor —
+  // registered against every tracked qurl_id; render goes through
+  // linkStatus mutation + safeEdit (NOT runTick) to avoid the
+  // per-event DDB BatchGet. Polling tick remains the correctness
+  // primitive. Handler factory in view-update-handler.js so the
+  // state matrix is unit-testable without a full monitor closure.
   const viewUpdateRegisteredQurlIds = [];
-  function handleViewUpdate(update, qurlId) {
-    if (stopped) return;
-    if (viewCounterDegraded) return; // degraded monitor doesn't render counter
-    if (!(update && update.accessCount > 0)) return;
-    const current = linkStatus.get(qurlId);
-    if (!current || current.status === 'opened') return;
-    linkStatus.set(qurlId, { ...current, status: 'opened' });
-    viewed++;
-    if (!interaction) return;
-    const pending = Math.max(0, expectedCount - viewed);
-    safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] })
-      .catch((err) => {
-        logger.warn('view-update render failed', { sendId, qurl_id: qurlId, error: err.message });
-      });
-    if (pending === 0) {
+  const handleViewUpdate = createHandleViewUpdate({
+    sendId,
+    linkStatus,
+    getButtonRow: () => buttonRow,
+    isStopped: () => stopped,
+    isViewCounterDegraded: () => viewCounterDegraded,
+    hasInteraction: () => !!interaction,
+    getViewed: () => viewed,
+    setViewed: (n) => { viewed = n; },
+    getExpectedCount: () => expectedCount,
+    buildStatusMsg,
+    safeEdit,
+    onAllDone: () => {
       allDone = true;
       clearInterval(timer);
-    }
-  }
+    },
+    logger,
+  });
   function registerViewUpdateFor(qurlId) {
     if (!config.ENABLE_VIEW_UPDATE_PUSH) return;
     viewUpdateRegistry.register(qurlId, handleViewUpdate);
     viewUpdateRegisteredQurlIds.push(qurlId);
   }
-  // Registration happens BEFORE `let viewed = 0;` (and the rest of the
-  // monitor setup) declares its closure state further down. Safe
-  // because `handleViewUpdate` only fires async — it can't be invoked
-  // synchronously from this loop, so by the time any SQS message
-  // dispatches into it the entire monitorLinkStatus body has run.
+  // Registration pre-dates `let viewed = 0` further down; safe because
+  // the callback only fires async (after monitorLinkStatus returns).
   for (const qurlId of trackedQurlIds) {
     registerViewUpdateFor(qurlId);
   }

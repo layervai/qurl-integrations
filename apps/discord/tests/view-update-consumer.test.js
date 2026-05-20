@@ -296,4 +296,23 @@ describe('view-update-consumer', () => {
       await consumer.stop();
     });
   });
+
+  describe('onFatal contract', () => {
+    test('onFatal is wired through start() and remains optional', async () => {
+      // start() accepts an optional { onFatal } option; the defense-in-
+      // depth path in pollLoop calls it on truly unexpected throws
+      // (vs. the normal ReceiveMessage error path which logs + backs
+      // off). Direct unit-test of pollLoop's fatal branch would require
+      // mocking the registry to throw across an await — heavier than
+      // it's worth. This test pins the contract that start() doesn't
+      // reject + remains optional, so a future refactor that requires
+      // onFatal fails this loud.
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      expect(() => consumer.start()).not.toThrow();
+      // Must stop() or the background pollLoop keeps cycling on the
+      // module's stopController for the rest of the suite. afterEach
+      // would catch it, but explicit stop here keeps the test honest.
+      await consumer.stop();
+    });
+  });
 });

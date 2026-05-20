@@ -74,11 +74,24 @@ function publish({ qurlId, accessCount, consumed, eventId }) {
     logger.warn('view-update-publisher: publish() called with invalid qurlId', { qurlId });
     return;
   }
+  // The webhook handler (qurl-webhook.js) already strict-coerces
+  // `data.consumed` to a literal boolean before calling here, so
+  // anything other than `true` / `false` arriving at this point is a
+  // caller-side regression worth surfacing. Log + coerce-to-false
+  // rather than silently flipping (cr round-3 #8).
+  let consumedBool = consumed;
+  if (typeof consumedBool !== 'boolean') {
+    logger.warn('view-update-publisher: consumed is not a boolean (contract regression)', {
+      qurl_id: qurlId,
+      consumed_type: typeof consumed,
+    });
+    consumedBool = false;
+  }
   try {
     const envelope = {
       qurl_id: qurlId,
       access_count: accessCount,
-      consumed: consumed === true,
+      consumed: consumedBool,
       event_id: eventId,
       published_at_ms: Date.now(),
     };

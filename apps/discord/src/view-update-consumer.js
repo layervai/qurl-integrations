@@ -271,7 +271,11 @@ function start({ onFatal } = {}) {
 }
 
 async function stop() {
-  if (!running || stopController.signal.aborted) return;
+  // Safe-nav on stopController in case start() partially-initialized
+  // (set running=true then threw before stopController = new ...
+  // landed). Practically impossible since `new AbortController()`
+  // shouldn't throw, but free defense vs. a future refactor.
+  if (!running || stopController?.signal.aborted) return;
   stopController.abort();
   logger.info('view-update-consumer: stopping');
   running = false;
