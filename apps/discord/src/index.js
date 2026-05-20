@@ -25,6 +25,8 @@ const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { handleFlowInteraction } = require('./flow-dispatch');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { ensureWebhookSubscription } = require('./qurl-webhook-registrar');
+// Eager require so a missing dep fails at boot, not at first persist.
+const ssmSdk = require('@aws-sdk/client-ssm');
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
@@ -1101,26 +1103,39 @@ async function start() {
     // route still works. config.QURL_API_KEY + BASE_URL must be set
     // (already required for /qurl send to function).
     if (config.QURL_API_KEY && config.QURL_ENDPOINT && config.BASE_URL) {
-      // persistSecret: lazy SSM PutParameter so the registrar stays
-      // SDK-agnostic. Lazy-required so a missing @aws-sdk/client-ssm
-      // dep doesn't break boot — it just degrades to in-memory-only.
+      // 5s timeout so a hung IMDS / network blackhole can't leave the
+      // registrar's `.then(setQurlWebhookSecret)` pending forever and
+      // strand the receiver on PLACEHOLDER. bestEffortPersist swallows
+      // the rejection and degrades to in-memory-only.
       const persistSecret = process.env.QURL_WEBHOOK_SECRET_SSM_PARAM
         ? async (secret) => {
-          const ssm = require('@aws-sdk/client-ssm');
-          const client = new ssm.SSMClient({ region: process.env.AWS_REGION });
-          await client.send(new ssm.PutParameterCommand({
+          const client = new ssmSdk.SSMClient({ region: process.env.AWS_REGION });
+          const put = client.send(new ssmSdk.PutParameterCommand({
             Name: process.env.QURL_WEBHOOK_SECRET_SSM_PARAM,
             Type: 'SecureString',
             Value: secret,
             Overwrite: true,
           }));
+          let timeoutHandle;
+          const timeout = new Promise((_, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error('SSM PutParameter timed out after 5s')), 5_000);
+          });
+          try {
+            await Promise.race([put, timeout]);
+          } finally {
+            clearTimeout(timeoutHandle);
+          }
         }
         : undefined;
+      // 200-char clip in case qurl-service ever applies a length cap
+      // server-side — otherwise the create would 4xx into an infinite
+      // retry-create loop.
+      const description = `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'}, env=${process.env.NODE_ENV || 'unset'})`.slice(0, 200);
       ensureWebhookSubscription({
         apiEndpoint: config.QURL_ENDPOINT,
         apiKey: config.QURL_API_KEY,
         bridgeUrl: `${config.BASE_URL}/webhooks/qurl`,
-        description: `Discord bot view counter (region=${process.env.AWS_REGION || 'unset'}, env=${process.env.NODE_ENV || 'unset'})`,
+        description,
         // Pass the SSM-loaded secret so the registrar can skip rotation
         // when steady-state (existing sub + non-PLACEHOLDER secret) —
         // prevents multi-replica HTTP-fleet boots from rotating each
