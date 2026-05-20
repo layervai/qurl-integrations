@@ -210,6 +210,13 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case http.StatusNotFound:
+				// cmd.Target echoes are SAFE inside backtick code
+				// spans because qurlIDPattern (`^q_[A-Z0-9]{16,64}$`)
+				// restricts the charset to ASCII-uppercase + digits
+				// — no backtick break-out, no mrkdwn token. If
+				// TODO(upstream-rebrand) ever widens the charset,
+				// route the echo through truncateForError-equivalent
+				// neutralization before interpolating.
 				slog.Info("admin revoke: qURL not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
 				respondSlack(w, fmt.Sprintf("`%s` not found — already revoked, or check the qurl_id.", cmd.Target))
 				return
@@ -423,18 +430,18 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 
 // looksLikeSlackUserID reports whether s matches Slack's documented
 // user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid)
-// prefix followed by 8+ uppercase-alphanumeric chars. The 9-char
-// floor matches the parser-side userMentionPattern (`[UW][A-Z0-9]{8,63}`)
-// so a value rejected at parse time is also rejected here. Used as
-// a defensive guard on values read from DDB before interpolating
-// into Slack mrkdwn `<@%s>` mentions: the parser already constrains
-// values written through admin add/remove, but owner_id is written
-// by BindWorkspace from the OAuth callback (a different code path),
-// and admin_slack_user_ids could in principle be hand-mutated. Cheap
-// insurance against a malformed value breaking out of the mention
-// surface.
+// prefix followed by 8-63 uppercase-alphanumeric chars (9-64 chars
+// total). The bounds match the parser-side userMentionPattern
+// (`[UW][A-Z0-9]{8,63}`) so a value rejected at parse time is also
+// rejected here. Used as a defensive guard on values read from DDB
+// before interpolating into Slack mrkdwn `<@%s>` mentions: the
+// parser already constrains values written through admin add/remove,
+// but owner_id is written by BindWorkspace from the OAuth callback
+// (a different code path), and admin_slack_user_ids could in
+// principle be hand-mutated. Cheap insurance against a malformed
+// value breaking out of the mention surface.
 func looksLikeSlackUserID(s string) bool {
-	if len(s) < 9 {
+	if len(s) < 9 || len(s) > 64 {
 		return false
 	}
 	if s[0] != 'U' && s[0] != 'W' {

@@ -147,6 +147,31 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
+// TestHandleAdminRevoke_MissingTeamOrUserID fences the early-return
+// in requireAdminSync when team_id / user_id are empty. The
+// handleAdmin entry-point TrimSpaces both fields, so a whitespace-
+// only payload reaches the gate as "" and renders the explicit
+// "missing team_id or user_id" warning. No mutation is attempted.
+func TestHandleAdminRevoke_MissingTeamOrUserID(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.failOnAdminMutation(t, "missing identity should bail before CheckAdmin")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	// Empty team_id, valid user_id.
+	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, "   ", testAdminUserID)
+	if !strings.Contains(reply, "missing team_id or user_id") {
+		t.Errorf("empty-team reply missing surface: %q", reply)
+	}
+	// Valid team_id, empty user_id.
+	_, reply = inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, "   ")
+	if !strings.Contains(reply, "missing team_id or user_id") {
+		t.Errorf("empty-user reply missing surface: %q", reply)
+	}
+}
+
 // TestHandleAdminRevoke_NonAdmin fences the admin-only gate on revoke.
 func TestHandleAdminRevoke_NonAdmin(t *testing.T) {
 	ts := newAdminTestServers(t)

@@ -331,10 +331,18 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		},
 	})
 	if getErr != nil {
-		// Disambiguation read failed; surface a generic 503 rather
-		// than guess at the underlying state. The audit log on the
-		// caller-side captures the original CCFE for triage.
-		return ddbToError("AddAdmin", getErr)
+		// Disambiguation read failed (timeout / transport). Mirror
+		// BindWorkspace's ErrCodeWorkspaceBindUnverified posture:
+		// surface the unverified-variant code so the handler renders
+		// the "couldn't confirm — please retry" copy instead of the
+		// generic upstream-error. We know the conditional fired
+		// (the CCFE that brought us here is real); we just couldn't
+		// disambiguate the cause.
+		return &Error{
+			StatusCode: http.StatusConflict,
+			Code:       ErrCodeAdminAddUnverified,
+			Title:      "AddAdmin: conditional fired but disambiguation read failed",
+		}
 	}
 	if len(out.Item) == 0 {
 		return &Error{
