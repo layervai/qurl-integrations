@@ -1,7 +1,8 @@
 // SQS-driven view-update consumer (feat #60, sub-second view counter).
-// Runs in the worker tier alongside the existing event-consumer. Long-
-// polls the view-updates queue, parses each envelope, and dispatches
-// into the process-local view-update-registry.
+// Runs in the HTTP tier — same process that owns the webhook receiver
+// (publisher) AND the live monitorLinkStatus instances (dispatch
+// targets). Long-polls the view-updates queue, parses each envelope,
+// and dispatches into the process-local view-update-registry.
 //
 // Pairs with src/view-update-publisher.js. Envelope contract is owned
 // by the publisher's module header; this module MIRRORS it. Any field

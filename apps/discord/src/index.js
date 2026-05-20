@@ -1212,9 +1212,12 @@ async function start() {
   // guard as the event-shipper sibling above.
   //
   // Combined mode is intentionally NOT rejected here (unlike
-  // ENABLE_EVENT_SHIPPER): the registry's silent-drop-on-miss is
-  // idempotent — a duplicate dispatch in a combined process is a
-  // no-op at the monitor render layer.
+  // ENABLE_EVENT_SHIPPER): there's no in-process direct-dispatch
+  // path competing with the SQS round-trip — both paths converge
+  // in consumer → registry → monitor. Combined mode just means
+  // the publisher and consumer live in the same process; messages
+  // still round-trip through SQS, and registry dispatch + status
+  // === 'opened' guards handle any race or redelivery.
   if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
     viewUpdatePublisher.start();
     viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });

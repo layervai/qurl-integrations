@@ -1206,6 +1206,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     viewUpdateRegistry.register(qurlId, handleViewUpdate);
     viewUpdateRegisteredQurlIds.push(qurlId);
   }
+  // Registration happens BEFORE `let viewed = 0;` (and the rest of the
+  // monitor setup) declares its closure state further down. Safe
+  // because `handleViewUpdate` only fires async — it can't be invoked
+  // synchronously from this loop, so by the time any SQS message
+  // dispatches into it the entire monitorLinkStatus body has run.
   for (const qurlId of trackedQurlIds) {
     registerViewUpdateFor(qurlId);
   }

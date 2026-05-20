@@ -189,10 +189,13 @@ describe('view-update-consumer', () => {
       const cb = jest.fn();
       registry.register('qrl_x', cb);
 
-      // resolvesOnce + resolves: the manual pollOnce() call below
-      // gets the message; the background pollLoop spawned by start()
-      // sees an empty queue and exits its iteration without firing
-      // a second delete.
+      // resolvesOnce + resolves: only the FIRST ReceiveMessage call
+      // gets the message; subsequent calls (whether from the background
+      // pollLoop spawned by start() or the manual pollOnce() below)
+      // see an empty queue. Net effect: exactly one delete, regardless
+      // of which loop's pollOnce processed the message — synchronous
+      // pollLoop scheduling means the background loop usually wins the
+      // race, but assertions don't depend on the winner.
       sqsMock.on(ReceiveMessageCommand)
         .resolvesOnce({
           Messages: [
