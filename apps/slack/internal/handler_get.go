@@ -304,9 +304,6 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 
 	message := ":link: *qURL ready:* " + out.QURLLink
 	if args.cmd.Once() {
-		// Make the single-use posture visible to the requester so they
-		// see what they shipped — a link that burns on first redemption
-		// behaves materially differently from the default.
 		message += " (one-time use)"
 	}
 	if args.cmd.DM() {

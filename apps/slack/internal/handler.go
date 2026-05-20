@@ -752,7 +752,7 @@ func (h *Handler) helpMessage() string {
 		lines = append(lines, "• `/qurl get <url|$name> dm:true` — DM the link to you instead of posting it in-channel")
 	}
 	lines = append(lines,
-		"• `/qurl get <url|$name> once:true` — The link works exactly once; redemption burns it",
+		"• `/qurl get <url|$name> once:true` — Mint a single-use link; the first redemption burns it",
 		"• `/qurl get <url|$name> reason:\"…\"` — Annotate the audit log with a reason",
 		"• `/qurl list` — Show your 5 most recent qURLs",
 		"• `/qurl setup` — Connect qURL to your Slack workspace (workspace admin only)",

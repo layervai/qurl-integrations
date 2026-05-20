@@ -411,11 +411,8 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_OnceTrue fences the wire shape for the
-// once:true flag: the JSON body carries `one_time_use: true` so the
-// minted qURL burns on first redemption. Alias-form mint, matching
-// the [TestCreateInputJSON_Reason] sibling — the body shape is
-// `createForResourceBody`, which carries `OneTimeUse` directly.
+// TestCreateInputJSON_OnceTrue fences `one_time_use: true` on the
+// wire body and the `(one-time use)` suffix on the async reply.
 func TestCreateInputJSON_OnceTrue(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -442,13 +439,9 @@ func TestCreateInputJSON_OnceTrue(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_OnceAbsent fences the absence half of the
-// once: contract: when the flag is omitted, the JSON body must NOT
-// carry `one_time_use` (the SDK's `omitempty` tag drops the false
-// zero value). Mirrors [TestCreateInputJSON_OnceTrue] so a regression
-// that flipped the default to true at the handler layer surfaces
-// here. Also pins that the reply copy does NOT carry the suffix on
-// the default path.
+// TestCreateInputJSON_OnceAbsent fences `omitempty` — without the
+// flag, `one_time_use` is absent from the body and the suffix is
+// absent from the reply.
 func TestCreateInputJSON_OnceAbsent(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})

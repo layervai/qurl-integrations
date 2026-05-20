@@ -143,11 +143,7 @@ func (c *Command) DM() bool {
 	return strings.EqualFold(v, "true")
 }
 
-// Once returns the parsed value of the `once:true` flag on `get`. When
-// set, the resulting qURL is single-use — the first redemption burns
-// the link. Mirrors [Command.DM]'s shape so `once:false` (and absence)
-// both return false; the applyFlag arm gates the value half so only
-// the literal `true` / `false` strings reach this accessor.
+// Once returns the parsed value of the `once:true` flag on `get`.
 func (c *Command) Once() bool {
 	if c == nil {
 		return false
@@ -221,13 +217,9 @@ var ErrInvalidQURLID = errors.New("invalid qurl_id")
 // Catches user-facing typos earlier than the handler dispatch.
 var ErrUnexpectedArgument = errors.New("unexpected argument")
 
-// flagKeyOnce is the canonical flag-key string for the strict-boolean
-// `once:` flag. Lifted to a constant so the accessor lookup, the
-// applyFlag case label, and the rejection error message share one
-// source — a future rename here propagates without a grep audit. The
-// sibling `dm` key is still inlined at its three call sites for
-// historical reasons; not pre-emptively refactored per
-// surgical-changes guidance.
+// flagKeyOnce is the canonical key for the `once:` strict-boolean
+// flag. Constant rather than literal because goconst flags `"once"`
+// at its 3-occurrence threshold on `--new-from-rev`.
 const flagKeyOnce = "once"
 
 // ErrInvalidFlag is the sentinel wrapped by every [applyFlag] error
@@ -877,11 +869,7 @@ func applyFlag(cmd *Command, tok string) error {
 		cmd.Flags[key] = val
 		return nil
 	case flagKeyOnce:
-		// Strict-posture boolean — same shape as `dm` above. Only
-		// `true` / `false` (case-folded) survive; `once:yes` /
-		// `once:1` / `once:please` reject so the user sees a friendly
-		// error instead of [Command.Once] silently returning false on
-		// a non-"true" value.
+		// Strict-boolean gate — same shape as `dm` above.
 		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
 			return fmt.Errorf("%w: once:%q (use once:true or omit the flag)", ErrInvalidFlag, val)
 		}
