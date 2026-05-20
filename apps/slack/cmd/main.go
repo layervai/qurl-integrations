@@ -493,7 +493,7 @@ func (a *adminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.Workspac
 // matching oauth.BindConflictCode for 409 paths so the callback can
 // branch idempotent vs. rebind-refused vs. generic-failure. Non-409
 // or non-*slackdata.Error returns "" so the callback treats it as a
-// generic failure (revoke key + 500).
+// generic failure (500).
 func classifyBindError(err error) oauth.BindConflictCode {
 	var ae *slackdata.Error
 	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
@@ -507,6 +507,13 @@ func classifyBindError(err error) oauth.BindConflictCode {
 	case slackdata.ErrCodeWorkspaceBindUnverified:
 		return oauth.BindConflictUnverified
 	default:
+		// A 409 from slackdata with an unmapped Code means a new
+		// conflict variant was added on the producer side without
+		// the classifier here being updated. Surface a warn so
+		// on-call sees the drift on CloudWatch before users start
+		// reporting "every rebind 500s."
+		slog.Warn("classifyBindError: slackdata returned 409 with unmapped Code — defaulting to generic 500 (classifier and slackdata.ErrCodeWorkspace* have drifted)",
+			"code", ae.Code, "title", ae.Title)
 		return ""
 	}
 }
