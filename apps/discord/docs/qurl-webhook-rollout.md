@@ -53,7 +53,9 @@ Terraform-side ordering (config lives in `qurl-integrations-infra`):
    correct unconfigured-state behavior.
 2. Apply the Lambda function + IAM role (scoped: `ssm:GetParameter` on
    the `QURL_API_KEY` + `QURL_WEBHOOK_SECRET` paths; `ssm:PutParameter`
-   on the `QURL_WEBHOOK_SECRET` path; `logs:*`).
+   on the `QURL_WEBHOOK_SECRET` path; `logs:CreateLogGroup` +
+   `logs:CreateLogStream` + `logs:PutLogEvents` — minimum CloudWatch
+   grant; `logs:*` is overly broad).
 3. `aws_lambda_invocation.webhook_registrar` runs synchronously during
    apply with the deploy-specific input (bridge URL, region, param
    names). If the Lambda fails (qurl-service down, IAM missing, etc.),

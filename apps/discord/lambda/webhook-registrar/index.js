@@ -185,20 +185,39 @@ exports.handler = async (event, context) => {
   // initialIsRealSecret guard reuses it if the sub still matches.
   const initialSecret = await readSsmSecureString({ ssmClient, name: event.ssmParamName });
 
-  const persistSecret = buildSsmPersistSecret({
-    ssmClient,
-    paramName: event.ssmParamName,
-    PutParameterCommand,
-  });
-
+  // Lambda STRICT-persist path: do NOT pass `persistSecret` into
+  // `ensureWebhookSubscription` (its `bestEffortPersist` swallows
+  // failures, which is correct for the on-boot caller where the
+  // in-memory secret keeps the bot working until next deploy — but
+  // WRONG here, where SSM persistence IS the deliverable. If the SSM
+  // write fails after qurl-service returns a new secret, that secret
+  // never reaches the bot and the receiver 503s every webhook. Fail
+  // the Lambda loudly → Terraform apply fails → operator notices
+  // instead of half-registered state shipping silently.
   const result = await ensureWebhookSubscription({
     apiEndpoint: event.apiEndpoint,
     apiKey,
     bridgeUrl: event.bridgeUrl,
     description: event.description,
     initialSecret,
-    persistSecret,
+    // persistSecret intentionally omitted — handled below with strict
+    // throw-on-failure semantics.
   });
+
+  // Persist directly so a PutParameter failure propagates out of the
+  // handler. Only persist when the secret actually changed
+  // (created/rotated) — `reused` returns the SSM-loaded `initialSecret`
+  // unchanged, so re-writing the same value is a wasteful no-op + would
+  // emit a misleading "secret persisted" log on every steady-state
+  // invocation.
+  if (result.action !== 'reused') {
+    const persist = buildSsmPersistSecret({
+      ssmClient,
+      paramName: event.ssmParamName,
+      PutParameterCommand,
+    });
+    await persist(result.secret);
+  }
 
   console.log(JSON.stringify({
     msg: 'qURL webhook-registrar Lambda complete',

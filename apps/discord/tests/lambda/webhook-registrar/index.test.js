@@ -236,8 +236,53 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
     mockQurlService({
       'GET /v1/webhooks': () => ({ status: 401, body: { error: 'Unauthorized' } }),
     });
-    
     await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/401/);
+  });
+
+  it('throws when SSM PutParameter fails on the persist call (strict-persist; Terraform deploy must fail fast)', async () => {
+    // Critical: the Lambda uses strict-persist (not bestEffortPersist
+    // which swallows errors). If qurl-service returns a new secret
+    // and SSM PutParameter fails, the secret never reaches the bot's
+    // env on next deploy → receiver 503s every webhook silently. The
+    // Lambda MUST throw so aws_lambda_invocation surfaces the failure
+    // and Terraform apply rolls back / halts.
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+      .on(PutParameterCommand)
+      .rejects(Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' }));
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_orphaned', secret: 'whsec_lost_to_ssm',
+      } } }),
+    });
+    await expect(handler(BASE_EVENT, CONTEXT)).rejects.toThrow(/Rate exceeded|ThrottlingException/);
+  });
+
+  it('does NOT call PutParameter on the reuse path (steady-state re-invocations are no-op for SSM)', async () => {
+    // Re-invoking the Lambda when nothing has changed should be free —
+    // no SSM write, no qurl-service rotate. Pin the no-op invariant
+    // so a future refactor doesn't re-introduce noisy steady-state writes.
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'whsec_existing' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed'],
+      }] } }),
+    });
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(result.action).toBe('reused');
+    expect(ssmMock.commandCalls(PutParameterCommand)).toHaveLength(0);
   });
 });
 

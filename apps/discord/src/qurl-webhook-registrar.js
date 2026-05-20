@@ -355,14 +355,16 @@ async function ensureWebhookSubscription(opts) {
     // Parallel — each DELETE is independent + the 404-on-concurrent-
     // delete path is already swallowed per-loser, so concurrency is
     // safe. N=2-5 in practice (replica count); sequential would add
-    // ~100-200ms per loser on the recovery boot. Note: Promise.all
-    // propagates the FIRST non-404 rejection; siblings keep running
-    // detached. That's acceptable here — we already lost the race for
-    // a clean delete state, and the boot path will fail loudly on the
-    // first error rather than logging N of them.
-    await Promise.all(losers.map(loser =>
+    // ~100-200ms per loser on the recovery boot. allSettled (vs all)
+    // so a non-404 rejection on one sibling doesn't leave siblings'
+    // promises unhandled — we collect every rejection, then throw the
+    // first one explicitly so the call site sees a single greppable
+    // failure with clean stack trace.
+    const results = await Promise.allSettled(losers.map(loser =>
       deleteSubscription({ apiEndpoint, apiKey, webhookId: loser.webhook_id }),
     ));
+    const firstReject = results.find(r => r.status === 'rejected');
+    if (firstReject) throw firstReject.reason;
   }
 
   let webhookId;
