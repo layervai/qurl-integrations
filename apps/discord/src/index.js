@@ -24,6 +24,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { handleFlowInteraction } = require('./flow-dispatch');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
+const { ensureWebhookSubscription } = require('./qurl-webhook-registrar');
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
@@ -1094,6 +1095,56 @@ async function start() {
   //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
+    // Self-register the qurl.accessed webhook subscription post-listen,
+    // pre-traffic. Fire-and-forget — failures log loudly but don't
+    // crash the boot path because the manual operator-curl recovery
+    // route still works. config.QURL_API_KEY + BASE_URL must be set
+    // (already required for /qurl send to function).
+    if (config.QURL_API_KEY && config.QURL_ENDPOINT && config.BASE_URL) {
+      // persistSecret: lazy SSM PutParameter so the registrar stays
+      // SDK-agnostic. Lazy-required so a missing @aws-sdk/client-ssm
+      // dep doesn't break boot — it just degrades to in-memory-only.
+      const persistSecret = process.env.QURL_WEBHOOK_SECRET_SSM_PARAM
+        ? async (secret) => {
+          const ssm = require('@aws-sdk/client-ssm');
+          const client = new ssm.SSMClient({ region: process.env.AWS_REGION });
+          await client.send(new ssm.PutParameterCommand({
+            Name: process.env.QURL_WEBHOOK_SECRET_SSM_PARAM,
+            Type: 'SecureString',
+            Value: secret,
+            Overwrite: true,
+          }));
+        }
+        : undefined;
+      ensureWebhookSubscription({
+        apiEndpoint: config.QURL_ENDPOINT,
+        apiKey: config.QURL_API_KEY,
+        bridgeUrl: `${config.BASE_URL}/webhooks/qurl`,
+        description: `Discord bot view counter (${process.env.AWS_REGION || 'unknown-region'}, ${process.env.NODE_ENV || 'unknown-env'})`,
+        persistSecret,
+      }).then(result => {
+        // Update the in-memory secret so the receiver uses what the
+        // registrar just got (especially important when persistSecret
+        // is denied or skipped — without this update the receiver
+        // would still verify against the OLD config.QURL_WEBHOOK_SECRET).
+        config.QURL_WEBHOOK_SECRET = result.secret;
+        logger.info('qURL webhook self-registration complete', {
+          webhook_id: result.webhookId,
+          action: result.action,
+        });
+      }).catch(err => {
+        // Don't crash the boot path — manual curl is still a recovery
+        // route. But log loudly so the failure is visible without
+        // user-facing symptoms.
+        logger.error('qURL webhook self-registration failed', {
+          error: err.message,
+          status: err.status,
+          op: err.op,
+        });
+      });
+    } else {
+      logger.warn('qURL webhook self-registration skipped — QURL_API_KEY / QURL_ENDPOINT / BASE_URL missing');
+    }
   } else if (isGateway) {
     // Returns 503 until isReady() flips true (after READY from the
     // Discord gateway). Dockerfile --start-period=30s covers this
