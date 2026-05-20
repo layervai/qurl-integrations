@@ -283,12 +283,14 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "dm:1 rejected (not true/false)", text: "get $prod-db dm:1", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
 		{name: "dm:yes rejected (not true/false)", text: "get $prod-db dm:yes", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
 		{name: "dm:please rejected (not true/false)", text: "get $prod-db dm:please", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
-		// once: mirrors dm:'s strict-boolean gate above. Empty-value
-		// cases for once: are covered by the shared `reason:`-keyed
-		// "empty bare value" / "empty quoted value" rows higher up.
+		// once: mirrors dm:'s strict-boolean gate above. Explicit
+		// once:-keyed empty rows survive a refactor that moves per-
+		// key validation in front of the shared empty-value gate.
 		{name: "once:1 rejected (not true/false)", text: "get $prod-db once:1", wantSentnl: ErrInvalidFlag, wantSubstr: onceRejectSubstr},
 		{name: "once:yes rejected (not true/false)", text: "get $prod-db once:yes", wantSentnl: ErrInvalidFlag, wantSubstr: onceRejectSubstr},
 		{name: "once:please rejected (not true/false)", text: "get $prod-db once:please", wantSentnl: ErrInvalidFlag, wantSubstr: onceRejectSubstr},
+		{name: "once: bare empty rejected", text: "get $prod-db once:", wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
+		{name: `once:"" quoted empty rejected`, text: `get $prod-db once:""`, wantSentnl: ErrInvalidFlag, wantSubstr: "empty value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
