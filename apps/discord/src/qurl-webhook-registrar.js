@@ -333,7 +333,9 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
  * @param {string} opts.description    - human-readable; surfaces in qurl-service UI
  * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When set to a non-placeholder value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness.
  * @param {Function} [opts.persistSecret] - optional async(secret) → void callback for best-effort persistence
- * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused'}>}
+ * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused', ownerId: string}>}
+ *   `ownerId` is the qurl-service auth0 owner the API key resolves to. Required
+ *   by per-guild callers for receiver routing.
  */
 async function ensureWebhookSubscription(opts) {
   const { apiEndpoint, apiKey, bridgeUrl, description, initialSecret, persistSecret } = opts;
@@ -390,6 +392,10 @@ async function ensureWebhookSubscription(opts) {
   const initialIsRealSecret = typeof initialSecret === 'string'
     && initialSecret.length > 0;
 
+  // Forwarded so per-guild callers can route inbound webhooks
+  // without a second GET /v1/webhooks.
+  let ownerId;
+
   if (existing && initialIsRealSecret && !wasDedupe) {
     // Trust assumption: the SSM-loaded `initialSecret` matches the
     // existing sub's server-side secret. No challenge/verify here.
@@ -400,6 +406,7 @@ async function ensureWebhookSubscription(opts) {
     webhookId = existing.webhook_id;
     secret = initialSecret;
     action = 'reused';
+    ownerId = existing.owner_id;
     // Wrap the PATCH in try/catch matching the rotate branch — a
     // transient 5xx here shouldn't flip the boot log to "self-
     // registration failed" when the in-memory secret is already
@@ -413,7 +420,7 @@ async function ensureWebhookSubscription(opts) {
       });
     }
     logger.info('qURL webhook subscription reused (existing found, SSM secret trusted, no rotate)', { webhookId, url: bridgeUrl });
-    return { secret, webhookId, action };
+    return { secret, webhookId, action, ownerId };
   }
 
   if (existing) {
@@ -422,6 +429,7 @@ async function ensureWebhookSubscription(opts) {
     // so the boot can succeed even if the events PATCH fails — a
     // stuck PATCH shouldn't block secret recovery.
     webhookId = existing.webhook_id;
+    ownerId = existing.owner_id;
     const rotated = await rotateSecret({ apiEndpoint, apiKey, webhookId });
     secret = rotated.secret;
     action = 'rotated';
@@ -441,6 +449,7 @@ async function ensureWebhookSubscription(opts) {
     webhookId = created.webhook_id;
     secret = created.secret;
     action = 'created';
+    ownerId = created.owner_id;
     logger.info('qURL webhook subscription created', { webhookId, url: bridgeUrl });
   }
 
@@ -451,7 +460,7 @@ async function ensureWebhookSubscription(opts) {
 
   await bestEffortPersist({ persistSecret, value: secret });
 
-  return { secret, webhookId, action };
+  return { secret, webhookId, action, ownerId };
 }
 
 // Build a persistSecret callback that writes the rotated secret to an

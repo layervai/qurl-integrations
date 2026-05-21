@@ -90,25 +90,28 @@ async function main() {
       const guildId = row.guild_id;
       console.log(`[backfill] candidate guild_id=${guildId}`);
       if (DRY_RUN) continue;
-      // Decrypt the stored key via the same path getGuildApiKey uses.
-      // Then call the shared link helper. linkGuildWebhookSubscription
-      // is non-throwing — it returns { ok, reason } so we can count
-      // outcomes without try/catch noise.
-      const apiKey = await db.getGuildApiKey(guildId);
-      if (!apiKey) {
-        console.warn(`[backfill] guild_id=${guildId} qurl_api_key decrypted empty — skipping`);
-        skipped += 1;
-        continue;
-      }
-      const result = await linkGuildWebhookSubscription({
-        guildId, apiKey, descriptionContext: 'via=backfill-script',
-      });
-      if (result.ok) {
-        provisioned += 1;
-        console.log(`[backfill] provisioned guild_id=${guildId} action=${result.action}`);
-      } else {
+      // Per-row try/catch so one corrupt encrypted row doesn't abort
+      // the whole backfill.
+      try {
+        const apiKey = await db.getGuildApiKey(guildId);
+        if (!apiKey) {
+          console.warn(`[backfill] guild_id=${guildId} qurl_api_key decrypted empty — skipping`);
+          skipped += 1;
+          continue;
+        }
+        const result = await linkGuildWebhookSubscription({
+          guildId, apiKey, descriptionContext: 'via=backfill-script',
+        });
+        if (result.ok) {
+          provisioned += 1;
+          console.log(`[backfill] provisioned guild_id=${guildId} action=${result.action}`);
+        } else {
+          failed += 1;
+          console.error(`[backfill] FAILED guild_id=${guildId} reason=${result.reason}`);
+        }
+      } catch (rowErr) {
         failed += 1;
-        console.error(`[backfill] FAILED guild_id=${guildId} reason=${result.reason}`);
+        console.error(`[backfill] FAILED guild_id=${guildId} threw: ${rowErr?.message}`);
       }
     }
     ExclusiveStartKey = res.LastEvaluatedKey;

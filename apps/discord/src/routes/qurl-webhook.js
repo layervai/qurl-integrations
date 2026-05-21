@@ -123,17 +123,20 @@ router.post('/qurl', async (req, res) => {
     return res.status(503).json({ error: 'Webhook receiver misconfigured' });
   }
 
-  // Every other failure shape is 401 + rate-limiter increment + audit.
-  // OWNER_UNKNOWN-after-primed gets a distinct audit so a real auth0
-  // owner probing the receiver shows up on a different dashboard line
-  // than HMAC-mismatch traffic (different threat models).
+  // OWNER_UNKNOWN / OWNER_ID_MISSING are operational drift, not
+  // attacker signal — skip the bad-sig limiter so a registry-drift
+  // burst from qurl-service's worker fleet doesn't also throttle
+  // legitimate webhooks on the same source IP.
   if (result !== VERIFY_RESULTS.OK) {
-    const n = badSigLimiter.recordBadSig(ip);
+    const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
+      || result === VERIFY_RESULTS.SIG_HEADER_MISSING
+      || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED;
+    const totalInWindow = isHmacFailure ? badSigLimiter.recordBadSig(ip) : null;
     const auditEvent = result === VERIFY_RESULTS.OWNER_UNKNOWN
       ? AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER
       : AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID;
-    logger.warn('qURL webhook verification failed', { ip, totalInWindow: n, result, ownerId });
-    logger.audit(auditEvent, { total_in_window: n, result });
+    logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId });
+    logger.audit(auditEvent, { total_in_window: totalInWindow, result });
     return res.status(401).json({ error: 'Invalid signature' });
   }
 

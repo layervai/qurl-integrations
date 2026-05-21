@@ -88,12 +88,6 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
 });
 
 describe('webhook-subscriptions registry — multi-guild-shared-owner', () => {
-  // When one auth0 admin installs the bot in N guilds, every row
-  // shares the same owner_id + webhook_id + secret (qurl-service
-  // dedupes on (owner_id, url) per ensureWebhookSubscription). The
-  // cache entries collide on identical content; the GuildIds set
-  // tracks all guilds that point at this entry. Important for the
-  // unlink path's reference-counting.
   it('coalesces N rows sharing an owner_id into one cache entry', async () => {
     mockScan.mockResolvedValueOnce([
       { guildId: 'g1', webhookId: 'wh_shared', webhookSecret: 'sec_shared', webhookOwnerId: 'usr_admin' },
@@ -105,6 +99,88 @@ describe('webhook-subscriptions registry — multi-guild-shared-owner', () => {
     // know about guild_ids — that's a DDB-layer concern for the
     // unlink ref-count path.
     expect(subs.getSecretForOwner('usr_admin')).toBe('sec_shared');
+  });
+
+  // Rotate-drift tiebreaker: when sibling rows disagree on secret,
+  // the newest updatedAt MUST win (qurl-service signs with the
+  // post-rotate secret; a stale-row pick would 401 every webhook).
+  it('picks the secret from the most-recently-updated row on rotate-drift', async () => {
+    // Stale row first so first-write-wins regressions fail this test.
+    mockScan.mockResolvedValueOnce([
+      {
+        guildId: 'g1', webhookId: 'wh_v1', webhookSecret: 'sec_stale', webhookOwnerId: 'usr_admin',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+      {
+        guildId: 'g2', webhookId: 'wh_v2', webhookSecret: 'sec_fresh', webhookOwnerId: 'usr_admin',
+        updatedAt: '2026-05-21T00:00:00.000Z',
+      },
+    ]);
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_admin')).toBe('sec_fresh');
+  });
+
+  it('picks the most-recently-updated row regardless of scan order', async () => {
+    mockScan.mockResolvedValueOnce([
+      {
+        guildId: 'g2', webhookId: 'wh_v2', webhookSecret: 'sec_fresh', webhookOwnerId: 'usr_admin',
+        updatedAt: '2026-05-21T00:00:00.000Z',
+      },
+      {
+        guildId: 'g1', webhookId: 'wh_v1', webhookSecret: 'sec_stale', webhookOwnerId: 'usr_admin',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+    ]);
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_admin')).toBe('sec_fresh');
+  });
+
+  it('treats missing updatedAt as oldest (legacy row never beats a timestamped one)', async () => {
+    mockScan.mockResolvedValueOnce([
+      { guildId: 'g_legacy', webhookId: 'wh_legacy', webhookSecret: 'sec_legacy', webhookOwnerId: 'usr_admin' },
+      {
+        guildId: 'g_new', webhookId: 'wh_new', webhookSecret: 'sec_new', webhookOwnerId: 'usr_admin',
+        updatedAt: '2026-05-21T00:00:00.000Z',
+      },
+    ]);
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_admin')).toBe('sec_new');
+  });
+});
+
+describe('webhook-subscriptions registry — concurrent upsert during scan', () => {
+  it('preserves an upsertGuild entry written while scanOnce is awaiting', async () => {
+    let resolveScan;
+    mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
+    // Kick off scanOnce — it'll suspend on the scan promise.
+    const scanPromise = subs.scanOnce();
+    // While scan is suspended, a concurrent /qurl setup writes a row.
+    subs.upsertGuild({
+      guildId: 'g_race', ownerId: 'usr_race', webhookId: 'wh_race', webhookSecret: 'sec_race',
+    });
+    // Scan completes — its `rows` doesn't include the racing guild
+    // because the row was written after the DDB read started.
+    resolveScan([]);
+    await scanPromise;
+    // The synchronous upsert MUST survive the rebuild. Without the
+    // upsertsDuringScan tracker, the clear() would wipe it and this
+    // expectation would fail with null.
+    expect(subs.getSecretForOwner('usr_race')).toBe('sec_race');
+  });
+
+  it('scan supersedes a pre-scan upsert when DDB row is also present', async () => {
+    subs.upsertGuild({
+      guildId: 'g_pre', ownerId: 'usr_pre', webhookId: 'wh_pre', webhookSecret: 'sec_pre',
+    });
+    mockScan.mockResolvedValueOnce([
+      {
+        guildId: 'g_pre', webhookId: 'wh_pre', webhookSecret: 'sec_pre_from_scan',
+        webhookOwnerId: 'usr_pre',
+        updatedAt: '2026-05-21T00:00:00.000Z',
+      },
+    ]);
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_pre')).toBe('sec_pre_from_scan');
   });
 });
 

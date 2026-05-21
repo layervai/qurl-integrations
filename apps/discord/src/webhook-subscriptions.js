@@ -46,6 +46,12 @@ let timer = null;
 // here keeps the discover/refresh fold idempotent.
 let defaultOwnerId = null;
 
+// Owners whose entries must survive scanOnce's clear-and-repopulate
+// swap. Reset at the top of each scan; re-applied after the swap so
+// a concurrent /qurl setup whose DDB write landed AFTER the scan
+// crossed its partition isn't silently dropped.
+let upsertsDuringScan = new Set();
+
 function getSecretForOwner(ownerId) {
   if (!ownerId) return null;
   const entry = subscriptions.get(ownerId);
@@ -69,15 +75,14 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
     entry = { guildIds: new Set(), webhookSecret, webhookId };
     subscriptions.set(ownerId, entry);
   } else {
-    // ensureWebhookSubscription dedupes on (owner_id, url); two
-    // guilds sharing an owner get the SAME webhookId + secret. If a
-    // future qurl-service change generates a new secret on re-link
-    // for the same owner, take the newer value — entries are
-    // last-write-wins by design.
+    // Last-write-wins. A second guild's link triggers qurl-service to
+    // rotate the shared secret; the newer value must replace the
+    // older one for the receiver to match qurl-service's signatures.
     entry.webhookSecret = webhookSecret;
     entry.webhookId = webhookId;
   }
   entry.guildIds.add(guildId);
+  upsertsDuringScan.add(ownerId);
 }
 
 // Removes guildId from its owner's entry; if the entry is now empty
@@ -121,35 +126,47 @@ async function discoverDefaultOwnerId() {
   return null;
 }
 
-// One refresh pass. Rebuilds the per-guild map from `guild_configs`
-// AND rediscovers the default-key owner_id (idempotent). Throws on
-// any sub-step failure so the caller increments the failure counter
-// — partial-pass state would mask drift.
+// One refresh pass. Rebuilds the per-owner map from `guild_configs`
+// and rediscovers the default-key owner_id. Throws on any sub-step
+// failure; the caller (refreshTick) increments consecutiveFailures.
 async function scanOnce() {
-  const rows = await db.scanGuildSubscriptions();
+  upsertsDuringScan = new Set();
 
-  // Rebuild rather than diff-apply: tiny table (low hundreds at
-  // scale), simpler than reconciling adds/drops, and any synchronous
-  // upsertGuild calls between scans are preserved because we rebuild
-  // the map before swapping.
+  // Parallelize the two independent network reads: the DDB scan and
+  // the qurl-service GET /v1/webhooks. Sequential, they added 50-300ms
+  // per tick for no benefit.
+  const [rows, discoveredOwner] = await Promise.all([
+    db.scanGuildSubscriptions(),
+    discoverDefaultOwnerId(),
+  ]);
+
+  // Tiebreaker: when sibling rows for one owner disagree on (secret,
+  // webhookId) — the propagateGuildWebhookSubscription window — the
+  // row with the newest `updatedAt` wins. The chosen-updatedAt is a
+  // scan-local concern; we keep it in a parallel Map instead of
+  // attaching to the cache entry shape that the receiver consults.
   const next = new Map();
+  const winningUpdatedAt = new Map();
   for (const r of rows) {
     let entry = next.get(r.webhookOwnerId);
     if (!entry) {
       entry = { guildIds: new Set(), webhookSecret: r.webhookSecret, webhookId: r.webhookId };
       next.set(r.webhookOwnerId, entry);
+      winningUpdatedAt.set(r.webhookOwnerId, r.updatedAt || '');
+    } else if ((r.updatedAt || '') > winningUpdatedAt.get(r.webhookOwnerId)) {
+      entry.webhookSecret = r.webhookSecret;
+      entry.webhookId = r.webhookId;
+      winningUpdatedAt.set(r.webhookOwnerId, r.updatedAt || '');
     }
     entry.guildIds.add(r.guildId);
   }
 
-  const discoveredOwner = await discoverDefaultOwnerId();
   if (discoveredOwner) {
     defaultOwnerId = discoveredOwner;
     if (config.QURL_WEBHOOK_SECRET) {
-      // We don't know the webhookId for the default-key sub from
-      // GET /v1/webhooks?limit=1 in a stable way — but the receiver
-      // only needs webhookSecret. Synthetic webhookId acts as a
-      // marker for the default entry; never sent over the wire.
+      // GET /v1/webhooks?limit=1 doesn't pin which sub belongs to the
+      // default key; receiver only needs the secret, so a synthetic
+      // webhookId marks the default entry (never sent over the wire).
       next.set(discoveredOwner, {
         guildIds: new Set(['__default__']),
         webhookSecret: config.QURL_WEBHOOK_SECRET,
@@ -158,12 +175,20 @@ async function scanOnce() {
     }
   }
 
-  // Atomic-ish swap. Clear-and-repopulate so any caller holding a
-  // reference to `subscriptions` sees a consistent post-swap state
-  // (Map.set is synchronous; no caller can observe a half-built map
-  // between iterations in single-threaded Node).
+  // Only snapshot when concurrent upserts could have landed. The
+  // common case (no concurrent /qurl setup) skips the allocation.
+  const liveSnapshot = upsertsDuringScan.size > 0 ? new Map(subscriptions) : null;
   subscriptions.clear();
   for (const [k, v] of next.entries()) subscriptions.set(k, v);
+
+  if (liveSnapshot) {
+    for (const ownerId of upsertsDuringScan) {
+      if (next.has(ownerId)) continue;
+      const liveEntry = liveSnapshot.get(ownerId);
+      if (liveEntry) subscriptions.set(ownerId, liveEntry);
+    }
+  }
+
   primed = true;
 }
 
@@ -219,6 +244,7 @@ function _resetForTesting() {
   primed = false;
   consecutiveFailures = 0;
   defaultOwnerId = null;
+  upsertsDuringScan = new Set();
   if (timer) {
     clearInterval(timer);
     timer = null;
@@ -232,9 +258,9 @@ module.exports = {
   isPrimed,
   upsertGuild,
   removeGuild,
-  // Exposed for the splice points in qurl-oauth.js + commands.js so
-  // they can do a synchronous local update after writing to DDB. NOT
-  // exposed as part of the receiver's hot path.
+  // Test-only: production callers should let the 30s ticker drive
+  // refresh. Exposed because the test suite needs to drive scans
+  // deterministically without waiting on real intervals.
   scanOnce,
   _resetForTesting,
 };

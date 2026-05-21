@@ -101,7 +101,10 @@ const STORE_METHODS = Object.freeze([
   // Guild (BYOK) API keys
   'getGuildApiKey',
   'setGuildApiKey',
-  'removeGuildApiKey',
+  // Raw delete — see ddb-store.js's defensive comment. Production
+  // callers MUST use guild-webhook-link.js::unlinkGuildAndWebhook so
+  // the qurl-service subscription is torn down in lockstep.
+  '_removeGuildApiKeyRaw',
   'getGuildConfig',
   'getGuildConfigWithApiKey',
 
@@ -110,6 +113,7 @@ const STORE_METHODS = Object.freeze([
   'clearGuildWebhookSubscription',
   'listGuildSubscriptionsByOwner',
   'scanGuildSubscriptions',
+  'propagateGuildWebhookSubscription',
 
   // Orphaned OAuth tokens (background revoke-retry queue)
   'recordOrphanedToken',

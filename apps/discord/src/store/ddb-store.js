@@ -1476,15 +1476,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   }));
 }
 
-// Raw delete. Future callers that need to fully unlink a guild
-// (including tearing down its qurl-service webhook subscription)
-// MUST go through `guild-webhook-link.js::unlinkGuildAndWebhook`,
-// NOT this function — calling removeGuildApiKey directly leaves an
-// orphan webhook subscription on qurl-service for BYOK guilds.
-// Leaving the function exported (rather than renaming it `_raw`)
-// preserves API stability for the backfill script + tests that
-// only need the data-layer primitive.
-async function removeGuildApiKey(guildId) {
+// Raw delete. Bypasses qurl-service subscription teardown; use
+// `guild-webhook-link.js::unlinkGuildAndWebhook` to also tear down
+// the subscription. The leading underscore signals "internal — read
+// the orchestrator first."
+async function _removeGuildApiKeyRaw(guildId) {
   const res = await ddb.send(new DeleteCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
@@ -1573,11 +1569,55 @@ async function listGuildSubscriptionsByOwner(webhookOwnerId) {
     .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));
 }
 
-// Returns every guild_configs row that has a webhook subscription set,
-// with the secret decrypted. Used by the in-process subscription
-// registry's priming + 30s refresh tick. Rows missing webhook_id are
-// skipped — those are guilds with an API key but no provisioned
-// subscription yet (e.g. between deploy and the backfill script).
+// Propagate (webhookId, webhookSecret) to every sibling guild row
+// owned by the same webhookOwnerId. Called after
+// ensureWebhookSubscription rotates the shared secret so sibling
+// rows don't keep stale ciphertext that the cache tick could
+// deterministically pick on Scan-order tiebreak.
+//
+// Returns the count of rows updated (excludes the just-written
+// primary row, which the caller has already persisted). Per-row
+// errors surface as rejections in the Promise.allSettled result so
+// the caller can log+continue without losing visibility.
+async function propagateGuildWebhookSubscription(webhookOwnerId, { webhookId, webhookSecret }) {
+  if (!webhookOwnerId || !webhookId || !webhookSecret) {
+    throw new Error('propagateGuildWebhookSubscription: webhookOwnerId, webhookId, webhookSecret all required');
+  }
+  const siblings = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  if (siblings.length === 0) return { updated: 0, failed: 0 };
+
+  const updatedAt = nowIso();
+  const encryptedSecret = encrypt(webhookSecret);
+  const results = await Promise.allSettled(siblings.map((s) => ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: s.guildId },
+    UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
+    // Defense against a race where the row was cleared between
+    // listGuildSubscriptionsByOwner and this write — never mint
+    // subscription state on a row that opted out.
+    ConditionExpression: 'attribute_exists(webhook_owner_id)',
+    ExpressionAttributeValues: {
+      ':wid': webhookId,
+      ':wsec': encryptedSecret,
+      ':u': updatedAt,
+    },
+  }))));
+
+  let updated = 0;
+  let failed = 0;
+  for (const r of results) {
+    if (r.status === 'fulfilled') { updated += 1; continue; }
+    // ConditionalCheckFailedException = sibling cleared between
+    // list and write; benign, not a failure.
+    if (r.reason?.name === 'ConditionalCheckFailedException') continue;
+    failed += 1;
+  }
+  return { updated, failed };
+}
+
+// Returns every guild_configs row with a provisioned webhook
+// subscription, secret decrypted. Forwards `updatedAt` so the
+// in-process cache can tiebreak sibling rows during rotation drift.
 async function scanGuildSubscriptions() {
   const rows = await scanAll(TABLES.guild_configs);
   const out = [];
@@ -1588,6 +1628,11 @@ async function scanGuildSubscriptions() {
       webhookId: r.webhook_id,
       webhookSecret: decrypt(r.webhook_secret),
       webhookOwnerId: r.webhook_owner_id,
+      // ISO-8601 string OR undefined for rows pre-dating the
+      // updated_at write. The cache treats `undefined` as "older
+      // than any timestamped row" so a stale legacy row never beats
+      // a freshly-written one in the tiebreak.
+      updatedAt: r.updated_at,
     });
   }
   return out;
@@ -1738,10 +1783,10 @@ module.exports = {
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
-  getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
+  getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
   // Per-guild webhook subscriptions (BYOK view counter)
   setGuildWebhookSubscription, clearGuildWebhookSubscription,
-  listGuildSubscriptionsByOwner, scanGuildSubscriptions,
+  listGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   // Orphaned tokens
   recordOrphanedToken, countOrphanedTokens, listOrphanedTokens,
   decryptOrphanedToken, deleteOrphanedToken,

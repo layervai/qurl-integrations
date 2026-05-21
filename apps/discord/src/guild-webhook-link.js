@@ -1,25 +1,8 @@
 // Per-guild qurl-service webhook subscription provisioning.
-//
-// Called from the two `setGuildApiKey` call sites (qurl-oauth callback +
-// /qurl setup admin form) and from the one-time backfill script. The
-// caller has already persisted the API key to DDB; this module's job
-// is to:
-//   1. ensure a qurl.accessed subscription exists under that API key
-//   2. discover the qurl-service owner_id the key resolves to
-//   3. persist {webhook_id, encrypted secret, owner_id} on the
-//      guild_configs row
-//   4. update the in-process subscription registry synchronously so
-//      the registering replica is immediately correct
-//
-// Partial-failure: if step 3 throws AFTER step 1 succeeded, the
-// just-created subscription is best-effort DELETE'd so the admin's
-// account isn't littered with orphan webhooks.
-//
-// All paths are non-blocking on caller error: the OAuth callback +
-// /qurl setup should report success for KEY LINKING even when the
-// view-counter wiring fails — the key still works, view counter just
-// degrades to the polling fallback until backfill catches up. This
-// module logs + audits but never re-throws to the caller.
+// Called from the two setGuildApiKey call sites + the backfill script.
+// Never re-throws to the caller: the OAuth callback / /qurl setup
+// should succeed for key linking even when view-counter wiring fails
+// (the polling fallback covers it until backfill catches up).
 
 const config = require('./config');
 const db = require('./store');
@@ -28,57 +11,52 @@ const { AUDIT_EVENTS } = require('./constants');
 const { ensureWebhookSubscription, deleteSubscription } = require('./qurl-webhook-registrar');
 const subs = require('./webhook-subscriptions');
 
-// 10s matches qurl-oauth.js's QURL_SERVICE_TIMEOUT_MS budget; keep
-// it tight so a stuck qurl-service GET doesn't block /qurl setup.
-const QURL_SERVICE_TIMEOUT_MS = 10_000;
+// Frozen discriminator for the `reason` field on link/unlink results.
+// Keeping it as an enum lets downstream audit-log parsers / dashboards
+// avoid string-typos and lets the receiver / store tests assert
+// against the canonical values.
+const LINK_RESULTS = Object.freeze({
+  MISSING_ARGS: 'missing-args',
+  CONFIG_MISSING: 'config-missing',
+  REGISTER_FAILED: 'register-failed',
+  OWNER_MISSING: 'owner-missing',
+  PERSIST_FAILED: 'persist-failed',
+  LIST_FAILED: 'list-failed',
+  CANNOT_DELETE: 'cannot-delete',
+  KEPT_FOR_SIBLINGS: 'kept-for-siblings',
+  DELETED: 'deleted',
+  NOT_FOUND: 'not-found',
+  READ_FAILED: 'read-failed',
+  DELETE_FAILED: 'delete-failed',
+  UNLINKED: 'unlinked',
+});
 
 function bridgeUrl() {
-  // BASE_URL is validated upstream (variables.tf regex pins
-  // https://host[:port][/segment] with no trailing slash), but we
-  // still strip a trailing slash defensively so a future relaxation
-  // of that validation can't render `https://bot//webhooks/qurl`.
-  return `${config.BASE_URL.replace(/\/$/, '')}/webhooks/qurl`;
+  // BASE_URL is validated upstream; multi-slash strip is defense
+  // against future config-drift.
+  return `${config.BASE_URL.replace(/\/+$/, '')}/webhooks/qurl`;
 }
 
-// Discover the qurl-service owner_id by listing the first webhook
-// under this key. Any of the caller's subs work since they all share
-// the key's owner — including the one we just created via
-// ensureWebhookSubscription. Returns null if the list is empty
-// (defensive — shouldn't happen since we just registered one) and
-// throws on transport / non-2xx errors so the partial-failure path
-// can roll back.
-async function discoverOwnerId(apiKey) {
-  const resp = await fetch(`${config.QURL_ENDPOINT}/v1/webhooks?limit=1`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
-  });
-  if (!resp.ok) {
-    throw new Error(`GET /v1/webhooks returned ${resp.status} on owner_id discovery`);
-  }
-  const body = await resp.json();
-  const first = Array.isArray(body?.data) ? body.data[0] : null;
-  return typeof first?.owner_id === 'string' && first.owner_id.length > 0
-    ? first.owner_id
-    : null;
+// Fire-and-forget DELETE used by the three orphan-cleanup paths in
+// linkGuildWebhookSubscription. Centralized so the warn shape stays
+// consistent and a future-cr nit ("logger field names differ across
+// the three paths") doesn't recur.
+function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
+  deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
+    .catch((dErr) => logger.warn('Best-effort orphan-subscription delete threw', {
+      error: dErr?.message, webhookId, guildId,
+    }));
 }
 
 // Provision (idempotent) a per-guild webhook subscription.
-//
-// Returns { ok: true, action } on success or { ok: false, reason } on
-// any failure. Never throws; the caller's user-facing flow continues
-// regardless of outcome.
-//
-// `action` mirrors ensureWebhookSubscription's: 'created' | 'rotated'
-// | 'reused'. Useful for distinguishing "fresh guild" from "admin
-// shared their key across N guilds" in audit logs.
+// `action` mirrors ensureWebhookSubscription: 'created' | 'rotated' | 'reused'.
 async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContext }) {
   if (!guildId || !apiKey) {
-    return { ok: false, reason: 'missing-args' };
+    return { ok: false, reason: LINK_RESULTS.MISSING_ARGS };
   }
   if (!config.BASE_URL || !config.QURL_ENDPOINT) {
     logger.warn('Per-guild webhook link skipped: BASE_URL or QURL_ENDPOINT unset', { guildId });
-    return { ok: false, reason: 'config-missing' };
+    return { ok: false, reason: LINK_RESULTS.CONFIG_MISSING };
   }
 
   let registered = null;
@@ -93,37 +71,16 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook subscription registration failed', {
       error: err?.message, guildId,
     });
-    return { ok: false, reason: 'register-failed' };
+    return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
   }
 
-  const { webhookId, secret, action } = registered;
-
-  let webhookOwnerId;
-  try {
-    webhookOwnerId = await discoverOwnerId(apiKey);
-  } catch (err) {
-    // Owner_id discovery failed AFTER we successfully registered.
-    // Without owner_id the receiver can't route inbound events to
-    // this subscription's secret — best-effort DELETE to avoid an
-    // orphan billing-active sub on the admin's account.
-    deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
-      .catch((dErr) => logger.warn('Best-effort orphan-subscription delete threw', {
-        error: dErr?.message, webhookId, guildId,
-      }));
-    logger.warn('Per-guild webhook owner_id discovery failed; rolled back', {
-      error: err?.message, guildId, webhookId,
+  const { webhookId, secret, action, ownerId: webhookOwnerId } = registered;
+  if (typeof webhookOwnerId !== 'string' || !webhookOwnerId) {
+    bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
+    logger.warn('Per-guild webhook ownerId missing from registrar response; rolled back', {
+      guildId, webhookId, action,
     });
-    return { ok: false, reason: 'owner-discovery-failed' };
-  }
-  if (!webhookOwnerId) {
-    deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
-      .catch((dErr) => logger.warn('Best-effort orphan-subscription delete threw', {
-        error: dErr?.message, webhookId, guildId,
-      }));
-    logger.warn('Per-guild webhook owner_id missing on discovery response; rolled back', {
-      guildId, webhookId,
-    });
-    return { ok: false, reason: 'owner-missing' };
+    return { ok: false, reason: LINK_RESULTS.OWNER_MISSING };
   }
 
   try {
@@ -133,18 +90,24 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       webhookOwnerId,
     });
   } catch (err) {
-    // DDB write failed AFTER subscription was successfully created.
-    // Same orphan-cleanup rationale as qurl-oauth.js:413's orphan-
-    // mint cleanup. ensureWebhookSubscription's own dedupe heals on
-    // the next /qurl setup attempt.
-    deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
-      .catch((dErr) => logger.warn('Best-effort orphan-subscription delete threw', {
-        error: dErr?.message, webhookId, guildId,
-      }));
+    bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
     logger.warn('Per-guild webhook subscription persisted-create rollback', {
       error: err?.message, guildId, webhookId,
     });
-    return { ok: false, reason: 'persist-failed' };
+    return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
+  }
+
+  // Sibling rows under the same owner may hold a pre-rotate secret.
+  // Best-effort propagation; the scanOnce tiebreaker still picks the
+  // freshly-written primary if this fails.
+  try {
+    await db.propagateGuildWebhookSubscription(webhookOwnerId, {
+      webhookId, webhookSecret: secret,
+    });
+  } catch (err) {
+    logger.warn('Per-guild webhook secret propagation to siblings failed (non-blocking)', {
+      error: err?.message, guildId, webhookOwnerId, webhookId,
+    });
   }
 
   subs.upsertGuild({ guildId, ownerId: webhookOwnerId, webhookId, webhookSecret: secret });
@@ -154,18 +117,13 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   return { ok: true, action };
 }
 
-// Best-effort tear-down of a guild's webhook subscription, used by
-// the unlink path. Reference-counted via listGuildSubscriptionsByOwner
-// so multi-guild admins (one auth0 owner across N guilds) don't kill
-// sibling delivery when one guild unlinks.
-//
-// DELETE 401 = the API key the helper would use has been revoked
-// already (typical re-key flow); DELETE 404 = subscription already
-// gone. Both swallowed; the QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED
-// audit captures them for forensic counting.
+// Reference-counted tear-down for unlink: only DELETE the qurl-service
+// subscription if this was the last guild referencing it. 401 / 404 on
+// DELETE are swallowed (typical re-key flow has the old key already
+// revoked).
 async function unlinkGuildWebhookSubscription({ guildId, apiKey, webhookId, webhookOwnerId }) {
   if (!guildId || !webhookOwnerId || !webhookId) {
-    return { ok: false, reason: 'missing-args' };
+    return { ok: false, reason: LINK_RESULTS.MISSING_ARGS };
   }
 
   let siblings = [];
@@ -175,21 +133,18 @@ async function unlinkGuildWebhookSubscription({ guildId, apiKey, webhookId, webh
     logger.warn('listGuildSubscriptionsByOwner threw — skipping DELETE to avoid killing siblings', {
       error: err?.message, guildId, webhookOwnerId,
     });
-    return { ok: false, reason: 'list-failed' };
+    return { ok: false, reason: LINK_RESULTS.LIST_FAILED };
   }
   const otherGuilds = siblings.filter(s => s.guildId !== guildId);
   if (otherGuilds.length > 0) {
-    // Other guilds share this subscription; leave it alone. Local
-    // registry update only — let the next tick observe the row drop.
     subs.removeGuild({ guildId, ownerId: webhookOwnerId });
-    return { ok: true, reason: 'kept-for-siblings', siblingCount: otherGuilds.length };
+    return { ok: true, reason: LINK_RESULTS.KEPT_FOR_SIBLINGS, siblingCount: otherGuilds.length };
   }
 
-  // Last guild for this subscription. Best-effort DELETE.
   if (!apiKey || !config.QURL_ENDPOINT) {
     logger.warn('Skipping DELETE: missing apiKey or QURL_ENDPOINT', { guildId });
     subs.removeGuild({ guildId, ownerId: webhookOwnerId });
-    return { ok: false, reason: 'cannot-delete' };
+    return { ok: false, reason: LINK_RESULTS.CANNOT_DELETE };
   }
   try {
     await deleteSubscription({
@@ -199,11 +154,6 @@ async function unlinkGuildWebhookSubscription({ guildId, apiKey, webhookId, webh
       guild_id: guildId,
     });
   } catch (err) {
-    // 401 = key revoked (typical re-key flow); 404 should already be
-    // swallowed inside deleteSubscription itself (see qurl-webhook-
-    // registrar.js:192). Anything else is an unexpected qurl-service
-    // failure mode; log + audit but DON'T re-throw, since the caller
-    // (removeGuildApiKey) is in a critical unlink path.
     const status = err?.status;
     logger.warn('Per-guild webhook subscription DELETE failed (swallowed)', {
       error: err?.message, status, guildId, webhookId,
@@ -213,20 +163,15 @@ async function unlinkGuildWebhookSubscription({ guildId, apiKey, webhookId, webh
     });
   }
   subs.removeGuild({ guildId, ownerId: webhookOwnerId });
-  return { ok: true, reason: 'deleted' };
+  return { ok: true, reason: LINK_RESULTS.DELETED };
 }
 
-// One-shot orchestrator for the unlink path: load the guild's current
-// state, tear down the qurl-service subscription (ref-counted across
-// siblings), then delete the DDB row. Future callers that today don't
-// exist (an `/qurl unlink` admin command, an OAuth revoke handler)
-// MUST use this entry point rather than calling db.removeGuildApiKey
-// directly — otherwise the webhook subscription orphans on
-// qurl-service and the bot leaves an unprotected secret-less row
-// behind. See removeGuildApiKey in ddb-store.js for the comment that
-// points future authors here.
+// One-shot orchestrator for the unlink path. Tears down the
+// subscription FIRST (so partial failure leaves observable DDB state
+// rather than an unobservable qurl-service orphan), then drops the
+// DDB row via the raw delete.
 async function unlinkGuildAndWebhook(guildId) {
-  if (!guildId) return { ok: false, reason: 'missing-args' };
+  if (!guildId) return { ok: false, reason: LINK_RESULTS.MISSING_ARGS };
   let row;
   try {
     row = await db.getGuildConfigWithApiKey(guildId);
@@ -234,14 +179,10 @@ async function unlinkGuildAndWebhook(guildId) {
     logger.warn('unlinkGuildAndWebhook: failed to load guild row', {
       error: err?.message, guildId,
     });
-    return { ok: false, reason: 'read-failed' };
+    return { ok: false, reason: LINK_RESULTS.READ_FAILED };
   }
-  if (!row) return { ok: true, reason: 'not-found' };
+  if (!row) return { ok: true, reason: LINK_RESULTS.NOT_FOUND };
 
-  // Tear down the subscription FIRST so a partial-failure leaves
-  // observable orphan state (a DDB row with stale webhook_id) rather
-  // than an unobservable orphan (a row deleted but the webhook still
-  // billing-active on qurl-service). Best-effort throughout.
   if (row.webhook_id && row.webhook_owner_id) {
     await unlinkGuildWebhookSubscription({
       guildId,
@@ -252,18 +193,19 @@ async function unlinkGuildAndWebhook(guildId) {
   }
 
   try {
-    await db.removeGuildApiKey(guildId);
+    await db._removeGuildApiKeyRaw(guildId);
   } catch (err) {
-    logger.warn('unlinkGuildAndWebhook: removeGuildApiKey failed', {
+    logger.warn('unlinkGuildAndWebhook: _removeGuildApiKeyRaw failed', {
       error: err?.message, guildId,
     });
-    return { ok: false, reason: 'delete-failed' };
+    return { ok: false, reason: LINK_RESULTS.DELETE_FAILED };
   }
-  return { ok: true, reason: 'unlinked' };
+  return { ok: true, reason: LINK_RESULTS.UNLINKED };
 }
 
 module.exports = {
   linkGuildWebhookSubscription,
   unlinkGuildWebhookSubscription,
   unlinkGuildAndWebhook,
+  LINK_RESULTS,
 };

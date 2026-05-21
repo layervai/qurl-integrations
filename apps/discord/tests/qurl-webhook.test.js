@@ -421,6 +421,45 @@ describe('POST /webhooks/qurl — payload handling', () => {
   });
 });
 
+describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures count)', () => {
+  // 30 OWNER_UNKNOWN events from one IP must NOT 429 the 31st valid
+  // event — limiter is reserved for HMAC failures (attacker signal).
+  beforeAll(() => {
+    jest.resetModules();
+  });
+  it('does NOT increment bad-sig limiter on OWNER_UNKNOWN', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    // Fresh ownership table: cache primed, owner not registered.
+    mockPrimed = true;
+    mockOwnerSecrets.clear();
+    mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
+    const unknownPayload = { ...VALID_PAYLOAD, owner_id: 'usr_unregistered' };
+    const unknownRaw = JSON.stringify(unknownPayload);
+
+    // 30 OWNER_UNKNOWN events — if these incremented the bad-sig
+    // counter, the 31st request below would 429.
+    for (let i = 0; i < 30; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await request(isolatedApp)
+        .post('/webhooks/qurl')
+        .set('Content-Type', 'application/json')
+        .set('QURL-Signature', signBody(unknownRaw))
+        .send(unknownRaw);
+      expect(r.status).toBe(401);
+    }
+
+    // Switch to a valid signed event for a known owner; should pass.
+    const validRaw = JSON.stringify(VALID_PAYLOAD);
+    const valid = await request(isolatedApp)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(validRaw))
+      .send(validRaw);
+    expect(valid.status).toBe(200);
+  });
+});
+
 describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter)', () => {
   // The receiver MUST verify HMAC against the secret registered for the
   // body's owner_id — not against any other owner's secret. A regression
