@@ -11,7 +11,7 @@ function parseExpiryMs(expiresIn) {
   const match = String(expiresIn ?? '').match(/^(\d{1,6})([mhd])$/);
   if (!match) return null;
   const ms = Number(match[1]) * EXPIRY_UNITS[match[2]] * 1000;
-  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (!isPositiveFinite(ms)) return null;
   return Math.min(ms, MAX_EXPIRY_MS);
 }
 
@@ -124,7 +124,7 @@ function formatSelfDestructLabel(seconds) {
 // selected" sentinel — so the segment is always present and aligned
 // with the rest of the header.
 function formatSelfDestructSegment(seconds) {
-  if (Number.isFinite(seconds) && seconds > 0) {
+  if (isPositiveFinite(seconds)) {
     return `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
   }
   return 'Self-destruct: off';
@@ -171,11 +171,11 @@ function formatSessionDurationSeconds(seconds) {
 
 // isPositiveFinite — single predicate for "valid positive numeric
 // seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
-// 0, and negative numbers. Six call sites (connector.js, commands.js
-// (x2), server.js, time.js (x2)) all used the inline
-// `Number.isFinite(x) && x > 0` form — extracting here so the
-// predicate definition lives next to the formatter that already
-// owns the seconds/TTL semantics.
+// 0, and negative numbers. Replaces 11 inline `Number.isFinite(x) &&
+// x > 0` / `!Number.isFinite(x) || x <= 0` sites across
+// connector.js, commands.js (×3), server.js, index.js (×2),
+// store/ddb-store.js, and time.js (×3). Co-located with the
+// formatters that own the seconds/TTL semantics.
 function isPositiveFinite(n) {
   return Number.isFinite(n) && n > 0;
 }

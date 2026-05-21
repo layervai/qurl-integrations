@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const { isPositiveFinite } = require('./utils/time');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -250,11 +251,11 @@ if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINU
   logger.error('PENDING_LINK_EXPIRY_MINUTES must be a positive integer');
   process.exit(1);
 }
-if (!Number.isFinite(config.RATE_LIMIT_WINDOW_MS) || config.RATE_LIMIT_WINDOW_MS <= 0) {
+if (!isPositiveFinite(config.RATE_LIMIT_WINDOW_MS)) {
   logger.error('RATE_LIMIT_WINDOW_MS must be a positive integer (set to 0 would disable rate limiting)');
   process.exit(1);
 }
-if (!Number.isFinite(config.RATE_LIMIT_MAX_REQUESTS) || config.RATE_LIMIT_MAX_REQUESTS <= 0) {
+if (!isPositiveFinite(config.RATE_LIMIT_MAX_REQUESTS)) {
   logger.error('RATE_LIMIT_MAX_REQUESTS must be a positive integer');
   process.exit(1);
 }

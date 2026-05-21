@@ -3505,7 +3505,7 @@ const SELF_DESTRUCT_PRESET_SECONDS = new Set(SELF_DESTRUCT_PRESETS.map((p) => p.
 function selfDestructOptionToSeconds(value) {
   if (!value || value === SELF_DESTRUCT_NO_TIMER_CHOICE) return null;
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return null;
+  if (!isPositiveFinite(n)) return null;
   // Match the parsed Number directly — SELF_DESTRUCT_PRESETS contains
   // 0.5 (the "1/2 second" preset), so a Math.floor here would map 0.5
   // → 0 (not in the set) and silently downgrade to "no timer." The
