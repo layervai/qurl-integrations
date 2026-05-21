@@ -1277,7 +1277,7 @@ describe('handleAddRecipients', () => {
       null,
     );
     // mintLinks is called against the NEW resource (conn-res-43)
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key', null);
     // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     // DMs should have been sent
@@ -1354,7 +1354,7 @@ describe('handleAddRecipients', () => {
       'location.json', 'test-api-key',
       null,
     );
-    expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', expect.any(String), 1, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', expect.any(String), 1, 'test-api-key', null);
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(1);
@@ -1423,7 +1423,7 @@ describe('handleAddRecipients', () => {
       'location.json', 'test-api-key',
       null,
     );
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', expect.any(String), 1, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', expect.any(String), 1, 'test-api-key', null);
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     expect(result.msg).toMatch(/Added 1 recipient/);
   });
@@ -1515,7 +1515,7 @@ describe('handleAddRecipients', () => {
     // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', expect.any(String), 2, 'test-api-key', null);
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
@@ -1580,8 +1580,8 @@ describe('handleAddRecipients', () => {
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', expect.any(String), 10, 'test-api-key');
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', expect.any(String), 10, 'test-api-key', null);
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', expect.any(String), 2, 'test-api-key', null);
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
@@ -1613,7 +1613,7 @@ describe('handleAddRecipients', () => {
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', expect.any(String), 8, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', expect.any(String), 8, 'test-api-key', null);
     expect(mockSendDM).toHaveBeenCalledTimes(8);
     expect(result.msg).toMatch(/Added 8 recipients/);
   });

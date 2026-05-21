@@ -191,6 +191,55 @@ describe('Connector client — coverage boost', () => {
       expect(ttlField.value).toBe('60');
     });
 
+    // mintLinks forwards selfDestructSeconds as session_duration so
+    // every minted token on a self-destruct send gets an L7 session
+    // window matching the fileviewer's client-side blank. Sibling of
+    // the viewer_ttl_seconds tests above — same value, different
+    // wire-field (mint_link request JSON, not upload form).
+    describe('mintLinks — session_duration forwarding', () => {
+      function captureMintBody() {
+        let bodyJSON = null;
+        globalThis.fetch = jest.fn(async (_url, opts) => {
+          bodyJSON = JSON.parse(opts.body);
+          return {
+            ok: true,
+            json: async () => ({ success: true, links: [{ qurl_id: 'q_1', qurl_link: 'https://q.test/l' }] }),
+          };
+        });
+        return () => bodyJSON;
+      }
+
+      it('sends session_duration when selfDestructSeconds provided', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, 30);
+        expect(getBody().session_duration).toBe('30s');
+      });
+
+      it('clamps 0.5 (fileviewer preset) to "1s" — qurl-service MinSessionDuration floor', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, 0.5);
+        expect(getBody().session_duration).toBe('1s');
+      });
+
+      it('ceils fractional values >1 (defensive — presets are all integer ≥1)', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, 2.3);
+        expect(getBody().session_duration).toBe('3s');
+      });
+
+      it('omits session_duration when null', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, null);
+        expect(getBody().session_duration).toBeUndefined();
+      });
+
+      it('omits session_duration when undefined (default param)', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined);
+        expect(getBody().session_duration).toBeUndefined();
+      });
+    });
+
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
       // Defensive: an upstream caller passing 0, NaN, or a string by
       // mistake shouldn't cause the field to land on the form. The

@@ -323,7 +323,24 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * one-time tokens, so one recipient opening their link doesn't
  * invalidate anyone else's.
  */
-async function mintLinks(resourceId, expiresAt, n, apiKey) {
+// mintLinks mints `n` access tokens on the connector's `/api/mint_link`
+// endpoint. selfDestructSeconds, when set, is forwarded as
+// `session_duration` so every minted token gets an L7 session window
+// matching the fileviewer's client-side self-destruct timer.
+//
+// Without this, the upload-time auto-created token correctly inherits
+// session_duration via the connector's CreateQURL path
+// (qurl-integrations-infra#540), but every additional token minted on
+// the same resource defaults back to qurl-service's QURL_SESSION_TTL
+// (3600s sandbox). A recipient of the self-destruct send could then
+// refresh `*.qurl.site/...` past the fileviewer blank and see the
+// content again for up to an hour. Tracked: qurl-integrations-infra#764.
+//
+// Value mapping (matches SELF_DESTRUCT_PRESETS in src/utils/time.js):
+//   selfDestructSeconds null     → omit session_duration → server default
+//   selfDestructSeconds 0.5      → "1s" (qurl-service MinSessionDuration)
+//   selfDestructSeconds N >= 1   → "Ns" (whole-seconds rounded up)
+async function mintLinks(resourceId, expiresAt, n, apiKey, selfDestructSeconds = null) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -335,10 +352,20 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }
+  const body = { expires_at: expiresAt, n, one_time_use: true };
+  if (selfDestructSeconds !== null && selfDestructSeconds !== undefined) {
+    // Math.ceil clamps fractional presets (the only one today is 0.5)
+    // up to 1s — qurl-service rejects sub-second session_duration via
+    // its MinSessionDuration = 1 * time.Second validator. The 0.5s
+    // preset's fileviewer-side 500ms canvas blank still fires; only
+    // the L7 session window floors at 1s.
+    const seconds = Math.max(1, Math.ceil(selfDestructSeconds));
+    body.session_duration = `${seconds}s`;
+  }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ expires_at: expiresAt, n, one_time_use: true }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30000),
   });
 
