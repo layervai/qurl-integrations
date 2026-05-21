@@ -238,6 +238,26 @@ describe('Connector client — coverage boost', () => {
         await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined);
         expect(getBody().session_duration).toBeUndefined();
       });
+
+      // Defensive: a future caller passing NaN, ±Infinity, a numeric
+      // string, a boolean, or an object shouldn't put garbage on the
+      // wire ("NaNs", "Infinitys", etc.) and turn a recoverable input
+      // mistake into a confusing 400 from qurl-service's
+      // validateSessionDuration. Math.max(1, ...) already handles
+      // negatives but Number.isFinite is what catches the non-numeric
+      // / non-finite inputs. Mirrors the sibling viewer_ttl_seconds
+      // defensive-input test at this file's :243 (same idiom, same
+      // belt-and-suspenders justification: the confirm-card dropdown
+      // is the contract, but mintLinks is exported).
+      it('omits session_duration for non-finite / wrong-type / non-positive inputs', async () => {
+        const cases = [NaN, Infinity, -Infinity, '30', '0.5', true, false, {}, [], 0, -1, -0.5];
+        for (const v of cases) {
+          const getBody = captureMintBody();
+          // eslint-disable-next-line no-await-in-loop
+          await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, v);
+          expect(getBody().session_duration).toBeUndefined();
+        }
+      });
     });
 
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
