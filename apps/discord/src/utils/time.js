@@ -1,5 +1,18 @@
 const logger = require('../logger');
 
+// isPositiveFinite — single predicate for "valid positive numeric
+// seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
+// 0, and negative numbers. Replaces 11 inline `Number.isFinite(x) &&
+// x > 0` / `!Number.isFinite(x) || x <= 0` sites across
+// connector.js, commands.js (×3), server.js, index.js (×2),
+// store/ddb-store.js, and time.js (×3). Hoisted to file top so
+// readers scanning top-to-bottom see the predicate before its
+// (lexically lower) call sites in parseExpiryMs /
+// formatSelfDestructSegment / formatSessionDurationSeconds.
+function isPositiveFinite(n) {
+  return Number.isFinite(n) && n > 0;
+}
+
 const EXPIRY_UNITS = { m: 60, h: 3600, d: 86400 };
 // Cap the expiry at 30 days in ms. An arbitrarily large numeric component in
 // the expiry string (e.g. "99999999999d") would otherwise overflow Number
@@ -167,17 +180,6 @@ function formatSessionDurationSeconds(seconds) {
   // number is ≥1. Combined with the isPositiveFinite guard above,
   // this never emits "0s".
   return `${Math.ceil(seconds)}s`;
-}
-
-// isPositiveFinite — single predicate for "valid positive numeric
-// seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
-// 0, and negative numbers. Replaces 11 inline `Number.isFinite(x) &&
-// x > 0` / `!Number.isFinite(x) || x <= 0` sites across
-// connector.js, commands.js (×3), server.js, index.js (×2),
-// store/ddb-store.js, and time.js (×3). Co-located with the
-// formatters that own the seconds/TTL semantics.
-function isPositiveFinite(n) {
-  return Number.isFinite(n) && n > 0;
 }
 
 module.exports = {
