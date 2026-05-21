@@ -170,9 +170,9 @@ function connectorAuthHeaders(apiKey) {
 // 1 * time.Second. A reader looking at one wire field should know the
 // other has the opposite handling for the 0.5s preset.
 function appendViewerTtl(form, viewerTtlSeconds) {
-  // isPositiveFinite already filters non-numbers (Number.isFinite('30')
-  // is false) and zero/negative — same invariant the modal-prefill
-  // setValue uses.
+  // Strict positive-finite: isPositiveFinite filters non-numbers
+  // (Number.isFinite('30') is false), zero, negatives, and ±Infinity
+  // — same invariant the modal-prefill setValue uses.
   if (isPositiveFinite(viewerTtlSeconds)) {
     form.append('viewer_ttl_seconds', String(viewerTtlSeconds));
   }
@@ -349,7 +349,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * @param {?number} [opts.selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null }) {
+async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
