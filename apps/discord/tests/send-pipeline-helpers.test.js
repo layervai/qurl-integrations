@@ -1323,6 +1323,20 @@ describe('handleAddRecipients', () => {
       'test-api-key',
       30,
     );
+    // End-to-end fence (CR cycle 2 ask): selfDestructSeconds must
+    // also reach mintLinks. The 7 sibling assertions in this file
+    // pin the call signature with null; this one pins that a
+    // non-null value flows through mintLinksInBatches → mintLinks
+    // unchanged. Without this, a future rename of the
+    // mintLinksInBatches opt key (selfDestructSeconds → ...) would
+    // silently drop the value at the boundary.
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      'conn-res-44',
+      expect.any(String),
+      1,
+      'test-api-key',
+      30,
+    );
   });
 
   it('URL send: uploads location JSON and mints links', async () => {
@@ -1387,6 +1401,18 @@ describe('handleAddRecipients', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
       'location.json',
+      'test-api-key',
+      300,
+    );
+    // Symmetric with the file-path end-to-end fence above:
+    // selfDestructSeconds must also reach mintLinks on the URL/maps
+    // re-upload path. Without this, a future rename of the
+    // mintLinksInBatches opt key would silently drop the value here
+    // even if the upload side caught it.
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      'res-loc-2',
+      expect.any(String),
+      1,
       'test-api-key',
       300,
     );

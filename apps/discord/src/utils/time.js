@@ -123,11 +123,48 @@ function formatSelfDestructSegment(seconds) {
   return 'Self-destruct: off';
 }
 
+// formatSessionDurationSeconds maps a SELF_DESTRUCT_PRESETS-shaped
+// number to the qurl-service-format duration string the connector's
+// `mint_link` body and the upload-time `CreateQURL` body both expect.
+//
+// Co-located with SELF_DESTRUCT_PRESETS because the preset values are
+// the ONLY legitimate input source — keeping the formatter here
+// prevents the bot's wire-format mapping from drifting if the preset
+// set ever changes (e.g., adding a 100ms preset would force a decision
+// here about how to floor it).
+//
+// Returns the duration string (e.g. "1s", "30s") when the input is a
+// finite positive number; returns null otherwise. Callers should omit
+// the wire field entirely when the result is null (qurl-service then
+// uses QURL_SESSION_TTL as the default).
+//
+// Value mapping:
+//   null / undefined / non-finite / non-numeric / ≤0  → null (omit)
+//   0.5 (the only fractional preset)                  → "1s" (qurl-service
+//                                                       MinSessionDuration
+//                                                       floor — fileviewer's
+//                                                       500ms client-side
+//                                                       blank still fires)
+//   N >= 1                                            → "Ns" (Math.ceil
+//                                                       defensively floors
+//                                                       any non-preset
+//                                                       fractional input)
+//
+// Mirrors qurl-s3-connector's `sessionDurationFor()` (Go) so the
+// upload-time and mint-time wire mappings stay in lockstep. If one
+// changes, the other must too — fenced by qurl-integrations-infra
+// PR #764 + this PR landing as a coordinated pair.
+function formatSessionDurationSeconds(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return `${Math.max(1, Math.ceil(seconds))}s`;
+}
+
 module.exports = {
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
+  formatSessionDurationSeconds,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,

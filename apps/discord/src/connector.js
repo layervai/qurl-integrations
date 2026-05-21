@@ -2,6 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 
 const { sanitizeFilename } = require('./utils/sanitize');
+const { formatSessionDurationSeconds } = require('./utils/time');
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
@@ -323,31 +324,19 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * one-time tokens, so one recipient opening their link doesn't
  * invalidate anyone else's.
  *
- * `selfDestructSeconds`, when a finite positive number, is forwarded
- * as `session_duration` so every minted token gets an L7 session
- * window matching the fileviewer's client-side self-destruct timer.
- * Without this, the upload-time auto-created token correctly inherits
- * `session_duration` via the connector's CreateQURL path
- * (qurl-integrations-infra#540), but every additional token minted on
- * the same resource defaults back to qurl-service's `QURL_SESSION_TTL`
- * (3600s sandbox). A recipient of the self-destruct send could then
- * refresh `*.qurl.site/...` past the fileviewer blank and see the
- * content again for up to an hour. Tracked:
- * qurl-integrations-infra#764.
- *
- * Value mapping (matches SELF_DESTRUCT_PRESETS in src/utils/time.js):
- * - `null` / `undefined` / non-finite / non-numeric → omit
- *   `session_duration` → qurl-service uses its server default.
- * - `0.5` (the only fractional preset) → `"1s"` (qurl-service
- *   `MinSessionDuration = 1 * time.Second` floor; fileviewer's
- *   500ms client-side blank still fires).
- * - `N >= 1` → `"Ns"` (whole-seconds, ceil'd defensively).
+ * `selfDestructSeconds` is forwarded as `session_duration` so every
+ * minted token's L7 session window matches the fileviewer's client-
+ * side self-destruct timer (closes the mint-side gap left by
+ * qurl-integrations-infra#540, tracked in qurl-integrations-infra#764).
+ * The seconds→duration-string mapping lives in
+ * `utils/time.js::formatSessionDurationSeconds` (co-located with
+ * `SELF_DESTRUCT_PRESETS`).
  *
  * @param {string} resourceId — connector resource_id (alphanum + `_-`).
  * @param {string} expiresAt — ISO string forwarded as `expires_at`.
  * @param {number} n — integer 1..100, count of links to mint.
  * @param {?string} apiKey — caller API key; falls back to `config.QURL_API_KEY`.
- * @param {?number} [selfDestructSeconds] — see Value mapping above. Defaults to null.
+ * @param {?number} [selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
 async function mintLinks(resourceId, expiresAt, n, apiKey, selfDestructSeconds = null) {
@@ -363,22 +352,9 @@ async function mintLinks(resourceId, expiresAt, n, apiKey, selfDestructSeconds =
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }
   const body = { expires_at: expiresAt, n, one_time_use: true };
-  // Mirror `appendViewerTtl`'s defensive contract (connector.js:164):
-  // gate on Number.isFinite(x) && x > 0 to reject NaN, ±Infinity, the
-  // string "30", booleans, objects, null, and undefined. The confirm-
-  // card dropdown is the contract today (only the 7 SELF_DESTRUCT_
-  // PRESETS values reach this layer), but mintLinks is exported, so
-  // a future caller passing garbage shouldn't put "NaNs" / "Infinitys"
-  // on the wire and turn a recoverable upstream input mistake into a
-  // confusing 400 from qurl-service::validateSessionDuration.
-  if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
-    // Math.ceil clamps fractional presets (the only one today is 0.5)
-    // up to 1s — qurl-service rejects sub-second session_duration via
-    // its MinSessionDuration = 1 * time.Second validator. The 0.5s
-    // preset's fileviewer-side 500ms canvas blank still fires; only
-    // the L7 session window floors at 1s.
-    const seconds = Math.max(1, Math.ceil(selfDestructSeconds));
-    body.session_duration = `${seconds}s`;
+  const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
+  if (sessionDuration !== null) {
+    body.session_duration = sessionDuration;
   }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',

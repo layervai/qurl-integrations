@@ -17,6 +17,7 @@ const {
   expiryToMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
+  formatSessionDurationSeconds,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
@@ -178,6 +179,56 @@ describe('utils/time', () => {
       expect(formatSelfDestructSegment(Infinity)).toBe('Self-destruct: off');
       expect(formatSelfDestructSegment(0)).toBe('Self-destruct: off');
       expect(formatSelfDestructSegment(-5)).toBe('Self-destruct: off');
+    });
+  });
+
+  // formatSessionDurationSeconds is the connector→qurl-service ABI
+  // formatter for the bot's `session_duration` wire field. Tested here
+  // alongside its only legitimate input source (SELF_DESTRUCT_PRESETS)
+  // so a future preset change forces a co-located test update.
+  describe('formatSessionDurationSeconds', () => {
+    it('every preset maps to "Ns" with whole-seconds floor', () => {
+      // Round-trip the full preset set so adding a new preset forces a
+      // decision about how this formatter handles it (and updates the
+      // test if behavior changes).
+      const expected = {
+        0.5: '1s', // qurl-service MinSessionDuration floor
+        1: '1s',
+        5: '5s',
+        30: '30s',
+        300: '300s',
+        1800: '1800s',
+        3600: '3600s',
+      };
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(formatSessionDurationSeconds(preset.seconds))
+          .toBe(expected[preset.seconds]);
+      }
+    });
+
+    it('clamps the 0.5s preset to "1s" (MinSessionDuration floor)', () => {
+      // qurl-service rejects sub-second session_duration via
+      // MinSessionDuration = 1 * time.Second. The 0.5s preset's
+      // fileviewer-side 500ms canvas blank still fires; only the L7
+      // session window floors at 1s.
+      expect(formatSessionDurationSeconds(0.5)).toBe('1s');
+    });
+
+    it('ceils fractional values > 1 (defensive — presets are integer ≥1)', () => {
+      expect(formatSessionDurationSeconds(2.3)).toBe('3s');
+      expect(formatSessionDurationSeconds(1.0001)).toBe('2s');
+    });
+
+    it('returns null for null / undefined / non-finite / non-numeric / ≤0', () => {
+      // Mirrors the appendViewerTtl defensive contract on the sibling
+      // upload wire field (connector.js:appendViewerTtl) so the bot
+      // can never put "NaNs" / "Infinitys" on the wire and turn a
+      // recoverable upstream-input mistake into a confusing 400 from
+      // qurl-service::validateSessionDuration.
+      const cases = [null, undefined, NaN, Infinity, -Infinity, '30', '0.5', true, false, {}, [], 0, -1, -0.5];
+      for (const v of cases) {
+        expect(formatSessionDurationSeconds(v)).toBeNull();
+      }
     });
   });
 
