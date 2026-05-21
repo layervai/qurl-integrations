@@ -18,6 +18,7 @@ const {
   formatSelfDestructLabel,
   formatSelfDestructSegment,
   formatSessionDurationSeconds,
+  isPositiveFinite,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
@@ -228,6 +229,44 @@ describe('utils/time', () => {
       const cases = [null, undefined, NaN, Infinity, -Infinity, '30', '0.5', true, false, {}, [], 0, -1, -0.5];
       for (const v of cases) {
         expect(formatSessionDurationSeconds(v)).toBeNull();
+      }
+    });
+  });
+
+  // isPositiveFinite is the shared "valid positive numeric
+  // seconds/count/TTL" gate replacing 11 inline `Number.isFinite(x)
+  // && x > 0` sites. Tested here directly (in addition to integration
+  // coverage at each call site) so the contract lives co-located with
+  // the formatters that share the gate.
+  describe('isPositiveFinite', () => {
+    it('returns true for positive finite numbers', () => {
+      const cases = [0.5, 1, 5, 30, 1.0001, 1e308, Number.MAX_SAFE_INTEGER];
+      for (const v of cases) {
+        expect(isPositiveFinite(v)).toBe(true);
+      }
+    });
+
+    it('returns false for null / undefined / NaN / ±Infinity', () => {
+      const cases = [null, undefined, NaN, Infinity, -Infinity];
+      for (const v of cases) {
+        expect(isPositiveFinite(v)).toBe(false);
+      }
+    });
+
+    it('returns false for zero and negative finite numbers', () => {
+      const cases = [0, -0, -1, -0.5, -1e308, Number.MIN_SAFE_INTEGER];
+      for (const v of cases) {
+        expect(isPositiveFinite(v)).toBe(false);
+      }
+    });
+
+    it('returns false for non-number types (no Number coercion)', () => {
+      // Number.isFinite (strict variant, used internally) rejects
+      // string/boolean/object/array without coercion. This is
+      // load-bearing: the global isFinite() would coerce '0x1' → 1.
+      const cases = ['1', '0.5', '30s', true, false, {}, [], () => 1];
+      for (const v of cases) {
+        expect(isPositiveFinite(v)).toBe(false);
       }
     });
   });

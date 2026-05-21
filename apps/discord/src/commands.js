@@ -27,6 +27,7 @@ const {
   expiryToMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
+  isPositiveFinite,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
@@ -1490,7 +1491,12 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       tokensUsed = 0;
     }
     const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey, selfDestructSeconds);
+    const minted = await mintLinks(currentResourceId, {
+      expiresAt,
+      n: batchSize,
+      apiKey,
+      selfDestructSeconds,
+    });
     for (const link of minted) {
       // qurl_id is the join key against qurl.accessed webhooks; empty
       // string degrades the whole monitor to bare base-msg.
@@ -3499,7 +3505,7 @@ const SELF_DESTRUCT_PRESET_SECONDS = new Set(SELF_DESTRUCT_PRESETS.map((p) => p.
 function selfDestructOptionToSeconds(value) {
   if (!value || value === SELF_DESTRUCT_NO_TIMER_CHOICE) return null;
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return null;
+  if (!isPositiveFinite(n)) return null;
   // Match the parsed Number directly — SELF_DESTRUCT_PRESETS contains
   // 0.5 (the "1/2 second" preset), so a Math.floor here would map 0.5
   // → 0 (not in the set) and silently downgrade to "no timer." The
@@ -4058,7 +4064,7 @@ function renderConfirmCardContent({
     content += `\n**To:** ${validRecipients.length} user${validRecipients.length === 1 ? '' : 's'} (${previewNames}${more})\n`;
   }
   content += `**Expires:** ${EXPIRY_LABELS[expiresIn] || expiresIn}\n`;
-  if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
+  if (isPositiveFinite(selfDestructSeconds)) {
     content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
   }
   if (personalMessage) {
@@ -4256,7 +4262,7 @@ function renderConfirmCardRows({
   // corrupted DDB row carrying an off-preset finite value (which would
   // otherwise leave every option un-defaulted and force Discord to
   // render the first option's label — wrong UX).
-  const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
+  const hasTimer = isPositiveFinite(selfDestructSeconds);
   const hasMatchingPreset = hasTimer && SELF_DESTRUCT_PRESETS.some((p) => p.seconds === selfDestructSeconds);
   if (hasTimer && !hasMatchingPreset) {
     // Symmetric with the expiry off-set warn below: a finite positive

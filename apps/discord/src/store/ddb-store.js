@@ -66,6 +66,7 @@ const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
 const { DM_STATUS } = require('../constants');
+const { isPositiveFinite } = require('../utils/time');
 
 // Badge taxonomy — stable string enum values so callers that
 // compare or persist them across boots stay consistent.
@@ -204,7 +205,7 @@ function getPreviousMonthString(date = new Date()) {
 // Same fail-fast philosophy as the DDB_TABLE_PREFIX / AWS_REGION
 // guards above.
 const PENDING_LINK_EXPIRY_MS = Math.trunc(Number(config.PENDING_LINK_EXPIRY_MINUTES)) * 60 * 1000;
-if (!Number.isFinite(PENDING_LINK_EXPIRY_MS) || PENDING_LINK_EXPIRY_MS <= 0) {
+if (!isPositiveFinite(PENDING_LINK_EXPIRY_MS)) {
   throw new Error(`config.PENDING_LINK_EXPIRY_MINUTES is required to be a positive number when STORE_TYPE=ddb (got '${config.PENDING_LINK_EXPIRY_MINUTES}'). Set it in the deployment template alongside DDB_TABLE_PREFIX / AWS_REGION.`);
 }
 

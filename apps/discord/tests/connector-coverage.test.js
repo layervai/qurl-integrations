@@ -211,31 +211,31 @@ describe('Connector client — coverage boost', () => {
 
       it('sends session_duration when selfDestructSeconds provided', async () => {
         const getBody = captureMintBody();
-        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, 30);
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 30 });
         expect(getBody().session_duration).toBe('30s');
       });
 
       it('clamps 0.5 (fileviewer preset) to "1s" — qurl-service MinSessionDuration floor', async () => {
         const getBody = captureMintBody();
-        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, 0.5);
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 0.5 });
         expect(getBody().session_duration).toBe('1s');
       });
 
       it('ceils fractional values >1 (defensive — presets are all integer ≥1)', async () => {
         const getBody = captureMintBody();
-        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, 2.3);
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 2.3 });
         expect(getBody().session_duration).toBe('3s');
       });
 
       it('omits session_duration when null', async () => {
         const getBody = captureMintBody();
-        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, null);
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: null });
         expect(getBody().session_duration).toBeUndefined();
       });
 
-      it('omits session_duration when undefined (default param)', async () => {
+      it('omits session_duration when omitted (default param)', async () => {
         const getBody = captureMintBody();
-        await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined);
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
         expect(getBody().session_duration).toBeUndefined();
       });
 
@@ -253,7 +253,7 @@ describe('Connector client — coverage boost', () => {
         for (const v of cases) {
           const getBody = captureMintBody();
           // eslint-disable-next-line no-await-in-loop
-          await connector.mintLinks('r_xyz', '2099-01-01T00:00:00Z', 1, undefined, v);
+          await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: v });
           expect(getBody().session_duration).toBeUndefined();
         }
       });
@@ -301,7 +301,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.message).toMatch(/Connector mint_link failed \(502\)/);
@@ -322,7 +322,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.apiCode).toBe('quota_exceeded');
@@ -340,7 +340,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(500);
@@ -356,7 +356,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(503);
@@ -372,7 +372,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(504);
@@ -388,7 +388,7 @@ describe('Connector client — coverage boost', () => {
         json: async () => ({ success: true, links: null }),
       });
 
-      await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
         .rejects.toThrow('Connector mint_link returned no links array');
     });
 
@@ -398,7 +398,7 @@ describe('Connector client — coverage boost', () => {
         json: async () => ({ success: true, links: 'not-array' }),
       });
 
-      await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
         .rejects.toThrow('Connector mint_link returned no links array');
     });
 
@@ -408,7 +408,7 @@ describe('Connector client — coverage boost', () => {
         json: async () => ({ success: true }),
       });
 
-      await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
         .rejects.toThrow('Connector mint_link returned no links array');
     });
   });
@@ -444,7 +444,7 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
   });
 
   it('throws when QURL_API_KEY is empty on mintLinks', async () => {
-    await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
       .rejects.toThrow('QURL_API_KEY is not configured');
   });
 });

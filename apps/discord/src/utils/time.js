@@ -1,5 +1,17 @@
 const logger = require('../logger');
 
+// isPositiveFinite — single predicate for "valid positive numeric
+// seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
+// 0, and negative numbers. Strict Number.isFinite (NOT global
+// isFinite) so non-numbers like '1', true, {} are also rejected
+// without coercion. Use whenever you need "definitely a positive
+// number" — TTL gates, count validators, threshold checks. Hoisted
+// to file top so readers see the definition before its (lexically
+// lower) callers in this file.
+function isPositiveFinite(n) {
+  return Number.isFinite(n) && n > 0;
+}
+
 const EXPIRY_UNITS = { m: 60, h: 3600, d: 86400 };
 // Cap the expiry at 30 days in ms. An arbitrarily large numeric component in
 // the expiry string (e.g. "99999999999d") would otherwise overflow Number
@@ -11,7 +23,7 @@ function parseExpiryMs(expiresIn) {
   const match = String(expiresIn ?? '').match(/^(\d{1,6})([mhd])$/);
   if (!match) return null;
   const ms = Number(match[1]) * EXPIRY_UNITS[match[2]] * 1000;
-  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (!isPositiveFinite(ms)) return null;
   return Math.min(ms, MAX_EXPIRY_MS);
 }
 
@@ -113,6 +125,13 @@ function isLegitimateSelfDestructSelectValue(value) {
 function formatSelfDestructLabel(seconds) {
   const match = findPresetBySeconds(seconds);
   if (match) return match.label;
+  // Intentionally NOT isPositiveFinite — this branch's purpose is
+  // to flag *non-finite* (NaN/Infinity) as "(invalid)" while still
+  // letting 0 / negative off-preset values render as "0s" / "-5s"
+  // for the next gate to handle (the form caller maps a finite-but-
+  // off-preset value to the underlying numeric formatting). Don't
+  // "finish the refactor" by switching to isPositiveFinite — that
+  // would silently re-route 0 / negatives to "(invalid)" too.
   if (!Number.isFinite(seconds)) return '(invalid)';
   return `${seconds}s`;
 }
@@ -124,7 +143,7 @@ function formatSelfDestructLabel(seconds) {
 // selected" sentinel — so the segment is always present and aligned
 // with the rest of the header.
 function formatSelfDestructSegment(seconds) {
-  if (Number.isFinite(seconds) && seconds > 0) {
+  if (isPositiveFinite(seconds)) {
     return `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
   }
   return 'Self-destruct: off';
@@ -162,10 +181,10 @@ function formatSelfDestructSegment(seconds) {
 // changes, the other must too — fenced by qurl-integrations-infra
 // PR #764 + this PR landing as a coordinated pair.
 function formatSessionDurationSeconds(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (!isPositiveFinite(seconds)) return null;
   // Math.ceil of any value in (0, 1] is 1; of any positive finite
-  // number is ≥1. Combined with the > 0 guard above, this never
-  // emits "0s".
+  // number is ≥1. Combined with the isPositiveFinite guard above,
+  // this never emits "0s".
   return `${Math.ceil(seconds)}s`;
 }
 
@@ -175,6 +194,7 @@ module.exports = {
   formatSelfDestructLabel,
   formatSelfDestructSegment,
   formatSessionDurationSeconds,
+  isPositiveFinite,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
