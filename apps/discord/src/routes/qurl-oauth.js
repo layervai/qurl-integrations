@@ -17,6 +17,7 @@ const { readCookie } = require('../utils/cookies');
 const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
+const { linkGuildWebhookSubscription } = require('../guild-webhook-link');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -431,6 +432,17 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
   logger.info('qURL OAuth setup complete', {
     guildId, configuredBy: discordUserId, keyPrefix,
+  });
+
+  // 3a. Register a per-guild qurl.accessed webhook subscription under
+  //     THIS guild's API key so the BYOK view counter fires for qurls
+  //     it mints. Non-blocking by design: linkGuildWebhookSubscription
+  //     swallows all internal failure modes and logs/audits — the user
+  //     still gets a "qURL connected" success page if the wiring
+  //     fails. View counter degrades to the polling fallback until
+  //     the backfill script catches them.
+  await linkGuildWebhookSubscription({
+    guildId, apiKey, descriptionContext: `via=oauth, configuredBy=${discordUserId}`,
   });
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the

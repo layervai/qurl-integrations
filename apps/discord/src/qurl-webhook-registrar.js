@@ -477,6 +477,7 @@ function buildSsmPersistSecret({ ssmClient, paramName, PutParameterCommand, time
 
 module.exports = {
   ensureWebhookSubscription,
+  deleteSubscription,
   buildSsmPersistSecret,
   _internals: {
     canonicalUrl,

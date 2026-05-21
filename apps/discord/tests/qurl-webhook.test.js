@@ -47,6 +47,25 @@ jest.mock('../src/view-update-publisher', () => ({
   stop: jest.fn(),
 }));
 
+// Multi-secret subscription registry. The receiver now looks up the
+// secret by `body.owner_id` instead of reading config.QURL_WEBHOOK_SECRET.
+// Tests mock the lookup so VALID_PAYLOAD's owner_id resolves to the same
+// secret signBody() uses; `mockPrimed` lets individual tests opt into
+// the 503-unprimed and 401-unknown-owner paths.
+let mockPrimed = true;
+const mockOwnerSecrets = new Map();
+mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
+jest.mock('../src/webhook-subscriptions', () => ({
+  isPrimed: () => mockPrimed,
+  getSecretForOwner: (ownerId) => mockOwnerSecrets.get(ownerId) || null,
+  start: jest.fn(),
+  stop: jest.fn(),
+  upsertGuild: jest.fn(),
+  removeGuild: jest.fn(),
+  scanOnce: jest.fn(),
+  _resetForTesting: jest.fn(),
+}));
+
 process.env.QURL_WEBHOOK_SECRET = 'test-qurl-secret';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 process.env.AWS_REGION = 'us-east-2';
@@ -72,6 +91,12 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockRecordQurlView.mockImplementation(async () => 'recorded');
   mockViewUpdatePublish.mockReset();
+  // Reset cache-state mocks to "primed + the usr_test owner is known"
+  // so each test starts from a predictable baseline. Tests that need
+  // the unprimed / unknown-owner branches flip these explicitly.
+  mockPrimed = true;
+  mockOwnerSecrets.clear();
+  mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
 });
 
 describe('POST /webhooks/qurl — view-update push gate (feat #60)', () => {
@@ -122,27 +147,41 @@ describe('POST /webhooks/qurl — view-update push gate (feat #60)', () => {
   });
 });
 
-describe('POST /webhooks/qurl — unconfigured secret returns 503 (retriable)', () => {
-  // If the webhook-registrar Lambda hasn't populated SSM yet, or the
-  // ECS task started before SSM secret injection completed, the bot's
-  // config.QURL_WEBHOOK_SECRET will be empty. MUST 503 (qurl-service
-  // retries) not 401 (non-retriable, drops the event).
-  it('returns 503 when secret is empty', async () => {
-    // eslint-disable-next-line global-require
-    const config = require('../src/config');
-    const original = config.QURL_WEBHOOK_SECRET;
-    config.QURL_WEBHOOK_SECRET = '';
-    try {
-      const res = await request(app)
-        .post('/webhooks/qurl')
-        .set('Content-Type', 'application/json')
-        .set('QURL-Signature', '0'.repeat(64))
-        .send('{}');
-      expect(res.status).toBe(503);
-      expect(res.body).toEqual({ error: 'Webhook receiver not configured' });
-    } finally {
-      config.QURL_WEBHOOK_SECRET = original;
-    }
+describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed semantics', () => {
+  // Before the registry's first successful scan completes, ANY unknown
+  // owner_id is "transiently unknown" rather than "genuinely unknown"
+  // — return 503 (retriable). qurl-service retries 503 (1+2+4+8+16=31s
+  // backoff) but NOT 401, so a 401 here would silently drop a guild's
+  // very first views post-deploy.
+  it('returns 503 when registry is unprimed (cold start / DDB scan in-flight)', async () => {
+    // 503 fires when isPrimed()=false AND the owner_id lookup misses.
+    // A primed cache where the owner is registered always wins (we
+    // serve the request); only the unprimed-AND-miss combination
+    // signals "transient gap, retry me".
+    mockPrimed = false;
+    mockOwnerSecrets.clear();
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(503);
+  });
+
+  // After the registry is primed, an unknown owner is the real signal
+  // — return 401 (truthful response). This is what an attacker probing
+  // the endpoint with a fabricated owner_id would see.
+  it('returns 401 when registry is primed but owner_id is unknown', async () => {
+    mockPrimed = true;
+    mockOwnerSecrets.clear(); // owner_id present in body but no entry registered
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(401);
   });
 });
 
@@ -237,7 +276,11 @@ describe('POST /webhooks/qurl — payload handling', () => {
   });
 
   it('returns 200 invalid-payload when qurl_id missing (no retry — payload is malformed, not transient)', async () => {
-    const payload = { id: 'evt-1', type: 'qurl.accessed', data: { access_count: 1 } };
+    // owner_id must still be present + valid; the receiver verifies
+    // HMAC + resolves the registry entry BEFORE checking body
+    // payload shape, so an unsigned-or-unowned payload would 401
+    // before this branch.
+    const payload = { id: 'evt-1', type: 'qurl.accessed', owner_id: 'usr_test', data: { access_count: 1 } };
     const raw = JSON.stringify(payload);
     const res = await request(app)
       .post('/webhooks/qurl')
@@ -251,7 +294,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
 
   it('returns 200 invalid-payload when access_count is negative', async () => {
     const payload = {
-      id: 'evt-1', type: 'qurl.accessed',
+      id: 'evt-1', type: 'qurl.accessed', owner_id: 'usr_test',
       data: { qurl_id: 'q_aaaaaaaaaa1', access_count: -3, consumed: false },
     };
     const raw = JSON.stringify(payload);
@@ -271,7 +314,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
     // would record in DDB and then trip the publisher's
     // "invalid accessCount" warn, producing an asymmetric log pair.
     const payload = {
-      id: 'evt-zero', type: 'qurl.accessed',
+      id: 'evt-zero', type: 'qurl.accessed', owner_id: 'usr_test',
       data: { qurl_id: 'q_aaaaaaaaaa1', access_count: 0, consumed: false },
     };
     const raw = JSON.stringify(payload);
@@ -375,6 +418,86 @@ describe('POST /webhooks/qurl — payload handling', () => {
       .set('QURL-Signature', signBody(raw))
       .send(raw);
     expect(mockRecordQurlView).toHaveBeenCalledWith(expect.objectContaining({ consumed: false }));
+  });
+});
+
+describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter)', () => {
+  // The receiver MUST verify HMAC against the secret registered for the
+  // body's owner_id — not against any other owner's secret. A regression
+  // that fell back to "any registered secret" would let a guild A's
+  // secret accept guild B's webhook, which is observationally fine
+  // (HMAC just has to match SOME secret) but would let an attacker who
+  // compromised any one guild's API key forge events for all other
+  // guilds — security drift, not a bug a test would otherwise catch.
+  it('picks the secret matching body.owner_id, not a sibling owner', async () => {
+    mockOwnerSecrets.set('usr_test', 'secret-A');
+    mockOwnerSecrets.set('usr_sibling', 'secret-B');
+    // Sign with usr_sibling's secret but send under usr_test owner_id
+    // — receiver should reject because secret-B doesn't match the
+    // owner_id-resolved secret-A.
+    const payload = { ...VALID_PAYLOAD, owner_id: 'usr_test' };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw, 'secret-B'))
+      .send(raw);
+    expect(res.status).toBe(401);
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+  });
+
+  it('accepts a request signed with the owner_id-resolved secret', async () => {
+    mockOwnerSecrets.set('usr_byok_guild', 'guild-specific-secret');
+    const payload = { ...VALID_PAYLOAD, owner_id: 'usr_byok_guild' };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw, 'guild-specific-secret'))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'recorded' });
+  });
+});
+
+describe('POST /webhooks/qurl — body.owner_id parse failure modes', () => {
+  // Pre-HMAC body parse is bounded (req.rawBody is 1mb-capped by
+  // server.js middleware), so we don't worry about deep-nesting V8
+  // exhaustion. The remaining gaps are missing/non-string owner_id
+  // and a body that parsed-successfully but lacks the field.
+  it('returns 401 when body.owner_id is missing entirely', async () => {
+    const payload = { ...VALID_PAYLOAD };
+    delete payload.owner_id;
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(401);
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when body.owner_id is non-string (e.g. object slipped through)', async () => {
+    const payload = { ...VALID_PAYLOAD, owner_id: { weird: true } };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 when body.owner_id is empty string', async () => {
+    const payload = { ...VALID_PAYLOAD, owner_id: '' };
+    const raw = JSON.stringify(payload);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(401);
   });
 });
 

@@ -1476,6 +1476,14 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   }));
 }
 
+// Raw delete. Future callers that need to fully unlink a guild
+// (including tearing down its qurl-service webhook subscription)
+// MUST go through `guild-webhook-link.js::unlinkGuildAndWebhook`,
+// NOT this function — calling removeGuildApiKey directly leaves an
+// orphan webhook subscription on qurl-service for BYOK guilds.
+// Leaving the function exported (rather than renaming it `_raw`)
+// preserves API stability for the backfill script + tests that
+// only need the data-layer primitive.
 async function removeGuildApiKey(guildId) {
   const res = await ddb.send(new DeleteCommand({
     TableName: TABLES.guild_configs,
@@ -1509,6 +1517,80 @@ async function getGuildConfigWithApiKey(guildId) {
   const row = res.Item;
   if (!row) return row;
   return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
+}
+
+// ── Per-guild qurl-service webhook subscriptions (BYOK view counter) ──
+
+// webhook_secret stored encrypted (same envelope as qurl_api_key).
+// webhook_id + webhook_owner_id stored plain — neither is a credential
+// (webhook_id is a public-ish opaque identifier returned to API callers;
+// webhook_owner_id is an auth0 sub already echoed in inbound webhook
+// payloads). Keeping them plain avoids a decrypt() on every cache prime
+// and lets ad-hoc DDB queries by owner work without round-tripping
+// through the crypto module.
+async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, webhookOwnerId }) {
+  if (!guildId || !webhookId || !webhookSecret || !webhookOwnerId) {
+    throw new Error('setGuildWebhookSubscription: guildId, webhookId, webhookSecret, webhookOwnerId all required');
+  }
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, webhook_owner_id = :woid, updated_at = :u',
+    ExpressionAttributeValues: {
+      ':wid': webhookId,
+      ':wsec': encrypt(webhookSecret),
+      ':woid': webhookOwnerId,
+      ':u': nowIso(),
+    },
+  }));
+}
+
+// REMOVE the three webhook_* attributes; leaves the API key row intact.
+// Used when a guild rotates to a key whose owner_id differs from the
+// previous one and the caller has already DELETE'd the old subscription
+// (or accepted the orphan).
+async function clearGuildWebhookSubscription(guildId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    UpdateExpression: 'REMOVE webhook_id, webhook_secret, webhook_owner_id SET updated_at = :u',
+    ExpressionAttributeValues: { ':u': nowIso() },
+  }));
+}
+
+// Reference-counting helper for the unlink path. Returns all guild_ids
+// (including the caller's guild_id, if any) currently associated with
+// the given webhook_owner_id. The caller decides whether to issue
+// DELETE on qurl-service based on the count (don't kill sibling guilds
+// that share the same auth0 admin's API key).
+//
+// Low-cardinality table (low hundreds of guilds at scale per
+// design discussion); full scan + in-JS filter is fine here.
+async function listGuildSubscriptionsByOwner(webhookOwnerId) {
+  const rows = await scanAll(TABLES.guild_configs);
+  return rows
+    .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
+    .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));
+}
+
+// Returns every guild_configs row that has a webhook subscription set,
+// with the secret decrypted. Used by the in-process subscription
+// registry's priming + 30s refresh tick. Rows missing webhook_id are
+// skipped — those are guilds with an API key but no provisioned
+// subscription yet (e.g. between deploy and the backfill script).
+async function scanGuildSubscriptions() {
+  const rows = await scanAll(TABLES.guild_configs);
+  const out = [];
+  for (const r of rows) {
+    if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;
+    out.push({
+      guildId: r.guild_id,
+      webhookId: r.webhook_id,
+      webhookSecret: decrypt(r.webhook_secret),
+      webhookOwnerId: r.webhook_owner_id,
+    });
+  }
+  return out;
 }
 
 // ── Orphaned OAuth tokens ──
@@ -1657,6 +1739,9 @@ module.exports = {
   recordQurlView, getQurlViews,
   // Guild configs
   getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
+  // Per-guild webhook subscriptions (BYOK view counter)
+  setGuildWebhookSubscription, clearGuildWebhookSubscription,
+  listGuildSubscriptionsByOwner, scanGuildSubscriptions,
   // Orphaned tokens
   recordOrphanedToken, countOrphanedTokens, listOrphanedTokens,
   decryptOrphanedToken, deleteOrphanedToken,

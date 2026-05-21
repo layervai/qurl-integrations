@@ -427,6 +427,26 @@ const AUDIT_EVENTS = {
   QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
   // Sustained rate = qurl_views table hot.
   QURL_WEBHOOK_STORE_ERROR: 'qurl_webhook_store_error',
+
+  // Subscription registry (BYOK per-guild webhooks). The registry is a
+  // process-local Map<owner_id, …> primed from guild_configs at boot and
+  // refreshed every 30s. Sustained rate of UNPRIMED = boot stall OR DDB
+  // throttling on the priming scan. Sustained rate of UNKNOWN_OWNER after
+  // priming = a real auth0 owner is hitting the receiver without ever
+  // having linked a key (attacker probing) OR an upstream contract drift
+  // (qurl-service emitting events under a different owner_id than the one
+  // that registered the subscription).
+  QURL_WEBHOOK_CACHE_MISS_UNPRIMED: 'qurl_webhook_cache_miss_unprimed',
+  QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER: 'qurl_webhook_cache_miss_unknown_owner',
+  // Refresh failure. After N consecutive failures the registry stays
+  // unprimed (or stale) — receiver responds 503; qurl-service retries.
+  QURL_WEBHOOK_CACHE_REFRESH_FAIL: 'qurl_webhook_cache_refresh_fail',
+  // Lifecycle. SUBSCRIPTION_DELETE_FAILED fires when DELETE returns 401
+  // (key revoked) or 404 (already gone) — both are swallowed so guild
+  // unlink doesn't fail user-facing on stale qurl-service state.
+  QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
+  QURL_WEBHOOK_SUBSCRIPTION_DELETED: 'qurl_webhook_subscription_deleted',
+  QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

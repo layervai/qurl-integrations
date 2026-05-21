@@ -12,6 +12,7 @@ const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
 const qurlWebhookRouter = require('./routes/qurl-webhook');
+const webhookSubscriptions = require('./webhook-subscriptions');
 
 const app = express();
 
@@ -270,6 +271,11 @@ function stopIntervals() {
   // graceful shutdown so the interval doesn't outlive the server.
   if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
   if (typeof webhooksRouter.stopIntervals === 'function') webhooksRouter.stopIntervals();
+  // 30s subscription-registry refresh ticker (per-guild webhook
+  // secrets cache). No-op on the gateway tier where the registry was
+  // never started; required on the HTTP tier so the ticker doesn't
+  // outlive the server during graceful shutdown.
+  webhookSubscriptions.stop();
 }
 
 module.exports = { app, startServer, stopIntervals };

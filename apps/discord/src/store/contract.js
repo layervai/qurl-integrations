@@ -105,6 +105,12 @@ const STORE_METHODS = Object.freeze([
   'getGuildConfig',
   'getGuildConfigWithApiKey',
 
+  // Per-guild qurl-service webhook subscriptions (BYOK view counter)
+  'setGuildWebhookSubscription',
+  'clearGuildWebhookSubscription',
+  'listGuildSubscriptionsByOwner',
+  'scanGuildSubscriptions',
+
   // Orphaned OAuth tokens (background revoke-retry queue)
   'recordOrphanedToken',
   'countOrphanedTokens',
