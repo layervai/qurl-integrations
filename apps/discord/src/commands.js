@@ -1471,9 +1471,14 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
  * @param {number} opts.recipientCount — number of tokens to mint in total.
  * @param {string} opts.apiKey — QURL API key.
+ * @param {?number} [opts.selfDestructSeconds] — when set, forwarded to mintLinks
+ *   as `session_duration`. Each minted token gets an L7 session window matching
+ *   the fileviewer's client-side self-destruct timer. null/undefined inherits
+ *   qurl-service's QURL_SESSION_TTL default. See mintLinks for value mapping
+ *   (0.5 → "1s", N>=1 → ceil to whole seconds).
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey }) {
+async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
@@ -1485,7 +1490,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       tokensUsed = 0;
     }
     const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
+    const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey, selfDestructSeconds);
     for (const link of minted) {
       // qurl_id is the join key against qurl.accessed webhooks; empty
       // string degrades the whole monitor to bare base-msg.
@@ -1781,6 +1786,7 @@ async function executeSendPipeline(interaction, {
           expiresAt,
           recipientCount: recipients.length,
           apiKey,
+          selfDestructSeconds,
         });
       } finally {
         bufHolder.buf = null;
@@ -1818,6 +1824,7 @@ async function executeSendPipeline(interaction, {
         expiresAt,
         recipientCount: recipients.length,
         apiKey,
+        selfDestructSeconds,
       });
 
       if (allLinks.length < recipients.length) {
@@ -2485,6 +2492,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           expiresAt,
           recipientCount: newRecipients.length,
           apiKey,
+          selfDestructSeconds: inheritedDestruct,
         });
       } catch (err) {
         // Discord CDN URLs are signed and expire (~24h). If re-download fails,
@@ -2529,6 +2537,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         expiresAt,
         recipientCount: newRecipients.length,
         apiKey,
+        selfDestructSeconds: inheritedDestruct,
       });
 
       if (allLinks.length < newRecipients.length) {

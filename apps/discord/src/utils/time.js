@@ -39,6 +39,13 @@ function expiryToMs(expiresIn) {
 // (qurl-s3-connector PR #477). Connector contract is 0.5–3600 inclusive,
 // so every preset here is in range; clamping is unreachable.
 const SELF_DESTRUCT_PRESETS = Object.freeze([
+  // 0.5s residual: fileviewer blanks at 500ms (client-side), but the
+  // L7 session_duration floors at 1s per qurl-service's
+  // MinSessionDuration. A recipient refreshing between t=500ms and
+  // t=1000ms still re-renders. The preset is intentionally retained
+  // because the client-side blank is the perceived "self destruct"
+  // and the 500ms residual closes on retry past 1s. If qurl-service
+  // ever lowers MinSessionDuration to sub-second, this gap closes.
   Object.freeze({ seconds: 0.5, label: '1/2 second' }),
   Object.freeze({ seconds: 1, label: '1 second' }),
   Object.freeze({ seconds: 5, label: '5 seconds' }),
@@ -123,11 +130,51 @@ function formatSelfDestructSegment(seconds) {
   return 'Self-destruct: off';
 }
 
+// formatSessionDurationSeconds maps a SELF_DESTRUCT_PRESETS-shaped
+// number to the qurl-service-format duration string the connector's
+// `mint_link` body and the upload-time `CreateQURL` body both expect.
+//
+// Co-located with SELF_DESTRUCT_PRESETS because the preset values are
+// the ONLY legitimate input source — keeping the formatter here
+// prevents the bot's wire-format mapping from drifting if the preset
+// set ever changes (e.g., adding a 100ms preset would force a decision
+// here about how to floor it).
+//
+// Returns the duration string (e.g. "1s", "30s") when the input is a
+// finite positive number; returns null otherwise. Callers should omit
+// the wire field entirely when the result is null (qurl-service then
+// uses QURL_SESSION_TTL as the default).
+//
+// Value mapping:
+//   null / undefined / non-finite / non-numeric / ≤0  → null (omit)
+//   0.5 (the only fractional preset)                  → "1s" (qurl-service
+//                                                       MinSessionDuration
+//                                                       floor — fileviewer's
+//                                                       500ms client-side
+//                                                       blank still fires)
+//   N >= 1                                            → "Ns" (Math.ceil
+//                                                       defensively floors
+//                                                       any non-preset
+//                                                       fractional input)
+//
+// Mirrors qurl-s3-connector's `sessionDurationFor()` (Go) so the
+// upload-time and mint-time wire mappings stay in lockstep. If one
+// changes, the other must too — fenced by qurl-integrations-infra
+// PR #764 + this PR landing as a coordinated pair.
+function formatSessionDurationSeconds(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  // Math.ceil of any value in (0, 1] is 1; of any positive finite
+  // number is ≥1. Combined with the > 0 guard above, this never
+  // emits "0s".
+  return `${Math.ceil(seconds)}s`;
+}
+
 module.exports = {
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
+  formatSessionDurationSeconds,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
