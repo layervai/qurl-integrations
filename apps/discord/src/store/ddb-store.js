@@ -1476,10 +1476,10 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   }));
 }
 
-// Raw delete. Bypasses qurl-service subscription teardown; use
-// `guild-webhook-link.js::unlinkGuildAndWebhook` to also tear down
-// the subscription. The leading underscore signals "internal — read
-// the orchestrator first."
+// Raw delete. No qurl-service subscription teardown. Today there is
+// no production caller; a future /qurl unlink admin command MUST
+// add an orchestrator that issues DELETE /v1/webhooks/{id} BEFORE
+// calling this, or it'll orphan the subscription on qurl-service.
 async function _removeGuildApiKeyRaw(guildId) {
   const res = await ddb.send(new DeleteCommand({
     TableName: TABLES.guild_configs,
@@ -1575,15 +1575,20 @@ async function listGuildSubscriptionsByOwner(webhookOwnerId) {
 // rows don't keep stale ciphertext that the cache tick could
 // deterministically pick on Scan-order tiebreak.
 //
-// Returns the count of rows updated (excludes the just-written
-// primary row, which the caller has already persisted). Per-row
-// errors surface as rejections in the Promise.allSettled result so
-// the caller can log+continue without losing visibility.
-async function propagateGuildWebhookSubscription(webhookOwnerId, { webhookId, webhookSecret }) {
+// `excludeGuildId` (optional): skip this guild — the caller has
+// already persisted it. Returns counts of rows updated/failed (the
+// excluded guild is not counted).
+async function propagateGuildWebhookSubscription(
+  webhookOwnerId,
+  { webhookId, webhookSecret, excludeGuildId },
+) {
   if (!webhookOwnerId || !webhookId || !webhookSecret) {
     throw new Error('propagateGuildWebhookSubscription: webhookOwnerId, webhookId, webhookSecret all required');
   }
-  const siblings = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  const allMatches = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  const siblings = excludeGuildId
+    ? allMatches.filter(s => s.guildId !== excludeGuildId)
+    : allMatches;
   if (siblings.length === 0) return { updated: 0, failed: 0 };
 
   const updatedAt = nowIso();

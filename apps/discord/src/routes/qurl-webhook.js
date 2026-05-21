@@ -146,7 +146,10 @@ router.post('/qurl', async (req, res) => {
     let totalInWindow = null;
     if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
     else if (isUnknownOwner) totalInWindow = unknownOwnerLimiter.recordBadSig(ip);
-    const auditEvent = result === VERIFY_RESULTS.OWNER_UNKNOWN
+    // Audit-event split mirrors the threat-model split: OWNER_* are
+    // operational/payload-shape signal (route both to the same
+    // unknown-owner dashboard line); SIG_* are HMAC-failure signal.
+    const auditEvent = isUnknownOwner
       ? AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER
       : AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID;
     logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId });
@@ -245,8 +248,4 @@ router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
 };
-// Exposed for tests that want to assert against the policy table
-// without rebuilding the conditional ladder. NOT part of any external
-// contract.
-router._VERIFY_RESULTS = VERIFY_RESULTS;
 module.exports = router;

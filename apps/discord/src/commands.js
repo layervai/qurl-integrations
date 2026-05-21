@@ -3283,13 +3283,14 @@ async function handleSetupModal(interaction, { flow_id }) {
 
   // Fire-and-forget per-guild webhook subscription register. The
   // helper does network + DDB work that can take seconds; awaiting
-  // would delay the modal-reply unacceptably. A failure only
-  // degrades the view counter to the polling fallback.
+  // would delay the modal reply unacceptably. .catch is defense-in-
+  // depth — the helper never re-throws by contract and emits its
+  // own audit events.
   linkGuildWebhookSubscription({
     guildId: interaction.guildId,
     apiKey: submittedKey,
     descriptionContext: `via=paste, configuredBy=${interaction.user.id}`,
-  }).catch((err) => logger.warn('linkGuildWebhookSubscription threw (non-blocking)', {
+  }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
     error: err?.message, guildId: interaction.guildId,
   }));
 

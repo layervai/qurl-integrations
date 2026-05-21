@@ -1,6 +1,6 @@
-// Tests for the link / unlink orchestrators. The cache-side scenarios
-// live in tests/webhook-subscriptions.test.js; this file covers the
-// db + registrar wiring + partial-failure rollback paths.
+// Tests for the link orchestrator (db + registrar wiring + partial-
+// failure rollback). Cache-side scenarios live in
+// tests/webhook-subscriptions.test.js.
 
 const mockEnsureWebhookSubscription = jest.fn();
 const mockDeleteSubscription = jest.fn();
@@ -11,16 +11,9 @@ jest.mock('../src/qurl-webhook-registrar', () => ({
 
 const mockSetGuildWebhookSubscription = jest.fn();
 const mockPropagateGuildWebhookSubscription = jest.fn();
-const mockListGuildSubscriptionsByOwner = jest.fn();
-const mockGetGuildConfigWithApiKey = jest.fn();
-const mockRemoveGuildApiKeyRaw = jest.fn();
 jest.mock('../src/store', () => ({
   setGuildWebhookSubscription: mockSetGuildWebhookSubscription,
   propagateGuildWebhookSubscription: mockPropagateGuildWebhookSubscription,
-  listGuildSubscriptionsByOwner: mockListGuildSubscriptionsByOwner,
-  getGuildConfigWithApiKey: mockGetGuildConfigWithApiKey,
-  _removeGuildApiKeyRaw: mockRemoveGuildApiKeyRaw,
-  // Stubs for unrelated config-time calls
   healthCheck: jest.fn(),
 }));
 
@@ -54,7 +47,7 @@ process.env.AWS_REGION = 'us-east-2';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 
 const {
-  linkGuildWebhookSubscription, unlinkGuildAndWebhook, LINK_RESULTS,
+  linkGuildWebhookSubscription, LINK_RESULTS,
 } = require('../src/guild-webhook-link');
 const { AUDIT_EVENTS } = require('../src/constants');
 
@@ -69,7 +62,6 @@ beforeEach(() => {
   mockSetGuildWebhookSubscription.mockResolvedValue();
   mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0 });
   mockDeleteSubscription.mockResolvedValue();
-  mockListGuildSubscriptionsByOwner.mockResolvedValue([]);
 });
 
 describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
@@ -136,66 +128,14 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
   });
 });
 
-describe('unlinkGuildAndWebhook orchestrator', () => {
-  it('returns not-found when the row is absent', async () => {
-    mockGetGuildConfigWithApiKey.mockResolvedValueOnce(null);
-    const result = await unlinkGuildAndWebhook('g_missing');
-    expect(result).toEqual({ ok: true, reason: LINK_RESULTS.NOT_FOUND });
-    // Never reaches DELETE / raw-delete paths.
-    expect(mockDeleteSubscription).not.toHaveBeenCalled();
-    expect(mockRemoveGuildApiKeyRaw).not.toHaveBeenCalled();
-  });
-
-  it('tears down subscription THEN deletes row (order matters for orphan visibility)', async () => {
-    mockGetGuildConfigWithApiKey.mockResolvedValueOnce({
-      guild_id: 'g_unlink',
-      qurl_api_key: 'lv_guild_unlink',
-      webhook_id: 'wh_unlink',
-      webhook_owner_id: 'usr_unlink',
+describe('linkGuildWebhookSubscription — propagation parameter', () => {
+  it('passes the just-linked guildId to propagate so primary is skipped', async () => {
+    await linkGuildWebhookSubscription({
+      guildId: 'g_primary', apiKey: 'lv_test',
     });
-    mockListGuildSubscriptionsByOwner.mockResolvedValueOnce([
-      // Only this guild; the unlink IS the last reference.
-      { guildId: 'g_unlink', webhookId: 'wh_unlink' },
-    ]);
-    const result = await unlinkGuildAndWebhook('g_unlink');
-    expect(result).toEqual({ ok: true, reason: LINK_RESULTS.UNLINKED });
-    expect(mockDeleteSubscription).toHaveBeenCalledWith({
-      apiEndpoint: 'https://qurl.example', apiKey: 'lv_guild_unlink', webhookId: 'wh_unlink',
-    });
-    expect(mockRemoveGuildApiKeyRaw).toHaveBeenCalledWith('g_unlink');
-    // Order verified via mock call sequence (later index = later call).
-    const deleteCallIdx = mockDeleteSubscription.mock.invocationCallOrder[0];
-    const rawDeleteCallIdx = mockRemoveGuildApiKeyRaw.mock.invocationCallOrder[0];
-    expect(deleteCallIdx).toBeLessThan(rawDeleteCallIdx);
-  });
-
-  it('preserves sibling subscription when other guilds share the same owner', async () => {
-    mockGetGuildConfigWithApiKey.mockResolvedValueOnce({
-      guild_id: 'g_one_of_many',
-      qurl_api_key: 'lv_shared',
-      webhook_id: 'wh_shared',
-      webhook_owner_id: 'usr_admin',
-    });
-    mockListGuildSubscriptionsByOwner.mockResolvedValueOnce([
-      { guildId: 'g_one_of_many', webhookId: 'wh_shared' },
-      { guildId: 'g_sibling', webhookId: 'wh_shared' },
-    ]);
-    const result = await unlinkGuildAndWebhook('g_one_of_many');
-    expect(result).toEqual({ ok: true, reason: LINK_RESULTS.UNLINKED });
-    // CRITICAL: sibling delivery survives — no DELETE issued.
-    expect(mockDeleteSubscription).not.toHaveBeenCalled();
-    expect(mockRemoveGuildApiKeyRaw).toHaveBeenCalledWith('g_one_of_many');
-  });
-
-  it('returns delete-failed when _removeGuildApiKeyRaw throws', async () => {
-    mockGetGuildConfigWithApiKey.mockResolvedValueOnce({
-      guild_id: 'g_raw_fail',
-      qurl_api_key: 'lv_x',
-      webhook_id: 'wh_x',
-      webhook_owner_id: 'usr_x',
-    });
-    mockRemoveGuildApiKeyRaw.mockRejectedValueOnce(new Error('DDB outage'));
-    const result = await unlinkGuildAndWebhook('g_raw_fail');
-    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.DELETE_FAILED });
+    expect(mockPropagateGuildWebhookSubscription).toHaveBeenCalledWith(
+      'usr_ok',
+      { webhookId: 'wh_ok', webhookSecret: 'sec_ok', excludeGuildId: 'g_primary' },
+    );
   });
 });

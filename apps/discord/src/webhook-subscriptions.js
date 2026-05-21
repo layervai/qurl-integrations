@@ -145,9 +145,14 @@ async function scanOnce() {
   // exceeds ~10k — scanAll inside scanGuildSubscriptions and
   // listGuildSubscriptionsByOwner is bounded by table size, not
   // result size.
+  //
+  // discoverDefaultOwnerId fires only until success — the bot's own
+  // owner_id never changes without a redeploy, so re-fetching every
+  // 30s after success is wasted load on qurl-service.
+  const needsDefaultDiscovery = !defaultOwnerId || !config.QURL_WEBHOOK_SECRET;
   const [rows, discoveredOwner] = await Promise.all([
     db.scanGuildSubscriptions(),
-    discoverDefaultOwnerId(),
+    needsDefaultDiscovery ? discoverDefaultOwnerId() : Promise.resolve(defaultOwnerId),
   ]);
 
   // Tiebreaker: when sibling rows for one owner disagree on (secret,

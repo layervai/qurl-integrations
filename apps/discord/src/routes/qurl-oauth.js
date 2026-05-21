@@ -434,15 +434,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     guildId, configuredBy: discordUserId, keyPrefix,
   });
 
-  // 3a. Register a per-guild qurl.accessed webhook subscription under
-  //     THIS guild's API key (BYOK view counter). True fire-and-forget:
-  //     the helper makes a qurl-service round-trip + a DDB scan that
-  //     can add up to a few seconds of latency to user-facing OAuth.
-  //     A failure here only degrades the view counter (polling fallback
-  //     still works); it must not delay the success page.
+  // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
+  //     view counter). Fire-and-forget: the helper never re-throws by
+  //     contract and emits its own audit events; the .catch is a
+  //     defense-in-depth safety net against future contract drift, not
+  //     the primary failure-visibility channel.
   linkGuildWebhookSubscription({
     guildId, apiKey, descriptionContext: `via=oauth, configuredBy=${discordUserId}`,
-  }).catch((err) => logger.warn('linkGuildWebhookSubscription threw (non-blocking)', {
+  }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
     error: err?.message, guildId,
   }));
 
