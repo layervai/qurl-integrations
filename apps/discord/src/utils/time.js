@@ -162,11 +162,22 @@ function formatSelfDestructSegment(seconds) {
 // changes, the other must too — fenced by qurl-integrations-infra
 // PR #764 + this PR landing as a coordinated pair.
 function formatSessionDurationSeconds(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (!isPositiveFinite(seconds)) return null;
   // Math.ceil of any value in (0, 1] is 1; of any positive finite
-  // number is ≥1. Combined with the > 0 guard above, this never
-  // emits "0s".
+  // number is ≥1. Combined with the isPositiveFinite guard above,
+  // this never emits "0s".
   return `${Math.ceil(seconds)}s`;
+}
+
+// isPositiveFinite — single predicate for "valid positive numeric
+// seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
+// 0, and negative numbers. Six call sites (connector.js, commands.js
+// (x2), server.js, time.js (x2)) all used the inline
+// `Number.isFinite(x) && x > 0` form — extracting here so the
+// predicate definition lives next to the formatter that already
+// owns the seconds/TTL semantics.
+function isPositiveFinite(n) {
+  return Number.isFinite(n) && n > 0;
 }
 
 module.exports = {
@@ -175,6 +186,7 @@ module.exports = {
   formatSelfDestructLabel,
   formatSelfDestructSegment,
   formatSessionDurationSeconds,
+  isPositiveFinite,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,

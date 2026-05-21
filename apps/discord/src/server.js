@@ -6,6 +6,7 @@ const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
+const { isPositiveFinite } = require('./utils/time');
 const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
@@ -24,13 +25,13 @@ const app = express();
 // proxy', …)`. Express also accepts `true` (trust ALL hops) and `'true'`
 // (string), both of which let an attacker spoof X-Forwarded-For via any
 // upstream proxy to rotate their apparent IP and bypass the per-IP rate
-// limiter. The parseInt + Number.isFinite + > 0 chain below rejects all
-// of those: `'true'` / `'yes'` parse to NaN, negative values are
-// dropped, and a missing env falls through to the production-only
-// default of `1` (one hop = the ALB) rather than `true`.
+// limiter. The parseInt + isPositiveFinite chain below rejects all of
+// those: `'true'` / `'yes'` parse to NaN, negative values are dropped,
+// and a missing env falls through to the production-only default of `1`
+// (one hop = the ALB) rather than `true`.
 if (process.env.TRUST_PROXY) {
   const hops = parseInt(process.env.TRUST_PROXY, 10);
-  if (Number.isFinite(hops) && hops > 0) {
+  if (isPositiveFinite(hops)) {
     app.set('trust proxy', hops);
   } else {
     logger.warn(`Ignoring invalid TRUST_PROXY=${process.env.TRUST_PROXY} (must be a positive integer hop count, NOT 'true')`);

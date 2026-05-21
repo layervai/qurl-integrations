@@ -2,7 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 
 const { sanitizeFilename } = require('./utils/sanitize');
-const { formatSessionDurationSeconds } = require('./utils/time');
+const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
@@ -170,10 +170,10 @@ function connectorAuthHeaders(apiKey) {
 // 1 * time.Second. A reader looking at one wire field should know the
 // other has the opposite handling for the 0.5s preset.
 function appendViewerTtl(form, viewerTtlSeconds) {
-  // Number.isFinite already filters non-numbers (Number.isFinite('30') is
-  // false), so the typeof guard would be redundant. Strict positive-finite
-  // is the same invariant the modal-prefill setValue uses.
-  if (Number.isFinite(viewerTtlSeconds) && viewerTtlSeconds > 0) {
+  // isPositiveFinite already filters non-numbers (Number.isFinite('30')
+  // is false) and zero/negative — same invariant the modal-prefill
+  // setValue uses.
+  if (isPositiveFinite(viewerTtlSeconds)) {
     form.append('viewer_ttl_seconds', String(viewerTtlSeconds));
   }
 }
@@ -340,13 +340,16 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * `SELF_DESTRUCT_PRESETS`).
  *
  * @param {string} resourceId — connector resource_id (alphanum + `_-`).
- * @param {string} expiresAt — ISO string forwarded as `expires_at`.
- * @param {number} n — integer 1..100, count of links to mint.
- * @param {?string} apiKey — caller API key; falls back to `config.QURL_API_KEY`.
- * @param {?number} [selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
+ * @param {object} opts — minting options. Bag-shaped for sibling-consistency
+ *   with mintLinksInBatches, whose call-through used to position-align the
+ *   adjacent `expiresAt` and `apiKey` strings (cycle-1 footgun on PR #483).
+ * @param {string} opts.expiresAt — ISO string forwarded as `expires_at`.
+ * @param {number} opts.n — integer 1..100, count of links to mint.
+ * @param {?string} [opts.apiKey] — caller API key; falls back to `config.QURL_API_KEY`.
+ * @param {?number} [opts.selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, expiresAt, n, apiKey, selfDestructSeconds = null) {
+async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
