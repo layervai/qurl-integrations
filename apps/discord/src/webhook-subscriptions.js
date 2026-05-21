@@ -52,6 +52,15 @@ let defaultOwnerId = null;
 // scan crossed its partition isn't silently dropped.
 const upsertsDuringScan = new Set();
 
+// Re-entrancy guard. setInterval doesn't await the previous tick, so
+// if scanGuildSubscriptions takes longer than REFRESH_INTERVAL_MS,
+// the next tick would fire while the current one is awaiting — both
+// would .clear() upsertsDuringScan and the second would wipe the
+// first's in-flight tracking, defeating the concurrent-upsert
+// preservation. Skipping the overlapping tick is safe: the receiver's
+// 503-unprimed path covers any extra delay.
+let scanInFlight = false;
+
 // Sentinel for the default-key entry's webhookId field. A unique
 // Symbol can never collide with a real qurl-service webhook_id
 // (those are opaque strings). The receiver only reads webhookSecret
@@ -73,8 +82,14 @@ function isPrimed() {
 // replica gets immediate consistency; sibling replicas converge on
 // next tick. Idempotent: same (guildId, ownerId) re-call just re-adds.
 function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
-  if (!guildId || !ownerId || !webhookId || !webhookSecret) {
-    throw new Error('upsertGuild: guildId, ownerId, webhookId, webhookSecret all required');
+  // Type-strict: a caller-bug passing `ownerId: 0` or `ownerId: {}`
+  // would pass a truthy-only check for some shapes and then break
+  // downstream Map.get(ownerId) lookups via strict equality.
+  if (typeof guildId !== 'string' || !guildId.length
+      || typeof ownerId !== 'string' || !ownerId.length
+      || (typeof webhookId !== 'string' || !webhookId.length)
+      || (typeof webhookSecret !== 'string' || !webhookSecret.length)) {
+    throw new Error('upsertGuild: guildId, ownerId, webhookId, webhookSecret must all be non-empty strings');
   }
   let entry = subscriptions.get(ownerId);
   if (!entry) {
@@ -136,86 +151,97 @@ async function discoverDefaultOwnerId() {
 // and rediscovers the default-key owner_id. Throws on any sub-step
 // failure; the caller (refreshTick) increments consecutiveFailures.
 async function scanOnce() {
-  upsertsDuringScan.clear();
-
-  // Parallelize the two independent network reads: the DDB scan and
-  // the qurl-service GET /v1/webhooks. Sequential, they added 50-300ms
-  // per tick for no benefit.
-  // TODO: GSI on webhook_owner_id when guild_configs row count
-  // exceeds ~10k — scanAll inside scanGuildSubscriptions and
-  // listGuildSubscriptionsByOwner is bounded by table size, not
-  // result size.
-  //
-  // discoverDefaultOwnerId fires only until success — the bot's own
-  // owner_id never changes without a redeploy, so re-fetching every
-  // 30s after success is wasted load on qurl-service.
-  const needsDefaultDiscovery = !defaultOwnerId || !config.QURL_WEBHOOK_SECRET;
-  const [rows, discoveredOwner] = await Promise.all([
-    db.scanGuildSubscriptions(),
-    needsDefaultDiscovery ? discoverDefaultOwnerId() : Promise.resolve(defaultOwnerId),
-  ]);
-
-  // Tiebreaker: when sibling rows for one owner disagree on (secret,
-  // webhookId) — the propagateGuildWebhookSubscription window — the
-  // row with the newest `updatedAt` wins. The chosen-updatedAt is a
-  // scan-local concern; we keep it in a parallel Map instead of
-  // attaching to the cache entry shape that the receiver consults.
-  const next = new Map();
-  const winningUpdatedAt = new Map();
-  for (const r of rows) {
-    let entry = next.get(r.webhookOwnerId);
-    if (!entry) {
-      entry = { guildIds: new Set(), webhookSecret: r.webhookSecret, webhookId: r.webhookId };
-      next.set(r.webhookOwnerId, entry);
-      winningUpdatedAt.set(r.webhookOwnerId, r.updatedAt || '');
-    } else if ((r.updatedAt || '') > winningUpdatedAt.get(r.webhookOwnerId)) {
-      entry.webhookSecret = r.webhookSecret;
-      entry.webhookId = r.webhookId;
-      winningUpdatedAt.set(r.webhookOwnerId, r.updatedAt || '');
-    }
-    entry.guildIds.add(r.guildId);
+  if (scanInFlight) {
+    // Drop the overlap rather than corrupt upsertsDuringScan tracking
+    // (see comment on the guard above). Caller doesn't see the skip;
+    // primed stays true (or stays false during cold-start).
+    return;
   }
+  scanInFlight = true;
+  try {
+    upsertsDuringScan.clear();
 
-  if (discoveredOwner) {
-    defaultOwnerId = discoveredOwner;
-    if (config.QURL_WEBHOOK_SECRET) {
-      // Receiver only reads webhookSecret; the Symbol sentinel is
-      // for debugging and can never collide with a real opaque
-      // webhook_id string from qurl-service.
-      next.set(discoveredOwner, {
-        guildIds: new Set([DEFAULT_KEY_SENTINEL]),
-        webhookSecret: config.QURL_WEBHOOK_SECRET,
-        webhookId: DEFAULT_KEY_SENTINEL,
+    // Parallelize the two independent network reads. Sequential they
+    // added 50-300ms per tick.
+    // TODO: GSI on webhook_owner_id when guild_configs row count
+    // exceeds ~10k — scanAll is bounded by table size, not result size.
+    //
+    // discoverDefaultOwnerId only fires while there's something to
+    // discover: the bot's own owner_id never changes in-process (env
+    // is read at boot), so once we have it AND a secret to pair with,
+    // the GET is wasted load on qurl-service.
+    const needsDefaultDiscovery = !!config.QURL_WEBHOOK_SECRET && !defaultOwnerId;
+    const [rows, discoveredOwner] = await Promise.all([
+      db.scanGuildSubscriptions(),
+      needsDefaultDiscovery ? discoverDefaultOwnerId() : Promise.resolve(defaultOwnerId),
+    ]);
+
+    // Tiebreaker: when sibling rows for one owner disagree on
+    // (secret, webhookId) — the propagateGuildWebhookSubscription
+    // window — the row with the newest updatedAt wins. winningUpdatedAt
+    // is a scan-local Map so the visible cache entry shape stays
+    // { guildIds, webhookSecret, webhookId }.
+    const next = new Map();
+    const winningUpdatedAt = new Map();
+    for (const r of rows) {
+      let entry = next.get(r.webhookOwnerId);
+      if (!entry) {
+        entry = { guildIds: new Set(), webhookSecret: r.webhookSecret, webhookId: r.webhookId };
+        next.set(r.webhookOwnerId, entry);
+        winningUpdatedAt.set(r.webhookOwnerId, r.updatedAt || '');
+      } else if ((r.updatedAt || '') > winningUpdatedAt.get(r.webhookOwnerId)) {
+        entry.webhookSecret = r.webhookSecret;
+        entry.webhookId = r.webhookId;
+        winningUpdatedAt.set(r.webhookOwnerId, r.updatedAt || '');
+      }
+      entry.guildIds.add(r.guildId);
+    }
+
+    if (discoveredOwner) {
+      defaultOwnerId = discoveredOwner;
+      if (config.QURL_WEBHOOK_SECRET) {
+        // Symbol sentinel for webhookId — receiver only reads
+        // webhookSecret; can't collide with any real qurl-service
+        // webhook_id (opaque string). NOTE: Symbols don't survive
+        // JSON.stringify, so a future debug-dump endpoint that
+        // serializes the cache will see webhookId as undefined for
+        // the default entry. Tradeoff favored over a sentinel string.
+        next.set(discoveredOwner, {
+          guildIds: new Set([DEFAULT_KEY_SENTINEL]),
+          webhookSecret: config.QURL_WEBHOOK_SECRET,
+          webhookId: DEFAULT_KEY_SENTINEL,
+        });
+      }
+    } else {
+      // Default-key owner_id discovery failed (no QURL_API_KEY /
+      // QURL_ENDPOINT, OR the Lambda hasn't run yet on a fresh
+      // deploy). Inbound webhooks for non-BYOK guilds 401 until
+      // discovery succeeds — alarm on this log line for fresh-deploy
+      // gaps that outlast the Lambda.
+      logger.warn('webhook-subscriptions: default-key owner_id discovery returned null', {
+        hasApiKey: Boolean(config.QURL_API_KEY),
+        hasEndpoint: Boolean(config.QURL_ENDPOINT),
+        hasWebhookSecret: Boolean(config.QURL_WEBHOOK_SECRET),
       });
     }
-  } else {
-    // Default-key owner_id couldn't be discovered (QURL_API_KEY or
-    // QURL_ENDPOINT unset, or the Lambda hasn't run yet on a fresh
-    // deploy). Inbound webhooks for non-BYOK guilds will 401 until
-    // discovery succeeds. Warn so a CloudWatch metric filter on this
-    // line can alert on a fresh-deploy gap that outlasts the Lambda.
-    logger.warn('webhook-subscriptions: default-key owner_id discovery returned null', {
-      hasApiKey: Boolean(config.QURL_API_KEY),
-      hasEndpoint: Boolean(config.QURL_ENDPOINT),
-      hasWebhookSecret: Boolean(config.QURL_WEBHOOK_SECRET),
-    });
-  }
 
-  // Only snapshot when concurrent upserts could have landed. The
-  // common case (no concurrent /qurl setup) skips the allocation.
-  const liveSnapshot = upsertsDuringScan.size > 0 ? new Map(subscriptions) : null;
-  subscriptions.clear();
-  for (const [k, v] of next.entries()) subscriptions.set(k, v);
+    // Only snapshot when concurrent upserts could have landed.
+    const liveSnapshot = upsertsDuringScan.size > 0 ? new Map(subscriptions) : null;
+    subscriptions.clear();
+    for (const [k, v] of next.entries()) subscriptions.set(k, v);
 
-  if (liveSnapshot) {
-    for (const ownerId of upsertsDuringScan) {
-      if (next.has(ownerId)) continue;
-      const liveEntry = liveSnapshot.get(ownerId);
-      if (liveEntry) subscriptions.set(ownerId, liveEntry);
+    if (liveSnapshot) {
+      for (const ownerId of upsertsDuringScan) {
+        if (next.has(ownerId)) continue;
+        const liveEntry = liveSnapshot.get(ownerId);
+        if (liveEntry) subscriptions.set(ownerId, liveEntry);
+      }
     }
-  }
 
-  primed = true;
+    primed = true;
+  } finally {
+    scanInFlight = false;
+  }
 }
 
 async function refreshTick() {
@@ -271,6 +297,7 @@ function _resetForTesting() {
   consecutiveFailures = 0;
   defaultOwnerId = null;
   upsertsDuringScan.clear();
+  scanInFlight = false;
   if (timer) {
     clearInterval(timer);
     timer = null;

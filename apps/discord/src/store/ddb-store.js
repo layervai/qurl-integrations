@@ -1628,10 +1628,24 @@ async function scanGuildSubscriptions() {
   const out = [];
   for (const r of rows) {
     if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;
+    let webhookSecret;
+    try {
+      webhookSecret = decrypt(r.webhook_secret);
+    } catch (err) {
+      // One corrupt row (key rotation gap, manual DDB tamper, partial
+      // migration) must NOT abort the entire scan — the cache would
+      // stay unprimed and every inbound webhook would 401. Log the
+      // bad row and continue; backfill or operator intervention can
+      // re-encrypt it later.
+      logger.warn('scanGuildSubscriptions: decrypt failed for row, skipping', {
+        guildId: r.guild_id, error: err.message,
+      });
+      continue;
+    }
     out.push({
       guildId: r.guild_id,
       webhookId: r.webhook_id,
-      webhookSecret: decrypt(r.webhook_secret),
+      webhookSecret,
       webhookOwnerId: r.webhook_owner_id,
       // ISO-8601 string OR undefined for rows pre-dating the
       // updated_at write. The cache treats `undefined` as "older

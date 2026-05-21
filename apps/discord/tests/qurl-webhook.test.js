@@ -66,6 +66,17 @@ jest.mock('../src/webhook-subscriptions', () => ({
   _resetForTesting: jest.fn(),
 }));
 
+// Capture audit emissions so tests can assert that the receiver fires
+// the right CloudWatch metric-filter event per failure branch.
+const mockAudit = jest.fn();
+jest.mock('../src/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  audit: mockAudit,
+}));
+
 process.env.QURL_WEBHOOK_SECRET = 'test-qurl-secret';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 process.env.AWS_REGION = 'us-east-2';
@@ -537,6 +548,29 @@ describe('POST /webhooks/qurl — body.owner_id parse failure modes', () => {
       .set('QURL-Signature', signBody(raw))
       .send(raw);
     expect(res.status).toBe(401);
+  });
+
+  // Pins the metric-filter contract: OWNER_ID_MISSING shares the
+  // CACHE_MISS_UNKNOWN_OWNER audit with OWNER_UNKNOWN (operational /
+  // payload-shape signal, NOT HMAC-failure signal). A regression
+  // that routed it to SIGNATURE_INVALID would mix it with HMAC
+  // brute-force alarms.
+  it('fires CACHE_MISS_UNKNOWN_OWNER audit on missing body.owner_id', async () => {
+    const payload = { ...VALID_PAYLOAD };
+    delete payload.owner_id;
+    const raw = JSON.stringify(payload);
+    await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    // The receiver may emit OTHER audit events (rate-limit, cache-miss);
+    // we only assert the OWNER_ID_MISSING-specific one fired with
+    // the right event key and result value.
+    const auditCalls = mockAudit.mock.calls;
+    const ownerMissCall = auditCalls.find(([event]) => event === 'qurl_webhook_cache_miss_unknown_owner');
+    expect(ownerMissCall).toBeDefined();
+    expect(ownerMissCall[1]).toEqual(expect.objectContaining({ result: 'owner_id_missing' }));
   });
 });
 

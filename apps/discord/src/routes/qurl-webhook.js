@@ -50,8 +50,10 @@ const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
 // HTTP status + audit event + rate-limiter interaction in one place
-// so the policy table stays grep-able.
-const VERIFY_RESULTS = {
+// so the policy table stays grep-able. Frozen for parity with
+// LINK_RESULTS — typo in a string value would silently break the
+// downstream switch.
+const VERIFY_RESULTS = Object.freeze({
   OK: 'ok',
   RAW_BODY_MISSING: 'raw_body_missing',         // middleware bug; should never happen
   SIG_HEADER_MISSING: 'sig_header_missing',
@@ -60,7 +62,7 @@ const VERIFY_RESULTS = {
   CACHE_UNPRIMED: 'cache_unprimed',             // 503 — registry hasn't completed first scan
   OWNER_UNKNOWN: 'owner_unknown',               // 401 — registry primed, owner not registered
   SIG_INVALID: 'sig_invalid',                   // HMAC mismatch on real secret
-};
+});
 
 function verifyAndResolve(req) {
   if (!req.rawBody) {

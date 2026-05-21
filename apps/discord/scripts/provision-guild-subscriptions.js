@@ -77,10 +77,10 @@ async function main() {
       if (row.webhook_id) { skipped += 1; continue; }
       candidates += 1;
       const guildId = row.guild_id;
-      console.log(`[backfill] candidate guild_id=${guildId}`);
-      if (DRY_RUN) continue;
       // Per-row try/catch so one corrupt encrypted row doesn't abort
-      // the whole backfill.
+      // the whole backfill. The decrypt is performed even in DRY_RUN
+      // mode so operators see decrypt failures in the preview rather
+      // than discovering them mid-real-run.
       try {
         const apiKey = await db.getGuildApiKey(guildId);
         if (!apiKey) {
@@ -88,6 +88,8 @@ async function main() {
           skipped += 1;
           continue;
         }
+        console.log(`[backfill] candidate guild_id=${guildId}`);
+        if (DRY_RUN) continue;
         const result = await linkGuildWebhookSubscription({
           guildId, apiKey, descriptionContext: 'via=backfill-script',
         });
