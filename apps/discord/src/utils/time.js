@@ -125,6 +125,13 @@ function isLegitimateSelfDestructSelectValue(value) {
 function formatSelfDestructLabel(seconds) {
   const match = findPresetBySeconds(seconds);
   if (match) return match.label;
+  // Intentionally NOT isPositiveFinite — this branch's purpose is
+  // to flag *non-finite* (NaN/Infinity) as "(invalid)" while still
+  // letting 0 / negative off-preset values render as "0s" / "-5s"
+  // for the next gate to handle (the form caller maps a finite-but-
+  // off-preset value to the underlying numeric formatting). Don't
+  // "finish the refactor" by switching to isPositiveFinite — that
+  // would silently re-route 0 / negatives to "(invalid)" too.
   if (!Number.isFinite(seconds)) return '(invalid)';
   return `${seconds}s`;
 }
