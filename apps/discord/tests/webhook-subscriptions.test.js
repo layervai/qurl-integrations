@@ -182,6 +182,38 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
     await subs.scanOnce();
     expect(subs.getSecretForOwner('usr_pre')).toBe('sec_pre_from_scan');
   });
+
+  // Cycle-6 cr regression: scan caught a pre-rotate sibling row for
+  // owner X while a concurrent linkGuildWebhookSubscription wrote
+  // the post-rotate secret via upsertGuild. Without the cycle-6 fix
+  // (upsertsDuringScan overrides scan-result entries), the cache
+  // would hold the stale secret until the next 30s tick.
+  it('upsert mid-scan overrides scan result for the same owner (rotate-drift race)', async () => {
+    let resolveScan;
+    mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
+    const scanPromise = subs.scanOnce();
+    // Mid-scan: a concurrent link wrote the POST-rotate secret in
+    // memory via upsertGuild. DDB write may or may not be visible
+    // to the in-flight scan; assume it is and the scan caught a
+    // stale sibling row.
+    subs.upsertGuild({
+      guildId: 'g_primary', ownerId: 'usr_rot',
+      webhookId: 'wh_rot', webhookSecret: 'sec_post_rotate',
+    });
+    // Scan resolves with the PRE-rotate sibling row (rotate drift).
+    resolveScan([
+      {
+        guildId: 'g_sibling', webhookId: 'wh_rot', webhookSecret: 'sec_pre_rotate',
+        webhookOwnerId: 'usr_rot',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+    ]);
+    await scanPromise;
+    // The in-memory upsert MUST win — qurl-service signs with the
+    // post-rotate secret, so any cached pre-rotate secret would
+    // 401 every inbound webhook for this owner.
+    expect(subs.getSecretForOwner('usr_rot')).toBe('sec_post_rotate');
+  });
 });
 
 describe('webhook-subscriptions registry — synchronous local update API', () => {
@@ -224,6 +256,26 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
     });
     subs.removeGuild({ guildId: 'g1', ownerId: 'usr_admin' });
     expect(subs.getSecretForOwner('usr_admin')).toBe('sec_shared');
+  });
+
+  // Defensive: pre-discovery (defaultOwnerId is null), removeGuild on
+  // a BYOK guild whose owner happens to equal what would BECOME the
+  // default owner could otherwise drop the entry. Doesn't matter
+  // today (no production caller), but pins the future-/qurl-unlink
+  // contract before that caller lands.
+  it('removeGuild on a sole-guild owner drops the entry pre-discovery (next scan rediscovers)', async () => {
+    subs.upsertGuild({
+      guildId: 'g1', ownerId: 'usr_byok', webhookId: 'wh_byok', webhookSecret: 'sec_byok',
+    });
+    subs.removeGuild({ guildId: 'g1', ownerId: 'usr_byok' });
+    expect(subs.getSecretForOwner('usr_byok')).toBeNull();
+    // The DDB row is still authoritative — the next 30s tick will
+    // restore the entry if the caller didn't also DDB-delete it.
+    mockScan.mockResolvedValueOnce([
+      { guildId: 'g1', webhookId: 'wh_byok', webhookSecret: 'sec_byok', webhookOwnerId: 'usr_byok' },
+    ]);
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_byok')).toBe('sec_byok');
   });
 });
 

@@ -436,9 +436,14 @@ router.get('/callback', rateLimit, async (req, res) => {
 
   // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
   //     view counter). Fire-and-forget: the helper never re-throws by
-  //     contract and emits its own audit events; the .catch is a
-  //     defense-in-depth safety net against future contract drift, not
-  //     the primary failure-visibility channel.
+  //     contract and emits its own audit events; .catch is defense-
+  //     in-depth.
+  //
+  //     KNOWN QUIRK (tracked in issue #487): a SIGTERM mid-link
+  //     (ECS task cycle, deploy) drops the in-flight work and the
+  //     guild has no view-counter subscription until /qurl setup
+  //     runs again or the backfill script catches it. Polling
+  //     fallback covers correctness.
   linkGuildWebhookSubscription({
     guildId, apiKey, descriptionContext: `via=oauth, configuredBy=${discordUserId}`,
   }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {

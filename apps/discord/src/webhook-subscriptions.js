@@ -61,10 +61,15 @@ const upsertsDuringScan = new Set();
 // 503-unprimed path covers any extra delay.
 let scanInFlight = false;
 
-// Sentinel for the default-key entry's webhookId field. A unique
-// Symbol can never collide with a real qurl-service webhook_id
-// (those are opaque strings). The receiver only reads webhookSecret
-// from the entry; the field is for debugging.
+// Sentinel for the default-key entry's webhookId and guildIds. A
+// unique Symbol can never collide with a real qurl-service webhook_id
+// (those are opaque strings). Receiver only reads webhookSecret from
+// the entry; the field is for debugging.
+// FOOT-GUN: Symbols don't survive JSON.stringify (debug-dump endpoint
+// will see webhookId as undefined) AND Array.from(entry.guildIds) on
+// the default entry yields [Symbol(...)] — telemetry that joins
+// guildIds with a delimiter or pushes them to a string-keyed log
+// field will surface a non-string for the default entry.
 const DEFAULT_KEY_SENTINEL = Symbol('default-key-subscription');
 
 function getSecretForOwner(ownerId) {
@@ -168,8 +173,9 @@ async function scanOnce() {
 
     // Parallelize the two independent network reads. Sequential they
     // added 50-300ms per tick.
-    // TODO: GSI on webhook_owner_id when guild_configs row count
-    // exceeds ~10k — scanAll is bounded by table size, not result size.
+    // TODO(#486): GSI on webhook_owner_id when guild_configs row
+    // count exceeds ~10k — scanAll is bounded by table size, not
+    // result size.
     //
     // discoverDefaultOwnerId only fires while there's something to
     // discover: the bot's own owner_id never changes in-process (env
@@ -243,8 +249,13 @@ async function scanOnce() {
     for (const [k, v] of next.entries()) subscriptions.set(k, v);
 
     if (liveSnapshot) {
+      // For any owner touched by upsertGuild during the scan, the
+      // in-memory write IS the truth — even when scan returned a row
+      // for the same owner. The scan may have caught a pre-rotate
+      // sibling row before propagateGuildWebhookSubscription
+      // converged; preferring liveSnapshot closes the up-to-30s
+      // window where the cache would otherwise hold a stale secret.
       for (const ownerId of upsertsDuringScan) {
-        if (next.has(ownerId)) continue;
         const liveEntry = liveSnapshot.get(ownerId);
         if (liveEntry) subscriptions.set(ownerId, liveEntry);
       }

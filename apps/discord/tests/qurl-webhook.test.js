@@ -438,6 +438,11 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
   // receiver with bogus owner_id from a single IP IS rate-limited
   // (just at a looser threshold than HMAC brute-force), so we can't
   // accidentally regress to no-ceiling-at-all.
+  //
+  // FRAGILE: depends on jest.mock factory closures surviving
+  // jest.resetModules — true today, but a future refactor that moves
+  // these mocks into beforeEach would silently break the isolation
+  // (the isolated `app` would see the unmocked registry).
   beforeAll(() => {
     jest.resetModules();
   });

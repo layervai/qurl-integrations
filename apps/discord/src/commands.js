@@ -3286,6 +3286,10 @@ async function handleSetupModal(interaction, { flow_id }) {
   // would delay the modal reply unacceptably. .catch is defense-in-
   // depth — the helper never re-throws by contract and emits its
   // own audit events.
+  //
+  // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops
+  // the in-flight work; operator runs /qurl setup or backfill.
+  // Polling fallback covers correctness.
   linkGuildWebhookSubscription({
     guildId: interaction.guildId,
     apiKey: submittedKey,
