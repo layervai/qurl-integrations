@@ -227,6 +227,54 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
   });
 });
 
+describe('webhook-subscriptions registry — scanInFlight re-entrancy guard', () => {
+  // If a tick takes longer than the 30s interval, the next interval
+  // fires while the first is still awaiting. Both calls would
+  // .clear() upsertsDuringScan and the second wipes the first's in-
+  // flight tracking. The guard drops the overlap. Pin the behavior
+  // so a refactor doesn't accidentally re-introduce the race.
+  it('drops an overlapping scanOnce while another is in flight', async () => {
+    let resolveFirst;
+    mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    mockScan.mockResolvedValueOnce([
+      { guildId: 'g_second', webhookId: 'wh_2', webhookSecret: 'sec_2', webhookOwnerId: 'usr_2' },
+    ]);
+    const first = subs.scanOnce();
+    // The second call returns IMMEDIATELY because scanInFlight is true;
+    // mockScan is NOT invoked a second time.
+    const second = subs.scanOnce();
+    await second;
+    expect(mockScan).toHaveBeenCalledTimes(1);
+    // Now finish the first scan so subsequent tests aren't tainted.
+    resolveFirst([]);
+    await first;
+  });
+});
+
+describe('webhook-subscriptions registry — default-key + BYOK owner collision', () => {
+  // Edge case: an admin links a BYOK guild using the SAME auth0 owner
+  // as the bot's default key (e.g., bot operator running /qurl setup
+  // in their own server). The BYOK row's webhook_owner_id ===
+  // discoveredOwner. Without the guard, the default-key fold would
+  // overwrite the BYOK entry's guildIds — observationally benign
+  // (the secret is the same) but a silent overwrite is dishonest.
+  it('does NOT clobber a BYOK entry that shares the default-key owner_id', async () => {
+    mockScan.mockResolvedValueOnce([
+      {
+        guildId: 'g_admin_byok', webhookId: 'wh_byok',
+        webhookSecret: 'sec_shared', webhookOwnerId: 'usr_default',
+        updatedAt: '2026-05-21T00:00:00.000Z',
+      },
+    ]);
+    // discoverDefaultOwnerId returns 'usr_default' — same as BYOK row.
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+    // Secret resolves; BYOK entry is preserved (webhookId stays the
+    // string 'wh_byok', NOT the DEFAULT_KEY_SENTINEL Symbol).
+    expect(subs.getSecretForOwner('usr_default')).toBe('sec_shared');
+  });
+});
+
 describe('webhook-subscriptions registry — default-key discovery', () => {
   // When GET /v1/webhooks returns an empty list (Lambda hasn't run
   // on a fresh deploy, or QURL_API_KEY/QURL_ENDPOINT are unset),

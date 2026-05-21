@@ -139,3 +139,27 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
     );
   });
 });
+
+describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure', () => {
+  // When DDB write throws AFTER subscription creation, the rollback
+  // DELETE fires fire-and-forget. If qurl-service rejects the DELETE
+  // (e.g., 500 — not 401/404 which deleteSubscription itself swallows),
+  // the helper must still emit DELETE_FAILED audit so an orphan-
+  // subscription metric filter catches it. Without this test, the
+  // .catch branch was unexercised.
+  it('emits SUBSCRIPTION_DELETE_FAILED audit when rollback DELETE rejects', async () => {
+    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
+    const dErr = new Error('qurl-service 500');
+    dErr.status = 500;
+    mockDeleteSubscription.mockRejectedValueOnce(dErr);
+    await linkGuildWebhookSubscription({
+      guildId: 'g_rollback_fail', apiKey: 'lv_x',
+    });
+    // Fire-and-forget — wait a microtask for the .catch handler.
+    await new Promise(setImmediate);
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
+      expect.objectContaining({ guild_id: 'g_rollback_fail', path: 'rollback' }),
+    );
+  });
+});

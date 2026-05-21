@@ -110,6 +110,11 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
 // (no sibling guilds + not the default-key owner), drops it. Default-
 // key entry is never dropped from removeGuild — it's owned by the
 // Lambda lifecycle and rediscovered by the tick.
+//
+// No production caller exists today; the future /qurl unlink admin
+// command MUST call this synchronously after writing to DDB so the
+// registering replica's cache is immediately correct (mirror of
+// upsertGuild's sync-update pattern).
 function removeGuild({ guildId, ownerId }) {
   if (!ownerId) return;
   const entry = subscriptions.get(ownerId);
@@ -199,7 +204,14 @@ async function scanOnce() {
 
     if (discoveredOwner) {
       defaultOwnerId = discoveredOwner;
-      if (config.QURL_WEBHOOK_SECRET) {
+      // Collision case: a BYOK guild that linked using the bot's OWN
+      // default API key has webhook_owner_id === discoveredOwner. The
+      // BYOK row already populated `next`; don't clobber its guildIds
+      // / webhookId with the synthetic default-key shape. The
+      // secret is identical in this case (both came from the same
+      // qurl-service subscription), so leaving the BYOK entry in
+      // place is observationally correct.
+      if (config.QURL_WEBHOOK_SECRET && !next.has(discoveredOwner)) {
         // Symbol sentinel for webhookId — receiver only reads
         // webhookSecret; can't collide with any real qurl-service
         // webhook_id (opaque string). NOTE: Symbols don't survive

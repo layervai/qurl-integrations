@@ -432,6 +432,42 @@ describe('POST /webhooks/qurl — payload handling', () => {
   });
 });
 
+describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () => {
+  // 150/min is the unknownOwnerLimiter ceiling; OWNER_UNKNOWN traffic
+  // beyond that 429s. This pins the contract: an attacker probing the
+  // receiver with bogus owner_id from a single IP IS rate-limited
+  // (just at a looser threshold than HMAC brute-force), so we can't
+  // accidentally regress to no-ceiling-at-all.
+  beforeAll(() => {
+    jest.resetModules();
+  });
+  it('returns 429 after 150 OWNER_UNKNOWN events from the same IP', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedApp = require('../src/server').app;
+    mockPrimed = true;
+    mockOwnerSecrets.clear();
+    mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
+    const unknownPayload = { ...VALID_PAYLOAD, owner_id: 'usr_unregistered' };
+    const unknownRaw = JSON.stringify(unknownPayload);
+    // 150 burns the unknownOwnerLimiter exactly to its ceiling.
+    for (let i = 0; i < 150; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(isolatedApp)
+        .post('/webhooks/qurl')
+        .set('Content-Type', 'application/json')
+        .set('QURL-Signature', signBody(unknownRaw))
+        .send(unknownRaw);
+    }
+    // 151st OWNER_UNKNOWN event 429s.
+    const limited = await request(isolatedApp)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(unknownRaw))
+      .send(unknownRaw);
+    expect(limited.status).toBe(429);
+  });
+});
+
 describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures count)', () => {
   // 30 OWNER_UNKNOWN events from one IP must NOT 429 the 31st valid
   // event — limiter is reserved for HMAC failures (attacker signal).

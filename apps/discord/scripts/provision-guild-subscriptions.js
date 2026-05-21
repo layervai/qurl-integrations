@@ -90,6 +90,10 @@ async function main() {
         }
         console.log(`[backfill] candidate guild_id=${guildId}`);
         if (DRY_RUN) continue;
+        // linkGuildWebhookSubscription also calls subs.upsertGuild
+        // on success — that's a no-op in this script context (the
+        // registry isn't .start()'d) but DDB is the source of truth,
+        // so running bots pick the new row up on their next 30s tick.
         const result = await linkGuildWebhookSubscription({
           guildId, apiKey, descriptionContext: 'via=backfill-script',
         });

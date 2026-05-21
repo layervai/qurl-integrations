@@ -1586,6 +1586,11 @@ async function propagateGuildWebhookSubscription(
     throw new Error('propagateGuildWebhookSubscription: webhookOwnerId, webhookId, webhookSecret all required');
   }
   const allMatches = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  // Common case for a first-time admin: only the just-written primary
+  // row matches the owner. Short-circuit before the scan-filter pass.
+  if (excludeGuildId && allMatches.length === 1 && allMatches[0].guildId === excludeGuildId) {
+    return { updated: 0, failed: 0 };
+  }
   const siblings = excludeGuildId
     ? allMatches.filter(s => s.guildId !== excludeGuildId)
     : allMatches;
