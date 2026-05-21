@@ -449,8 +449,15 @@ const AUDIT_EVENTS = {
   // binary (success has its own event below).
   QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
   QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED: 'qurl_webhook_subscription_register_failed',
+  // SUBSCRIPTION_DELETED has no production caller today — reserved for
+  // the future /qurl unlink admin command tracked in issue #487.
   QURL_WEBHOOK_SUBSCRIPTION_DELETED: 'qurl_webhook_subscription_deleted',
   QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
+  // Per-row decrypt failure during scanGuildSubscriptions. Sustained
+  // rate = KMS key rotation drift, partial migration, or manual DDB
+  // tamper — a guild's secret is unrecoverable from the cache until
+  // re-encrypted via backfill or /qurl setup.
+  QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL: 'qurl_webhook_cache_row_decrypt_fail',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

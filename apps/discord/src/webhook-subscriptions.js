@@ -138,7 +138,12 @@ function removeGuild({ guildId, ownerId }) {
 // failure counter increments correctly.
 async function discoverDefaultOwnerId() {
   if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
-  const resp = await fetch(`${config.QURL_ENDPOINT}/v1/webhooks?limit=1`, {
+  // limit=10 (was limit=1): owner_id is identical across all subs
+  // this key owns, so we only need one valid row. If a future
+  // contract drift drops owner_id from the FIRST row's response,
+  // limit=1 would return null even though row 2+ would be valid;
+  // 10 is a low-cost defense.
+  const resp = await fetch(`${config.QURL_ENDPOINT}/v1/webhooks?limit=10`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${config.QURL_API_KEY}` },
     signal: AbortSignal.timeout(10_000),
@@ -148,9 +153,6 @@ async function discoverDefaultOwnerId() {
   }
   const body = await resp.json();
   const subs = Array.isArray(body?.data) ? body.data : [];
-  // owner_id is the same across every subscription this key owns;
-  // any row works. Subs without owner_id (defensive against contract
-  // drift) are skipped.
   for (const s of subs) {
     if (typeof s?.owner_id === 'string' && s.owner_id.length > 0) return s.owner_id;
   }

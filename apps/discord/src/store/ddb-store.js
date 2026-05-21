@@ -65,7 +65,7 @@ const {
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
-const { DM_STATUS } = require('../constants');
+const { DM_STATUS, AUDIT_EVENTS } = require('../constants');
 const { isPositiveFinite } = require('../utils/time');
 
 // Badge taxonomy — stable string enum values so callers that
@@ -1641,11 +1641,15 @@ async function scanGuildSubscriptions() {
     } catch (err) {
       // One corrupt row (key rotation gap, manual DDB tamper, partial
       // migration) must NOT abort the entire scan — the cache would
-      // stay unprimed and every inbound webhook would 401. Log the
-      // bad row and continue; backfill or operator intervention can
-      // re-encrypt it later.
+      // stay unprimed and every inbound webhook would 401. Log + emit
+      // an audit so a CloudWatch metric-filter alarm can fire on
+      // sustained decrypt failures (KMS key drift); backfill or
+      // /qurl setup re-encrypts the row.
       logger.warn('scanGuildSubscriptions: decrypt failed for row, skipping', {
         guildId: r.guild_id, error: err.message,
+      });
+      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL, {
+        guild_id: r.guild_id, error_type: err.name || 'unknown',
       });
       continue;
     }

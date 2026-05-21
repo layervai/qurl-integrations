@@ -126,7 +126,17 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     });
   }
 
-  subs.upsertGuild({ guildId, ownerId: webhookOwnerId, webhookId, webhookSecret: secret });
+  // upsertGuild validates input types; if a future caller-bug feeds
+  // in an unexpected shape that the upstream guards missed, we still
+  // want the success audit to fire — DDB is authoritative, so a
+  // failed in-memory upsert is correctable on the next 30s tick.
+  try {
+    subs.upsertGuild({ guildId, ownerId: webhookOwnerId, webhookId, webhookSecret: secret });
+  } catch (err) {
+    logger.warn('subs.upsertGuild rejected (cache will reconcile on next scan)', {
+      error: err?.message, guildId,
+    });
+  }
   logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
     guild_id: guildId, action,
   });

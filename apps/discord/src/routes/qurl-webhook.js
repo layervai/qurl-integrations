@@ -39,6 +39,15 @@ const SIGNATURE_HEADER = 'qurl-signature';
 // silently absorbing it.
 const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/;
 
+// Replace control chars (0x00-0x1f + DEL) with '?' so attacker-
+// controlled strings can't spoof field separators or inject newlines
+// in line-oriented log shippers. The control-regex IS the point here.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+function sanitizeForLog(s) {
+  return s.replace(CONTROL_CHARS, '?');
+}
+
 const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 // Looser limiter for OWNER_UNKNOWN — operational drift is the
 // expected failure mode (not an attacker brute-forcing HMAC), but
@@ -132,6 +141,11 @@ router.post('/qurl', async (req, res) => {
   // lag after a peer's setGuildApiKey; treating it as 401 would
   // silently drop a guild's first views post-link.
   if (result === VERIFY_RESULTS.CACHE_UNPRIMED) {
+    // Intentionally NOT counted toward unknownOwnerLimiter — the
+    // unprimed window is one-shot at boot (primed never flips back to
+    // false), so attacker exploitation here is bounded to the
+    // cold-start window. qurl-service retries 503 so the event isn't
+    // lost.
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNPRIMED, {});
     return res.status(503).json({ error: 'Webhook receiver warming up' });
   }
@@ -162,10 +176,14 @@ router.post('/qurl', async (req, res) => {
     const auditEvent = isUnknownOwner
       ? AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER
       : AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID;
-    // Truncate the attacker-controlled ownerId before logging — a
-    // mega-string would blow up log volume + confuse downstream
-    // parsers that group by line. 64 chars is well over an auth0 sub.
-    const safeOwnerId = typeof ownerId === 'string' ? ownerId.slice(0, 64) : ownerId;
+    // Truncate + strip non-printables on the attacker-controlled
+    // ownerId before logging. Mega-string blows up log volume; control
+    // chars (\n, \r, escape sequences) confuse line-oriented log
+    // parsers and can spoof field separators in some shippers.
+    // 64 chars is well over an auth0 sub.
+    const safeOwnerId = typeof ownerId === 'string'
+      ? sanitizeForLog(ownerId.slice(0, 64))
+      : ownerId;
     logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId: safeOwnerId });
     logger.audit(auditEvent, { total_in_window: totalInWindow, result });
     return res.status(401).json({ error: 'Invalid signature' });
