@@ -162,6 +162,13 @@ function connectorAuthHeaders(apiKey) {
 // re-upload, file via Discord CDN download, JSON) thread the same wire
 // field name. The connector validates the value (PR #477); we forward
 // it as a string and let the connector own the contract.
+//
+// Asymmetry note: viewer_ttl_seconds is forwarded VERBATIM (so 0.5 →
+// "0.5"; the fileviewer's client-side blank reads the value directly).
+// The sibling formatSessionDurationSeconds() helper in utils/time.js
+// FLOORS 0.5 to "1s" because qurl-service's MinSessionDuration is
+// 1 * time.Second. A reader looking at one wire field should know the
+// other has the opposite handling for the 0.5s preset.
 function appendViewerTtl(form, viewerTtlSeconds) {
   // Number.isFinite already filters non-numbers (Number.isFinite('30') is
   // false), so the typeof guard would be redundant. Strict positive-finite

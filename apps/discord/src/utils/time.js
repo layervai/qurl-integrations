@@ -39,6 +39,13 @@ function expiryToMs(expiresIn) {
 // (qurl-s3-connector PR #477). Connector contract is 0.5–3600 inclusive,
 // so every preset here is in range; clamping is unreachable.
 const SELF_DESTRUCT_PRESETS = Object.freeze([
+  // 0.5s residual: fileviewer blanks at 500ms (client-side), but the
+  // L7 session_duration floors at 1s per qurl-service's
+  // MinSessionDuration. A recipient refreshing between t=500ms and
+  // t=1000ms still re-renders. The preset is intentionally retained
+  // because the client-side blank is the perceived "self destruct"
+  // and the 500ms residual closes on retry past 1s. If qurl-service
+  // ever lowers MinSessionDuration to sub-second, this gap closes.
   Object.freeze({ seconds: 0.5, label: '1/2 second' }),
   Object.freeze({ seconds: 1, label: '1 second' }),
   Object.freeze({ seconds: 5, label: '5 seconds' }),
@@ -156,9 +163,9 @@ function formatSelfDestructSegment(seconds) {
 // PR #764 + this PR landing as a coordinated pair.
 function formatSessionDurationSeconds(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  // Math.ceil of any value in (0, 1] is already 1; Math.ceil of any
-  // positive finite number is ≥1. The earlier `Math.max(1, ...)`
-  // floor was redundant given the `seconds <= 0` guard above.
+  // Math.ceil of any value in (0, 1] is 1; of any positive finite
+  // number is ≥1. Combined with the > 0 guard above, this never
+  // emits "0s".
   return `${Math.ceil(seconds)}s`;
 }
 
