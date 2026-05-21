@@ -40,6 +40,13 @@ const SIGNATURE_HEADER = 'qurl-signature';
 const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/;
 
 const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
+// Looser limiter for OWNER_UNKNOWN — operational drift is the
+// expected failure mode (not an attacker brute-forcing HMAC), but
+// without ANY ceiling an attacker could flood the receiver with
+// signed-shaped requests carrying bogus owner_id and never trip a
+// rate limit. Threshold is 5× the HMAC limiter to avoid throttling
+// during a real registry-rebuild incident.
+const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
 // HTTP status + audit event + rate-limiter interaction in one place
@@ -73,14 +80,14 @@ function verifyAndResolve(req) {
     return { result: VERIFY_RESULTS.SIG_HEADER_MALFORMED };
   }
 
-  // Pre-HMAC owner_id read. req.body is already parsed by the
-  // rawBodyJson middleware in server.js (1mb cap on rawBody bounds
-  // any JSON.parse risk). The parser also stashed req.rawBody, which
-  // is what we HMAC. We treat req.body.owner_id as untrusted routing
-  // input — lookup grants no trust, HMAC is what grants trust.
-  // A malformed body never reaches us (express.json middleware would
-  // have already 400'd), but a body that parsed-successfully but
-  // lacks owner_id is possible and must produce 401, not 5xx.
+  // SECURITY: pre-HMAC parse depth/size MUST stay bounded by the
+  // rawBodyJson middleware cap (server.js, `limit: '1mb'`). Loosening
+  // that cap or adding extended type coercion here widens the
+  // pre-trust window — req.body is attacker-controlled JSON until
+  // the HMAC check below succeeds.
+  // The lookup itself grants no trust: a forged owner_id either
+  // misses the cache (→ 401) or hits a real secret the attacker
+  // can't forge against (→ 401).
   const ownerId = req.body && typeof req.body.owner_id === 'string' ? req.body.owner_id : null;
   if (!ownerId) {
     logger.warn('qURL webhook missing or non-string body.owner_id');
@@ -101,8 +108,8 @@ function verifyAndResolve(req) {
 
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
-  if (badSigLimiter.shouldThrottle(ip)) {
-    logger.warn('qURL webhook rate limit exceeded (bad signatures)', { ip });
+  if (badSigLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ip)) {
+    logger.warn('qURL webhook rate limit exceeded', { ip });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
@@ -123,15 +130,22 @@ router.post('/qurl', async (req, res) => {
     return res.status(503).json({ error: 'Webhook receiver misconfigured' });
   }
 
-  // OWNER_UNKNOWN / OWNER_ID_MISSING are operational drift, not
-  // attacker signal — skip the bad-sig limiter so a registry-drift
-  // burst from qurl-service's worker fleet doesn't also throttle
-  // legitimate webhooks on the same source IP.
+  // Two limiters, two threat models:
+  //   - HMAC failures count toward badSigLimiter (attacker brute-
+  //     forcing the secret).
+  //   - OWNER_UNKNOWN / OWNER_ID_MISSING count toward unknownOwnerLimiter
+  //     (operational drift OR attacker probing with garbage owner_id;
+  //     looser threshold so a real registry-rebuild burst doesn't
+  //     throttle legitimate traffic on the same source IP).
   if (result !== VERIFY_RESULTS.OK) {
     const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
       || result === VERIFY_RESULTS.SIG_HEADER_MISSING
       || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED;
-    const totalInWindow = isHmacFailure ? badSigLimiter.recordBadSig(ip) : null;
+    const isUnknownOwner = result === VERIFY_RESULTS.OWNER_UNKNOWN
+      || result === VERIFY_RESULTS.OWNER_ID_MISSING;
+    let totalInWindow = null;
+    if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
+    else if (isUnknownOwner) totalInWindow = unknownOwnerLimiter.recordBadSig(ip);
     const auditEvent = result === VERIFY_RESULTS.OWNER_UNKNOWN
       ? AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER
       : AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID;
@@ -229,6 +243,7 @@ router.post('/qurl', async (req, res) => {
 
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
+  unknownOwnerLimiter.stopSweep();
 };
 // Exposed for tests that want to assert against the policy table
 // without rebuilding the conditional ladder. NOT part of any external

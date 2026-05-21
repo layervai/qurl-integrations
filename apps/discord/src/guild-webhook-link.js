@@ -37,25 +37,43 @@ function bridgeUrl() {
   return `${config.BASE_URL.replace(/\/+$/, '')}/webhooks/qurl`;
 }
 
-// Fire-and-forget DELETE used by the three orphan-cleanup paths in
-// linkGuildWebhookSubscription. Centralized so the warn shape stays
-// consistent and a future-cr nit ("logger field names differ across
-// the three paths") doesn't recur.
+// Fire-and-forget DELETE used by the orphan-cleanup paths in
+// linkGuildWebhookSubscription. Emits the same DELETE_FAILED audit
+// event the non-rollback unlink path uses so a leaked-orphan
+// incident shows up on one CloudWatch metric regardless of which
+// path produced it.
 function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
   deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
-    .catch((dErr) => logger.warn('Best-effort orphan-subscription delete threw', {
-      error: dErr?.message, webhookId, guildId,
-    }));
+    .catch((dErr) => {
+      logger.warn('Best-effort orphan-subscription delete threw', {
+        error: dErr?.message, webhookId, guildId,
+      });
+      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED, {
+        guild_id: guildId, status: dErr?.status || null, path: 'rollback',
+      });
+    });
+}
+
+// Centralizes the "warn + audit failure" pattern for the five
+// failure branches of linkGuildWebhookSubscription. Without this,
+// the branches only logger.warn — CloudWatch metric filters watching
+// for register-failure spikes would miss them.
+function auditLinkFailure(guildId, reason, extra) {
+  logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED, {
+    guild_id: guildId, reason, ...(extra || {}),
+  });
 }
 
 // Provision (idempotent) a per-guild webhook subscription.
 // `action` mirrors ensureWebhookSubscription: 'created' | 'rotated' | 'reused'.
 async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContext }) {
   if (!guildId || !apiKey) {
+    auditLinkFailure(guildId || '<missing>', LINK_RESULTS.MISSING_ARGS);
     return { ok: false, reason: LINK_RESULTS.MISSING_ARGS };
   }
   if (!config.BASE_URL || !config.QURL_ENDPOINT) {
     logger.warn('Per-guild webhook link skipped: BASE_URL or QURL_ENDPOINT unset', { guildId });
+    auditLinkFailure(guildId, LINK_RESULTS.CONFIG_MISSING);
     return { ok: false, reason: LINK_RESULTS.CONFIG_MISSING };
   }
 
@@ -71,6 +89,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook subscription registration failed', {
       error: err?.message, guildId,
     });
+    auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED);
     return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
   }
 
@@ -80,6 +99,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook ownerId missing from registrar response; rolled back', {
       guildId, webhookId, action,
     });
+    auditLinkFailure(guildId, LINK_RESULTS.OWNER_MISSING);
     return { ok: false, reason: LINK_RESULTS.OWNER_MISSING };
   }
 
@@ -94,6 +114,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook subscription persisted-create rollback', {
       error: err?.message, guildId, webhookId,
     });
+    auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED);
     return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
   }
 

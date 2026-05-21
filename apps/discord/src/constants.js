@@ -444,7 +444,11 @@ const AUDIT_EVENTS = {
   // Lifecycle. SUBSCRIPTION_DELETE_FAILED fires when DELETE returns 401
   // (key revoked) or 404 (already gone) — both are swallowed so guild
   // unlink doesn't fail user-facing on stale qurl-service state.
+  // REGISTER_FAILED fires on every linkGuildWebhookSubscription failure
+  // branch so CloudWatch alarms can fire on the right side of the
+  // binary (success has its own event below).
   QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
+  QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED: 'qurl_webhook_subscription_register_failed',
   QURL_WEBHOOK_SUBSCRIPTION_DELETED: 'qurl_webhook_subscription_deleted',
   QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
 };

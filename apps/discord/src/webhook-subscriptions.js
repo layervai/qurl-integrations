@@ -47,10 +47,16 @@ let timer = null;
 let defaultOwnerId = null;
 
 // Owners whose entries must survive scanOnce's clear-and-repopulate
-// swap. Reset at the top of each scan; re-applied after the swap so
-// a concurrent /qurl setup whose DDB write landed AFTER the scan
-// crossed its partition isn't silently dropped.
-let upsertsDuringScan = new Set();
+// swap. .clear()'d at the top of each scan; re-applied after the
+// swap so a concurrent /qurl setup whose DDB write landed AFTER the
+// scan crossed its partition isn't silently dropped.
+const upsertsDuringScan = new Set();
+
+// Sentinel for the default-key entry's webhookId field. A unique
+// Symbol can never collide with a real qurl-service webhook_id
+// (those are opaque strings). The receiver only reads webhookSecret
+// from the entry; the field is for debugging.
+const DEFAULT_KEY_SENTINEL = Symbol('default-key-subscription');
 
 function getSecretForOwner(ownerId) {
   if (!ownerId) return null;
@@ -130,11 +136,15 @@ async function discoverDefaultOwnerId() {
 // and rediscovers the default-key owner_id. Throws on any sub-step
 // failure; the caller (refreshTick) increments consecutiveFailures.
 async function scanOnce() {
-  upsertsDuringScan = new Set();
+  upsertsDuringScan.clear();
 
   // Parallelize the two independent network reads: the DDB scan and
   // the qurl-service GET /v1/webhooks. Sequential, they added 50-300ms
   // per tick for no benefit.
+  // TODO: GSI on webhook_owner_id when guild_configs row count
+  // exceeds ~10k — scanAll inside scanGuildSubscriptions and
+  // listGuildSubscriptionsByOwner is bounded by table size, not
+  // result size.
   const [rows, discoveredOwner] = await Promise.all([
     db.scanGuildSubscriptions(),
     discoverDefaultOwnerId(),
@@ -164,15 +174,26 @@ async function scanOnce() {
   if (discoveredOwner) {
     defaultOwnerId = discoveredOwner;
     if (config.QURL_WEBHOOK_SECRET) {
-      // GET /v1/webhooks?limit=1 doesn't pin which sub belongs to the
-      // default key; receiver only needs the secret, so a synthetic
-      // webhookId marks the default entry (never sent over the wire).
+      // Receiver only reads webhookSecret; the Symbol sentinel is
+      // for debugging and can never collide with a real opaque
+      // webhook_id string from qurl-service.
       next.set(discoveredOwner, {
-        guildIds: new Set(['__default__']),
+        guildIds: new Set([DEFAULT_KEY_SENTINEL]),
         webhookSecret: config.QURL_WEBHOOK_SECRET,
-        webhookId: '__default__',
+        webhookId: DEFAULT_KEY_SENTINEL,
       });
     }
+  } else {
+    // Default-key owner_id couldn't be discovered (QURL_API_KEY or
+    // QURL_ENDPOINT unset, or the Lambda hasn't run yet on a fresh
+    // deploy). Inbound webhooks for non-BYOK guilds will 401 until
+    // discovery succeeds. Warn so a CloudWatch metric filter on this
+    // line can alert on a fresh-deploy gap that outlasts the Lambda.
+    logger.warn('webhook-subscriptions: default-key owner_id discovery returned null', {
+      hasApiKey: Boolean(config.QURL_API_KEY),
+      hasEndpoint: Boolean(config.QURL_ENDPOINT),
+      hasWebhookSecret: Boolean(config.QURL_WEBHOOK_SECRET),
+    });
   }
 
   // Only snapshot when concurrent upserts could have landed. The
@@ -244,7 +265,7 @@ function _resetForTesting() {
   primed = false;
   consecutiveFailures = 0;
   defaultOwnerId = null;
-  upsertsDuringScan = new Set();
+  upsertsDuringScan.clear();
   if (timer) {
     clearInterval(timer);
     timer = null;

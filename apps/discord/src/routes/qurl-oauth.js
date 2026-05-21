@@ -435,15 +435,16 @@ router.get('/callback', rateLimit, async (req, res) => {
   });
 
   // 3a. Register a per-guild qurl.accessed webhook subscription under
-  //     THIS guild's API key so the BYOK view counter fires for qurls
-  //     it mints. Non-blocking by design: linkGuildWebhookSubscription
-  //     swallows all internal failure modes and logs/audits — the user
-  //     still gets a "qURL connected" success page if the wiring
-  //     fails. View counter degrades to the polling fallback until
-  //     the backfill script catches them.
-  await linkGuildWebhookSubscription({
+  //     THIS guild's API key (BYOK view counter). True fire-and-forget:
+  //     the helper makes a qurl-service round-trip + a DDB scan that
+  //     can add up to a few seconds of latency to user-facing OAuth.
+  //     A failure here only degrades the view counter (polling fallback
+  //     still works); it must not delay the success page.
+  linkGuildWebhookSubscription({
     guildId, apiKey, descriptionContext: `via=oauth, configuredBy=${discordUserId}`,
-  });
+  }).catch((err) => logger.warn('linkGuildWebhookSubscription threw (non-blocking)', {
+    error: err?.message, guildId,
+  }));
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the
   //    browser tab. Fire-and-forget — a delivery failure shouldn't block

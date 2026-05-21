@@ -227,6 +227,42 @@ describe('webhook-subscriptions registry — synchronous local update API', () =
   });
 });
 
+describe('webhook-subscriptions registry — default-key discovery', () => {
+  // When GET /v1/webhooks returns an empty list (Lambda hasn't run
+  // on a fresh deploy, or QURL_API_KEY/QURL_ENDPOINT are unset),
+  // discoverDefaultOwnerId returns null. scanOnce must still flip
+  // primed=true (so inbound webhooks for KNOWN owners aren't held in
+  // 503), but the default-key entry must NOT be folded in (anything
+  // signed by the Lambda's default sub will 401 until discovery
+  // succeeds — which is the truthful response, since the bot can't
+  // verify those signatures).
+  it('still primes the cache when discoverDefaultOwnerId returns null', async () => {
+    mockScan.mockResolvedValueOnce([
+      { guildId: 'g1', webhookId: 'wh1', webhookSecret: 'sec1', webhookOwnerId: 'usr_byok' },
+    ]);
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({ data: [] }),
+    }));
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+    // BYOK guild's entry still made it in.
+    expect(subs.getSecretForOwner('usr_byok')).toBe('sec1');
+    // Default-key entry absent — no usr_default lookup possible.
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+  });
+
+  it('still primes the cache when GET response data field is missing', async () => {
+    mockScan.mockResolvedValueOnce([]);
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({}),
+    }));
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+  });
+});
+
 describe('webhook-subscriptions registry — first-scan-failure semantics', () => {
   it('throws on scanOnce DDB failure (caller increments failure counter)', async () => {
     mockScan.mockRejectedValueOnce(new Error('DDB throttled'));

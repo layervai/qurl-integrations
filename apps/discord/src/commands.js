@@ -3281,17 +3281,17 @@ async function handleSetupModal(interaction, { flow_id }) {
   await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
   logger.info('Guild API key configured', logFields);
 
-  // Best-effort register a per-guild qurl.accessed webhook subscription
-  // under THIS guild's API key so the BYOK view counter fires for qurls
-  // it mints. Non-blocking — the helper swallows all failures and
-  // audit-logs; admin still gets the success reply even if the
-  // webhook wiring fails. View counter degrades to the polling
-  // fallback until the backfill script catches up.
-  await linkGuildWebhookSubscription({
+  // Fire-and-forget per-guild webhook subscription register. The
+  // helper does network + DDB work that can take seconds; awaiting
+  // would delay the modal-reply unacceptably. A failure only
+  // degrades the view counter to the polling fallback.
+  linkGuildWebhookSubscription({
     guildId: interaction.guildId,
     apiKey: submittedKey,
     descriptionContext: `via=paste, configuredBy=${interaction.user.id}`,
-  });
+  }).catch((err) => logger.warn('linkGuildWebhookSubscription threw (non-blocking)', {
+    error: err?.message, guildId: interaction.guildId,
+  }));
 
   // Swallow Discord errors on the post-persist editReply. If the
   // editReply throws AFTER setGuildApiKey commits, letting it

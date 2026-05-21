@@ -40,26 +40,15 @@ async function main() {
     console.error('FATAL: QURL_ENDPOINT and BASE_URL must be set');
     process.exit(1);
   }
+  if (!config.DDB_TABLE_PREFIX || !config.DDB_TABLE_PREFIX.endsWith('-')) {
+    console.error(`FATAL: DDB_TABLE_PREFIX must be set and end with "-" (got ${JSON.stringify(config.DDB_TABLE_PREFIX)})`);
+    process.exit(1);
+  }
 
-  // Scan the guild_configs table for every row with a stored API key.
-  // We use the raw store helpers (not scanGuildSubscriptions, which
-  // filters down to rows that ALREADY have a webhook_id) because the
-  // backfill universe is precisely "has key, no subscription yet".
-  //
-  // listAll-style helper isn't exposed on the contract; getAllGuilds
-  // doesn't exist either. We approximate by scanning + filtering
-  // through getGuildConfigWithApiKey for each candidate guildId. To
-  // discover candidates, we use scanGuildSubscriptions PLUS the
-  // contract's awkward fact that DDB scanAll inside ddb-store.js
-  // already returns full rows. The cleanest path: import scanAll via
-  // an internal scan helper. The pragmatic path: small inline scan
-  // here.
-  //
-  // Pragmatic path: the bot's contract exposes nothing for "list every
-  // guildId in guild_configs". Add a helper via DDB SDK directly so
-  // the script stays single-purpose and doesn't grow the Store
-  // contract just for a one-off operator tool.
-
+  // Contract has no "list every guild_configs row" helper, so the
+  // script issues its own ScanCommand. Table name MUST come from the
+  // bot's own config.DDB_TABLE_PREFIX so the script can't target a
+  // different table than the running bot.
   const {
     DynamoDBClient,
   } = require('@aws-sdk/client-dynamodb');
@@ -70,7 +59,7 @@ async function main() {
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({
     region: process.env.AWS_REGION || 'us-east-2',
   }));
-  const TABLE = `qurl-bot-discord-${config.ENVIRONMENT || process.env.ENVIRONMENT || 'sandbox'}-guild-configs`;
+  const TABLE = `${config.DDB_TABLE_PREFIX}guild-configs`;
 
   let scanned = 0;
   let candidates = 0;
