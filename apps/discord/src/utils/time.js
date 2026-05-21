@@ -156,7 +156,10 @@ function formatSelfDestructSegment(seconds) {
 // PR #764 + this PR landing as a coordinated pair.
 function formatSessionDurationSeconds(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return `${Math.max(1, Math.ceil(seconds))}s`;
+  // Math.ceil of any value in (0, 1] is already 1; Math.ceil of any
+  // positive finite number is ≥1. The earlier `Math.max(1, ...)`
+  // floor was redundant given the `seconds <= 0` guard above.
+  return `${Math.ceil(seconds)}s`;
 }
 
 module.exports = {
