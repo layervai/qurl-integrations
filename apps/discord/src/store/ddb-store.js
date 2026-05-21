@@ -1562,6 +1562,8 @@ async function clearGuildWebhookSubscription(guildId) {
 //
 // Low-cardinality table (low hundreds of guilds at scale per
 // design discussion); full scan + in-JS filter is fine here.
+// TODO(#486): replace scanAll with a Query on the webhook_owner_id
+// GSI when guild_configs > ~10k rows.
 async function listGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs);
   return rows

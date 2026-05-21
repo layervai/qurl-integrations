@@ -163,9 +163,12 @@ async function discoverDefaultOwnerId() {
 async function scanOnce() {
   if (scanInFlight) {
     // Drop the overlap rather than corrupt upsertsDuringScan tracking
-    // (see comment on the guard above). Caller doesn't see the skip;
-    // primed stays true (or stays false during cold-start).
-    return;
+    // (see comment on the guard above). Return a sentinel so the
+    // caller can distinguish "completed a real refresh" from "no-op'd
+    // because another was in flight" — refreshTick uses this to
+    // avoid resetting consecutiveFailures during a long-running
+    // outage (a slow scan that overlaps the next tick).
+    return 'skipped';
   }
   scanInFlight = true;
   try {
@@ -262,6 +265,7 @@ async function scanOnce() {
     }
 
     primed = true;
+    return 'completed';
   } finally {
     scanInFlight = false;
   }
@@ -269,8 +273,12 @@ async function scanOnce() {
 
 async function refreshTick() {
   try {
-    await scanOnce();
-    consecutiveFailures = 0;
+    const result = await scanOnce();
+    // Only reset on a completed scan. If scanOnce was 'skipped' (the
+    // previous tick is still in flight), leave the failure counter
+    // alone — a slow scan during an outage could otherwise mask the
+    // REFRESH_FAIL_ESCALATE_AT alarm.
+    if (result === 'completed') consecutiveFailures = 0;
   } catch (err) {
     consecutiveFailures += 1;
     const level = consecutiveFailures >= REFRESH_FAIL_ESCALATE_AT ? 'error' : 'warn';

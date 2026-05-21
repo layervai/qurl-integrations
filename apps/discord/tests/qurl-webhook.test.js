@@ -441,12 +441,16 @@ describe('POST /webhooks/qurl — unknown-owner limiter (looser threshold)', () 
   //
   // FRAGILE: depends on jest.mock factory closures surviving
   // jest.resetModules — true today, but a future refactor that moves
-  // these mocks into beforeEach would silently break the isolation
-  // (the isolated `app` would see the unmocked registry).
+  // these mocks into beforeEach would silently break the isolation.
+  // Assert below that the isolated registry IS still the mock so a
+  // regression fails this test loudly instead of silent 503s.
   beforeAll(() => {
     jest.resetModules();
   });
   it('returns 429 after 150 OWNER_UNKNOWN events from the same IP', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedSubs = require('../src/webhook-subscriptions');
+    expect(jest.isMockFunction(isolatedSubs.start)).toBe(true);
     // eslint-disable-next-line global-require
     const isolatedApp = require('../src/server').app;
     mockPrimed = true;
@@ -480,6 +484,9 @@ describe('POST /webhooks/qurl — bad-sig limiter scope (only HMAC failures coun
     jest.resetModules();
   });
   it('does NOT increment bad-sig limiter on OWNER_UNKNOWN', async () => {
+    // eslint-disable-next-line global-require
+    const isolatedSubs = require('../src/webhook-subscriptions');
+    expect(jest.isMockFunction(isolatedSubs.start)).toBe(true);
     // eslint-disable-next-line global-require
     const isolatedApp = require('../src/server').app;
     // Fresh ownership table: cache primed, owner not registered.

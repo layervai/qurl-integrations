@@ -301,6 +301,21 @@ describe('webhook-subscriptions registry — scanInFlight re-entrancy guard', ()
     resolveFirst([]);
     await first;
   });
+
+  // Skipped scans return 'skipped' sentinel; completed scans return
+  // 'completed'. refreshTick uses this to avoid resetting the
+  // consecutiveFailures counter when a slow scan overlaps the next
+  // tick — otherwise an alarm-worthy outage would be masked.
+  it('returns "skipped" sentinel when another scan is in flight, "completed" otherwise', async () => {
+    let resolveFirst;
+    mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    const first = subs.scanOnce();
+    const second = await subs.scanOnce();
+    expect(second).toBe('skipped');
+    resolveFirst([]);
+    const firstResult = await first;
+    expect(firstResult).toBe('completed');
+  });
 });
 
 describe('webhook-subscriptions registry — default-key + BYOK owner collision', () => {

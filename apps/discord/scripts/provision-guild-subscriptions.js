@@ -120,10 +120,11 @@ async function main() {
   console.log(`Skipped:      ${skipped}`);
   if (!DRY_RUN) {
     console.log(`Provisioned:  ${provisioned}`);
-    console.log(`Failed:       ${failed}`);
   }
-  // Exit non-zero if any candidate failed so operator CI / shell
-  // chains catch partial-failure runs.
+  // Always print Failed: even in dry-run — getGuildApiKey decrypt
+  // errors increment `failed` in either mode, and silent exit 2
+  // would let an operator miss them.
+  console.log(`Failed:       ${failed}`);
   process.exit(failed > 0 ? 2 : 0);
 }
 

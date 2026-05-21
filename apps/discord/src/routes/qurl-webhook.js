@@ -46,6 +46,14 @@ const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
 // signed-shaped requests carrying bogus owner_id and never trip a
 // rate limit. Threshold is 5× the HMAC limiter to avoid throttling
 // during a real registry-rebuild incident.
+//
+// CROSS-TENANT FAIRNESS TRADE-OFF: keyed on IP alone. qurl-service
+// egresses from a small NAT/proxy pool so a single guild whose
+// webhook_owner_id has drifted vs. qurl-service's signing identity
+// can burn 150/min on the shared source IP and 429 other guilds'
+// legitimate events. Acceptable at low BYOK count today (≤10 in
+// prod); at scale this should key on (ip, owner_id) or skip per-IP
+// limiting for OWNER_UNKNOWN entirely.
 const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
 
 // Reason codes returned from verifyAndResolve. Caller maps them to
@@ -154,7 +162,11 @@ router.post('/qurl', async (req, res) => {
     const auditEvent = isUnknownOwner
       ? AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER
       : AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID;
-    logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId });
+    // Truncate the attacker-controlled ownerId before logging — a
+    // mega-string would blow up log volume + confuse downstream
+    // parsers that group by line. 64 chars is well over an auth0 sub.
+    const safeOwnerId = typeof ownerId === 'string' ? ownerId.slice(0, 64) : ownerId;
+    logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId: safeOwnerId });
     logger.audit(auditEvent, { total_in_window: totalInWindow, result });
     return res.status(401).json({ error: 'Invalid signature' });
   }
