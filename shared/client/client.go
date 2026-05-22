@@ -292,11 +292,69 @@ type CreateInput struct {
 }
 
 // CreateOutput is the response from creating a qURL.
+//
+// `QURLLink` vs `QURLSite` carry different shapes by resource kind, and
+// the kind is signaled on the wire via `type`:
+//
+//   - `type == ""` or `type == "url"` (URL-redirect qURLs): `QURLLink`
+//     is the user-facing access URL (`https://<qurl-link-domain>/#<token>`).
+//     `QURLSite` is set but secondary — it's the eventual redirect target
+//     once the token resolves.
+//   - `type == "tunnel"` (reverse-tunnel qURLs): `QURLLink` is EMPTY
+//     **by server contract** — `qurl-service` deliberately elides it
+//     (`internal/service/qurl_service.go::CreateQurl` only populates
+//     QurlLink when `!isTunnel`). `QURLSite` is the access surface.
+//
+// Callers MUST check `Type` (or the equivalent "non-empty QURLSite +
+// empty QURLLink") to pick the right user-facing URL — treating an
+// empty QURLLink as a server bug silently breaks the tunnel path.
 type CreateOutput struct {
 	ResourceID string     `json:"resource_id"`
 	QURLLink   string     `json:"qurl_link"`
 	QURLSite   string     `json:"qurl_site"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	// Type is the qURL kind. Either empty/"url" or "tunnel"; see the
+	// type-level doc for the per-kind URL contract.
+	Type string `json:"type,omitempty"`
+}
+
+// IsTunnel reports whether the qURL is a reverse-tunnel resource. The
+// check is wire-format-stable: server-side `qurl-service` sets `type`
+// to `"tunnel"` for tunnel qURLs (see `gen.CreateQurlData.Type` in
+// `qurl-service/internal/api/handlers/server.go`). The empty-QURLLink
+// shape (the secondary signal) is kept as a fallback because a future
+// `type` rename without a corresponding bot bump still has to keep
+// rendering for the existing user base.
+func (o *CreateOutput) IsTunnel() bool {
+	if o == nil {
+		return false
+	}
+	if o.Type == "tunnel" {
+		return true
+	}
+	// Defensive fallback: an empty QURLLink with a non-empty QURLSite
+	// is the wire shape qurl-service emits for tunnel qURLs even if
+	// the `type` field is unset (older minted rows, replays, etc.).
+	// A URL-redirect qURL with both empty would be a true server
+	// contract surprise — the caller's empty-QURLLink branch should
+	// keep its existing alarm.
+	return o.QURLLink == "" && o.QURLSite != ""
+}
+
+// AccessURL returns the user-facing URL to show in chat/UI. For URL
+// qURLs that's the `QURLLink` (token-bearing fragment URL); for
+// tunnel qURLs the human-clickable surface is `QURLSite` because
+// `QURLLink` is empty by contract. Returns empty when neither field
+// is populated — caller should treat that as a real server contract
+// surprise and surface a retry/diagnostic, not an empty link.
+func (o *CreateOutput) AccessURL() string {
+	if o == nil {
+		return ""
+	}
+	if o.IsTunnel() {
+		return o.QURLSite
+	}
+	return o.QURLLink
 }
 
 // isHeaderSafeASCIIByte reports whether b is safe to ship in a header

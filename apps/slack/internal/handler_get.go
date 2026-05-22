@@ -295,14 +295,20 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	if err != nil {
 		return "", mapMintError(log, err)
 	}
-	// Defensive: a 200 with an empty qurl_link is a server contract
-	// surprise — log loud and surface the generic retry message.
-	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "alias_form", isAliasForm, "resource_id_form", isResourceIDForm, "resource_id", input.ResourceID)
+	// Pick the user-facing URL by qURL kind. URL-redirect qURLs ship a
+	// token-bearing `qurl_link`; tunnel qURLs ship an empty `qurl_link`
+	// by server contract and the access surface lives on `qurl_site`
+	// (see CreateOutput's type-level doc + AccessURL helper). A truly
+	// missing URL (both fields empty) IS a server contract surprise —
+	// we keep the loud-error branch for that case so the alarm doesn't
+	// regress on a future server-side rename.
+	accessURL := out.AccessURL()
+	if accessURL == "" {
+		log.Error("get: mint returned no usable URL — server contract surprise", "alias_form", isAliasForm, "resource_id_form", isResourceIDForm, "resource_id", input.ResourceID, "type", out.Type)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	message := ":link: *qURL ready:* " + out.QURLLink
+	message := ":link: *qURL ready:* " + accessURL
 	if args.cmd.Once() {
 		message += " (one-time use)"
 	}

@@ -2141,3 +2141,86 @@ func TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst(t *testin
 		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive (exclusivity beats empty-pointer), got %v", err)
 	}
 }
+
+// testTunnelQURLSite is the canonical fixture for tunnel-qURL
+// `qurl_site` values across the CreateOutput helper tests. The host
+// doesn't escape the wire — the helpers route by `type` / link-shape
+// only — so any well-formed HTTPS URL works; this value mirrors the
+// `<resource_id>.qurl.site.layerv.xyz` shape `qurl-service` emits.
+const testTunnelQURLSite = "https://example.qurl.site"
+
+// TestCreateOutput_IsTunnel_TypeFieldDominant pins the primary
+// detector: the wire `type` field. A `type:"tunnel"` response IS a
+// tunnel qURL regardless of what QURLLink/QURLSite happen to carry —
+// the kind is what `qurl-service` already declared. Future fields on
+// the response that affect URL shape should NOT short-circuit Type.
+func TestCreateOutput_IsTunnel_TypeFieldDominant(t *testing.T) {
+	out := &CreateOutput{Type: "tunnel", QURLLink: "", QURLSite: testTunnelQURLSite}
+	if !out.IsTunnel() {
+		t.Errorf("IsTunnel()=false on Type=\"tunnel\"; want true")
+	}
+	if got, want := out.AccessURL(), testTunnelQURLSite; got != want {
+		t.Errorf("AccessURL()=%q want=%q on tunnel with QURLSite set", got, want)
+	}
+}
+
+// TestCreateOutput_IsTunnel_FallbackEmptyLinkAndSite pins the
+// belt-and-suspenders fallback for the legacy / type-elided shape:
+// empty QURLLink + non-empty QURLSite is still treated as tunnel even
+// when `type` is absent. A future qurl-service version that stops
+// emitting Type (or renames it) must keep tunnel-rendering working
+// without a bot bump — the agent-bootstrap fleet ships ahead of bot
+// updates and the older-rendered tunnel rows live for 24h post-mint.
+func TestCreateOutput_IsTunnel_FallbackEmptyLinkAndSite(t *testing.T) {
+	out := &CreateOutput{Type: "", QURLLink: "", QURLSite: testTunnelQURLSite}
+	if !out.IsTunnel() {
+		t.Errorf("IsTunnel()=false on type-elided tunnel shape; want true")
+	}
+	if got, want := out.AccessURL(), testTunnelQURLSite; got != want {
+		t.Errorf("AccessURL()=%q want=%q on fallback tunnel", got, want)
+	}
+}
+
+// TestCreateOutput_IsTunnel_URLRedirectFalse pins that URL-redirect
+// qURLs do NOT report IsTunnel — they ship a populated QURLLink and
+// the caller renders that, even if Type happens to be unset (legacy
+// rows pre-Type-field).
+func TestCreateOutput_IsTunnel_URLRedirectFalse(t *testing.T) {
+	out := &CreateOutput{Type: "", QURLLink: "https://qurl.link/#abc", QURLSite: "https://target.example"}
+	if out.IsTunnel() {
+		t.Errorf("IsTunnel()=true on URL-redirect (populated QURLLink); want false")
+	}
+	if got, want := out.AccessURL(), "https://qurl.link/#abc"; got != want {
+		t.Errorf("AccessURL()=%q want=%q on URL-redirect", got, want)
+	}
+}
+
+// TestCreateOutput_AccessURL_EmptyBothFields fences the real
+// contract-surprise case: type may be absent and BOTH URL fields
+// empty. The caller still needs a non-nil signal to surface the
+// "server returned no usable URL" diagnostic — empty AccessURL is
+// the routing trigger. Don't optimize this to return a placeholder.
+func TestCreateOutput_AccessURL_EmptyBothFields(t *testing.T) {
+	out := &CreateOutput{}
+	if got := out.AccessURL(); got != "" {
+		t.Errorf("AccessURL()=%q on fully-empty output; want \"\" (real contract surprise)", got)
+	}
+	if out.IsTunnel() {
+		t.Errorf("IsTunnel()=true on fully-empty output; want false — type-less + URL-less is NOT a tunnel signal")
+	}
+}
+
+// TestCreateOutput_NilSafe covers the helper's nil receiver — any
+// future caller pattern that does `var out *CreateOutput; out.IsTunnel()`
+// (e.g. a deserialization-failed path) must not panic. The helpers
+// return their zero-equivalent so the caller's empty-URL branch
+// still trips cleanly.
+func TestCreateOutput_NilSafe(t *testing.T) {
+	var out *CreateOutput
+	if out.IsTunnel() {
+		t.Errorf("IsTunnel() on nil receiver returned true; want false")
+	}
+	if got := out.AccessURL(); got != "" {
+		t.Errorf("AccessURL() on nil receiver returned %q; want \"\"", got)
+	}
+}

@@ -18,11 +18,34 @@ func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID st
 	body := map[string]any{
 		testKeyData: map[string]any{
 			testKeyResourceID: resourceID,
-			"qurl_link":       link,
+			testKeyQURLLink:   link,
 		},
 	}
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode: %v", err)
+	}
+}
+
+// writeTunnelCreateFixture writes the response shape `qurl-service`
+// emits for tunnel-type qURLs: `type:"tunnel"`, empty `qurl_link`,
+// populated `qurl_site`. Mirrors the contract pinned in
+// `qurl-service/internal/service/qurl_service.go::CreateQurl` and
+// the SDK doc on `client.CreateOutput`. Distinct fixture (rather
+// than a writeCreateFixture variant) so a future test reader sees
+// the empty-link shape as deliberate, not a typo.
+func writeTunnelCreateFixture(t *testing.T, w http.ResponseWriter, qurlSite, resourceID string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	body := map[string]any{
+		testKeyData: map[string]any{
+			testKeyResourceID: resourceID,
+			testKeyQURLLink:   "",
+			testKeyQURLSite:   qurlSite,
+			testKeyType:       "tunnel",
+		},
+	}
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Fatalf("encode tunnel fixture: %v", err)
 	}
 }
 
@@ -65,6 +88,76 @@ func TestHandleGet_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(async, "https://qurl.link/abc") {
 		t.Errorf("async reply missing link: %q", async)
+	}
+}
+
+// TestHandleGet_HappyPath_Tunnel fences the tunnel-qURL branch:
+// `qurl-service` emits `type:"tunnel"` + empty `qurl_link` +
+// populated `qurl_site`, and the handler must render `qurl_site` as
+// the user-facing URL instead of treating the empty link as a
+// contract surprise. Pre-fix, this test fails with the
+// "Failed to mint qURL" copy because handler_get.go's
+// `out.QURLLink == ""` short-circuit fired ahead of the kind
+// detector.
+func TestHandleGet_HappyPath_Tunnel(t *testing.T) {
+	const tunnelSite = "https://r_cnaip_fprni.qurl.site.layerv.xyz"
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "tunnel-demo", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeTunnelCreateFixture(t, w, tunnelSite, testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	status, ack, async := inv.invokeAdminAsync("get $tunnel-demo", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if ack != ackWorkingOnIt {
+		t.Errorf("ack = %q, want %q", ack, ackWorkingOnIt)
+	}
+	if !strings.Contains(async, tunnelSite) {
+		t.Errorf("async reply missing tunnel qurl_site URL: %q (expected to contain %q)", async, tunnelSite)
+	}
+	// Defensive: a regression that ALSO surfaces the empty-link
+	// contract-surprise message alongside the URL would mask the fix —
+	// the user would see both a "qURL ready" line and a "Failed to
+	// mint" line. Explicit negative-assert so the loud-error branch
+	// stays exclusive to the truly-no-URL case.
+	if strings.Contains(async, "Failed to mint qURL") {
+		t.Errorf("async reply incorrectly surfaced contract-surprise copy on tunnel mint: %q", async)
+	}
+}
+
+// TestHandleGet_NoURLContractSurprise fences the truly-broken case:
+// neither `qurl_link` nor `qurl_site` populated. Server contract
+// surprise of the original "post-mint there must be SOME URL"
+// shape — caller surfaces the generic retry copy. This is the
+// branch the pre-fix `out.QURLLink == ""` check was guarding; we
+// kept it (now keyed on `AccessURL()==""`) so the loud-error path
+// doesn't regress when the server gets actually broken.
+func TestHandleGet_NoURLContractSurprise(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "broken-resource", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := map[string]any{
+			testKeyData: map[string]any{
+				testKeyResourceID: testResourceIDFix,
+				testKeyQURLLink:   "",
+				testKeyQURLSite:   "",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $broken-resource", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "Failed to mint qURL") {
+		t.Errorf("async reply missing contract-surprise copy on no-URL response: %q", async)
 	}
 }
 
