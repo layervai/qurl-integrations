@@ -12,6 +12,7 @@ const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
 const qurlWebhookRouter = require('./routes/qurl-webhook');
+const webhookSubscriptions = require('./webhook-subscriptions');
 
 const app = express();
 
@@ -73,7 +74,9 @@ const rawBodyJson = express.json({
 
 // /webhook (GitHub) gated on isOpenNHPActive so we don't parse 1MB of
 // JSON for routes that aren't mounted. /webhooks (qURL) is unconditional
-// — the receiver itself returns 503 when QURL_WEBHOOK_SECRET is unset.
+// — the receiver returns 503 when the per-guild subscription registry
+// is still warming up (cold-start or sibling-replica lag), so an
+// unmounted-cap fresh deploy never accepts traffic.
 if (config.isOpenNHPActive) {
   app.use('/webhook', rawBodyJson);
 }
@@ -191,12 +194,16 @@ if (config.isOpenNHPActive) {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
 }
 
-// Unconditional mount — the route returns 503 until QURL_WEBHOOK_SECRET
-// is set, so a fresh deploy never accepts traffic without the secret.
+// Unconditional mount. The receiver returns 503 while the per-guild
+// subscription registry (src/webhook-subscriptions.js) is unprimed
+// OR within the sibling-replica lag window — qurl-service retries
+// 503, so a fresh deploy never silently drops inbound webhooks.
+// Pure-BYOK setups (no QURL_WEBHOOK_SECRET) are supported; the
+// receiver matches each inbound event against the per-guild secret
+// the linking flow registered.
 app.use('/webhooks', qurlWebhookRouter);
 if (!config.QURL_WEBHOOK_SECRET) {
-  logger.warn('QURL_WEBHOOK_SECRET unset — qURL webhook receiver returns 503 on all inbound');
-  logger.warn('To enable: set SSM /<project>/QURL_WEBHOOK_SECRET, then restart the task');
+  logger.warn('QURL_WEBHOOK_SECRET unset — running pure-BYOK mode (no default-key subscription; per-guild registrations only)');
 }
 
 // Cache-Control: no-store on every response from the OAuth surfaces —
@@ -270,6 +277,11 @@ function stopIntervals() {
   // graceful shutdown so the interval doesn't outlive the server.
   if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
   if (typeof webhooksRouter.stopIntervals === 'function') webhooksRouter.stopIntervals();
+  // 30s subscription-registry refresh ticker (per-guild webhook
+  // secrets cache). No-op on the gateway tier where the registry was
+  // never started; required on the HTTP tier so the ticker doesn't
+  // outlive the server during graceful shutdown.
+  webhookSubscriptions.stop();
 }
 
 module.exports = { app, startServer, stopIntervals };

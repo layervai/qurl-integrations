@@ -49,6 +49,7 @@ const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
 const viewUpdateConsumer = require('./view-update-consumer');
 const viewUpdatePublisher = require('./view-update-publisher');
+const webhookSubscriptions = require('./webhook-subscriptions');
 const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
@@ -1119,16 +1120,31 @@ async function start() {
   //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
-    // Webhook subscription registration is OUT-OF-PROCESS as of the
-    // webhook-registrar Lambda — see
+    // Webhook subscription registration is OUT-OF-PROCESS for the
+    // bot's default key, via the webhook-registrar Lambda — see
     //   apps/discord/lambda/webhook-registrar/index.js  (handler)
     //   apps/discord/lambda/webhook-registrar/README.md  (bundling)
     //   apps/discord/docs/qurl-webhook-rollout.md        (operator flow)
-    // The Lambda is invoked once per deploy via Terraform, writes the
-    // rotated/created secret to SSM, and the bot reads
-    // `QURL_WEBHOOK_SECRET` from env at boot — single-instance Lambda
-    // is race-free by construction, no in-app dedupe/lock logic needed.
-    // Rotation: re-invoke the Lambda + force-redeploy the bot.
+    // The Lambda is invoked once per deploy via Terraform and writes
+    // the default-key secret to SSM; the bot reads QURL_WEBHOOK_SECRET
+    // from env at boot.
+    //
+    // PER-GUILD subscriptions (BYOK view counter) are in-process:
+    // every guild that links its own API key (via /qurl setup or the
+    // OAuth callback) gets its own subscription. The registry below
+    // owns the in-memory map<owner_id, secret> the multi-secret
+    // receiver consults on every inbound webhook, primes from
+    // guild_configs at boot, and refreshes every 30s — including
+    // re-discovering the default-key owner_id by listing the
+    // Lambda's subscription. See src/webhook-subscriptions.js.
+    //
+    // Fire-and-forget: the receiver returns 503 until cachePrimed is
+    // true, so a slow first-scan doesn't drop events — qurl-service
+    // retries 503. Awaiting here would delay the HTTP listener
+    // unnecessarily.
+    webhookSubscriptions.start().catch((err) => {
+      logger.error('webhook-subscriptions registry initial scan crash', { error: err?.message });
+    });
   } else if (isGateway) {
     // Returns 503 until isReady() flips true (after READY from the
     // Discord gateway). Dockerfile --start-period=30s covers this

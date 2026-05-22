@@ -65,7 +65,7 @@ const {
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
-const { DM_STATUS } = require('../constants');
+const { DM_STATUS, AUDIT_EVENTS } = require('../constants');
 const { isPositiveFinite } = require('../utils/time');
 
 // Badge taxonomy — stable string enum values so callers that
@@ -661,11 +661,21 @@ async function queryAll(input) {
   return items;
 }
 
-async function scanAll(TableName) {
+async function scanAll(TableName, { consistentRead = false } = {}) {
   const items = [];
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new ScanCommand({ TableName, ExclusiveStartKey }));
+    const res = await ddb.send(new ScanCommand({
+      TableName,
+      ExclusiveStartKey,
+      // ConsistentRead doubles RCU cost; the priming/refresh path for
+      // the webhook subscription registry uses it because a recent
+      // setGuildWebhookSubscription on a sibling replica MUST be
+      // visible to this replica's next scan within the
+      // SIBLING_LAG_GRACE_MS window. All other scanAll callers use
+      // the default eventually-consistent path.
+      ConsistentRead: consistentRead || undefined,
+    }));
     items.push(...(res.Items || []));
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -1476,7 +1486,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   }));
 }
 
-async function removeGuildApiKey(guildId) {
+// Raw delete. No qurl-service subscription teardown. Today there is
+// no production caller; a future /qurl unlink admin command MUST
+// add an orchestrator that issues DELETE /v1/webhooks/{id} BEFORE
+// calling this, or it'll orphan the subscription on qurl-service.
+async function _removeGuildApiKeyRaw(guildId) {
   const res = await ddb.send(new DeleteCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
@@ -1509,6 +1523,224 @@ async function getGuildConfigWithApiKey(guildId) {
   const row = res.Item;
   if (!row) return row;
   return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
+}
+
+// ── Per-guild qurl-service webhook subscriptions (BYOK view counter) ──
+
+// webhook_secret stored encrypted (same envelope as qurl_api_key).
+// webhook_id + webhook_owner_id stored plain — neither is a credential
+// (webhook_id is a public-ish opaque identifier returned to API callers;
+// webhook_owner_id is an auth0 sub already echoed in inbound webhook
+// payloads). Keeping them plain avoids a decrypt() on every cache prime
+// and lets ad-hoc DDB queries by owner work without round-tripping
+// through the crypto module.
+async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, webhookOwnerId }) {
+  if (!guildId || !webhookId || !webhookSecret || !webhookOwnerId) {
+    throw new Error('setGuildWebhookSubscription: guildId, webhookId, webhookSecret, webhookOwnerId all required');
+  }
+  // ConditionExpression: only write webhook_* attributes onto a row
+  // that ALREADY has a qurl_api_key. Without this guard, a future
+  // caller-bug or race that ran setGuildWebhookSubscription before
+  // setGuildApiKey would create an orphan guild_configs row with
+  // webhook_* attrs but no api key — receiver would have a secret
+  // but no link to the linking admin's identity. Mirrors the
+  // attribute_exists pattern in propagateGuildWebhookSubscription.
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    ConditionExpression: 'attribute_exists(qurl_api_key)',
+    UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, webhook_owner_id = :woid, updated_at = :u',
+    ExpressionAttributeValues: {
+      ':wid': webhookId,
+      ':wsec': encrypt(webhookSecret),
+      ':woid': webhookOwnerId,
+      ':u': nowIso(),
+    },
+  }));
+}
+
+// REMOVE the three webhook_* attributes; leaves the API key row intact.
+// Used when a guild rotates to a key whose owner_id differs from the
+// previous one and the caller has already DELETE'd the old subscription
+// (or accepted the orphan).
+async function clearGuildWebhookSubscription(guildId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: guildId },
+    UpdateExpression: 'REMOVE webhook_id, webhook_secret, webhook_owner_id SET updated_at = :u',
+    ExpressionAttributeValues: { ':u': nowIso() },
+  }));
+}
+
+// Reference-counting helper for the unlink path. Returns all guild_ids
+// (including the caller's guild_id, if any) currently associated with
+// the given webhook_owner_id. The caller decides whether to issue
+// DELETE on qurl-service based on the count (don't kill sibling guilds
+// that share the same auth0 admin's API key).
+//
+// ConsistentRead because the link-time caller (propagateGuildWebhookSubscription)
+// runs IMMEDIATELY after a setGuildWebhookSubscription write — an
+// eventually-consistent scan could miss the just-written primary row
+// (or sibling rows from a concurrent link) and silently skip the
+// propagation that fixes rotate-drift. RCU cost is acceptable on a
+// low-cardinality table.
+// TODO(#486): replace scanAll with a Query on the webhook_owner_id
+// GSI when guild_configs > ~10k rows. Every `/qurl setup` and OAuth
+// callback hits this via propagateGuildWebhookSubscription, so the
+// link-path cost is O(table_size) per call — same fix as the
+// 30s priming scan, single migration covers both.
+async function listGuildSubscriptionsByOwner(webhookOwnerId) {
+  const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
+  return rows
+    .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
+    .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));
+}
+
+// Propagate (webhookId, webhookSecret) to every sibling guild row
+// owned by the same webhookOwnerId. Called after
+// ensureWebhookSubscription rotates the shared secret so sibling
+// rows don't keep stale ciphertext that the cache tick could
+// deterministically pick on Scan-order tiebreak.
+//
+// `excludeGuildId` (optional): skip this guild — the caller has
+// already persisted it. Returns counts of rows updated/failed (the
+// excluded guild is not counted).
+async function propagateGuildWebhookSubscription(
+  webhookOwnerId,
+  { webhookId, webhookSecret, excludeGuildId },
+) {
+  if (!webhookOwnerId || !webhookId || !webhookSecret) {
+    throw new Error('propagateGuildWebhookSubscription: webhookOwnerId, webhookId, webhookSecret all required');
+  }
+  const allMatches = await listGuildSubscriptionsByOwner(webhookOwnerId);
+  // Common case for a first-time admin: only the just-written primary
+  // row matches the owner. Short-circuit before the scan-filter pass.
+  if (excludeGuildId && allMatches.length === 1 && allMatches[0].guildId === excludeGuildId) {
+    return { updated: 0, failed: 0 };
+  }
+  const siblings = excludeGuildId
+    ? allMatches.filter(s => s.guildId !== excludeGuildId)
+    : allMatches;
+  if (siblings.length === 0) return { updated: 0, failed: 0 };
+
+  const updatedAt = nowIso();
+  const encryptedSecret = encrypt(webhookSecret);
+  const results = await Promise.allSettled(siblings.map((s) => ddb.send(new UpdateCommand({
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: s.guildId },
+    UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, updated_at = :u',
+    // Defense against a race where the row was cleared between
+    // listGuildSubscriptionsByOwner and this write — never mint
+    // subscription state on a row that opted out.
+    ConditionExpression: 'attribute_exists(webhook_owner_id)',
+    ExpressionAttributeValues: {
+      ':wid': webhookId,
+      ':wsec': encryptedSecret,
+      ':u': updatedAt,
+    },
+  }))));
+
+  let updated = 0;
+  let failed = 0;
+  for (const r of results) {
+    if (r.status === 'fulfilled') { updated += 1; continue; }
+    // ConditionalCheckFailedException = sibling cleared between
+    // list and write; benign, not a failure.
+    if (r.reason?.name === 'ConditionalCheckFailedException') continue;
+    failed += 1;
+  }
+  return { updated, failed };
+}
+
+// Returns every guild_configs row with a provisioned webhook
+// subscription, secret decrypted. Forwards `updatedAt` so the
+// in-process cache can tiebreak sibling rows during rotation drift.
+//
+// Eventually-consistent on purpose: the receiver's
+// `SIBLING_LAG_GRACE_MS` window upgrades any OWNER_UNKNOWN within
+// REFRESH_INTERVAL_MS + grace to 503-retriable, so a sibling replica
+// that hasn't seen DDB's replicated write yet does NOT 401 — the
+// next 30s tick catches it. Strong consistency would double the
+// per-tick RCU cost for a property the receiver already provides.
+// `propagateGuildWebhookSubscription` is where strong consistency
+// actually pays for itself (write-then-read same flow).
+// Per-row decrypt-fail alarm-once tracker. A permanently-corrupt row
+// would otherwise emit 2880 audits/day (30s tick × 2 replicas).
+// Cleared per guildId on its next successful decrypt — so a row that
+// recovers (operator re-encrypts via /qurl setup or backfill) resets
+// and re-alarms if it breaks again.
+const _decryptAlarmedGuilds = new Set();
+
+async function scanGuildSubscriptions() {
+  const rows = await scanAll(TABLES.guild_configs);
+  const out = [];
+  let provisionedCount = 0;
+  let decryptFailCount = 0;
+  for (const r of rows) {
+    if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;
+    provisionedCount += 1;
+    let webhookSecret;
+    try {
+      webhookSecret = decrypt(r.webhook_secret);
+      // Successful decrypt — if this row was alarmed, clear so a
+      // future re-break re-fires (we want "the row went bad again"
+      // to page, not just "the row was ever bad").
+      if (_decryptAlarmedGuilds.has(r.guild_id)) _decryptAlarmedGuilds.delete(r.guild_id);
+    } catch (err) {
+      // One corrupt row (key rotation gap, manual DDB tamper, partial
+      // migration) must NOT abort the entire scan — the cache would
+      // stay unprimed and every inbound webhook would 401. Log + emit
+      // an audit so a CloudWatch metric-filter alarm can fire on
+      // sustained decrypt failures (KMS key drift); backfill or
+      // /qurl setup re-encrypts the row.
+      //
+      // Alarm-once per guild_id per "outage": the audit fires on the
+      // FIRST decrypt failure for this row and stays silent until a
+      // successful decrypt resets the tracker (see try-branch above).
+      // The warn-log still fires every tick so per-row breakage stays
+      // visible at log-stream granularity.
+      logger.warn('scanGuildSubscriptions: decrypt failed for row, skipping', {
+        guildId: r.guild_id, error: err.message,
+      });
+      if (!_decryptAlarmedGuilds.has(r.guild_id)) {
+        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL, {
+          guild_id: r.guild_id, error_type: err.name || 'unknown',
+        });
+        _decryptAlarmedGuilds.add(r.guild_id);
+      }
+      decryptFailCount += 1;
+      continue;
+    }
+    out.push({
+      guildId: r.guild_id,
+      webhookId: r.webhook_id,
+      webhookSecret,
+      webhookOwnerId: r.webhook_owner_id,
+      // ISO-8601 string OR undefined for rows pre-dating the
+      // updated_at write. The cache treats `undefined` as "older
+      // than any timestamped row" so a stale legacy row never beats
+      // a freshly-written one in the tiebreak.
+      updatedAt: r.updated_at,
+    });
+  }
+  // Escalate when more than half of provisioned rows failed decrypt AND
+  // we saw at least 3 (avoids alarm spam on a 1-row sandbox table that
+  // tripped a single transient decrypt error). The per-row audit fires
+  // identically whether 1 row or all rows fail; this distinct event
+  // gives ops a metric filter that means "KMS-wide outage" vs "one bad
+  // row." Skip when 0 rows are provisioned — division-by-zero guard
+  // and a no-op the alarm doesn't need to see.
+  // TODO: re-tune the 3-row floor at ≥20 BYOK guilds — at higher cardinality,
+  //   ">50% of ≥3" is too sensitive (it would fire on a 5-of-9 partial
+  //   tenant-key tier outage that's a real-but-not-mass event); switch to a
+  //   percentile band + absolute floor (e.g. >50% AND ≥5) or a separate
+  //   "tier-scoped" decrypt audit.
+  if (provisionedCount >= 3 && decryptFailCount * 2 > provisionedCount) {
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MASS_DECRYPT_FAIL, {
+      failed: decryptFailCount, provisioned: provisionedCount,
+    });
+  }
+  return out;
 }
 
 // ── Orphaned OAuth tokens ──
@@ -1656,7 +1888,10 @@ module.exports = {
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
-  getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
+  getGuildApiKey, setGuildApiKey, _removeGuildApiKeyRaw, getGuildConfig, getGuildConfigWithApiKey,
+  // Per-guild webhook subscriptions (BYOK view counter)
+  setGuildWebhookSubscription, clearGuildWebhookSubscription,
+  listGuildSubscriptionsByOwner, scanGuildSubscriptions, propagateGuildWebhookSubscription,
   // Orphaned tokens
   recordOrphanedToken, countOrphanedTokens, listOrphanedTokens,
   decryptOrphanedToken, deleteOrphanedToken,
@@ -1669,4 +1904,10 @@ module.exports = {
   // underscore signals intent. If you find yourself depending on
   // this outside tests, add a real public API instead.
   _TABLES_FOR_TESTING: TABLES,
+  // Test-only: clear the per-row decrypt-alarm tracker so a suite
+  // that asserts the alarm-fires-on-first-failure semantic starts
+  // each test from a clean slate. Production callers MUST NOT use
+  // this — production semantics depend on the tracker persisting
+  // for the process lifetime.
+  _resetDecryptAlarmedForTesting: () => _decryptAlarmedGuilds.clear(),
 };

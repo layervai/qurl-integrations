@@ -38,6 +38,7 @@ const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
+const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
 const {
   searchPlaces,
@@ -3279,6 +3280,14 @@ async function handleSetupModal(interaction, { flow_id }) {
 
   await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
   logger.info('Guild API key configured', logFields);
+
+  fireAndForgetLinkGuildWebhookSubscription({
+    guildId: interaction.guildId,
+    apiKey: submittedKey,
+    via: 'paste',
+    configuredBy: interaction.user.id,
+  });
+
   // Swallow Discord errors on the post-persist editReply. If the
   // editReply throws AFTER setGuildApiKey commits, letting it
   // propagate would fire the dispatcher's universal safety-net

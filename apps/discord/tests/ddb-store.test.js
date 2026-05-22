@@ -405,6 +405,77 @@ describe('guild configs', () => {
     expect(result).not.toHaveProperty('qurl_api_key');
     expect(result).toMatchObject({ guild_id: 'g-1', configured_by: 'admin' });
   });
+
+  test('propagateGuildWebhookSubscription: swallows ConditionalCheckFailedException as benign', async () => {
+    // Scenario: between listGuildSubscriptionsByOwner returning the
+    // sibling row and the UpdateCommand executing, another path
+    // cleared the sibling's webhook_owner_id (mid-rollback of an
+    // earlier link). The ConditionExpression rejects with CCFE.
+    // That's the documented "row no longer qualifies" signal — it
+    // MUST NOT bubble up as a failure (would mask real failures).
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
+    ] });
+    const ccfe = new Error('ConditionalCheckFailedException');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    const result = await store.propagateGuildWebhookSubscription('usr_o', {
+      webhookId: 'wh_new', webhookSecret: 'sec_new',
+    });
+    expect(result).toEqual({ updated: 0, failed: 0 });
+  });
+
+  test('propagateGuildWebhookSubscription: non-CCFE errors are counted as failed', async () => {
+    // A real DDB error (throttling, validation, etc.) is NOT benign —
+    // it counts toward the failed-row tally so the caller can decide
+    // whether to log+continue. Pins the discriminator at line 1633.
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
+    ] });
+    ddbMock.on(UpdateCommand).rejects(new Error('ProvisionedThroughputExceededException'));
+    const result = await store.propagateGuildWebhookSubscription('usr_o', {
+      webhookId: 'wh_new', webhookSecret: 'sec_new',
+    });
+    expect(result).toEqual({ updated: 0, failed: 1 });
+  });
+
+  test('setGuildWebhookSubscription: rejects with CCFE when qurl_api_key row does not exist (orphan guard)', async () => {
+    // ConditionExpression on the UpdateCommand requires
+    // attribute_exists(qurl_api_key) — a caller-bug or race that ran
+    // setGuildWebhookSubscription before setGuildApiKey would otherwise
+    // create an orphan row with webhook_* attrs but no api key.
+    const ccfe = new Error('ConditionalCheckFailedException');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    await expect(store.setGuildWebhookSubscription('g_orphan', {
+      webhookId: 'wh_x',
+      webhookSecret: 'sec_x',
+      webhookOwnerId: 'usr_y',
+    })).rejects.toThrow(/ConditionalCheckFailedException/);
+    // Confirm the UpdateCommand actually carried the guard expression
+    // (would otherwise be a false-positive test that passes on any
+    // CCFE source — e.g. a different attribute condition).
+    const calls = ddbMock.commandCalls(UpdateCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0].input.ConditionExpression)
+      .toMatch(/attribute_exists\(qurl_api_key\)/);
+  });
+
+  test('propagateGuildWebhookSubscription: excludes the just-written primary guild', async () => {
+    // excludeGuildId tells propagate to skip the primary row (already
+    // written by setGuildWebhookSubscription). Otherwise the primary
+    // would receive a redundant UpdateCommand with identical data.
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_primary', webhook_id: 'wh_p', webhook_owner_id: 'usr_admin' },
+    ] });
+    const result = await store.propagateGuildWebhookSubscription('usr_admin', {
+      webhookId: 'wh_p', webhookSecret: 'sec_p', excludeGuildId: 'g_primary',
+    });
+    expect(result).toEqual({ updated: 0, failed: 0 });
+    // Short-circuit: no UpdateCommand fired for an "only excluded"
+    // result set.
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
 });
 
 // ── Orphaned OAuth tokens (encryption + hash path) ──

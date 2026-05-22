@@ -10,13 +10,23 @@
 // `src_ip` and `user_agent` are stripped server-side for type=transit
 // resources (connector-owned privacy boundary). Discord bot sends are
 // always transit.
+//
+// Multi-secret routing (BYOK view counter): inbound events carry the
+// qurl-service auth0 `owner_id` in the body envelope. The bot looks
+// the secret up by owner_id in the in-process subscription registry
+// BEFORE HMAC verification. That's safe because the lookup itself
+// grants no trust — HMAC verification still gates every accepted
+// event. Industry-standard pattern (Stripe, GitHub, Linear all do
+// this); the only alternative is making qurl-service include a
+// QURL-Webhook-Id header, which is a 2-repo coordination we don't
+// need for a problem the bot can solve itself.
 
 const express = require('express');
-const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
+const subs = require('../webhook-subscriptions');
 const viewUpdatePublisher = require('../view-update-publisher');
 
 const router = express.Router();
@@ -29,47 +39,178 @@ const SIGNATURE_HEADER = 'qurl-signature';
 // silently absorbing it.
 const SIGNATURE_PATTERN = /^[0-9a-f]{64}$/;
 
-const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
+// Replace control chars (0x00-0x1f + DEL) with '?' so attacker-
+// controlled strings can't spoof field separators or inject newlines
+// in line-oriented log shippers. The control-regex IS the point here.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+function sanitizeForLog(s) {
+  return s.replace(CONTROL_CHARS, '?');
+}
 
-function verifySignature(req) {
+const badSigLimiter = createBadSigLimiter({ max: 30, windowMs: 60_000 });
+// Looser limiter for OWNER_UNKNOWN — operational drift is the
+// expected failure mode (not an attacker brute-forcing HMAC), but
+// without ANY ceiling an attacker could flood the receiver with
+// signed-shaped requests carrying bogus owner_id and never trip a
+// rate limit. Threshold is 5× the HMAC limiter to avoid throttling
+// during a real registry-rebuild incident.
+//
+// CROSS-TENANT FAIRNESS TRADE-OFF: keyed on IP alone. qurl-service
+// egresses from a small NAT/proxy pool so a single guild whose
+// webhook_owner_id has drifted vs. qurl-service's signing identity
+// can burn 150/min on the shared source IP and 429 other guilds'
+// legitimate events. Acceptable at low BYOK count today (≤10 in
+// prod); at scale this should key on (ip, owner_id) or skip per-IP
+// limiting for OWNER_UNKNOWN entirely.
+const unknownOwnerLimiter = createBadSigLimiter({ max: 150, windowMs: 60_000 });
+
+// Reason codes returned from verifyAndResolve. Caller maps them to
+// HTTP status + audit event + rate-limiter interaction in one place
+// so the policy table stays grep-able. Frozen for parity with
+// LINK_RESULTS — typo in a string value would silently break the
+// downstream switch.
+const VERIFY_RESULTS = Object.freeze({
+  OK: 'ok',
+  RAW_BODY_MISSING: 'raw_body_missing',         // middleware bug; should never happen
+  SIG_HEADER_MISSING: 'sig_header_missing',
+  SIG_HEADER_MALFORMED: 'sig_header_malformed',
+  OWNER_ID_MISSING: 'owner_id_missing',         // parse failed OR field absent
+  CACHE_UNPRIMED: 'cache_unprimed',             // 503 — registry hasn't completed first scan
+  OWNER_UNKNOWN: 'owner_unknown',               // 401 — registry primed, owner not registered
+  SIG_INVALID: 'sig_invalid',                   // HMAC mismatch on real secret
+});
+
+function verifyAndResolve(req) {
+  if (!req.rawBody) {
+    logger.error('qURL webhook middleware did not populate rawBody — check server.js middleware ordering. Signature verification is BLOCKED until fixed.');
+    return { result: VERIFY_RESULTS.RAW_BODY_MISSING };
+  }
+
   const signature = req.headers[SIGNATURE_HEADER];
   if (!signature) {
     logger.warn('qURL webhook missing QURL-Signature header');
-    return false;
+    return { result: VERIFY_RESULTS.SIG_HEADER_MISSING };
   }
   if (typeof signature !== 'string' || !SIGNATURE_PATTERN.test(signature)) {
     logger.warn('qURL webhook signature has unexpected format', {
       length: typeof signature === 'string' ? signature.length : 0,
     });
-    return false;
+    return { result: VERIFY_RESULTS.SIG_HEADER_MALFORMED };
   }
-  if (!req.rawBody) {
-    logger.error('qURL webhook middleware did not populate rawBody — check server.js middleware ordering. Signature verification is BLOCKED until fixed.');
-    return false;
+
+  // SECURITY: pre-HMAC parse depth/size MUST stay bounded by the
+  // rawBodyJson middleware cap (server.js, `limit: '1mb'`). Loosening
+  // that cap or adding extended type coercion here widens the
+  // pre-trust window — req.body is attacker-controlled JSON until
+  // the HMAC check below succeeds.
+  // The lookup itself grants no trust: a forged owner_id either
+  // misses the cache (→ 401) or hits a real secret the attacker
+  // can't forge against (→ 401).
+  const ownerId = req.body && typeof req.body.owner_id === 'string' ? req.body.owner_id : null;
+  if (!ownerId) {
+    logger.warn('qURL webhook missing or non-string body.owner_id');
+    return { result: VERIFY_RESULTS.OWNER_ID_MISSING };
   }
-  return verifyHmacSha256(req.rawBody, config.QURL_WEBHOOK_SECRET, signature);
+
+  const secret = subs.getSecretForOwner(ownerId);
+  if (!secret) {
+    if (!subs.isPrimed()) return { result: VERIFY_RESULTS.CACHE_UNPRIMED, ownerId };
+    // Sibling-replica eventual-consistency lag: a freshly-linked
+    // guild's row is in DDB but THIS replica's last scan hasn't
+    // picked it up yet (linking-replica's upsertGuild is local-only;
+    // siblings catch up on the 30s tick). Treat as transient (503,
+    // retriable) until enough time has passed for at least two scan
+    // cycles to have seen the new owner — after that, 401 is the
+    // truthful response.
+    if (subs.isWithinSiblingLagWindow()) {
+      return { result: VERIFY_RESULTS.CACHE_UNPRIMED, ownerId };
+    }
+    return { result: VERIFY_RESULTS.OWNER_UNKNOWN, ownerId };
+  }
+
+  if (!verifyHmacSha256(req.rawBody, secret, signature)) {
+    return { result: VERIFY_RESULTS.SIG_INVALID, ownerId };
+  }
+  return { result: VERIFY_RESULTS.OK, ownerId };
 }
 
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
-  if (badSigLimiter.shouldThrottle(ip)) {
-    logger.warn('qURL webhook rate limit exceeded (bad signatures)', { ip });
+  // OR-coupling note: an IP that already burned the HMAC limiter
+  // (30/min) will get 429'd here even if its current request would
+  // have been OWNER_UNKNOWN (separately budgeted at 150/min). That's
+  // acceptable — the IP is already flagged as suspicious — so the
+  // looser unknown-owner threshold protects legitimate operational
+  // drift from OTHER IPs, not from the same already-bad-actor IP.
+  if (badSigLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ip)) {
+    logger.warn('qURL webhook rate limit exceeded', { ip });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
-  // 503 (retriable) vs 401 (non-retriable): an empty/missing secret
-  // means the webhook-registrar Lambda hasn't populated SSM yet (or
-  // the bot task started before SSM injection completed). qurl-service
-  // retries 503; a 401 here would silently drop the event.
-  if (!config.QURL_WEBHOOK_SECRET) {
-    return res.status(503).json({ error: 'Webhook receiver not configured' });
+  const { result, ownerId } = verifyAndResolve(req);
+
+  // 503 is the only retriable failure mode — qurl-service retries 503
+  // (1+2+4+8+16=31s backoff, 5 attempts) but NOT 401. The cache-
+  // unprimed case happens at cold start and during sibling-replica
+  // lag after a peer's setGuildApiKey; treating it as 401 would
+  // silently drop a guild's first views post-link.
+  if (result === VERIFY_RESULTS.CACHE_UNPRIMED) {
+    // Intentionally NOT counted toward unknownOwnerLimiter — the
+    // unprimed window is one-shot at boot (primed never flips back to
+    // false), so attacker exploitation here is bounded to the
+    // cold-start window. qurl-service retries 503 so the event isn't
+    // lost.
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNPRIMED, {});
+    return res.status(503).json({ error: 'Webhook receiver warming up' });
+  }
+  if (result === VERIFY_RESULTS.RAW_BODY_MISSING) {
+    // Middleware bug — 503 so qurl-service retries while we investigate.
+    return res.status(503).json({ error: 'Webhook receiver misconfigured' });
   }
 
-  if (!verifySignature(req)) {
-    const n = badSigLimiter.recordBadSig(ip);
-    logger.warn('Invalid qURL webhook signature', { ip, totalInWindow: n });
-    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID, { total_in_window: n });
+  // Two limiters, two threat models:
+  //   - HMAC failures count toward badSigLimiter (attacker brute-
+  //     forcing the secret).
+  //   - OWNER_UNKNOWN / OWNER_ID_MISSING count toward unknownOwnerLimiter
+  //     (operational drift OR attacker probing with garbage owner_id;
+  //     looser threshold so a real registry-rebuild burst doesn't
+  //     throttle legitimate traffic on the same source IP).
+  //
+  // SIG_HEADER_MISSING / SIG_HEADER_MALFORMED route to badSigLimiter
+  // (30/min) on purpose: a missing/malformed signature is
+  // indistinguishable from attacker probing — a future qurl-service
+  // contract drift that dropped the header would throttle legitimate
+  // traffic, BUT loosening this would also weaken the brute-force
+  // ceiling against the auth0-key-rotation attack model. Trade-off
+  // chosen deliberately; do not loosen without re-deriving the
+  // threat model.
+  if (result !== VERIFY_RESULTS.OK) {
+    const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
+      || result === VERIFY_RESULTS.SIG_HEADER_MISSING
+      || result === VERIFY_RESULTS.SIG_HEADER_MALFORMED;
+    const isUnknownOwner = result === VERIFY_RESULTS.OWNER_UNKNOWN
+      || result === VERIFY_RESULTS.OWNER_ID_MISSING;
+    let totalInWindow = null;
+    if (isHmacFailure) totalInWindow = badSigLimiter.recordBadSig(ip);
+    else if (isUnknownOwner) totalInWindow = unknownOwnerLimiter.recordBadSig(ip);
+    // Audit-event split mirrors the threat-model split: OWNER_* are
+    // operational/payload-shape signal (route both to the same
+    // unknown-owner dashboard line); SIG_* are HMAC-failure signal.
+    const auditEvent = isUnknownOwner
+      ? AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER
+      : AUDIT_EVENTS.QURL_WEBHOOK_SIGNATURE_INVALID;
+    // Truncate + strip non-printables on the attacker-controlled
+    // ownerId before logging. Mega-string blows up log volume; control
+    // chars (\n, \r, escape sequences) confuse line-oriented log
+    // parsers and can spoof field separators in some shippers.
+    // 64 chars is well over an auth0 sub.
+    const safeOwnerId = typeof ownerId === 'string'
+      ? sanitizeForLog(ownerId.slice(0, 64))
+      : ownerId;
+    logger.warn('qURL webhook verification failed', { ip, totalInWindow, result, ownerId: safeOwnerId });
+    logger.audit(auditEvent, { total_in_window: totalInWindow, result });
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
@@ -129,28 +270,32 @@ router.post('/qurl', async (req, res) => {
   const consumed = data.consumed === true;
 
   try {
-    const result = await db.recordQurlView({
+    const dbResult = await db.recordQurlView({
       qurlId: data.qurl_id,
       accessCount,
       consumed,
       eventId,
     });
-    logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result });
-    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result });
+    logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result: dbResult });
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result: dbResult });
     // Sub-second view counter (feat #60): publish to SQS only on
     // result === 'recorded' (a real new view, not a per-event dedup
     // replay). Fire-and-log — the polling fallback in
     // monitorLinkStatus catches anything the publisher drops. No
     // await: the HTTP response must come back to qurl-service
     // promptly so it doesn't retry on its own.
-    if (result === 'recorded') {
-      viewUpdatePublisher.publish({
+    if (dbResult === 'recorded') {
+      // Defer into the microtask queue so a future sync-throw refactor
+      // of publish() surfaces as a rejection instead of escaping.
+      Promise.resolve().then(() => viewUpdatePublisher.publish({
         qurlId: data.qurl_id,
         accessCount,
         eventId,
+      })).catch((err) => {
+        logger.error('viewUpdatePublisher.publish threw', { error: err?.message, qurl_id: data.qurl_id });
       });
     }
-    return res.status(200).json({ status: result });
+    return res.status(200).json({ status: dbResult });
   } catch (err) {
     // 5xx so qurl-service retries — transient DDB throttle should not
     // silently drop a view event.
@@ -162,5 +307,6 @@ router.post('/qurl', async (req, res) => {
 
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
+  unknownOwnerLimiter.stopSweep();
 };
 module.exports = router;

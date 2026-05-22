@@ -45,6 +45,20 @@ function makeStore() {
 const mockStore = makeStore();
 jest.mock('../src/store', () => mockStore);
 
+// Multi-secret receiver: route the flow-test owner_id to the
+// flow-test secret via a mocked registry. Without this the receiver
+// returns 503 (unprimed) on every webhook delivery.
+jest.mock('../src/webhook-subscriptions', () => ({
+  isPrimed: () => true,
+  getSecretForOwner: (ownerId) => (ownerId === 'usr_flow_test' ? 'flow-test-secret' : null),
+  start: jest.fn(),
+  stop: jest.fn(),
+  upsertGuild: jest.fn(),
+  removeGuild: jest.fn(),
+  scanOnce: jest.fn(),
+  _resetForTesting: jest.fn(),
+}));
+
 process.env.QURL_WEBHOOK_SECRET = 'flow-test-secret';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 process.env.AWS_REGION = 'us-east-2';

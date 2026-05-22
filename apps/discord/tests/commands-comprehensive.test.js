@@ -257,6 +257,16 @@ jest.mock('../src/flow-state', () => ({
   supersedeOrCreate: (...args) => mockSupersedeOrCreate(...args),
 }));
 
+// The `/qurl setup` paste-flow handler calls linkGuildWebhookSubscription
+// after persisting the key. The helper makes its own fetch() calls to
+// qurl-service that would inflate global.fetch call counts asserted by
+// the setup-modal suite. Stub to a no-op; per-helper coverage lives in
+// tests/guild-webhook-link.test.js.
+jest.mock('../src/guild-webhook-link', () => ({
+  linkGuildWebhookSubscription: jest.fn().mockResolvedValue({ ok: true, action: 'created' }),
+  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+}));
+
 // ---------------------------------------------------------------------------
 // Require modules under test
 // ---------------------------------------------------------------------------
