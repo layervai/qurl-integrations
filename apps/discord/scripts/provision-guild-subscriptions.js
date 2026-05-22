@@ -60,7 +60,13 @@ async function main() {
   let candidates = 0;
   let skipped = 0;
   let provisioned = 0;
-  let failed = 0;
+  // Split-counter: decrypt-side failures point at KEY_ENCRYPTION_KEY
+  // drift or row corruption; link-side failures point at qurl-service
+  // (5xx, auth) or downstream DDB. Triage path differs sharply for
+  // each — bundling them under one Failed: counter forces the
+  // operator to grep the per-row stderr lines to disambiguate.
+  let failedDecrypt = 0;
+  let failedLink = 0;
   let ExclusiveStartKey;
 
   do {
@@ -72,23 +78,30 @@ async function main() {
       if (row.webhook_id) { skipped += 1; continue; }
       candidates += 1;
       const guildId = row.guild_id;
-      // Per-row try/catch so one corrupt encrypted row doesn't abort
-      // the whole backfill. The decrypt is performed even in DRY_RUN
-      // mode so operators see decrypt failures in the preview rather
-      // than discovering them mid-real-run.
+      // Decrypt step isolated so a failure increments failedDecrypt
+      // (vs the link step's failedLink). The decrypt runs even in
+      // DRY_RUN so operators see decrypt failures in the preview
+      // rather than discovering them mid-real-run.
+      let apiKey;
       try {
-        const apiKey = await db.getGuildApiKey(guildId);
-        if (!apiKey) {
-          console.warn(`[backfill] guild_id=${guildId} qurl_api_key decrypted empty — skipping`);
-          skipped += 1;
-          continue;
-        }
-        console.log(`[backfill] candidate guild_id=${guildId}`);
-        if (DRY_RUN) continue;
-        // linkGuildWebhookSubscription also calls subs.upsertGuild
-        // on success — that's a no-op in this script context (the
-        // registry isn't .start()'d) but DDB is the source of truth,
-        // so running bots pick the new row up on their next 30s tick.
+        apiKey = await db.getGuildApiKey(guildId);
+      } catch (decryptErr) {
+        failedDecrypt += 1;
+        console.error(`[backfill] DECRYPT_FAILED guild_id=${guildId} threw: ${decryptErr?.message}`);
+        continue;
+      }
+      if (!apiKey) {
+        console.warn(`[backfill] guild_id=${guildId} qurl_api_key decrypted empty — skipping`);
+        skipped += 1;
+        continue;
+      }
+      console.log(`[backfill] candidate guild_id=${guildId}`);
+      if (DRY_RUN) continue;
+      // linkGuildWebhookSubscription also calls subs.upsertGuild
+      // on success — that's a no-op in this script context (the
+      // registry isn't .start()'d) but DDB is the source of truth,
+      // so running bots pick the new row up on their next 30s tick.
+      try {
         const result = await linkGuildWebhookSubscription({
           guildId, apiKey, descriptionContext: 'via=backfill-script',
         });
@@ -96,17 +109,18 @@ async function main() {
           provisioned += 1;
           console.log(`[backfill] provisioned guild_id=${guildId} action=${result.action}`);
         } else {
-          failed += 1;
-          console.error(`[backfill] FAILED guild_id=${guildId} reason=${result.reason}`);
+          failedLink += 1;
+          console.error(`[backfill] LINK_FAILED guild_id=${guildId} reason=${result.reason}`);
         }
-      } catch (rowErr) {
-        failed += 1;
-        console.error(`[backfill] FAILED guild_id=${guildId} threw: ${rowErr?.message}`);
+      } catch (linkErr) {
+        failedLink += 1;
+        console.error(`[backfill] LINK_FAILED guild_id=${guildId} threw: ${linkErr?.message}`);
       }
     }
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
 
+  const failedTotal = failedDecrypt + failedLink;
   console.log('\n=== Backfill summary ===');
   console.log(`Table:        ${TABLE}`);
   console.log(`Dry run:      ${DRY_RUN}`);
@@ -116,11 +130,12 @@ async function main() {
   if (!DRY_RUN) {
     console.log(`Provisioned:  ${provisioned}`);
   }
-  // Always print Failed: even in dry-run — getGuildApiKey decrypt
-  // errors increment `failed` in either mode, and silent exit 2
+  // Always print failed counters even in dry-run — decrypt errors
+  // increment failedDecrypt in either mode, and a silent exit 2
   // would let an operator miss them.
-  console.log(`Failed:       ${failed}`);
-  process.exit(failed > 0 ? 2 : 0);
+  console.log(`FailedDecrypt: ${failedDecrypt}`);
+  console.log(`FailedLink:    ${failedLink}`);
+  process.exit(failedTotal > 0 ? 2 : 0);
 }
 
 main().catch((err) => {

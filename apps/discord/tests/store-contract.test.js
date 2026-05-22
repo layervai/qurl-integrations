@@ -124,6 +124,34 @@ describe('store/contract', () => {
       const overlap = STORE_METHODS.filter(m => STORE_CONSTANTS.includes(m));
       expect(overlap).toEqual([]);
     });
+
+    it('no apps/discord/src caller references the pre-rename `removeGuildApiKey` name', () => {
+      // The contract method was renamed `removeGuildApiKey` →
+      // `_removeGuildApiKeyRaw` so the leading underscore signals
+      // "raw operation that does not also clean up sibling rows
+      // (webhook subscription)." Defensive guard: a future caller
+      // that accidentally re-types the old short name would silently
+      // skip the cleanup. This grep-style assertion makes the
+      // regression LOUD at test-time.
+      const fs = require('fs');
+      const path = require('path');
+      const SRC = path.resolve(__dirname, '../src');
+      const offenders = [];
+      function walk(dir) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) { walk(full); continue; }
+          if (!entry.name.endsWith('.js')) continue;
+          const body = fs.readFileSync(full, 'utf8');
+          // Word-boundary match catches `db.removeGuildApiKey(` and
+          // `removeGuildApiKey,` without flagging the renamed
+          // `_removeGuildApiKeyRaw`.
+          if (/\bremoveGuildApiKey\b(?!Raw)/.test(body)) offenders.push(path.relative(SRC, full));
+        }
+      }
+      walk(SRC);
+      expect(offenders).toEqual([]);
+    });
   });
 });
 

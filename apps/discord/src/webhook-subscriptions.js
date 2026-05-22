@@ -75,16 +75,15 @@ let lastScanCompletedAt = 0;
 // 401 — we've had two scan chances to see the owner.
 const SIBLING_LAG_GRACE_MS = 5_000;
 
-// Sentinel for the default-key entry's webhookId and guildIds. A
-// unique Symbol can never collide with a real qurl-service webhook_id
-// (those are opaque strings). Receiver only reads webhookSecret from
-// the entry; the field is for debugging.
-// FOOT-GUN: Symbols don't survive JSON.stringify (debug-dump endpoint
-// will see webhookId as undefined) AND Array.from(entry.guildIds) on
-// the default entry yields [Symbol(...)] — telemetry that joins
-// guildIds with a delimiter or pushes them to a string-keyed log
-// field will surface a non-string for the default entry.
-const DEFAULT_KEY_SENTINEL = Symbol('default-key-subscription');
+// Sentinel for the default-key entry's webhookId and guildIds.
+// Double-underscore-bracketed string can't collide with a real
+// qurl-service webhook_id (those are `wh_...`-prefixed opaque base64-
+// ish strings, never bracketed underscores) or a Discord guild_id
+// (those are decimal-only snowflakes). JSON-serializable so a future
+// debug-dump endpoint or telemetry that walks the cache won't surface
+// `undefined` for the default entry — the choice cost ~zero vs Symbol
+// here since the receiver never compares webhookId for equality.
+const DEFAULT_KEY_SENTINEL = '__default-key__';
 
 function getSecretForOwner(ownerId) {
   if (!ownerId) return null;
@@ -239,12 +238,10 @@ async function scanOnce() {
       // qurl-service subscription), so leaving the BYOK entry in
       // place is observationally correct.
       if (config.QURL_WEBHOOK_SECRET && !next.has(discoveredOwner)) {
-        // Symbol sentinel for webhookId — receiver only reads
-        // webhookSecret; can't collide with any real qurl-service
-        // webhook_id (opaque string). NOTE: Symbols don't survive
-        // JSON.stringify, so a future debug-dump endpoint that
-        // serializes the cache will see webhookId as undefined for
-        // the default entry. Tradeoff favored over a sentinel string.
+        // String sentinel — receiver only reads webhookSecret, never
+        // compares webhookId. Bracketed underscores can't collide
+        // with `wh_...` qurl-service IDs or decimal Discord
+        // snowflakes (the only legal guildIds values).
         next.set(discoveredOwner, {
           guildIds: new Set([DEFAULT_KEY_SENTINEL]),
           webhookSecret: config.QURL_WEBHOOK_SECRET,

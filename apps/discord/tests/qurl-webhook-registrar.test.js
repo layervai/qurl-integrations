@@ -941,3 +941,48 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
     expect(result.webhookId).toBe('wh_no_owner');
   });
 });
+
+// Pinned to keep webhook-subscriptions.js::discoverDefaultOwnerId
+// from breaking silently if a future registrar refactor changes
+// callQurlService's signature. The external caller relies on
+// (method, path, apiEndpoint, apiKey) + response = parsed-JSON body.
+describe('callQurlService — exported contract', () => {
+  const { callQurlService } = require('../src/qurl-webhook-registrar');
+
+  beforeEach(() => { global.fetch = jest.fn(); });
+  afterAll(() => { global.fetch = ORIGINAL_FETCH; });
+
+  it('is exported as a top-level function (not _internals)', () => {
+    expect(typeof callQurlService).toBe('function');
+  });
+
+  it('returns the JSON-parsed body on 2xx', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'x' }] }),
+    }));
+    const out = await callQurlService({
+      method: 'GET', path: '/v1/webhooks', apiEndpoint: 'https://q.example', apiKey: 'k',
+    });
+    expect(out).toEqual({ data: [{ id: 'x' }] });
+  });
+
+  it('forwards Authorization: Bearer <apiKey>', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200, text: async () => '{}',
+    }));
+    await callQurlService({
+      method: 'GET', path: '/v1/webhooks', apiEndpoint: 'https://q.example', apiKey: 'secret-k',
+    });
+    const opts = global.fetch.mock.calls[0][1];
+    expect(opts.headers.Authorization).toBe('Bearer secret-k');
+  });
+
+  it('throws on non-2xx with the QurlServiceError shape (op + status)', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: false, status: 503, text: async () => '',
+    }));
+    await expect(callQurlService({
+      method: 'GET', path: '/v1/webhooks', apiEndpoint: 'https://q.example', apiKey: 'k',
+    })).rejects.toThrow(/returned 503/);
+  });
+});

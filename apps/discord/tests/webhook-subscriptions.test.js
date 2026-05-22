@@ -347,7 +347,7 @@ describe('webhook-subscriptions registry — default-key + BYOK owner collision'
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
     // Secret resolves; BYOK entry is preserved (webhookId stays the
-    // string 'wh_byok', NOT the DEFAULT_KEY_SENTINEL Symbol).
+    // string 'wh_byok', NOT the DEFAULT_KEY_SENTINEL).
     expect(subs.getSecretForOwner('usr_default')).toBe('sec_shared');
   });
 });
