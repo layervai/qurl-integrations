@@ -138,6 +138,25 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
       { webhookId: 'wh_ok', webhookSecret: 'sec_ok', excludeGuildId: 'g_primary' },
     );
   });
+
+  // Partial propagate failure (e.g., one sibling throttled) MUST fire
+  // an audit. Without this, the sibling cache entry holds the stale
+  // secret for up to 30s and 401s every webhook silently.
+  it('emits SUBSCRIPTION_REGISTER_FAILED audit when propagate.failed > 0', async () => {
+    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 1, failed: 2 });
+    const result = await linkGuildWebhookSubscription({
+      guildId: 'g_partial', apiKey: 'lv_x',
+    });
+    // Registration itself still succeeded — partial propagate is a
+    // secondary signal, not a hard rollback.
+    expect(result).toEqual({ ok: true, action: 'created' });
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({
+        guild_id: 'g_partial', reason: 'propagate-partial', failed: 2, updated: 1,
+      }),
+    );
+  });
 });
 
 describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure', () => {

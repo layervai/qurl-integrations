@@ -127,6 +127,12 @@ function verifyAndResolve(req) {
 
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
+  // OR-coupling note: an IP that already burned the HMAC limiter
+  // (30/min) will get 429'd here even if its current request would
+  // have been OWNER_UNKNOWN (separately budgeted at 150/min). That's
+  // acceptable — the IP is already flagged as suspicious — so the
+  // looser unknown-owner threshold protects legitimate operational
+  // drift from OTHER IPs, not from the same already-bad-actor IP.
   if (badSigLimiter.shouldThrottle(ip) || unknownOwnerLimiter.shouldThrottle(ip)) {
     logger.warn('qURL webhook rate limit exceeded', { ip });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RATE_LIMITED, {});

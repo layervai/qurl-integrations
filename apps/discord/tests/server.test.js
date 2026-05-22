@@ -396,3 +396,35 @@ describe('Server', () => {
     });
   });
 });
+
+// ─── /webhooks rawBody parser invariant ────────────────────────────
+//
+// The qurl-webhook receiver does a pre-HMAC JSON.parse of req.body
+// to extract owner_id for secret routing. The SECURITY invariant
+// (called out in qurl-webhook.js's verifyAndResolve comment) is that
+// the 1mb cap on rawBodyJson middleware bounds the pre-trust window.
+// A refactor that re-orders middleware or bumps the limit without
+// re-reading that warning would silently widen the attack surface;
+// this pin-test fails loudly when the cap regresses.
+describe('server.js — /webhooks rawBody middleware invariant', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const serverSource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'server.js'),
+    'utf8',
+  );
+  it('mounts rawBodyJson at /webhooks with a 1mb cap', () => {
+    // The middleware is defined as `const rawBodyJson = express.json({...})`
+    // and mounted via `app.use('/webhooks', rawBodyJson)`. Both
+    // properties are load-bearing for the pre-HMAC parse safety.
+    expect(serverSource).toMatch(/rawBodyJson\s*=\s*express\.json\(\{[\s\S]*?limit:\s*['"]1mb['"][\s\S]*?\}\)/);
+    expect(serverSource).toMatch(/app\.use\(\s*['"]\/webhooks['"]\s*,\s*rawBodyJson\s*\)/);
+  });
+
+  it('rawBodyJson populates req.rawBody (HMAC source-of-truth)', () => {
+    // verifyHmacSha256 runs against req.rawBody. If a refactor drops
+    // the verify-callback, the receiver would 503 forever (the
+    // existing rawBody-missing guard fires).
+    expect(serverSource).toMatch(/verify:\s*\(\s*req\s*,\s*_?res\s*,\s*buf\s*\)\s*=>\s*\{[\s\S]*?req\.rawBody\s*=\s*buf/);
+  });
+});

@@ -117,9 +117,25 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   // excludeGuildId so the primary row (just written above) isn't
   // updated a second time.
   try {
-    await db.propagateGuildWebhookSubscription(webhookOwnerId, {
+    const propagateResult = await db.propagateGuildWebhookSubscription(webhookOwnerId, {
       webhookId, webhookSecret: secret, excludeGuildId: guildId,
     });
+    if (propagateResult.failed > 0) {
+      // Partial success: some sibling rows were updated, others
+      // threw. Their cache entries will pick up the stale secret on
+      // the next 30s tick and 401 every inbound webhook until
+      // another propagate run converges them. Audit so the
+      // CloudWatch alarm fires; the registration itself is still OK.
+      logger.warn('Per-guild webhook secret propagation partially failed', {
+        guildId, webhookOwnerId, webhookId, ...propagateResult,
+      });
+      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED, {
+        guild_id: guildId,
+        reason: 'propagate-partial',
+        updated: propagateResult.updated,
+        failed: propagateResult.failed,
+      });
+    }
   } catch (err) {
     logger.warn('Per-guild webhook secret propagation to siblings failed (non-blocking)', {
       error: err?.message, guildId, webhookOwnerId, webhookId,

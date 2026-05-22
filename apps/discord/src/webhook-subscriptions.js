@@ -235,16 +235,17 @@ async function scanOnce() {
           webhookId: DEFAULT_KEY_SENTINEL,
         });
       }
-    } else {
-      // Default-key owner_id discovery failed (no QURL_API_KEY /
-      // QURL_ENDPOINT, OR the Lambda hasn't run yet on a fresh
-      // deploy). Inbound webhooks for non-BYOK guilds 401 until
-      // discovery succeeds — alarm on this log line for fresh-deploy
-      // gaps that outlast the Lambda.
+    } else if (config.QURL_WEBHOOK_SECRET) {
+      // Only warn when we WANTED a default entry (secret is set) but
+      // discovery failed — that's the alarm-worthy case (fresh-deploy
+      // gap that outlasts the Lambda, qurl-service drift, etc.). For
+      // pure-BYOK setups (no default secret), discovery is
+      // intentionally skipped earlier and a null result here would
+      // just be the no-op path; warning every 30s in that
+      // configuration would dilute the alarm signal-to-noise.
       logger.warn('webhook-subscriptions: default-key owner_id discovery returned null', {
         hasApiKey: Boolean(config.QURL_API_KEY),
         hasEndpoint: Boolean(config.QURL_ENDPOINT),
-        hasWebhookSecret: Boolean(config.QURL_WEBHOOK_SECRET),
       });
     }
 
