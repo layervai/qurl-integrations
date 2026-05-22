@@ -128,8 +128,16 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     });
   } catch (err) {
     bestEffortDeleteSubscription({ apiKey, webhookId, guildId });
+    // ConditionalCheckFailedException from
+    // setGuildWebhookSubscription's attribute_exists(qurl_api_key)
+    // guard means setGuildApiKey wasn't called first (or its row
+    // was wiped between the two writes). Treat as hard caller-bug:
+    // bail out without touching the cache. The wider rollback (orphan
+    // DELETE above) still runs.
+    const isOrphanGuard = err?.name === 'ConditionalCheckFailedException';
     logger.warn('Per-guild webhook subscription persisted-create rollback', {
       error: err?.message, guildId, webhookId,
+      orphan_guard_tripped: isOrphanGuard,
     });
     auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED);
     return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };

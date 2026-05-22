@@ -1538,9 +1538,17 @@ async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, 
   if (!guildId || !webhookId || !webhookSecret || !webhookOwnerId) {
     throw new Error('setGuildWebhookSubscription: guildId, webhookId, webhookSecret, webhookOwnerId all required');
   }
+  // ConditionExpression: only write webhook_* attributes onto a row
+  // that ALREADY has a qurl_api_key. Without this guard, a future
+  // caller-bug or race that ran setGuildWebhookSubscription before
+  // setGuildApiKey would create an orphan guild_configs row with
+  // webhook_* attrs but no api key — receiver would have a secret
+  // but no link to the linking admin's identity. Mirrors the
+  // attribute_exists pattern in propagateGuildWebhookSubscription.
   await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
+    ConditionExpression: 'attribute_exists(qurl_api_key)',
     UpdateExpression: 'SET webhook_id = :wid, webhook_secret = :wsec, webhook_owner_id = :woid, updated_at = :u',
     ExpressionAttributeValues: {
       ':wid': webhookId,

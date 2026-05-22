@@ -439,6 +439,28 @@ describe('guild configs', () => {
     expect(result).toEqual({ updated: 0, failed: 1 });
   });
 
+  test('setGuildWebhookSubscription: rejects with CCFE when qurl_api_key row does not exist (orphan guard)', async () => {
+    // ConditionExpression on the UpdateCommand requires
+    // attribute_exists(qurl_api_key) — a caller-bug or race that ran
+    // setGuildWebhookSubscription before setGuildApiKey would otherwise
+    // create an orphan row with webhook_* attrs but no api key.
+    const ccfe = new Error('ConditionalCheckFailedException');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    await expect(store.setGuildWebhookSubscription('g_orphan', {
+      webhookId: 'wh_x',
+      webhookSecret: 'sec_x',
+      webhookOwnerId: 'usr_y',
+    })).rejects.toThrow(/ConditionalCheckFailedException/);
+    // Confirm the UpdateCommand actually carried the guard expression
+    // (would otherwise be a false-positive test that passes on any
+    // CCFE source — e.g. a different attribute condition).
+    const calls = ddbMock.commandCalls(UpdateCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0].input.ConditionExpression)
+      .toMatch(/attribute_exists\(qurl_api_key\)/);
+  });
+
   test('propagateGuildWebhookSubscription: excludes the just-written primary guild', async () => {
     // excludeGuildId tells propagate to skip the primary row (already
     // written by setGuildWebhookSubscription). Otherwise the primary

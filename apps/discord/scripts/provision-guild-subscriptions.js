@@ -25,6 +25,14 @@
 //
 // SCOPE: only operates on the qurl_api_key + webhook_* attributes of
 // the `guild_configs` DDB table. Does not touch any other table.
+//
+// PERFORMANCE NOTE: each linkGuildWebhookSubscription call transitively
+// invokes propagateGuildWebhookSubscription, which today does a full-
+// table ConsistentRead scan of guild_configs. The backfill is
+// therefore O(rows²) RCU. Acceptable at current scale (≤10 BYOK
+// guilds in prod); a re-run after the #486 GSI migration on
+// webhook_owner_id reduces this to O(rows × ownersScanned), and is
+// effectively free thereafter.
 
 'use strict';
 
