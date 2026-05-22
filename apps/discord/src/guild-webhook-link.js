@@ -190,9 +190,13 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       logger.warn('Per-guild webhook secret propagation partially failed', {
         guildId, webhookOwnerId, webhookId, ...propagateResult,
       });
-      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED, {
+      // Distinct event (not REGISTER_FAILED) — the link itself
+      // SUCCEEDED for the user; only sibling-row convergence is
+      // partial. CloudWatch dashboards on REGISTER_FAILED should
+      // stay unambiguous as "link failed for the user."
+      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_PROPAGATE_PARTIAL, {
         guild_id: guildId,
-        reason: 'propagate-partial',
+        webhook_owner_id: webhookOwnerId,
         updated: propagateResult.updated,
         failed: propagateResult.failed,
       });

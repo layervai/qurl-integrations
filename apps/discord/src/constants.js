@@ -476,6 +476,12 @@ const AUDIT_EVENTS = {
   // metric-filter-greppable so a future orphan-subscription sweeper
   // can list-and-diff against qurl-service's own subscription state.
   QURL_WEBHOOK_ORPHAN_LEFT_AFTER_401: 'qurl_webhook_orphan_left_after_401',
+  // Sibling-row propagate partially failed: link succeeded for the
+  // user but some sibling guilds may hold a stale secret until the
+  // next propagate run converges them. Distinct from
+  // SUBSCRIPTION_REGISTER_FAILED so the REGISTER_FAILED metric
+  // filter unambiguously means "the link failed for the user."
+  QURL_WEBHOOK_PROPAGATE_PARTIAL: 'qurl_webhook_propagate_partial',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

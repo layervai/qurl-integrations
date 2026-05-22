@@ -16,6 +16,13 @@
 // Usage:
 //   node apps/discord/scripts/provision-guild-subscriptions.js [--dry-run]
 //
+// Exit codes:
+//   0  clean — no failures (dry-run or real)
+//   2  one or more rows failed (intentional in dry-run too: it
+//      surfaces KMS drift before an operator commits to a real run)
+//   3  MAX_PAGES hit — cursor likely not advancing, investigate
+//      before re-running
+//
 // Required env: BASE_URL, QURL_ENDPOINT, AWS credentials with read +
 // UpdateItem on the guild_configs table, KEY_ENCRYPTION_KEY (for
 // decrypting stored qurl_api_keys), and any other env the bot's

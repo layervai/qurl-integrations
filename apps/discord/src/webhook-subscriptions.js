@@ -165,6 +165,15 @@ function removeGuild({ guildId, ownerId }) {
 // in the gap are 503'd via the unprimed-cache code path. Network /
 // HTTP errors are surfaced to the caller (scanOnce) so the tick's
 // failure counter increments correctly.
+//
+// ASSUMPTION: owner_id is identical across every webhook owned by a
+// single API key in qurl-service. True today by qurl-service's auth0
+// owner-binding contract. If qurl-service ever multi-tenants a key
+// (rare but plausible for partner-shared identities), this loop
+// returns whichever owner_id came first — the bot's default-key
+// subscription is then a coin flip. The same assumption underlies
+// BYOK row population via setGuildApiKey, so any change there needs
+// a coordinated rework here.
 async function discoverDefaultOwnerId() {
   if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
   // limit=100 (was limit=10): owner_id is identical across all subs
@@ -390,6 +399,10 @@ async function refreshTick() {
     if (result === 'completed') consecutiveFailures = 0;
   } catch (err) {
     consecutiveFailures += 1;
+    // Dynamic logger[level] dispatch — relies on the logger having
+    // both `.warn` and `.error` methods. Production logger satisfies
+    // this; any new test file that mocks the logger MUST stub both
+    // OR the level-escalation path will throw on the unmocked call.
     const level = consecutiveFailures >= REFRESH_FAIL_ESCALATE_AT ? 'error' : 'warn';
     logger[level]('webhook subscription registry refresh failed', {
       error: err.message,

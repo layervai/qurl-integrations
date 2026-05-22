@@ -285,10 +285,13 @@ router.post('/qurl', async (req, res) => {
     // await: the HTTP response must come back to qurl-service
     // promptly so it doesn't retry on its own.
     if (dbResult === 'recorded') {
-      // Trailing .catch pins the fire-and-forget contract: if a future
-      // refactor makes publish() async-throwing, this prevents an
-      // UnhandledPromiseRejection from crashing the worker.
-      Promise.resolve(viewUpdatePublisher.publish({
+      // Fire-and-forget contract pinned against BOTH future async-
+      // throwing AND sync-throwing refactors of publish(). The
+      // Promise.resolve().then(() => …) idiom defers the call into
+      // the microtask queue so a synchronous throw inside publish()
+      // surfaces as a rejected promise (caught by the trailing
+      // .catch) instead of escaping past Promise.resolve(value).
+      Promise.resolve().then(() => viewUpdatePublisher.publish({
         qurlId: data.qurl_id,
         accessCount,
         eventId,
