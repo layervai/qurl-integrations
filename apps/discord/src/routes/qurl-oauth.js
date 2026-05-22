@@ -17,7 +17,7 @@ const { readCookie } = require('../utils/cookies');
 const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
-const { linkGuildWebhookSubscription } = require('../guild-webhook-link');
+const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -435,20 +435,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   });
 
   // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
-  //     view counter). Fire-and-forget: the helper never re-throws by
-  //     contract and emits its own audit events; .catch is defense-
-  //     in-depth.
-  //
-  //     KNOWN QUIRK (tracked in issue #487): a SIGTERM mid-link
-  //     (ECS task cycle, deploy) drops the in-flight work and the
-  //     guild has no view-counter subscription until /qurl setup
-  //     runs again or the backfill script catches it. Polling
-  //     fallback covers correctness.
-  linkGuildWebhookSubscription({
-    guildId, apiKey, descriptionContext: `via=oauth, configuredBy=${discordUserId}`,
-  }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
-    error: err?.message, guildId,
-  }));
+  //     view counter). Fire-and-forget via the centralized helper.
+  fireAndForgetLinkGuildWebhookSubscription({
+    guildId, apiKey, via: 'oauth', configuredBy: discordUserId,
+  });
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the
   //    browser tab. Fire-and-forget — a delivery failure shouldn't block

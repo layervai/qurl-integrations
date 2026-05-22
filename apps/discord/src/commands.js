@@ -38,7 +38,7 @@ const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
-const { linkGuildWebhookSubscription } = require('./guild-webhook-link');
+const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
 const {
   searchPlaces,
@@ -3281,22 +3281,12 @@ async function handleSetupModal(interaction, { flow_id }) {
   await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
   logger.info('Guild API key configured', logFields);
 
-  // Fire-and-forget per-guild webhook subscription register. The
-  // helper does network + DDB work that can take seconds; awaiting
-  // would delay the modal reply unacceptably. .catch is defense-in-
-  // depth — the helper never re-throws by contract and emits its
-  // own audit events.
-  //
-  // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops
-  // the in-flight work; operator runs /qurl setup or backfill.
-  // Polling fallback covers correctness.
-  linkGuildWebhookSubscription({
+  fireAndForgetLinkGuildWebhookSubscription({
     guildId: interaction.guildId,
     apiKey: submittedKey,
-    descriptionContext: `via=paste, configuredBy=${interaction.user.id}`,
-  }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
-    error: err?.message, guildId: interaction.guildId,
-  }));
+    via: 'paste',
+    configuredBy: interaction.user.id,
+  });
 
   // Swallow Discord errors on the post-persist editReply. If the
   // editReply throws AFTER setGuildApiKey commits, letting it

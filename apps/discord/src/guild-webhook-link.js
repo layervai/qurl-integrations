@@ -213,7 +213,26 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   return { ok: true, action };
 }
 
+// Fire-and-forget wrapper for the two splice points (commands.js
+// `/qurl setup` paste flow + qurl-oauth.js OAuth callback). Centralizes
+// the .catch + descriptionContext format so the two call sites stay
+// in sync — a future audit-log shape change should touch one place.
+//
+// KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
+// in-flight work; the operator runs /qurl setup again or the
+// backfill script catches it. Polling fallback covers correctness.
+function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
+  linkGuildWebhookSubscription({
+    guildId,
+    apiKey,
+    descriptionContext: `via=${via}, configuredBy=${configuredBy}`,
+  }).catch((err) => logger.warn('linkGuildWebhookSubscription contract drift — threw unexpectedly', {
+    error: err?.message, guildId,
+  }));
+}
+
 module.exports = {
   linkGuildWebhookSubscription,
+  fireAndForgetLinkGuildWebhookSubscription,
   LINK_RESULTS,
 };

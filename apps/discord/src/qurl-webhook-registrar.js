@@ -405,7 +405,7 @@ async function ensureWebhookSubscription(opts) {
     // → bootstrap-rotate path lands a known-good shared secret.
     webhookId = existing.webhook_id;
     secret = initialSecret;
-    action = 'reused';
+    action = WEBHOOK_ACTIONS.REUSED;
     ownerId = existing.owner_id;
     // Wrap the PATCH in try/catch matching the rotate branch — a
     // transient 5xx here shouldn't flip the boot log to "self-
@@ -432,7 +432,7 @@ async function ensureWebhookSubscription(opts) {
     ownerId = existing.owner_id;
     const rotated = await rotateSecret({ apiEndpoint, apiKey, webhookId });
     secret = rotated.secret;
-    action = 'rotated';
+    action = WEBHOOK_ACTIONS.ROTATED;
     try {
       await reconcileEvents({ apiEndpoint, apiKey, existing });
     } catch (err) {
@@ -448,7 +448,7 @@ async function ensureWebhookSubscription(opts) {
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
     webhookId = created.webhook_id;
     secret = created.secret;
-    action = 'created';
+    action = WEBHOOK_ACTIONS.CREATED;
     ownerId = created.owner_id;
     logger.info('qURL webhook subscription created', { webhookId, url: bridgeUrl });
   }
@@ -484,10 +484,21 @@ function buildSsmPersistSecret({ ssmClient, paramName, PutParameterCommand, time
   };
 }
 
+// Frozen enum mirrors the LINK_RESULTS / VERIFY_RESULTS pattern in
+// sibling modules — a typo in any assignment site fails as
+// `WEBHOOK_ACTIONS.UNDEFINED_THING` at require time, not as a
+// silent string-comparison miss in a future caller.
+const WEBHOOK_ACTIONS = Object.freeze({
+  CREATED: 'created',
+  ROTATED: 'rotated',
+  REUSED: 'reused',
+});
+
 module.exports = {
   ensureWebhookSubscription,
   deleteSubscription,
   buildSsmPersistSecret,
+  WEBHOOK_ACTIONS,
   // Exposed for webhook-subscriptions.js so the registry's
   // discoverDefaultOwnerId tick goes through the same QurlServiceError /
   // op-tagged transport as the rest of the registrar surface — kept off

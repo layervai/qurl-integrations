@@ -264,6 +264,7 @@ jest.mock('../src/flow-state', () => ({
 // tests/guild-webhook-link.test.js.
 jest.mock('../src/guild-webhook-link', () => ({
   linkGuildWebhookSubscription: jest.fn().mockResolvedValue({ ok: true, action: 'created' }),
+  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
 }));
 
 // ---------------------------------------------------------------------------

@@ -36,7 +36,6 @@ const REFRESH_FAIL_ESCALATE_AT = 3;
 // orphan-token-sweeper.js's pattern and so tests can import a fresh
 // copy via jest.isolateModules().
 const subscriptions = new Map();
-let primed = false;
 let consecutiveFailures = 0;
 // Discovery-only failure counter. Tracked separately from
 // consecutiveFailures so a transient qurl-service 5xx during
@@ -97,8 +96,11 @@ function getSecretForOwner(ownerId) {
   return entry ? entry.webhookSecret : null;
 }
 
+// Derived from lastScanCompletedAt — primed === "we've completed at
+// least one scan." Two redundant flags would risk drift on a future
+// refactor that touched one but not the other.
 function isPrimed() {
-  return primed;
+  return lastScanCompletedAt > 0;
 }
 
 // Synchronous local-map mutation called by setGuildApiKey-adjacent
@@ -343,8 +345,18 @@ async function scanOnce() {
       });
     }
 
-    // Only snapshot when concurrent upserts could have landed.
-    const liveSnapshot = upsertsDuringScan.size > 0 ? new Map(subscriptions) : null;
+    // Snapshot ONLY the in-flight upsert owners — scales with the
+    // few concurrent /qurl setup calls during this scan, not the
+    // whole tenant count. A future 10k-tenant cache would otherwise
+    // pay an O(tenants) clone every scan tick.
+    let liveSnapshot = null;
+    if (upsertsDuringScan.size > 0) {
+      liveSnapshot = new Map();
+      for (const ownerId of upsertsDuringScan) {
+        const entry = subscriptions.get(ownerId);
+        if (entry) liveSnapshot.set(ownerId, entry);
+      }
+    }
     subscriptions.clear();
     for (const [k, v] of next.entries()) subscriptions.set(k, v);
 
@@ -355,22 +367,20 @@ async function scanOnce() {
       // sibling row before propagateGuildWebhookSubscription
       // converged; preferring liveSnapshot closes the up-to-30s
       // window where the cache would otherwise hold a stale secret.
-      for (const ownerId of upsertsDuringScan) {
-        const liveEntry = liveSnapshot.get(ownerId);
-        if (liveEntry) subscriptions.set(ownerId, liveEntry);
+      for (const [ownerId, liveEntry] of liveSnapshot) {
+        subscriptions.set(ownerId, liveEntry);
       }
     }
 
-    // INVARIANT: primed only ever transitions false → true within a
-    // process. It never flips back (transient scan failures leave the
-    // old map in place rather than re-flagging unprimed). This is
-    // load-bearing for the receiver's two-limiter threat model: the
-    // post-primed unknown-owner path runs unbounded HMAC work only when
-    // we're certain the cache reflects the world. If you ever need to
-    // re-flag unprimed mid-flight (e.g. an explicit cache-rebuild
-    // command), add a per-IP ceiling on the unprimed path FIRST.
-    // _resetForTesting() is the only allowed back-transition.
-    primed = true;
+    // INVARIANT: isPrimed() only ever transitions false → true within
+    // a process (lastScanCompletedAt is monotonically set on success;
+    // a transient scan failure leaves the prior timestamp in place).
+    // This is load-bearing for the receiver's two-limiter threat
+    // model: the post-primed unknown-owner path runs unbounded HMAC
+    // work only when we're certain the cache reflects the world. If
+    // you ever need to re-flag unprimed mid-flight (e.g. an explicit
+    // cache-rebuild command), add a per-IP ceiling on the unprimed
+    // path FIRST. _resetForTesting() is the only allowed back-transition.
     lastScanCompletedAt = Date.now();
     return 'completed';
   } finally {
@@ -458,7 +468,6 @@ function _setLastScanCompletedAtForTesting(ts) {
 // the ddb-store.js pattern for _TABLES_FOR_TESTING.
 function _resetForTesting() {
   subscriptions.clear();
-  primed = false;
   consecutiveFailures = 0;
   discoveryConsecutiveFailures = 0;
   defaultOwnerId = null;

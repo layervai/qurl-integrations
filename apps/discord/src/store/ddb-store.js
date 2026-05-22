@@ -1904,4 +1904,10 @@ module.exports = {
   // underscore signals intent. If you find yourself depending on
   // this outside tests, add a real public API instead.
   _TABLES_FOR_TESTING: TABLES,
+  // Test-only: clear the per-row decrypt-alarm tracker so a suite
+  // that asserts the alarm-fires-on-first-failure semantic starts
+  // each test from a clean slate. Production callers MUST NOT use
+  // this — production semantics depend on the tracker persisting
+  // for the process lifetime.
+  _resetDecryptAlarmedForTesting: () => _decryptAlarmedGuilds.clear(),
 };
