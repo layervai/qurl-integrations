@@ -393,17 +393,42 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     expect(subs.isPrimed()).toBe(false);
   });
 
-  it('throws on owner-discovery fetch failure (caller increments failure counter)', async () => {
-    mockScan.mockResolvedValueOnce([]);
+  it('does NOT throw on owner-discovery fetch failure (BYOK delivery survives a transient qurl-service blip)', async () => {
+    // Decoupled from Promise.all rejection: discovery failure is
+    // caught locally, scan completes with the BYOK row, primed flips
+    // true, and BYOK lookups resolve. The default-key entry stays
+    // absent until discovery recovers.
+    mockScan.mockResolvedValueOnce([
+      { guildId: 'g_byok', webhookId: 'wh_byok', webhookSecret: 'sec_byok', webhookOwnerId: 'usr_byok' },
+    ]);
     global.fetch = jest.fn(async () => ({
       ok: false, status: 503, text: async () => '',
     }));
-    // callQurlService wraps the failure in a QurlServiceError that
-    // includes the op name in the message — assert on the 503 status
-    // appearing, not the exact text, so a future error-message
-    // rewording doesn't break the test.
-    await expect(subs.scanOnce()).rejects.toThrow(/returned 503/);
-    expect(subs.isPrimed()).toBe(false);
+    await expect(subs.scanOnce()).resolves.toBe('completed');
+    expect(subs.isPrimed()).toBe(true);
+    expect(subs.getSecretForOwner('usr_byok')).toBe('sec_byok');
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+  });
+
+  it('emits QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL audit exactly once at the escalation threshold', async () => {
+    const mockLogger = require('../src/logger');
+    mockLogger.audit.mockClear();
+    // 5 consecutive discovery failures (DDB scan succeeds throughout).
+    for (let i = 0; i < 5; i++) {
+      mockScan.mockResolvedValueOnce([]);
+      global.fetch = jest.fn(async () => ({
+        ok: false, status: 503, text: async () => '',
+      }));
+      // eslint-disable-next-line no-await-in-loop
+      await subs._refreshTickForTesting();
+    }
+    const discoveryFailCalls = mockLogger.audit.mock.calls.filter(
+      ([event]) => event === 'qurl_webhook_default_discovery_fail',
+    );
+    expect(discoveryFailCalls).toHaveLength(1);
+    expect(discoveryFailCalls[0][1]).toEqual(
+      expect.objectContaining({ consecutive_failures: 3 }),
+    );
   });
 
   // Alarm-once contract: behavioral test via the test-only

@@ -38,6 +38,12 @@ const REFRESH_FAIL_ESCALATE_AT = 3;
 const subscriptions = new Map();
 let primed = false;
 let consecutiveFailures = 0;
+// Discovery-only failure counter. Tracked separately from
+// consecutiveFailures so a transient qurl-service 5xx during
+// discoverDefaultOwnerId doesn't take down BYOK delivery (the DDB
+// rows are independent). Receiver still 401s any default-key
+// webhooks until discovery succeeds, but BYOK guilds keep flowing.
+let discoveryConsecutiveFailures = 0;
 let timer = null;
 
 // The default-key entry lives in the same map under whatever owner_id
@@ -199,8 +205,6 @@ async function scanOnce() {
     // the snapshot/restore below are load-bearing.
     upsertsDuringScan.clear();
 
-    // Parallelize the two independent network reads. Sequential they
-    // added 50-300ms per tick.
     // TODO(#486): GSI on webhook_owner_id when guild_configs row
     // count exceeds ~10k — scanAll is bounded by table size, not
     // result size. When the GSI lands, the priming path can also drop
@@ -212,11 +216,46 @@ async function scanOnce() {
     // discover: the bot's own owner_id never changes in-process (env
     // is read at boot), so once we have it AND a secret to pair with,
     // the GET is wasted load on qurl-service.
+    //
+    // Discovery is fired in parallel with the DDB scan for latency,
+    // BUT its failure is caught locally instead of via Promise.all so
+    // a transient qurl-service 5xx during boot doesn't 503 every BYOK
+    // guild for 30s. The default-key entry stays absent (next tick
+    // retries); BYOK guilds resolve from the DDB rows normally.
     const needsDefaultDiscovery = !!config.QURL_WEBHOOK_SECRET && !defaultOwnerId;
-    const [rows, discoveredOwner] = await Promise.all([
+    const discoveryPromise = needsDefaultDiscovery
+      ? discoverDefaultOwnerId().then(
+        (owner) => ({ ok: true, owner }),
+        (err) => ({ ok: false, error: err }),
+      )
+      : Promise.resolve({ ok: true, owner: defaultOwnerId });
+    const [rows, discoveryResult] = await Promise.all([
       db.scanGuildSubscriptions(),
-      needsDefaultDiscovery ? discoverDefaultOwnerId() : Promise.resolve(defaultOwnerId),
+      discoveryPromise,
     ]);
+    let discoveredOwner;
+    if (discoveryResult.ok) {
+      discoveredOwner = discoveryResult.owner;
+      // Reset on success — independent of consecutiveFailures so a
+      // recovered discovery doesn't reset the DDB-scan counter.
+      discoveryConsecutiveFailures = 0;
+    } else {
+      discoveredOwner = defaultOwnerId; // keep prior value (likely null pre-first-success)
+      discoveryConsecutiveFailures += 1;
+      const level = discoveryConsecutiveFailures >= REFRESH_FAIL_ESCALATE_AT ? 'error' : 'warn';
+      logger[level]('default-key discovery failed (BYOK path unaffected)', {
+        error: discoveryResult.error.message,
+        consecutiveFailures: discoveryConsecutiveFailures,
+      });
+      if (discoveryConsecutiveFailures === REFRESH_FAIL_ESCALATE_AT) {
+        // Alarm-once at threshold so CloudWatch metric filters fire
+        // a single page per outage burst, not on every subsequent
+        // failed tick. Reset on success above.
+        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL, {
+          consecutive_failures: discoveryConsecutiveFailures,
+        });
+      }
+    }
 
     // Tiebreaker: when sibling rows for one owner disagree on
     // (secret, webhookId) — the propagateGuildWebhookSubscription
@@ -386,6 +425,7 @@ function _resetForTesting() {
   subscriptions.clear();
   primed = false;
   consecutiveFailures = 0;
+  discoveryConsecutiveFailures = 0;
   defaultOwnerId = null;
   upsertsDuringScan.clear();
   scanInFlight = false;

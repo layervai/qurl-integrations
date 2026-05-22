@@ -441,6 +441,12 @@ const AUDIT_EVENTS = {
   // Refresh failure. After N consecutive failures the registry stays
   // unprimed (or stale) — receiver responds 503; qurl-service retries.
   QURL_WEBHOOK_CACHE_REFRESH_FAIL: 'qurl_webhook_cache_refresh_fail',
+  // Default-key discovery failed for N consecutive ticks. Fires once
+  // at the escalation threshold. BYOK delivery is unaffected — the
+  // bot's own default-key webhook deliveries 401 until discovery
+  // recovers; ops should investigate qurl-service `GET /v1/webhooks`
+  // availability for the bot's QURL_API_KEY identity.
+  QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL: 'qurl_webhook_default_discovery_fail',
   // Lifecycle. SUBSCRIPTION_DELETE_FAILED fires when DELETE returns 401
   // (key revoked) or 404 (already gone) — both are swallowed so guild
   // unlink doesn't fail user-facing on stale qurl-service state.
