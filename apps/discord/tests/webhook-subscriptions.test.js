@@ -16,6 +16,14 @@ jest.mock('../src/store', () => ({
   scanGuildSubscriptions: mockScan,
 }));
 
+jest.mock('../src/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  audit: jest.fn(),
+}));
+
 process.env.QURL_API_KEY = 'lv_test_abc';
 process.env.QURL_ENDPOINT = 'https://qurl.layerv.ai';
 process.env.QURL_WEBHOOK_SECRET = 'default-key-secret';
@@ -392,38 +400,50 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     expect(subs.isPrimed()).toBe(false);
   });
 
-  // Pin the alarm-once contract: the audit fires exactly once when
-  // consecutiveFailures crosses the escalation threshold, NOT on
-  // every subsequent failed tick. Without this guard, a sustained
-  // outage would flood the alarm channel.
-  it('emits QURL_WEBHOOK_CACHE_REFRESH_FAIL audit exactly once at the escalation threshold', async () => {
-    // The audit fires INSIDE refreshTick (which wraps scanOnce in a
-    // try/catch and tracks consecutiveFailures). We exercise
-    // refreshTick directly via start() — but start() also kicks the
-    // ticker. Easier: drive refreshTick semantics by calling scanOnce
-    // 3+ times under failure, then verify the logger.audit mock fired
-    // exactly once with the escalate-threshold event.
-    //
-    // Drive via start() which runs refreshTick immediately + sets
-    // interval. We then advance with extra start()s? No — easier to
-    // hit refreshTick directly. But it's not exported. Use the
-    // public API: scanOnce throws, count failures via N synchronous
-    // attempts.
-    //
-    // Workaround: temporarily expose by importing the module path and
-    // calling start() N times via .unref()'d intervals. Simpler still:
-    // just verify the AUDIT_EVENTS string is correct + the threshold
-    // constant, since refreshTick has trivial logic.
-    //
-    // Pin the constants by introspection so a future bump to
-    // REFRESH_FAIL_ESCALATE_AT doesn't accidentally silence the alarm.
-    const src = require('fs').readFileSync(
-      require('path').join(__dirname, '..', 'src', 'webhook-subscriptions.js'),
-      'utf8',
+  // Alarm-once contract: behavioral test via the test-only
+  // _refreshTickForTesting hook. Five consecutive failures must fire
+  // the QURL_WEBHOOK_CACHE_REFRESH_FAIL audit EXACTLY ONCE at the
+  // escalation threshold, not on every subsequent failed tick.
+  it('emits QURL_WEBHOOK_CACHE_REFRESH_FAIL audit exactly once across N consecutive failures', async () => {
+    const mockLogger = require('../src/logger');
+    mockLogger.audit.mockClear();
+    // 5 consecutive scan failures.
+    for (let i = 0; i < 5; i++) {
+      mockScan.mockRejectedValueOnce(new Error('DDB throttled'));
+      // eslint-disable-next-line no-await-in-loop
+      await subs._refreshTickForTesting();
+    }
+    const refreshFailCalls = mockLogger.audit.mock.calls.filter(
+      ([event]) => event === 'qurl_webhook_cache_refresh_fail',
     );
-    expect(src).toMatch(/REFRESH_FAIL_ESCALATE_AT\s*=\s*3/);
-    expect(src).toMatch(/consecutiveFailures\s*===\s*REFRESH_FAIL_ESCALATE_AT/);
-    expect(src).toMatch(/QURL_WEBHOOK_CACHE_REFRESH_FAIL/);
+    expect(refreshFailCalls).toHaveLength(1);
+    expect(refreshFailCalls[0][1]).toEqual(
+      expect.objectContaining({ consecutive_failures: 3 }),
+    );
+  });
+
+  it('resets failure counter + lets the next outage alarm fresh', async () => {
+    const mockLogger = require('../src/logger');
+    mockLogger.audit.mockClear();
+    // 3 fails → audit fires once.
+    for (let i = 0; i < 3; i++) {
+      mockScan.mockRejectedValueOnce(new Error('fail'));
+      // eslint-disable-next-line no-await-in-loop
+      await subs._refreshTickForTesting();
+    }
+    // Recovery: a successful scan resets consecutiveFailures.
+    mockScan.mockResolvedValueOnce([]);
+    await subs._refreshTickForTesting();
+    // 3 MORE fails → the NEXT outage alarms again.
+    for (let i = 0; i < 3; i++) {
+      mockScan.mockRejectedValueOnce(new Error('fail'));
+      // eslint-disable-next-line no-await-in-loop
+      await subs._refreshTickForTesting();
+    }
+    const refreshFailCalls = mockLogger.audit.mock.calls.filter(
+      ([event]) => event === 'qurl_webhook_cache_refresh_fail',
+    );
+    expect(refreshFailCalls).toHaveLength(2);
   });
 
   it('after recovery, a successful scan flips primed back to true', async () => {

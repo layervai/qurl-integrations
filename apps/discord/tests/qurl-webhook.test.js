@@ -79,7 +79,9 @@ jest.mock('../src/logger', () => ({
   audit: mockAudit,
 }));
 
-process.env.QURL_WEBHOOK_SECRET = 'test-qurl-secret';
+// QURL_WEBHOOK_SECRET intentionally NOT set here — the receiver no
+// longer reads it directly; secrets come from the mocked
+// webhook-subscriptions registry above.
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 process.env.AWS_REGION = 'us-east-2';
 process.env.BASE_URL = 'http://localhost:3000';
@@ -619,6 +621,23 @@ describe('POST /webhooks/qurl — body.owner_id parse failure modes', () => {
       .set('QURL-Signature', signBody(raw))
       .send(raw);
     expect(res.status).toBe(401);
+  });
+
+  // Behavioral pin for the 1mb pre-HMAC parse boundary documented in
+  // qurl-webhook.js's SECURITY comment. A >1mb body must be rejected
+  // BEFORE the route handler runs — verified by asserting
+  // recordQurlView (the inner db call) is never invoked.
+  it('rejects >1mb /webhooks bodies before the route handler runs', async () => {
+    const big = JSON.stringify({ x: 'a'.repeat(2 * 1024 * 1024) });
+    await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(big))
+      .send(big);
+    // PayloadTooLargeError gets caught by the global error handler →
+    // 500 response, but the important property is the route never saw
+    // the body.
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
   });
 
   // Pins the metric-filter contract: OWNER_ID_MISSING shares the

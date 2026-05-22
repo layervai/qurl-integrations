@@ -1570,12 +1570,16 @@ async function clearGuildWebhookSubscription(guildId) {
 // DELETE on qurl-service based on the count (don't kill sibling guilds
 // that share the same auth0 admin's API key).
 //
-// Low-cardinality table (low hundreds of guilds at scale per
-// design discussion); full scan + in-JS filter is fine here.
+// ConsistentRead because the link-time caller (propagateGuildWebhookSubscription)
+// runs IMMEDIATELY after a setGuildWebhookSubscription write — an
+// eventually-consistent scan could miss the just-written primary row
+// (or sibling rows from a concurrent link) and silently skip the
+// propagation that fixes rotate-drift. RCU cost is acceptable on a
+// low-cardinality table.
 // TODO(#486): replace scanAll with a Query on the webhook_owner_id
 // GSI when guild_configs > ~10k rows.
 async function listGuildSubscriptionsByOwner(webhookOwnerId) {
-  const rows = await scanAll(TABLES.guild_configs);
+  const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows
     .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
     .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));

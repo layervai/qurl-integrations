@@ -413,18 +413,17 @@ describe('server.js — /webhooks rawBody middleware invariant', () => {
     path.join(__dirname, '..', 'src', 'server.js'),
     'utf8',
   );
+  // Structural pin: the 1mb cap on /webhooks rawBodyJson is the pre-
+  // HMAC parse safety boundary documented in qurl-webhook.js. The
+  // behavioral counterpart (recordQurlView NOT called for a >1mb
+  // payload) lives in qurl-webhook.test.js where the store mock has
+  // the right shape; this regex pin catches whitespace-tolerant
+  // refactors that bump the limit constant.
   it('mounts rawBodyJson at /webhooks with a 1mb cap', () => {
-    // The middleware is defined as `const rawBodyJson = express.json({...})`
-    // and mounted via `app.use('/webhooks', rawBodyJson)`. Both
-    // properties are load-bearing for the pre-HMAC parse safety.
     expect(serverSource).toMatch(/rawBodyJson\s*=\s*express\.json\(\{[\s\S]*?limit:\s*['"]1mb['"][\s\S]*?\}\)/);
     expect(serverSource).toMatch(/app\.use\(\s*['"]\/webhooks['"]\s*,\s*rawBodyJson\s*\)/);
   });
-
   it('rawBodyJson populates req.rawBody (HMAC source-of-truth)', () => {
-    // verifyHmacSha256 runs against req.rawBody. If a refactor drops
-    // the verify-callback, the receiver would 503 forever (the
-    // existing rawBody-missing guard fires).
     expect(serverSource).toMatch(/verify:\s*\(\s*req\s*,\s*_?res\s*,\s*buf\s*\)\s*=>\s*\{[\s\S]*?req\.rawBody\s*=\s*buf/);
   });
 });

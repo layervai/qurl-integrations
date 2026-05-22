@@ -32,6 +32,8 @@ const db = require('../src/store');
 const config = require('../src/config');
 const logger = require('../src/logger');
 const { linkGuildWebhookSubscription } = require('../src/guild-webhook-link');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -49,13 +51,6 @@ async function main() {
   // script issues its own ScanCommand. Table name MUST come from the
   // bot's own config.DDB_TABLE_PREFIX so the script can't target a
   // different table than the running bot.
-  const {
-    DynamoDBClient,
-  } = require('@aws-sdk/client-dynamodb');
-  const {
-    DynamoDBDocumentClient,
-    ScanCommand,
-  } = require('@aws-sdk/lib-dynamodb');
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({
     region: process.env.AWS_REGION || 'us-east-2',
   }));

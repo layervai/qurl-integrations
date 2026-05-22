@@ -151,12 +151,13 @@ function removeGuild({ guildId, ownerId }) {
 // failure counter increments correctly.
 async function discoverDefaultOwnerId() {
   if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
-  // limit=10 (was limit=1): owner_id is identical across all subs
-  // this key owns, so we only need one valid row. If a future
-  // contract drift drops owner_id from the FIRST row's response,
-  // limit=1 would return null even though row 2+ would be valid;
-  // 10 is a low-cost defense.
-  const resp = await fetch(`${config.QURL_ENDPOINT}/v1/webhooks?limit=10`, {
+  // limit=100 (was limit=10): owner_id is identical across all subs
+  // this key owns, so we only need one valid row. Bumped to 100 so
+  // a contract drift that drops owner_id from rows 1..N silently
+  // doesn't fail discovery — a bot key with 50+ subs is plausible
+  // at scale; 100 stays under the typical page-size cap with no
+  // pagination needed for the read-side.
+  const resp = await fetch(`${config.QURL_ENDPOINT}/v1/webhooks?limit=100`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${config.QURL_API_KEY}` },
     signal: AbortSignal.timeout(10_000),
@@ -376,5 +377,9 @@ module.exports = {
   // refresh. Exposed because the test suite needs to drive scans
   // deterministically without waiting on real intervals.
   scanOnce,
+  // Test-only: drives the failure-counter + escalation-audit logic
+  // synchronously. Production code uses the 30s setInterval inside
+  // start() to call this.
+  _refreshTickForTesting: refreshTick,
   _resetForTesting,
 };
