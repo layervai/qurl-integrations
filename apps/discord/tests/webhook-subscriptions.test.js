@@ -350,6 +350,31 @@ describe('webhook-subscriptions registry — default-key + BYOK owner collision'
     // string 'wh_byok', NOT the DEFAULT_KEY_SENTINEL).
     expect(subs.getSecretForOwner('usr_default')).toBe('sec_shared');
   });
+
+  it('BYOK row wins over default-key when secrets DIFFER for the same owner (chosen behavior)', async () => {
+    // Future-bug scenario: qurl-service rotates the default-key secret
+    // but the BYOK row's secret stays stale (or vice versa). Today this
+    // can't happen because the BYOK row + default-key share the same
+    // qurl-service subscription on shared owner_id — but if the
+    // identity assumption is ever violated, the BYOK row is what
+    // wins, NOT the env-derived default secret. Pinning the chosen
+    // behavior here forces the next bug that breaks the identity
+    // assumption to surface as a LOUD test failure (the assumption
+    // shifted), not a silent prod 401 storm.
+    mockScan.mockResolvedValueOnce([
+      {
+        guildId: 'g_admin_byok', webhookId: 'wh_byok',
+        // Diverged secret — different from QURL_WEBHOOK_SECRET.
+        webhookSecret: 'sec_byok_only',
+        webhookOwnerId: 'usr_default',
+        updatedAt: '2026-05-21T00:00:00.000Z',
+      },
+    ]);
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+    // BYOK row wins, NOT the env QURL_WEBHOOK_SECRET ('default-key-secret').
+    expect(subs.getSecretForOwner('usr_default')).toBe('sec_byok_only');
+  });
 });
 
 describe('webhook-subscriptions registry — default-key discovery', () => {

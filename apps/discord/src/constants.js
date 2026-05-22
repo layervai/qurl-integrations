@@ -470,6 +470,12 @@ const AUDIT_EVENTS = {
   // above, so without this distinct signal an alarm can't tell them
   // apart by event-count alone.
   QURL_WEBHOOK_CACHE_MASS_DECRYPT_FAIL: 'qurl_webhook_cache_mass_decrypt_fail',
+  // Orphan webhook left on qurl-service after a 401 rollback path —
+  // the admin revoked the key on layerv.ai before our DELETE landed.
+  // NOT alarmed by default (routine on every key rotation), but
+  // metric-filter-greppable so a future orphan-subscription sweeper
+  // can list-and-diff against qurl-service's own subscription state.
+  QURL_WEBHOOK_ORPHAN_LEFT_AFTER_401: 'qurl_webhook_orphan_left_after_401',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

@@ -141,6 +141,16 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
 // upsertGuild's sync-update pattern).
 function removeGuild({ guildId, ownerId }) {
   if (!ownerId) return;
+  // Reject the default-key sentinel as a guildId — a caller-bug that
+  // passed it would .delete() the sentinel from the default entry's
+  // guildIds Set, leaving the entry alive (the ownerId !== defaultOwnerId
+  // guard below catches that) but with a confusing size-zero state.
+  // Discord guildIds are decimal-only snowflakes; the bracketed-
+  // underscore sentinel can never legitimately appear here.
+  if (guildId === DEFAULT_KEY_SENTINEL) {
+    logger.warn('removeGuild called with DEFAULT_KEY_SENTINEL as guildId — caller bug, ignoring', { ownerId });
+    return;
+  }
   const entry = subscriptions.get(ownerId);
   if (!entry) return;
   entry.guildIds.delete(guildId);

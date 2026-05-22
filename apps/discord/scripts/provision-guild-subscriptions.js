@@ -93,7 +93,16 @@ async function main() {
       console.error(`[backfill] FATAL: exceeded MAX_PAGES=${MAX_PAGES} — cursor may not be advancing`);
       process.exit(3);
     }
-    const res = await ddb.send(new ScanCommand({ TableName: TABLE, ExclusiveStartKey }));
+    // FilterExpression is server-side post-read (DDB charges RCU on
+    // unfiltered rows), so it doesn't save cost — but it does shrink
+    // client-side memory pressure and suppresses noise from rows
+    // that obviously have nothing to provision (no qurl_api_key OR
+    // already-provisioned webhook_id).
+    const res = await ddb.send(new ScanCommand({
+      TableName: TABLE,
+      ExclusiveStartKey,
+      FilterExpression: 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id)',
+    }));
     const rows = res.Items || [];
     for (const row of rows) {
       scanned += 1;

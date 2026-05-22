@@ -1664,6 +1664,13 @@ async function propagateGuildWebhookSubscription(
 // per-tick RCU cost for a property the receiver already provides.
 // `propagateGuildWebhookSubscription` is where strong consistency
 // actually pays for itself (write-then-read same flow).
+// Per-row decrypt-fail alarm-once tracker. A permanently-corrupt row
+// would otherwise emit 2880 audits/day (30s tick × 2 replicas).
+// Cleared per guildId on its next successful decrypt — so a row that
+// recovers (operator re-encrypts via /qurl setup or backfill) resets
+// and re-alarms if it breaks again.
+const _decryptAlarmedGuilds = new Set();
+
 async function scanGuildSubscriptions() {
   const rows = await scanAll(TABLES.guild_configs);
   const out = [];
@@ -1675,6 +1682,10 @@ async function scanGuildSubscriptions() {
     let webhookSecret;
     try {
       webhookSecret = decrypt(r.webhook_secret);
+      // Successful decrypt — if this row was alarmed, clear so a
+      // future re-break re-fires (we want "the row went bad again"
+      // to page, not just "the row was ever bad").
+      if (_decryptAlarmedGuilds.has(r.guild_id)) _decryptAlarmedGuilds.delete(r.guild_id);
     } catch (err) {
       // One corrupt row (key rotation gap, manual DDB tamper, partial
       // migration) must NOT abort the entire scan — the cache would
@@ -1682,12 +1693,21 @@ async function scanGuildSubscriptions() {
       // an audit so a CloudWatch metric-filter alarm can fire on
       // sustained decrypt failures (KMS key drift); backfill or
       // /qurl setup re-encrypts the row.
+      //
+      // Alarm-once per guild_id per "outage": the audit fires on the
+      // FIRST decrypt failure for this row and stays silent until a
+      // successful decrypt resets the tracker (see try-branch above).
+      // The warn-log still fires every tick so per-row breakage stays
+      // visible at log-stream granularity.
       logger.warn('scanGuildSubscriptions: decrypt failed for row, skipping', {
         guildId: r.guild_id, error: err.message,
       });
-      logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL, {
-        guild_id: r.guild_id, error_type: err.name || 'unknown',
-      });
+      if (!_decryptAlarmedGuilds.has(r.guild_id)) {
+        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL, {
+          guild_id: r.guild_id, error_type: err.name || 'unknown',
+        });
+        _decryptAlarmedGuilds.add(r.guild_id);
+      }
       decryptFailCount += 1;
       continue;
     }

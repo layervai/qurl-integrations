@@ -177,6 +177,15 @@ router.post('/qurl', async (req, res) => {
   //     (operational drift OR attacker probing with garbage owner_id;
   //     looser threshold so a real registry-rebuild burst doesn't
   //     throttle legitimate traffic on the same source IP).
+  //
+  // SIG_HEADER_MISSING / SIG_HEADER_MALFORMED route to badSigLimiter
+  // (30/min) on purpose: a missing/malformed signature is
+  // indistinguishable from attacker probing — a future qurl-service
+  // contract drift that dropped the header would throttle legitimate
+  // traffic, BUT loosening this would also weaken the brute-force
+  // ceiling against the auth0-key-rotation attack model. Trade-off
+  // chosen deliberately; do not loosen without re-deriving the
+  // threat model.
   if (result !== VERIFY_RESULTS.OK) {
     const isHmacFailure = result === VERIFY_RESULTS.SIG_INVALID
       || result === VERIFY_RESULTS.SIG_HEADER_MISSING

@@ -49,11 +49,13 @@ function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
       if (status === 401) {
         // Routine re-key — admin revoked the key on layerv.ai before
         // our DELETE landed. Not alarm-worthy, but an orphan webhook
-        // is now stranded on qurl-service's account. Log at info so a
-        // per-guild history grep can still surface the orphan (without
-        // page-loading the audit channel on every key rotation).
-        logger.info('Orphan webhook subscription left on qurl-service (401 = key revoked)', {
-          webhook_id: webhookId, guild_id: guildId,
+        // is now stranded on qurl-service's account. Distinct audit
+        // event (NOT QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED) so a
+        // future orphan-subscription sweeper has a clean metric-
+        // filter grep target without needing a qurl-service-side
+        // list-and-diff. CloudWatch alarms should EXCLUDE this event.
+        logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_ORPHAN_LEFT_AFTER_401, {
+          guild_id: guildId, webhook_id: webhookId,
         });
         return;
       }
@@ -83,6 +85,16 @@ function auditLinkFailure(guildId, reason, extra) {
 
 // Provision (idempotent) a per-guild webhook subscription.
 // `action` mirrors ensureWebhookSubscription: 'created' | 'rotated' | 'reused'.
+//
+// `descriptionContext` is interpolated into a qurl-service UI string
+// ("Discord bot view counter (guild=<id>, <descriptionContext>)") and
+// MUST stay internally-controlled. Today's callers pass
+// 'via=oauth, configuredBy=<discord_user_id>',
+// 'via=paste, configuredBy=<discord_user_id>',
+// 'via=backfill-script' — all from internal flow tags. A future
+// caller that ever wants to put user-controlled text here should
+// instead sanitize to `[A-Za-z0-9=,_-]` (Discord user IDs are
+// decimal snowflakes; flow-tag literals are author-controlled).
 async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContext }) {
   if (!guildId || !apiKey) {
     auditLinkFailure(guildId || '<missing>', LINK_RESULTS.MISSING_ARGS);
