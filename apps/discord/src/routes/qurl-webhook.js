@@ -116,6 +116,16 @@ function verifyAndResolve(req) {
   const secret = subs.getSecretForOwner(ownerId);
   if (!secret) {
     if (!subs.isPrimed()) return { result: VERIFY_RESULTS.CACHE_UNPRIMED, ownerId };
+    // Sibling-replica eventual-consistency lag: a freshly-linked
+    // guild's row is in DDB but THIS replica's last scan hasn't
+    // picked it up yet (linking-replica's upsertGuild is local-only;
+    // siblings catch up on the 30s tick). Treat as transient (503,
+    // retriable) until enough time has passed for at least two scan
+    // cycles to have seen the new owner — after that, 401 is the
+    // truthful response.
+    if (subs.isWithinSiblingLagWindow()) {
+      return { result: VERIFY_RESULTS.CACHE_UNPRIMED, ownerId };
+    }
     return { result: VERIFY_RESULTS.OWNER_UNKNOWN, ownerId };
   }
 

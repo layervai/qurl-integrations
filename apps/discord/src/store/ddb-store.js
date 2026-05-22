@@ -661,11 +661,21 @@ async function queryAll(input) {
   return items;
 }
 
-async function scanAll(TableName) {
+async function scanAll(TableName, { consistentRead = false } = {}) {
   const items = [];
   let ExclusiveStartKey;
   do {
-    const res = await ddb.send(new ScanCommand({ TableName, ExclusiveStartKey }));
+    const res = await ddb.send(new ScanCommand({
+      TableName,
+      ExclusiveStartKey,
+      // ConsistentRead doubles RCU cost; the priming/refresh path for
+      // the webhook subscription registry uses it because a recent
+      // setGuildWebhookSubscription on a sibling replica MUST be
+      // visible to this replica's next scan within the
+      // SIBLING_LAG_GRACE_MS window. All other scanAll callers use
+      // the default eventually-consistent path.
+      ConsistentRead: consistentRead || undefined,
+    }));
     items.push(...(res.Items || []));
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
@@ -1630,8 +1640,11 @@ async function propagateGuildWebhookSubscription(
 // Returns every guild_configs row with a provisioned webhook
 // subscription, secret decrypted. Forwards `updatedAt` so the
 // in-process cache can tiebreak sibling rows during rotation drift.
+// Uses ConsistentRead so a recent setGuildWebhookSubscription on a
+// sibling replica IS visible to this replica's next scan — closes
+// the 401-on-fresh-link race within SIBLING_LAG_GRACE_MS.
 async function scanGuildSubscriptions() {
-  const rows = await scanAll(TABLES.guild_configs);
+  const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   const out = [];
   for (const r of rows) {
     if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;

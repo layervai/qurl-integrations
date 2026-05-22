@@ -61,6 +61,19 @@ const upsertsDuringScan = new Set();
 // 503-unprimed path covers any extra delay.
 let scanInFlight = false;
 
+// Timestamp (ms) of the most recent successful scan. The receiver
+// reads this to decide whether an OWNER_UNKNOWN looks like "sibling
+// replica caught a fresh-link gap" (recent enough to be a still-
+// converging eventual-consistency state — return 503 so qurl-service
+// retries) or "owner is genuinely absent" (we've had time to refresh
+// at least twice — return 401).
+let lastScanCompletedAt = 0;
+// Tolerance past one full refresh interval. Accounts for clock drift,
+// DDB cross-AZ replication delay, and scan execution time. After
+// REFRESH_INTERVAL_MS + grace, an OWNER_UNKNOWN is treated as a real
+// 401 — we've had two scan chances to see the owner.
+const SIBLING_LAG_GRACE_MS = 5_000;
+
 // Sentinel for the default-key entry's webhookId and guildIds. A
 // unique Symbol can never collide with a real qurl-service webhook_id
 // (those are opaque strings). Receiver only reads webhookSecret from
@@ -268,10 +281,22 @@ async function scanOnce() {
     }
 
     primed = true;
+    lastScanCompletedAt = Date.now();
     return 'completed';
   } finally {
     scanInFlight = false;
   }
+}
+
+// Receiver helper: tells the receiver whether an OWNER_UNKNOWN is
+// likely a sibling-replica eventual-consistency lag (just-linked
+// guild not yet visible to this replica's scan) vs. a genuinely
+// absent owner. Used to upgrade 401 → 503 inside the lag window so
+// qurl-service's 5x retry catches the next-tick refresh.
+function isWithinSiblingLagWindow() {
+  if (lastScanCompletedAt === 0) return true; // never completed
+  const elapsed = Date.now() - lastScanCompletedAt;
+  return elapsed < (REFRESH_INTERVAL_MS + SIBLING_LAG_GRACE_MS);
 }
 
 async function refreshTick() {
@@ -332,6 +357,7 @@ function _resetForTesting() {
   defaultOwnerId = null;
   upsertsDuringScan.clear();
   scanInFlight = false;
+  lastScanCompletedAt = 0;
   if (timer) {
     clearInterval(timer);
     timer = null;
@@ -343,6 +369,7 @@ module.exports = {
   stop,
   getSecretForOwner,
   isPrimed,
+  isWithinSiblingLagWindow,
   upsertGuild,
   removeGuild,
   // Test-only: production callers should let the 30s ticker drive

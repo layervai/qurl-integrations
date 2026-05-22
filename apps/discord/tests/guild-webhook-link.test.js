@@ -181,4 +181,40 @@ describe('linkGuildWebhookSubscription — bestEffortDeleteSubscription failure'
       expect.objectContaining({ guild_id: 'g_rollback_fail', path: 'rollback' }),
     );
   });
+
+  // 404 is swallowed inside the registrar (concurrent-delete race).
+  // The .catch in bestEffortDeleteSubscription never fires → no
+  // audit. Pins the contract so future refactor doesn't widen the
+  // alarm-noise surface.
+  it('does NOT emit DELETE_FAILED audit when DELETE 404s (registrar swallows)', async () => {
+    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
+    // Simulate registrar's swallow: deleteSubscription resolves silently.
+    mockDeleteSubscription.mockResolvedValueOnce(undefined);
+    await linkGuildWebhookSubscription({
+      guildId: 'g_404', apiKey: 'lv_x',
+    });
+    await new Promise(setImmediate);
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
+      expect.any(Object),
+    );
+  });
+
+  // 401 is the routine re-key signal (admin revoked the key on
+  // layerv.ai before our DELETE landed). Log only — auditing every
+  // re-key would flood the alarm channel.
+  it('does NOT emit DELETE_FAILED audit when DELETE 401s (routine re-key)', async () => {
+    mockSetGuildWebhookSubscription.mockRejectedValueOnce(new Error('DDB throttled'));
+    const dErr = new Error('qurl-service 401');
+    dErr.status = 401;
+    mockDeleteSubscription.mockRejectedValueOnce(dErr);
+    await linkGuildWebhookSubscription({
+      guildId: 'g_401', apiKey: 'lv_revoked',
+    });
+    await new Promise(setImmediate);
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED,
+      expect.any(Object),
+    );
+  });
 });

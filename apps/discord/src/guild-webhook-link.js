@@ -32,16 +32,23 @@ function bridgeUrl() {
 // rollback paths. Intentionally not awaited: the orphan-on-
 // qurl-service is itself ephemeral (it 401s every delivery on a
 // stale key) and the audit event is the operator-visible signal.
-// A leaked orphan converges via the future orphan-sweeper noted
-// in PR #485's Out-of-scope section.
+//
+// Audit-noise discrimination: 404 is swallowed inside the registrar
+// (concurrent-delete race; the goal state is already met). 401 is
+// the routine re-key signal — the admin revoked the key on
+// layerv.ai before our DELETE landed — so we log but DON'T audit
+// (would flood the alarm channel on every key rotation). 5xx and
+// network errors DO audit so an orphan-subscription leak is visible.
 function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
   deleteSubscription({ apiEndpoint: config.QURL_ENDPOINT, apiKey, webhookId })
     .catch((dErr) => {
+      const status = dErr?.status;
       logger.warn('Best-effort orphan-subscription delete threw', {
-        error: dErr?.message, webhookId, guildId,
+        error: dErr?.message, status, webhookId, guildId,
       });
+      if (status === 401) return; // routine re-key flow; not alarm-worthy
       logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED, {
-        guild_id: guildId, status: dErr?.status || null, path: 'rollback',
+        guild_id: guildId, status: status || null, path: 'rollback',
       });
     });
 }

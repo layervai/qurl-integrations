@@ -53,10 +53,12 @@ jest.mock('../src/view-update-publisher', () => ({
 // secret signBody() uses; `mockPrimed` lets individual tests opt into
 // the 503-unprimed and 401-unknown-owner paths.
 let mockPrimed = true;
+let mockWithinLag = false;
 const mockOwnerSecrets = new Map();
 mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
 jest.mock('../src/webhook-subscriptions', () => ({
   isPrimed: () => mockPrimed,
+  isWithinSiblingLagWindow: () => mockWithinLag,
   getSecretForOwner: (ownerId) => mockOwnerSecrets.get(ownerId) || null,
   start: jest.fn(),
   stop: jest.fn(),
@@ -104,8 +106,10 @@ beforeEach(() => {
   mockViewUpdatePublish.mockReset();
   // Reset cache-state mocks to "primed + the usr_test owner is known"
   // so each test starts from a predictable baseline. Tests that need
-  // the unprimed / unknown-owner branches flip these explicitly.
+  // the unprimed / unknown-owner / sibling-lag branches flip these
+  // explicitly.
   mockPrimed = true;
+  mockWithinLag = false;
   mockOwnerSecrets.clear();
   mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
 });
@@ -180,12 +184,14 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
     expect(res.status).toBe(503);
   });
 
-  // After the registry is primed, an unknown owner is the real signal
-  // — return 401 (truthful response). This is what an attacker probing
-  // the endpoint with a fabricated owner_id would see.
-  it('returns 401 when registry is primed but owner_id is unknown', async () => {
+  // After the registry is primed AND outside the sibling-replica lag
+  // window, an unknown owner is the real signal — return 401
+  // (truthful response). This is what an attacker probing the
+  // endpoint with a fabricated owner_id would see.
+  it('returns 401 when registry is primed AND outside lag window AND owner_id is unknown', async () => {
     mockPrimed = true;
-    mockOwnerSecrets.clear(); // owner_id present in body but no entry registered
+    mockWithinLag = false;
+    mockOwnerSecrets.clear();
     const raw = JSON.stringify(VALID_PAYLOAD);
     const res = await request(app)
       .post('/webhooks/qurl')
@@ -193,6 +199,23 @@ describe('POST /webhooks/qurl — subscription-registry primed-vs-unprimed seman
       .set('QURL-Signature', signBody(raw))
       .send(raw);
     expect(res.status).toBe(401);
+  });
+
+  // Sibling-replica eventual-consistency lag: a freshly-linked
+  // guild's row is in DDB but THIS replica's scan hasn't picked it
+  // up yet. Return 503 so qurl-service retries — the next tick on
+  // this replica will see the row and the retry succeeds.
+  it('returns 503 when registry is primed but owner_id is unknown AND within lag window', async () => {
+    mockPrimed = true;
+    mockWithinLag = true;
+    mockOwnerSecrets.clear();
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(503);
   });
 });
 
