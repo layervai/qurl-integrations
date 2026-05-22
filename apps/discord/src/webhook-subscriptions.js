@@ -197,12 +197,19 @@ async function scanOnce() {
   }
   scanInFlight = true;
   try {
-    // The clear-here is what makes upsertsDuringScan an *in-this-scan*
-    // tracker — without it, leftover entries from the previous scan
-    // would be re-applied as if they were concurrent, defeating the
-    // mid-scan-snapshot logic below. Between scans the set is
-    // harmless noise; only entries added between this .clear() and
-    // the snapshot/restore below are load-bearing.
+    // INVARIANT: only upserts that land between this .clear() and the
+    // snapshot read below count as "concurrent with this scan." The
+    // clear MUST happen before any await — JS's run-to-completion
+    // semantics mean every upsertGuild call up to here landed in this
+    // synchronous block (and is now zeroed); calls after the next
+    // await yield are what we need to track. A future async-ifying
+    // refactor that introduced an await between .clear() and the
+    // first network read would defeat this — the gap could swallow
+    // an upsertGuild that ran during the await, leaving its row in
+    // the cleared set but not re-applied via the liveSnapshot path.
+    // Between scans the set accumulates harmless noise (all entries
+    // are post-prior-scan synchronous upserts); the .clear is what
+    // re-zeros the in-scan tracker.
     upsertsDuringScan.clear();
 
     // TODO(#486): GSI on webhook_owner_id when guild_configs row

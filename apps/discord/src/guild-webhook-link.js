@@ -46,7 +46,17 @@ function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
       logger.warn('Best-effort orphan-subscription delete threw', {
         error: dErr?.message, status, webhookId, guildId,
       });
-      if (status === 401) return; // routine re-key flow; not alarm-worthy
+      if (status === 401) {
+        // Routine re-key — admin revoked the key on layerv.ai before
+        // our DELETE landed. Not alarm-worthy, but an orphan webhook
+        // is now stranded on qurl-service's account. Log at info so a
+        // per-guild history grep can still surface the orphan (without
+        // page-loading the audit channel on every key rotation).
+        logger.info('Orphan webhook subscription left on qurl-service (401 = key revoked)', {
+          webhook_id: webhookId, guild_id: guildId,
+        });
+        return;
+      }
       logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED, {
         guild_id: guildId, status: status || null, path: 'rollback',
       });

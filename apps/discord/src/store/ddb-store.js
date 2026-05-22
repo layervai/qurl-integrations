@@ -1696,6 +1696,11 @@ async function scanGuildSubscriptions() {
   // gives ops a metric filter that means "KMS-wide outage" vs "one bad
   // row." Skip when 0 rows are provisioned — division-by-zero guard
   // and a no-op the alarm doesn't need to see.
+  // TODO: re-tune the 3-row floor at ≥20 BYOK guilds — at higher cardinality,
+  //   ">50% of ≥3" is too sensitive (it would fire on a 5-of-9 partial
+  //   tenant-key tier outage that's a real-but-not-mass event); switch to a
+  //   percentile band + absolute floor (e.g. >50% AND ≥5) or a separate
+  //   "tier-scoped" decrypt audit.
   if (provisionedCount >= 3 && decryptFailCount * 2 > provisionedCount) {
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MASS_DECRYPT_FAIL, {
       failed: decryptFailCount, provisioned: provisionedCount,

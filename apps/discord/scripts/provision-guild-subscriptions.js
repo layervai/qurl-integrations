@@ -68,13 +68,15 @@ async function main() {
   let failedDecrypt = 0;
   let failedLink = 0;
   let ExclusiveStartKey;
-  // Anti-runaway cap. Mirrors the 50-page guard in
-  // ensureWebhookSubscription's findExistingSubscriptions. At DDB's
-  // default 1MB page size, 50 pages caps the worst-case scan at
-  // ~50MB of guild_configs rows (far beyond plausible bot scale).
-  // A future bug causing the cursor to not advance would otherwise
-  // silently spin forever.
-  const MAX_PAGES = 50;
+  // Anti-runaway cap. At DDB's default 1MB page size, 1000 pages
+  // caps the worst-case scan at ~1GB of guild_configs rows — well
+  // past plausible bot scale even after organic growth, but bounded
+  // enough that a non-advancing cursor still fails closed rather
+  // than spin forever. If a future operator hits the cap, recovery
+  // is: (1) confirm the cursor IS advancing (LastEvaluatedKey
+  // changes between pages); (2) raise this cap or chunk the run by
+  // pre-filtering rows to those with non-null qurl_api_key.
+  const MAX_PAGES = 1000;
   let pageCount = 0;
 
   do {
