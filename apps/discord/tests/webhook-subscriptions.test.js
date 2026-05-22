@@ -39,11 +39,13 @@ beforeEach(() => {
   subs._resetForTesting();
   mockScan.mockReset();
   // Default fetch mock returns the default-key owner_id discovery
-  // shape so the refresh tick can fold it in.
-  global.fetch = jest.fn(async () => ({
-    ok: true,
-    json: async () => ({ data: [{ owner_id: 'usr_default', webhook_id: 'wh_default' }] }),
-  }));
+  // shape so the refresh tick can fold it in. text() is required
+  // because discoverDefaultOwnerId goes through callQurlService,
+  // which reads body via text() then JSON.parses.
+  global.fetch = jest.fn(async () => {
+    const body = { data: [{ owner_id: 'usr_default', webhook_id: 'wh_default' }] };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  });
 });
 
 afterAll(() => {
@@ -364,8 +366,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       { guildId: 'g1', webhookId: 'wh1', webhookSecret: 'sec1', webhookOwnerId: 'usr_byok' },
     ]);
     global.fetch = jest.fn(async () => ({
-      ok: true,
-      json: async () => ({ data: [] }),
+      ok: true, status: 200, text: async () => JSON.stringify({ data: [] }),
     }));
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
@@ -378,8 +379,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
   it('still primes the cache when GET response data field is missing', async () => {
     mockScan.mockResolvedValueOnce([]);
     global.fetch = jest.fn(async () => ({
-      ok: true,
-      json: async () => ({}),
+      ok: true, status: 200, text: async () => JSON.stringify({}),
     }));
     await subs.scanOnce();
     expect(subs.isPrimed()).toBe(true);
@@ -395,8 +395,14 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
 
   it('throws on owner-discovery fetch failure (caller increments failure counter)', async () => {
     mockScan.mockResolvedValueOnce([]);
-    global.fetch = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
-    await expect(subs.scanOnce()).rejects.toThrow(/GET \/v1\/webhooks returned 503/);
+    global.fetch = jest.fn(async () => ({
+      ok: false, status: 503, text: async () => '',
+    }));
+    // callQurlService wraps the failure in a QurlServiceError that
+    // includes the op name in the message — assert on the 503 status
+    // appearing, not the exact text, so a future error-message
+    // rewording doesn't break the test.
+    await expect(subs.scanOnce()).rejects.toThrow(/returned 503/);
     expect(subs.isPrimed()).toBe(false);
   });
 

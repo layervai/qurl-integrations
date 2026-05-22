@@ -1650,8 +1650,11 @@ async function propagateGuildWebhookSubscription(
 async function scanGuildSubscriptions() {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   const out = [];
+  let provisionedCount = 0;
+  let decryptFailCount = 0;
   for (const r of rows) {
     if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;
+    provisionedCount += 1;
     let webhookSecret;
     try {
       webhookSecret = decrypt(r.webhook_secret);
@@ -1668,6 +1671,7 @@ async function scanGuildSubscriptions() {
       logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL, {
         guild_id: r.guild_id, error_type: err.name || 'unknown',
       });
+      decryptFailCount += 1;
       continue;
     }
     out.push({
@@ -1680,6 +1684,18 @@ async function scanGuildSubscriptions() {
       // than any timestamped row" so a stale legacy row never beats
       // a freshly-written one in the tiebreak.
       updatedAt: r.updated_at,
+    });
+  }
+  // Escalate when more than half of provisioned rows failed decrypt AND
+  // we saw at least 3 (avoids alarm spam on a 1-row sandbox table that
+  // tripped a single transient decrypt error). The per-row audit fires
+  // identically whether 1 row or all rows fail; this distinct event
+  // gives ops a metric filter that means "KMS-wide outage" vs "one bad
+  // row." Skip when 0 rows are provisioned — division-by-zero guard
+  // and a no-op the alarm doesn't need to see.
+  if (provisionedCount >= 3 && decryptFailCount * 2 > provisionedCount) {
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_CACHE_MASS_DECRYPT_FAIL, {
+      failed: decryptFailCount, provisioned: provisionedCount,
     });
   }
   return out;

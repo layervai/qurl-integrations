@@ -276,10 +276,15 @@ router.post('/qurl', async (req, res) => {
     // await: the HTTP response must come back to qurl-service
     // promptly so it doesn't retry on its own.
     if (dbResult === 'recorded') {
-      viewUpdatePublisher.publish({
+      // Trailing .catch pins the fire-and-forget contract: if a future
+      // refactor makes publish() async-throwing, this prevents an
+      // UnhandledPromiseRejection from crashing the worker.
+      Promise.resolve(viewUpdatePublisher.publish({
         qurlId: data.qurl_id,
         accessCount,
         eventId,
+      })).catch((err) => {
+        logger.error('viewUpdatePublisher.publish threw', { error: err?.message, qurl_id: data.qurl_id });
       });
     }
     return res.status(200).json({ status: dbResult });

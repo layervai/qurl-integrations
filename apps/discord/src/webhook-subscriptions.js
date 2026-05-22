@@ -24,6 +24,7 @@ const db = require('./store');
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
+const { callQurlService } = require('./qurl-webhook-registrar');
 
 const REFRESH_INTERVAL_MS = 30_000;
 // After this many consecutive refresh failures we escalate via audit
@@ -157,15 +158,16 @@ async function discoverDefaultOwnerId() {
   // doesn't fail discovery — a bot key with 50+ subs is plausible
   // at scale; 100 stays under the typical page-size cap with no
   // pagination needed for the read-side.
-  const resp = await fetch(`${config.QURL_ENDPOINT}/v1/webhooks?limit=100`, {
+  // Go through callQurlService for consistency with the rest of the
+  // registrar surface — same QurlServiceError shape, same op-tagged
+  // network-error handling, same 10s timeout default. The receiver
+  // shouldn't grow a second bespoke fetch path.
+  const body = await callQurlService({
     method: 'GET',
-    headers: { Authorization: `Bearer ${config.QURL_API_KEY}` },
-    signal: AbortSignal.timeout(10_000),
+    path: '/v1/webhooks?limit=100',
+    apiEndpoint: config.QURL_ENDPOINT,
+    apiKey: config.QURL_API_KEY,
   });
-  if (!resp.ok) {
-    throw new Error(`discoverDefaultOwnerId: GET /v1/webhooks returned ${resp.status}`);
-  }
-  const body = await resp.json();
   const subs = Array.isArray(body?.data) ? body.data : [];
   for (const s of subs) {
     if (typeof s?.owner_id === 'string' && s.owner_id.length > 0) return s.owner_id;
@@ -281,6 +283,15 @@ async function scanOnce() {
       }
     }
 
+    // INVARIANT: primed only ever transitions false → true within a
+    // process. It never flips back (transient scan failures leave the
+    // old map in place rather than re-flagging unprimed). This is
+    // load-bearing for the receiver's two-limiter threat model: the
+    // post-primed unknown-owner path runs unbounded HMAC work only when
+    // we're certain the cache reflects the world. If you ever need to
+    // re-flag unprimed mid-flight (e.g. an explicit cache-rebuild
+    // command), add a per-IP ceiling on the unprimed path FIRST.
+    // _resetForTesting() is the only allowed back-transition.
     primed = true;
     lastScanCompletedAt = Date.now();
     return 'completed';

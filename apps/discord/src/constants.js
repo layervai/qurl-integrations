@@ -458,6 +458,12 @@ const AUDIT_EVENTS = {
   // tamper — a guild's secret is unrecoverable from the cache until
   // re-encrypted via backfill or /qurl setup.
   QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL: 'qurl_webhook_cache_row_decrypt_fail',
+  // Mass-decrypt-fail escalation. Fires once per scan when >50% of
+  // provisioned rows fail decrypt (min 3 rows). Distinguishes a KMS-
+  // wide event from a single bad row — both emit the per-row event
+  // above, so without this distinct signal an alarm can't tell them
+  // apart by event-count alone.
+  QURL_WEBHOOK_CACHE_MASS_DECRYPT_FAIL: 'qurl_webhook_cache_mass_decrypt_fail',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
