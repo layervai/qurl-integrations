@@ -57,8 +57,15 @@ function bestEffortDeleteSubscription({ apiKey, webhookId, guildId }) {
         });
         return;
       }
+      // Audit any non-401 failure path INCLUDING network errors that
+      // surface as `status === undefined` (DNS, TLS, AbortError on
+      // timeout). Those previously fell through without an audit,
+      // hiding stranded orphans behind a single warn log.
       logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED, {
-        guild_id: guildId, status: status || null, path: 'rollback',
+        guild_id: guildId,
+        status: status || null,
+        error_type: dErr?.name || 'unknown',
+        path: 'rollback',
       });
     });
 }
@@ -128,6 +135,23 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
   }
 
+  // Seed the in-memory cache BEFORE propagation. Propagation runs a
+  // full table scan + N parallel sibling updates; a webhook that lands
+  // on this replica during that window would otherwise 503/401 until
+  // the next 30s tick. Propagation is best-effort by design — the
+  // registering replica's correctness shouldn't be gated on it.
+  // upsertGuild validates input types; if a future caller-bug feeds
+  // in an unexpected shape that the upstream guards missed, we still
+  // want the success audit to fire — DDB is authoritative, so a
+  // failed in-memory upsert is correctable on the next 30s tick.
+  try {
+    subs.upsertGuild({ guildId, ownerId: webhookOwnerId, webhookId, webhookSecret: secret });
+  } catch (err) {
+    logger.warn('subs.upsertGuild rejected (cache will reconcile on next scan)', {
+      error: err?.message, guildId,
+    });
+  }
+
   // Sibling rows under the same owner may hold a pre-rotate secret.
   // Best-effort propagation; scanOnce's updatedAt tiebreaker still
   // picks the freshly-written primary if this fails. Pass
@@ -159,17 +183,6 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     });
   }
 
-  // upsertGuild validates input types; if a future caller-bug feeds
-  // in an unexpected shape that the upstream guards missed, we still
-  // want the success audit to fire — DDB is authoritative, so a
-  // failed in-memory upsert is correctable on the next 30s tick.
-  try {
-    subs.upsertGuild({ guildId, ownerId: webhookOwnerId, webhookId, webhookSecret: secret });
-  } catch (err) {
-    logger.warn('subs.upsertGuild rejected (cache will reconcile on next scan)', {
-      error: err?.message, guildId,
-    });
-  }
   logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
     guild_id: guildId, action,
   });

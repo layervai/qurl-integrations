@@ -232,10 +232,10 @@ async function scanOnce() {
     const needsDefaultDiscovery = !!config.QURL_WEBHOOK_SECRET && !defaultOwnerId;
     const discoveryPromise = needsDefaultDiscovery
       ? discoverDefaultOwnerId().then(
-        (owner) => ({ ok: true, owner }),
-        (err) => ({ ok: false, error: err }),
+        (owner) => ({ ok: true, owner, fired: true }),
+        (err) => ({ ok: false, error: err, fired: true }),
       )
-      : Promise.resolve({ ok: true, owner: defaultOwnerId });
+      : Promise.resolve({ ok: true, owner: defaultOwnerId, fired: false });
     const [rows, discoveryResult] = await Promise.all([
       db.scanGuildSubscriptions(),
       discoveryPromise,
@@ -243,9 +243,14 @@ async function scanOnce() {
     let discoveredOwner;
     if (discoveryResult.ok) {
       discoveredOwner = discoveryResult.owner;
-      // Reset on success — independent of consecutiveFailures so a
-      // recovered discovery doesn't reset the DDB-scan counter.
-      discoveryConsecutiveFailures = 0;
+      // Only reset the failure counter when a discovery attempt
+      // actually fired AND succeeded. A no-op tick (defaultOwnerId
+      // already cached) must NOT reset — otherwise a future hot-
+      // reload of QURL_API_KEY that invalidates defaultOwnerId would
+      // lose any prior-discovery-failure escalation on the next no-op
+      // tick. Currently no such hot-reload path exists, but the
+      // semantic should match the variable's name.
+      if (discoveryResult.fired) discoveryConsecutiveFailures = 0;
     } else {
       discoveredOwner = defaultOwnerId; // keep prior value (likely null pre-first-success)
       discoveryConsecutiveFailures += 1;

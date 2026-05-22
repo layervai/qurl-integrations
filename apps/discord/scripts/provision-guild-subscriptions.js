@@ -147,9 +147,16 @@ async function main() {
   }
   // Always print failed counters even in dry-run — decrypt errors
   // increment failedDecrypt in either mode, and a silent exit 2
-  // would let an operator miss them.
+  // would let an operator miss them. Exit codes:
+  //   0  clean — no failures (dry-run or real)
+  //   2  one or more rows failed (intentional in dry-run too: it
+  //      surfaces KMS drift before an operator commits to a real run)
+  //   3  MAX_PAGES hit — cursor likely not advancing
   console.log(`FailedDecrypt: ${failedDecrypt}`);
   console.log(`FailedLink:    ${failedLink}`);
+  if (DRY_RUN && failedTotal > 0) {
+    console.log('NOTE: dry-run exit 2 is intentional — failures above must be triaged before a real run');
+  }
   process.exit(failedTotal > 0 ? 2 : 0);
 }
 

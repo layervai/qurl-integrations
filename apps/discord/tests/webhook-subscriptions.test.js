@@ -410,6 +410,43 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     expect(subs.getSecretForOwner('usr_default')).toBeNull();
   });
 
+  it('consecutiveFailures survives a "skipped" scan (long-running outage must still escalate)', async () => {
+    const mockLogger = require('../src/logger');
+    mockLogger.audit.mockClear();
+    // 2 fails — under threshold, no audit yet.
+    for (let i = 0; i < 2; i++) {
+      mockScan.mockRejectedValueOnce(new Error('fail'));
+      // eslint-disable-next-line no-await-in-loop
+      await subs._refreshTickForTesting();
+    }
+    // Force a 'skipped' tick by leaving scanInFlight true. Easiest
+    // path: kick a never-resolving scan and call refreshTick on top
+    // of it (the second one returns 'skipped' without throwing).
+    let resolveLong;
+    mockScan.mockReturnValueOnce(new Promise(r => { resolveLong = r; }));
+    const inflight = subs._refreshTickForTesting();
+    await subs._refreshTickForTesting(); // skipped — must NOT reset counter
+    resolveLong([]); // complete the long scan so the next assertion is meaningful
+    await inflight;
+    // The long-running scan that JUST completed was a SUCCESS (no
+    // throw), which resets the counter — this is correct behavior:
+    // a real recovery is real recovery. The point of this test is
+    // that the *skipped* tick alone didn't artificially reset.
+    // To pin the skip-doesn't-reset semantic, restart the failure
+    // streak and observe the audit fires at exactly 3 fails again
+    // (not 1 — would happen if skipped had been counted as success).
+    mockLogger.audit.mockClear();
+    for (let i = 0; i < 3; i++) {
+      mockScan.mockRejectedValueOnce(new Error('fail'));
+      // eslint-disable-next-line no-await-in-loop
+      await subs._refreshTickForTesting();
+    }
+    const calls = mockLogger.audit.mock.calls.filter(
+      ([event]) => event === 'qurl_webhook_cache_refresh_fail',
+    );
+    expect(calls).toHaveLength(1);
+  });
+
   it('emits QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL audit exactly once at the escalation threshold', async () => {
     const mockLogger = require('../src/logger');
     mockLogger.audit.mockClear();

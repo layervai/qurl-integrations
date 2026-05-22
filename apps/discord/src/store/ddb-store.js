@@ -1647,11 +1647,17 @@ async function propagateGuildWebhookSubscription(
 // Returns every guild_configs row with a provisioned webhook
 // subscription, secret decrypted. Forwards `updatedAt` so the
 // in-process cache can tiebreak sibling rows during rotation drift.
-// Uses ConsistentRead so a recent setGuildWebhookSubscription on a
-// sibling replica IS visible to this replica's next scan — closes
-// the 401-on-fresh-link race within SIBLING_LAG_GRACE_MS.
+//
+// Eventually-consistent on purpose: the receiver's
+// `SIBLING_LAG_GRACE_MS` window upgrades any OWNER_UNKNOWN within
+// REFRESH_INTERVAL_MS + grace to 503-retriable, so a sibling replica
+// that hasn't seen DDB's replicated write yet does NOT 401 — the
+// next 30s tick catches it. Strong consistency would double the
+// per-tick RCU cost for a property the receiver already provides.
+// `propagateGuildWebhookSubscription` is where strong consistency
+// actually pays for itself (write-then-read same flow).
 async function scanGuildSubscriptions() {
-  const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
+  const rows = await scanAll(TABLES.guild_configs);
   const out = [];
   let provisionedCount = 0;
   let decryptFailCount = 0;
