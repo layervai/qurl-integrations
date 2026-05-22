@@ -629,14 +629,18 @@ describe('POST /webhooks/qurl — body.owner_id parse failure modes', () => {
   // recordQurlView (the inner db call) is never invoked.
   it('rejects >1mb /webhooks bodies before the route handler runs', async () => {
     const big = JSON.stringify({ x: 'a'.repeat(2 * 1024 * 1024) });
-    await request(app)
+    const res = await request(app)
       .post('/webhooks/qurl')
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', signBody(big))
       .send(big);
-    // PayloadTooLargeError gets caught by the global error handler →
-    // 500 response, but the important property is the route never saw
-    // the body.
+    // Status must be one of the rejection codes — guards against a
+    // future error-handler rewrite that swallows the oversized body
+    // into a silent 200 (which mockRecordQurlView alone wouldn't
+    // catch if the route silently returned 200 without a write).
+    // 413 = PayloadTooLargeError mapped to spec, 500 = current
+    // global-error-handler mapping, 400 = a future tighter handler.
+    expect([400, 413, 500]).toContain(res.status);
     expect(mockRecordQurlView).not.toHaveBeenCalled();
   });
 

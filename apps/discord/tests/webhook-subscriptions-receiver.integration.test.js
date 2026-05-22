@@ -96,7 +96,7 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
     expect(res.body).toEqual({ status: 'recorded' });
   });
 
-  it('an unknown owner_id after priming returns 401 (post-prime truthful response)', async () => {
+  it('within the sibling-lag window, an unknown owner_id returns 503 (retriable — the just-linked-on-peer case)', async () => {
     mockScanGuildSubscriptions.mockResolvedValueOnce([
       {
         guildId: 'g_known',
@@ -107,9 +107,9 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       },
     ]);
     await subs.scanOnce();
-    // Forward the lastScanCompletedAt past the sibling-lag window
-    // so an unknown owner is treated as a real 401 (not 503).
-    await new Promise(resolve => setTimeout(resolve, 50));
+    // lastScanCompletedAt = Date.now() (just-scanned) is well inside
+    // REFRESH_INTERVAL_MS + SIBLING_LAG_GRACE_MS, so the receiver
+    // upgrades OWNER_UNKNOWN → 503 (retriable for qurl-service).
 
     const payload = buildPayload({ ownerId: 'usr_unknown' });
     const raw = JSON.stringify(payload);
@@ -120,9 +120,35 @@ describe('webhook-subscriptions → receiver integration (seam contract)', () =>
       .set('Content-Type', 'application/json')
       .set('QURL-Signature', sig)
       .send(raw);
-    // Within the sibling-lag window the receiver returns 503;
-    // either is a legitimate "registry doesn't know this owner" —
-    // accept both rather than time-of-day flake.
-    expect([401, 503]).toContain(res.status);
+    expect(res.status).toBe(503);
+  });
+
+  it('past the sibling-lag window, an unknown owner_id returns 401 (truthful — owner is genuinely absent)', async () => {
+    mockScanGuildSubscriptions.mockResolvedValueOnce([
+      {
+        guildId: 'g_known',
+        webhookId: 'wh_known',
+        webhookSecret: 'sec_known',
+        webhookOwnerId: 'usr_known',
+        updatedAt: '2026-05-22T00:00:00.000Z',
+      },
+    ]);
+    await subs.scanOnce();
+    // Force lastScanCompletedAt into the deep past so the receiver
+    // sees us well past REFRESH_INTERVAL_MS + SIBLING_LAG_GRACE_MS
+    // (35s) and treats OWNER_UNKNOWN as a genuine 401 instead of a
+    // sibling-lag 503.
+    subs._setLastScanCompletedAtForTesting(Date.now() - 10 * 60_000);
+
+    const payload = buildPayload({ ownerId: 'usr_unknown' });
+    const raw = JSON.stringify(payload);
+    const sig = qurlServiceSign(raw, 'sec_known');
+
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', sig)
+      .send(raw);
+    expect(res.status).toBe(401);
   });
 });

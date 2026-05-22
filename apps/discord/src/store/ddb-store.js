@@ -1577,7 +1577,10 @@ async function clearGuildWebhookSubscription(guildId) {
 // propagation that fixes rotate-drift. RCU cost is acceptable on a
 // low-cardinality table.
 // TODO(#486): replace scanAll with a Query on the webhook_owner_id
-// GSI when guild_configs > ~10k rows.
+// GSI when guild_configs > ~10k rows. Every `/qurl setup` and OAuth
+// callback hits this via propagateGuildWebhookSubscription, so the
+// link-path cost is O(table_size) per call — same fix as the
+// 30s priming scan, single migration covers both.
 async function listGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows

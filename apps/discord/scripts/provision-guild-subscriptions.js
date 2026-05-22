@@ -68,8 +68,21 @@ async function main() {
   let failedDecrypt = 0;
   let failedLink = 0;
   let ExclusiveStartKey;
+  // Anti-runaway cap. Mirrors the 50-page guard in
+  // ensureWebhookSubscription's findExistingSubscriptions. At DDB's
+  // default 1MB page size, 50 pages caps the worst-case scan at
+  // ~50MB of guild_configs rows (far beyond plausible bot scale).
+  // A future bug causing the cursor to not advance would otherwise
+  // silently spin forever.
+  const MAX_PAGES = 50;
+  let pageCount = 0;
 
   do {
+    pageCount += 1;
+    if (pageCount > MAX_PAGES) {
+      console.error(`[backfill] FATAL: exceeded MAX_PAGES=${MAX_PAGES} — cursor may not be advancing`);
+      process.exit(3);
+    }
     const res = await ddb.send(new ScanCommand({ TableName: TABLE, ExclusiveStartKey }));
     const rows = res.Items || [];
     for (const row of rows) {

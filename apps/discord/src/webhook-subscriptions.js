@@ -167,9 +167,11 @@ async function discoverDefaultOwnerId() {
     apiEndpoint: config.QURL_ENDPOINT,
     apiKey: config.QURL_API_KEY,
   });
-  const subs = Array.isArray(body?.data) ? body.data : [];
-  for (const s of subs) {
-    if (typeof s?.owner_id === 'string' && s.owner_id.length > 0) return s.owner_id;
+  // Local name `webhooks` (not `subs`) so it doesn't shadow the
+  // module convention everyone else uses for the registry import.
+  const webhooks = Array.isArray(body?.data) ? body.data : [];
+  for (const w of webhooks) {
+    if (typeof w?.owner_id === 'string' && w.owner_id.length > 0) return w.owner_id;
   }
   return null;
 }
@@ -189,13 +191,22 @@ async function scanOnce() {
   }
   scanInFlight = true;
   try {
+    // The clear-here is what makes upsertsDuringScan an *in-this-scan*
+    // tracker — without it, leftover entries from the previous scan
+    // would be re-applied as if they were concurrent, defeating the
+    // mid-scan-snapshot logic below. Between scans the set is
+    // harmless noise; only entries added between this .clear() and
+    // the snapshot/restore below are load-bearing.
     upsertsDuringScan.clear();
 
     // Parallelize the two independent network reads. Sequential they
     // added 50-300ms per tick.
     // TODO(#486): GSI on webhook_owner_id when guild_configs row
     // count exceeds ~10k — scanAll is bounded by table size, not
-    // result size.
+    // result size. When the GSI lands, the priming path can also drop
+    // to eventually-consistent reads (SIBLING_LAG_GRACE_MS already
+    // absorbs replication lag); strong consistency pays for itself in
+    // propagateGuildWebhookSubscription, not here.
     //
     // discoverDefaultOwnerId only fires while there's something to
     // discover: the bot's own owner_id never changes in-process (env
@@ -349,11 +360,23 @@ async function start() {
   timer.unref();
 }
 
+// Safe to call without having called start() — on the gateway tier
+// where the registry is never started, this is a no-op. If you ever
+// extend this beyond clearInterval, keep the unconditional-safe
+// contract: server.js calls stop() unconditionally for the gateway
+// tier (no start() match) and the HTTP tier alike.
 function stop() {
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
+}
+
+// Test-only: drive lastScanCompletedAt directly so the receiver's
+// isWithinSiblingLagWindow check can be exercised at both ends of
+// the window in unit tests without time-mocking Date.now globally.
+function _setLastScanCompletedAtForTesting(ts) {
+  lastScanCompletedAt = ts;
 }
 
 // Test-only: reset module-level state. Production code must never
@@ -389,5 +412,6 @@ module.exports = {
   // synchronously. Production code uses the 30s setInterval inside
   // start() to call this.
   _refreshTickForTesting: refreshTick,
+  _setLastScanCompletedAtForTesting,
   _resetForTesting,
 };
