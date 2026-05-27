@@ -60,6 +60,8 @@ var ErrAliasAlreadyBound = slackdata.ErrAliasAlreadyBound
 // 404 / "alias not bound" friendly copy.
 var ErrAliasNotFound = slackdata.ErrAliasNotFound
 
+var errTunnelSlugNotFound = errors.New("tunnel slug not found")
+
 // resourceIDPrefix is the wire prefix on every qurl-service resource
 // id. setalias discriminates URL targets from resource-id targets on
 // this prefix (raw URLs vs `r_…`).
@@ -180,6 +182,9 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	}
 	if strings.HasPrefix(tgt, "$") {
 		slug, msg := requireAlias(tgt)
+		// Alias and tunnel-slug grammars intentionally diverge:
+		// aliases may start with a digit, while tunnel slugs must
+		// start with a letter and be at least three characters.
 		if msg != "" || !tunnelSlugPattern.MatchString(slug) {
 			return nil, msgAliasTargetInvalid
 		}
@@ -289,10 +294,7 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 // Alias upsert is a single DDB UpdateItem — synchronous is fine.
 func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
-	rest := strings.TrimSpace(strings.TrimPrefix(text, "setalias"))
-	if rest == text {
-		rest = strings.TrimSpace(strings.TrimPrefix(text, "set-alias"))
-	}
+	rest := stripSetAliasPrefix(text)
 
 	args, userMsg := parseAliasArgs(rest, true)
 	if userMsg != "" {
@@ -308,9 +310,14 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 
 	target := args.Target
 	if strings.HasPrefix(target, "$") {
-		resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, strings.TrimPrefix(target, "$"))
+		slug := strings.TrimPrefix(target, "$")
+		resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 		if err != nil {
 			slog.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are Slack IDs or validated slug-like input.
+			if errors.Is(err, errTunnelSlugNotFound) {
+				respondSlack(w, fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl tunnel install %s` first, then retry this alias.", slug, slug))
+				return
+			}
 			respondSlack(w, sanitizeAPIError(err, "Failed to resolve tunnel slug"))
 			return
 		}
@@ -350,16 +357,27 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 	if err != nil {
 		return "", err
 	}
-	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
-		Type:         client.ResourceTypeTunnel,
-		Slug:         slug,
-		FindOrCreate: true,
-		Description:  "Slack alias target for " + slug,
-	})
-	if err != nil {
-		return "", err
+	cursor := ""
+	for {
+		page, err := c.ListResources(ctx, client.ListResourcesInput{
+			Limit:  100,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return "", err
+		}
+		for i := range page.Resources {
+			resource := &page.Resources[i]
+			if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
+				return resource.ResourceID, nil
+			}
+		}
+		if !page.HasMore || page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
-	return resource.ResourceID, nil
+	return "", errTunnelSlugNotFound
 }
 
 // redactURLForLog strips userinfo (e.g. `user:token@`) and any raw

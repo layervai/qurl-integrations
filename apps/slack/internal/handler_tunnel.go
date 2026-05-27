@@ -10,17 +10,22 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
+	// Production deploys should set QURL_TUNNEL_IMAGE to an immutable
+	// release tag or digest. The floating fallback is for dev/sandbox
+	// onboarding where the latest sidecar build is intentional.
 	defaultTunnelImage     = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
 	defaultTunnelLocalPort = 8080
 	tunnelBootstrapTTL     = "24h"
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+var bootstrapAPIKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._=-]+$`)
 
 type tunnelInstallArgs struct {
 	Slug      string
@@ -51,7 +56,11 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 			}
 			args.LocalPort = port
 		case strings.HasPrefix(token, "alias:"):
-			alias, msg := requireAlias(strings.TrimPrefix(token, "alias:"))
+			aliasToken := strings.TrimPrefix(token, "alias:")
+			if aliasToken != "" && !strings.HasPrefix(aliasToken, "$") {
+				aliasToken = "$" + aliasToken
+			}
+			alias, msg := requireAlias(aliasToken)
 			if msg != "" {
 				return nil, msg
 			}
@@ -137,6 +146,11 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 			h.postResponse(log, values.Get(fieldResponseURL), "The qURL API did not return a bootstrap key. Please retry or contact support.")
 			return
 		}
+		if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
+			log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+			h.postResponse(log, values.Get(fieldResponseURL), "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
+			return
+		}
 
 		log.Info("tunnel install succeeded", "slug", args.Slug, "alias", args.Alias, "resource_id", resource.ResourceID)
 		h.postResponse(log, values.Get(fieldResponseURL), h.renderTunnelInstallMessage(args, resource, key, aliasStatus))
@@ -178,9 +192,7 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, resource *
     local_port: %d`, args.Slug, args.LocalPort)
 	docker := fmt.Sprintf(`SECRET_DIR=/run/secrets/qurl-tunnel
 install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
-cat <<'QURL_API_KEY' | install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
-%s
-QURL_API_KEY
+printf '%%s' %s | install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
 
 docker run -d \
   --name qurl-tunnel \
@@ -191,17 +203,52 @@ docker run -d \
   -v "$PWD/qurl-proxy.yaml:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_TUNNEL_SLUG=%s \
-  %s`, key.APIKey, args.Slug, image)
+  %s`, shellSingleQuote(key.APIKey), args.Slug, shellSingleQuote(image))
 
-	return fmt.Sprintf("Tunnel `%s` is ready.\nResource: `%s`\n%s\n\nBootstrap key expires in %s. Remove the mounted key file after the first successful sidecar start.\n\n`qurl-proxy.yaml`\n%s\n\nDocker sidecar\n%s\n\nAfter it is connected, users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready.\nResource: `%s`\n%s\n\nBootstrap key %s. Delete this Slack message once the sidecar is running, and remove the mounted key file after the first successful sidecar start.\n\n`qurl-proxy.yaml`\n%s\n\nDocker sidecar\n%s\n\nAfter it is connected, users can run `/qurl get $%s`.",
 		args.Slug,
 		resource.ResourceID,
 		aliasStatus,
-		tunnelBootstrapTTL,
+		tunnelBootstrapExpiryCopy(key),
 		slackCodeBlock("yaml", configYAML),
 		slackCodeBlock("sh", docker),
 		args.Alias,
 	)
+}
+
+func tunnelBootstrapExpiryCopy(key *client.APIKey) string {
+	if key != nil && key.ExpiresAt != nil {
+		return "expires at " + key.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return "expires in the requested " + tunnelBootstrapTTL
+}
+
+func validateBootstrapAPIKeyForShell(apiKey string) error {
+	if apiKey == "" {
+		return errors.New("empty api key")
+	}
+	if !bootstrapAPIKeyPattern.MatchString(apiKey) {
+		return errors.New("api key contains unsupported characters")
+	}
+	return nil
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// ValidateTunnelImageRef checks the operator-provided image reference shown in
+// install snippets. Empty is valid and means the handler will use its fallback.
+func ValidateTunnelImageRef(image string) error {
+	if image == "" {
+		return nil
+	}
+	for _, r := range image {
+		if r <= ' ' || r == 0x7f {
+			return errors.New("tunnel image reference contains whitespace or control characters")
+		}
+	}
+	return nil
 }
 
 func slackCodeBlock(lang, body string) string {

@@ -64,7 +64,7 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 		if errors.As(err, &ccfe) {
 			return ErrAliasAlreadyBound
 		}
-		return ddbToError("BindChannelAlias", err)
+		return ddbToError("ensureAliasBindingsMap", err)
 	}
 	return nil
 }

@@ -315,22 +315,41 @@ func TestSetAlias_HappyResourceID(t *testing.T) {
 	}
 }
 
+func TestSetAlias_HyphenatedHappyURL(t *testing.T) {
+	h, store := newAliasTestHandler(t)
+	body, sign := aliasSlashRequest(t, "set-alias $staging https://example.com", testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	b := store.bindings(testAliasTeamID, testAliasChannelID)
+	if b[testAliasName] != testAliasURL {
+		t.Errorf("stored bindings = %v, want {%q: %q}", b, testAliasName, testAliasURL)
+	}
+}
+
 func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
-	var gotBody map[string]any
+	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
 			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode upstream body: %v", err)
-		}
-		respondQURLEnvelope(t, w, map[string]any{
+		gotQuery = r.URL.Query()
+		respondQURLEnvelope(t, w, []map[string]any{{
+			testKeyResourceID: "r_other_resource",
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       "other-dashboard",
+			testKeyStatus:     client.StatusActive,
+		}, {
 			testKeyResourceID: testTunnelResourceID,
 			testKeyType:       client.ResourceTypeTunnel,
 			testKeySlug:       testTunnelSlug,
 			testKeyStatus:     client.StatusActive,
-		})
+		}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -349,12 +368,47 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	if !strings.Contains(got, testTunnelResourceID) {
 		t.Errorf("response = %q, want resolved resource id", got)
 	}
-	if gotBody[testKeyType] != client.ResourceTypeTunnel || gotBody[testKeySlug] != testTunnelSlug || gotBody["find_or_create"] != true {
-		t.Errorf("upstream body = %+v, want tunnel find-or-create for slug", gotBody)
+	if gotQuery.Get("limit") != "100" {
+		t.Errorf("upstream query = %v, want limit=100", gotQuery)
 	}
 	b := store.bindings(testAliasTeamID, testAliasChannelID)
 	if b[testAliasName] != testTunnelResourceID {
 		t.Errorf("stored bindings = %v, want {%q: %s}", b, testAliasName, testTunnelResourceID)
+	}
+}
+
+func TestSetAlias_TunnelSlugMissingDoesNotCreateResource(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	var postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits++
+			t.Fatalf("setalias $slug must not create resources; got %s %s", r.Method, r.URL.Path)
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+		respondQURLEnvelope(t, w, []map[string]any{})
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	store := newFakeAliasStore()
+	h.aliasStore = store
+	body, sign := aliasSlashRequest(t, "setalias $staging $"+testTunnelSlug, testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, "was not found") {
+		t.Fatalf("response = %q, want not-found copy", got)
+	}
+	if postHits != 0 {
+		t.Fatalf("POST hits = %d, want 0", postHits)
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+		t.Fatalf("alias store touched on missing slug: %v", b)
 	}
 }
 

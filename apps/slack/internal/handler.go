@@ -529,6 +529,18 @@ func setAliasSubcommand(text string) bool {
 	return slashSubcommand(text, "setalias") || slashSubcommand(text, "set-alias")
 }
 
+func stripSetAliasPrefix(text string) string {
+	for _, verb := range []string{"setalias", "set-alias"} {
+		if text == verb {
+			return ""
+		}
+		if strings.HasPrefix(text, verb+" ") {
+			return strings.TrimSpace(strings.TrimPrefix(text, verb))
+		}
+	}
+	return text
+}
+
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {

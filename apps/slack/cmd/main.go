@@ -123,6 +123,10 @@ func run() error {
 
 	maxConcurrentAsync := readMaxConcurrentAsync()
 	adminStore := buildAdminStore(signalCtx)
+	tunnelImage := strings.TrimSpace(os.Getenv("QURL_TUNNEL_IMAGE"))
+	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
+		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
+	}
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -139,7 +143,7 @@ func run() error {
 		BaseContext:        signalCtx,
 		MaxConcurrentAsync: maxConcurrentAsync,
 		AdminStore:         adminStore,
-		TunnelImage:        strings.TrimSpace(os.Getenv("QURL_TUNNEL_IMAGE")),
+		TunnelImage:        tunnelImage,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;

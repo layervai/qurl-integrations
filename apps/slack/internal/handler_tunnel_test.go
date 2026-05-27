@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -27,6 +28,7 @@ func TestParseTunnelInstall(t *testing.T) {
 	}{
 		{name: "minimal", text: testTunnelInstallCmd, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
 		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: 9090},
+		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
 		{name: "bad slug uppercase", text: "tunnel install Prod", wantErr: true},
 		{name: "bad port", text: testTunnelInstallCmd + " port:70000", wantErr: true},
 		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
@@ -112,6 +114,8 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
 		"local_port: 9090",
 		"ghcr.io/layervai/qurl-reverse-tunnel-client:v-test",
+		"expires at 2026-05-28T00:00:00Z",
+		"Delete this Slack message once the sidecar is running",
 		"/qurl get $" + testTunnelSlug,
 	} {
 		if !strings.Contains(async, want) {
@@ -129,6 +133,95 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 	if !found || gotRID != testTunnelResourceID {
 		t.Fatalf("alias lookup = (%q, %v), want (%s, true)", gotRID, found, testTunnelResourceID)
+	}
+}
+
+func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			"key_id":      "key_tunnel_bootstrap",
+			"api_key":     "",
+			"purpose":     client.APIKeyPurposeTunnelBootstrap,
+			"tunnel_slug": testTunnelSlug,
+		})
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "did not return a bootstrap key") {
+		t.Fatalf("async reply = %q, want missing-plaintext copy", async)
+	}
+}
+
+func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		if apiKeyHits == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"title":"boom","status":500}}`))
+			return
+		}
+		respondQURLEnvelope(t, w, map[string]any{
+			"key_id":      "key_tunnel_bootstrap",
+			"api_key":     "lv_live_retry_bootstrap",
+			"purpose":     client.APIKeyPurposeTunnelBootstrap,
+			"tunnel_slug": testTunnelSlug,
+			"expires_at":  "2026-05-28T00:00:00Z",
+		})
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(first, "Failed to mint") {
+		t.Fatalf("first async reply = %q, want mint failure", first)
+	}
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "already bound") {
+		t.Fatalf("second async reply = %q, want successful remint against existing alias", second)
+	}
+	if apiKeyHits != 2 {
+		t.Fatalf("api key hits = %d, want 2", apiKeyHits)
+	}
+}
+
+func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
+	ts := newAdminTestServers(t)
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+	h := NewHandler(Config{AdminStore: store})
+	h.aliasStore = raceBindAliasStore{store: store}
+
+	status, err := h.ensureTunnelAlias(context.Background(), testAdminTeamID, "C_test", testTunnelSlug, testTunnelResourceID)
+	if err != nil {
+		t.Fatalf("ensureTunnelAlias: %v", err)
+	}
+	if !strings.Contains(status, "already bound") {
+		t.Fatalf("status = %q, want already-bound recovery copy", status)
 	}
 }
 
@@ -161,6 +254,21 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	if apiKeyHits != 0 {
 		t.Fatalf("api key route hit %d times; bootstrap key must not be minted when alias bind fails", apiKeyHits)
 	}
+}
+
+type raceBindAliasStore struct {
+	store *slackdata.Store
+}
+
+func (r raceBindAliasStore) BindChannelAlias(ctx context.Context, teamID, channelID, aliasName, resourceID string) error {
+	if err := r.store.BindChannelAlias(ctx, teamID, channelID, aliasName, resourceID); err != nil {
+		return err
+	}
+	return ErrAliasAlreadyBound
+}
+
+func (r raceBindAliasStore) UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error {
+	return r.store.UnbindChannelAlias(ctx, teamID, channelID, aliasName)
 }
 
 func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
