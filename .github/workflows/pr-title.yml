@@ -35,6 +35,7 @@ jobs:
             discord
             cli
             zapier
+            gmail-extension
             shared
             infra
             ci
