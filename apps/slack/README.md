@@ -7,8 +7,8 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
 - `/qurl create <url>` — Create a qURL
 - `/qurl get $alias` — Mint a qURL for a channel-bound resource alias
-- `/qurl setalias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias
-- `/qurl tunnel install <slug>` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only)
+- `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias
+- `/qurl tunnel install <slug> [port:8080] [alias:$alias]` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
@@ -22,11 +22,11 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
 - **Tunnel onboarding:** `/qurl tunnel install <slug>` uses the
-  workspace API key to find-or-create an owner-scoped tunnel resource,
-  bind `$<slug>` in the current Slack channel, and mint a 1-hour
-  `tunnel_bootstrap` API key. The Slack response renders a Docker
-  sidecar command that mounts the bootstrap key from a file and passes
-  `QURL_TUNNEL_SLUG=<slug>` to the client.
+  workspace API key to find-or-create a tunnel resource scoped to the
+  connected qURL account, bind `$<slug>` in the current Slack channel,
+  and mint a 1-hour `tunnel_bootstrap` API key. The Slack response
+  renders a Docker sidecar command that mounts the bootstrap key from
+  a file and passes `QURL_TUNNEL_SLUG=<slug>` to the client.
 - **Endpoints:**
   - `POST /slack/commands` — Slash command handler (ack-then-async)
   - `POST /slack/events` — Event subscriptions (link unfurling planned)
