@@ -191,6 +191,14 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		// and store the bare URL.
 		{name: "happy URL slack-autolinked", input: "$staging <https://example.com|https://example.com>", wantAlias: testAliasName, wantTgt: testAliasURL},
 		{name: "happy URL slack-autolinked no display", input: "$staging <https://example.com>", wantAlias: testAliasName, wantTgt: testAliasURL},
+		// should_escape:true also HTML-encodes &/</> inside the
+		// autolink. Round-trip the entity decode so the stored target
+		// is a bare URL the SDK will accept verbatim.
+		{name: "happy URL slack-autolinked with entity-encoded query", input: "$staging <https://example.com?a=1&amp;b=2|https://example.com?a=1&amp;b=2>", wantAlias: testAliasName, wantTgt: "https://example.com?a=1&b=2"},
+		// Regression guard: a bare `<@U…>` mention shouldn't get
+		// green-lit by the unwrap — the inner has no scheme, so the
+		// existing http(s) gate rejects with the generic copy.
+		{name: "user mention rejected (no scheme after unwrap)", input: "$staging <@U12345>", wantErr: true},
 		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
 		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
 		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},

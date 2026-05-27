@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -193,17 +194,20 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 
 // unwrapSlackAutolink strips the `<url|display>` (or `<url>`) wrapping
 // Slack applies to typed URLs when the slash command has
-// `should_escape: true`. Returns the inner URL when wrapping is
-// present, else returns the input unchanged.
+// `should_escape: true`, and decodes the `&amp;` / `&lt;` / `&gt;`
+// substitutions Slack applies under the same flag. The entity decode
+// only runs when the wrap is present — that's the signal `should_escape`
+// fired — so a user who literally typed `&amp;` outside an escaped
+// command keeps it intact.
 func unwrapSlackAutolink(tgt string) string {
 	if len(tgt) < 2 || tgt[0] != '<' || tgt[len(tgt)-1] != '>' {
 		return tgt
 	}
 	inner := tgt[1 : len(tgt)-1]
 	if i := strings.IndexByte(inner, '|'); i >= 0 {
-		return inner[:i]
+		inner = inner[:i]
 	}
-	return inner
+	return html.UnescapeString(inner)
 }
 
 // requireAlias checks that `tok` is `$<alias>` and returns the alias
