@@ -6,6 +6,9 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
 - `/qurl create <url>` — Create a qURL
+- `/qurl get $alias` — Mint a qURL for a channel-bound resource alias
+- `/qurl setalias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias
+- `/qurl tunnel install <slug>` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
@@ -18,6 +21,12 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
+- **Tunnel onboarding:** `/qurl tunnel install <slug>` uses the
+  workspace API key to find-or-create an owner-scoped tunnel resource,
+  bind `$<slug>` in the current Slack channel, and mint a 1-hour
+  `tunnel_bootstrap` API key. The Slack response renders a Docker
+  sidecar command that mounts the bootstrap key from a file and passes
+  `QURL_TUNNEL_SLUG=<slug>` to the client.
 - **Endpoints:**
   - `POST /slack/commands` — Slash command handler (ack-then-async)
   - `POST /slack/events` — Event subscriptions (link unfurling planned)
@@ -65,6 +74,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
 | `SLACK_BASE_URL` | OAuth | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose `redirect_uri` and the `/qurl setup` link. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
+| `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl tunnel install`. Set this to an immutable release tag or digest for production rollout. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
