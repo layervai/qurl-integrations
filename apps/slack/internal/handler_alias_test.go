@@ -199,6 +199,12 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		// green-lit by the unwrap — the inner has no scheme, so the
 		// existing http(s) gate rejects with the generic copy.
 		{name: "user mention rejected (no scheme after unwrap)", input: "$staging <@U12345>", wantErr: true},
+		// The byte-level backtick/non-printable fence at the top of
+		// parseAliasArgs runs *before* unwrap. Restricting the entity
+		// decode to Slack's documented set (&amp;/&lt;/&gt;) keeps
+		// numeric refs like `&#96;` (backtick) from sneaking past
+		// that fence and breaking the success-copy code fence.
+		{name: "numeric entity ref not decoded through wrap", input: "$staging <https://example.com/&#96;x>", wantAlias: testAliasName, wantTgt: "https://example.com/&#96;x"},
 		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
 		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
 		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -192,15 +191,21 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	return out, ""
 }
 
+// slackEscapeUndo reverses exactly the three substitutions Slack applies
+// under `should_escape: true` (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`).
+// Deliberately not `html.UnescapeString`: that decodes the full HTML5
+// entity set, including numeric refs like `&#96;` → "`" and `&#1;` →
+// "\x01", which would slip past the backtick/non-printable fence that
+// runs on the raw byte stream upstream of this function.
+var slackEscapeUndo = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">")
+
 // unwrapSlackAutolink strips the `<url|display>` (or `<url>`) wrapping
 // Slack applies to typed URLs when the slash command has
-// `should_escape: true`, and decodes the `&amp;` / `&lt;` / `&gt;`
-// substitutions Slack applies under the same flag. The entity decode
-// only runs when the wrap is present — that's the signal `should_escape`
-// fired — so a user who literally typed `&amp;` outside an escaped
-// command keeps it intact. Splits on the *first* `|` to match Slack's
-// `<url|display>` grammar; a URL containing a raw `|` would be ambiguous
-// here, and Slack autodetect percent-encodes `|` to `%7C` anyway.
+// `should_escape: true`, and undoes the entity substitutions Slack
+// applies under the same flag. Splits on the *first* `|` to match
+// Slack's `<url|display>` grammar; a URL containing a raw `|` would be
+// ambiguous here, and Slack autodetect percent-encodes `|` to `%7C`
+// anyway.
 func unwrapSlackAutolink(tgt string) string {
 	if len(tgt) < 2 || tgt[0] != '<' || tgt[len(tgt)-1] != '>' {
 		return tgt
@@ -209,7 +214,7 @@ func unwrapSlackAutolink(tgt string) string {
 	if i := strings.IndexByte(inner, '|'); i >= 0 {
 		inner = inner[:i]
 	}
-	return html.UnescapeString(inner)
+	return slackEscapeUndo.Replace(inner)
 }
 
 // requireAlias checks that `tok` is `$<alias>` and returns the alias
