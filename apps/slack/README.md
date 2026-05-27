@@ -15,7 +15,8 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - Channel notifications on qURL events (planned)
 
 Run `/qurl help` in Slack for command modifiers such as `once:true`,
-`dm:true`, and `reason:"..."`.
+`dm:true`, and `reason:"..."`; `dm:true` appears only when DM posting
+is configured.
 
 ## Architecture
 
@@ -30,8 +31,9 @@ Run `/qurl help` in Slack for command modifiers such as `once:true`,
   connected qURL account, bind `$<slug>` or the `alias:` override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
   key. The Slack response renders a Docker sidecar command that mounts
-  the bootstrap key from a file and passes `QURL_TUNNEL_SLUG=<slug>` to
-  the client. Delete the Slack response and remove the mounted key file
+  the bootstrap key from a file, passes that file path via
+  `QURL_API_KEY_FILE`, and passes `QURL_TUNNEL_SLUG=<slug>` to the
+  client. Delete the Slack response and remove the mounted key file
   after the first successful sidecar start.
 - **Endpoints:**
   - `POST /slack/commands` — Slash command handler (ack-then-async)
