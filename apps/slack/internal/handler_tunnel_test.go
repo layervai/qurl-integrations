@@ -113,6 +113,8 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"lv_live_test_bootstrap",
 		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
 		"local_port: 9090",
+		"WEB_CONTAINER=YOUR_WEB_CONTAINER_NAME",
+		`--network "container:${WEB_CONTAINER}"`,
 		"ghcr.io/layervai/qurl-reverse-tunnel-client:v-test",
 		"expires at 2026-05-28T00:00:00Z",
 		"Delete this Slack message once the sidecar is running",
@@ -122,7 +124,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{"connect.layerv", "proxy.layerv", "frps-"} {
+	for _, forbidden := range []string{"connect.layerv", "proxy.layerv", "frps-", "<web-container>"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -269,6 +271,62 @@ func (r raceBindAliasStore) BindChannelAlias(ctx context.Context, teamID, channe
 
 func (r raceBindAliasStore) UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error {
 	return r.store.UnbindChannelAlias(ctx, teamID, channelID, aliasName)
+}
+
+func TestValidateBootstrapAPIKeyForShell(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{name: "current live-ish shape", key: "lv_live_-Pe7wofxOWsLBlOL1hwPPV491dqNJ4zHbNuRvQUaRHQ"},
+		{name: "base64 characters allowed", key: "abc+/def=="},
+		{name: "colon allowed", key: "prefix:payload.signature"},
+		{name: "empty rejected", key: "", wantErr: true},
+		{name: "quote rejected", key: "abc'def", wantErr: true},
+		{name: "newline rejected", key: "abc\ndef", wantErr: true},
+		{name: "del rejected", key: "abc\x7fdef", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateBootstrapAPIKeyForShell(tc.key)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateBootstrapAPIKeyForShell(%q) err=%v, wantErr=%v", tc.key, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestShellSingleQuote(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "", want: "''"},
+		{in: "plain", want: "'plain'"},
+		{in: "$HOME && rm -rf /", want: "'$HOME && rm -rf /'"},
+		{in: "a'b", want: `'a'"'"'b'`},
+		{in: "line\nbreak", want: "'line\nbreak'"},
+	}
+	for _, tc := range cases {
+		if got := shellSingleQuote(tc.in); got != tc.want {
+			t.Errorf("shellSingleQuote(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSlackCodeBlockEscapesNestedFence(t *testing.T) {
+	t.Parallel()
+	got := slackCodeBlock("sh", "echo before\n```inner\n```")
+	if strings.Count(got, "```") != 2 {
+		t.Fatalf("slackCodeBlock produced extra code fences: %q", got)
+	}
+	if !strings.Contains(got, "'''inner") {
+		t.Fatalf("slackCodeBlock did not replace nested fence: %q", got)
+	}
 }
 
 func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {

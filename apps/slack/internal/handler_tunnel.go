@@ -26,7 +26,6 @@ const (
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
-var bootstrapAPIKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._=-]+$`)
 
 type tunnelInstallArgs struct {
 	Slug      string
@@ -194,12 +193,14 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, resource *
     local_ip: 127.0.0.1
     local_port: %d`, args.Slug, args.LocalPort)
 	docker := fmt.Sprintf(`SECRET_DIR=/run/secrets/qurl-tunnel
+WEB_CONTAINER=YOUR_WEB_CONTAINER_NAME
+: "${WEB_CONTAINER:?set WEB_CONTAINER to the container name or id of the local HTTP server}"
 install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 printf '%%s' %s | install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
 
 docker run -d \
   --name qurl-tunnel \
-  --network container:<web-container> \
+  --network "container:${WEB_CONTAINER}" \
   --restart=on-failure:5 \
   -v /var/lib/layerv/agent:/var/lib/layerv/agent \
   -v "$SECRET_DIR:$SECRET_DIR:ro" \
@@ -231,8 +232,10 @@ func validateBootstrapAPIKeyForShell(apiKey string) error {
 	if apiKey == "" {
 		return errors.New("empty api key")
 	}
-	if !bootstrapAPIKeyPattern.MatchString(apiKey) {
-		return errors.New("api key contains unsupported characters")
+	for _, r := range apiKey {
+		if r == '\'' || r < 0x20 || r == 0x7f {
+			return errors.New("api key contains unsupported characters")
+		}
 	}
 	return nil
 }
@@ -256,6 +259,9 @@ func ValidateTunnelImageRef(image string) error {
 }
 
 func slackCodeBlock(lang, body string) string {
+	// Slack cannot escape a nested triple-backtick fence inside a code block.
+	// Current callers render static YAML/sh snippets, but keep this guard so a
+	// future caller cannot prematurely close the block.
 	body = strings.ReplaceAll(body, "```", "'''")
 	return "```" + lang + "\n" + body + "\n```"
 }

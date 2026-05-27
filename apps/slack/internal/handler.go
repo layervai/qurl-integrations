@@ -541,6 +541,22 @@ func stripSetAliasPrefix(text string) string {
 	return text
 }
 
+func unsetAliasSubcommand(text string) bool {
+	return slashSubcommand(text, "unsetalias") || slashSubcommand(text, "unset-alias")
+}
+
+func stripUnsetAliasPrefix(text string) string {
+	for _, verb := range []string{"unsetalias", "unset-alias"} {
+		if text == verb {
+			return ""
+		}
+		if strings.HasPrefix(text, verb+" ") {
+			return strings.TrimSpace(strings.TrimPrefix(text, verb))
+		}
+	}
+	return text
+}
+
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
@@ -596,7 +612,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
 		h.handleSetAlias(w, values)
-	case slashSubcommand(text, "unsetalias"):
+	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
@@ -696,7 +712,7 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl list` — Show your 5 most recent qURLs",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
-	if h.cfg.AdminStore != nil {
+	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		lines = append(lines,
 			"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
 		)
@@ -709,8 +725,8 @@ func (h *Handler) helpMessage() string {
 		// verbs — the internal "alias" terminology is fine here
 		// because the audience for these lines is admins.
 		lines = append(lines,
-			"• `/qurl setalias $<alias> <url-or-resource-id-or-$slug>` — Configure an alias in this channel (admin only)",
-			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
+			"• `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` — Configure an alias in this channel (admin only)",
+			"• `/qurl unset-alias $<alias>` — Remove a configured alias in this channel (admin only)",
 			"• `/qurl aliases` — List the aliases configured in this channel",
 		)
 	}
