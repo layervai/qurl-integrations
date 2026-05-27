@@ -159,6 +159,9 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
+	// Hourly bucket matches the one-hour bootstrap key TTL: retries inside
+	// the same setup window replay safely, while a later install gets a fresh
+	// key instead of replaying an expired plaintext secret.
 	bucket := now.UTC().Format("2006010215")
 	return IdempotencyKey(teamID, channelID, userID, "tunnel-bootstrap:"+slug+":"+bucket)
 }
@@ -270,8 +273,10 @@ func ValidateTunnelImageRef(image string) error {
 
 func slackCodeBlock(lang, body string) string {
 	// Slack cannot escape a nested triple-backtick fence inside a code block.
-	// Current callers render static YAML/sh snippets, but keep this guard so a
-	// future caller cannot prematurely close the block.
-	body = strings.ReplaceAll(body, "```", "'''")
+	// Current callers render static YAML/sh snippets, so panic on programmer
+	// error instead of silently rewriting future user-visible content.
+	if strings.Contains(body, "```") {
+		panic("slack code block body contains nested triple-backtick fence")
+	}
 	return "```" + lang + "\n" + body + "\n```"
 }

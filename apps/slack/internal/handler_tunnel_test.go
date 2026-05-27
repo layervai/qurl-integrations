@@ -102,13 +102,22 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = "ghcr.io/layervai/qurl-reverse-tunnel-client:v-test"
 	h.SetAliasStore(h.cfg.AdminStore)
-	status, ack, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID)
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID)
+	var asyncEnvelope map[string]string
+	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
+		t.Fatalf("unmarshal tunnel install response_url body: %v", err)
+	}
+	async := asyncEnvelope[respFieldText]
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
 	if !strings.Contains(ack, "Working") {
 		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	if asyncEnvelope[respFieldResponseType] != respTypeEphemeral {
+		t.Fatalf("response_url response_type = %q, want ephemeral", asyncEnvelope[respFieldResponseType])
 	}
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
@@ -233,6 +242,10 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v, want same non-empty retry key", idempotencyKeys)
 	}
+	nextHourKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, "C_test", testAdminUserID, testTunnelSlug, now.Add(time.Hour))
+	if nextHourKey == idempotencyKeys[0] {
+		t.Fatal("next-hour tunnel bootstrap idempotency key matched current-hour key")
+	}
 }
 
 func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
@@ -341,14 +354,21 @@ func TestShellSingleQuote(t *testing.T) {
 	}
 }
 
-func TestSlackCodeBlockEscapesNestedFence(t *testing.T) {
+func TestSlackCodeBlockPanicsOnNestedFence(t *testing.T) {
 	t.Parallel()
-	got := slackCodeBlock("sh", "echo before\n```inner\n```")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("slackCodeBlock did not panic on nested fence")
+		}
+	}()
+	_ = slackCodeBlock("sh", "echo before\n```inner\n```")
+}
+
+func TestSlackCodeBlock(t *testing.T) {
+	t.Parallel()
+	got := slackCodeBlock("sh", "echo ok")
 	if strings.Count(got, "```") != 2 {
-		t.Fatalf("slackCodeBlock produced extra code fences: %q", got)
-	}
-	if !strings.Contains(got, "'''inner") {
-		t.Fatalf("slackCodeBlock did not replace nested fence: %q", got)
+		t.Fatalf("slackCodeBlock fences = %q, want one opening and one closing fence", got)
 	}
 }
 

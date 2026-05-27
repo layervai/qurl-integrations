@@ -94,7 +94,7 @@ const (
 // the user but trips ST1005 if we wrap in `error`, and (c) the
 // dispatcher needs the literal string anyway.
 const (
-	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`). Tunnel slugs are 3-64 chars, start with a lowercase letter, and contain lowercase letters/numbers/hyphens.\n\n" + aliasUsage
+	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`). Tunnel slugs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
 	msgAliasMissing       = "Missing alias.\n\n" + aliasUsage
 	msgAliasNoSigil       = "Alias must start with `$` (e.g. `$staging`).\n\n" + aliasUsage
 	msgAliasEmptyName     = "Missing alias name after `$`.\n\n" + aliasUsage

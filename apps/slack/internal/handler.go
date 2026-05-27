@@ -522,39 +522,40 @@ func classifySlackErr(err error) string {
 }
 
 func slashSubcommand(text, command string) bool {
-	return text == command || strings.HasPrefix(text, command+" ")
+	matched, _ := slashVerb(text, command)
+	return matched
+}
+
+func slashVerb(text string, verbs ...string) (matched bool, rest string) {
+	for _, verb := range verbs {
+		if text == verb {
+			return true, ""
+		}
+		if strings.HasPrefix(text, verb+" ") {
+			return true, strings.TrimSpace(strings.TrimPrefix(text, verb))
+		}
+	}
+	return false, text
 }
 
 func setAliasSubcommand(text string) bool {
-	return slashSubcommand(text, "setalias") || slashSubcommand(text, "set-alias")
+	matched, _ := slashVerb(text, "setalias", "set-alias")
+	return matched
 }
 
 func stripSetAliasPrefix(text string) string {
-	for _, verb := range []string{"setalias", "set-alias"} {
-		if text == verb {
-			return ""
-		}
-		if strings.HasPrefix(text, verb+" ") {
-			return strings.TrimSpace(strings.TrimPrefix(text, verb))
-		}
-	}
-	return text
+	_, rest := slashVerb(text, "setalias", "set-alias")
+	return rest
 }
 
 func unsetAliasSubcommand(text string) bool {
-	return slashSubcommand(text, "unsetalias") || slashSubcommand(text, "unset-alias")
+	matched, _ := slashVerb(text, "unsetalias", "unset-alias")
+	return matched
 }
 
 func stripUnsetAliasPrefix(text string) string {
-	for _, verb := range []string{"unsetalias", "unset-alias"} {
-		if text == verb {
-			return ""
-		}
-		if strings.HasPrefix(text, verb+" ") {
-			return strings.TrimSpace(strings.TrimPrefix(text, verb))
-		}
-	}
-	return text
+	_, rest := slashVerb(text, "unsetalias", "unset-alias")
+	return rest
 }
 
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {

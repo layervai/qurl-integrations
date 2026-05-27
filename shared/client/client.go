@@ -607,7 +607,9 @@ type Resource struct {
 	// Type is one of "url" (target-URL proxy, default) or "tunnel"
 	// (FRP-backed reverse tunnel). Mirrors the qurl-service
 	// `ResourceType` enum.
-	Type         string `json:"type,omitempty"`
+	Type string `json:"type,omitempty"`
+	// Slug is the owner-scoped immutable tunnel sidecar slug. It is present
+	// only for tunnel resources.
 	Slug         string `json:"slug,omitempty"`
 	Alias        string `json:"alias,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
@@ -690,16 +692,19 @@ type CreateAPIKeyInput struct {
 // APIKey represents an API key create response. APIKey is populated only on
 // create; list/update responses never return plaintext keys.
 type APIKey struct {
-	KeyID      string     `json:"key_id,omitempty"`
-	APIKey     string     `json:"api_key,omitempty"`
-	KeyPrefix  string     `json:"key_prefix,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	Scopes     []string   `json:"scopes,omitempty"`
-	Status     string     `json:"status,omitempty"`
-	CreatedAt  time.Time  `json:"created_at,omitzero"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
-	Purpose    string     `json:"purpose,omitempty"`
-	TunnelSlug string     `json:"tunnel_slug,omitempty"`
+	KeyID     string     `json:"key_id,omitempty"`
+	APIKey    string     `json:"api_key,omitempty"`
+	KeyPrefix string     `json:"key_prefix,omitempty"`
+	Name      string     `json:"name,omitempty"`
+	Scopes    []string   `json:"scopes,omitempty"`
+	Status    string     `json:"status,omitempty"`
+	CreatedAt time.Time  `json:"created_at,omitzero"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Purpose is the optional constrained-key purpose, such as
+	// "tunnel_bootstrap".
+	Purpose string `json:"purpose,omitempty"`
+	// TunnelSlug is the sidecar slug this constrained key is bound to.
+	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }
 
 // UpdateResourceInput is the input for `PATCH /v1/resources/{id}`.
