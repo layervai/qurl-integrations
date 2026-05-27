@@ -358,7 +358,12 @@ func (h *Handler) bindAliasTarget(ctx context.Context, teamID, channelID, alias,
 }
 
 func logAliasBound(teamID, channelID, alias, target string) {
-	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", alias, "target", redactURLForLog(target))
+	slog.LogAttrs(context.Background(), slog.LevelInfo, "alias bound",
+		slog.String("team_id", teamID),
+		slog.String("channel_id", channelID),
+		slog.String("alias", alias),
+		slog.String("target", redactURLForLog(target)),
+	)
 }
 
 func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {
