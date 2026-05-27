@@ -21,11 +21,11 @@
   },
   "config_label": {
     "message": "qURL server",
-    "description": "Label for the QURL server configuration area"
+    "description": "Label for the qURL server configuration area"
   },
   "config_placeholder": {
     "message": "Enter qURL server URL",
-    "description": "Placeholder text for the QURL server URL input"
+    "description": "Placeholder text for the qURL server URL input"
   },
   "config_default_hint": {
     "message": "Leave this blank to use the built-in default server.",
@@ -43,17 +43,21 @@
     "message": "Failed to save qURL server URL.",
     "description": "Fallback error shown when saving the server URL fails"
   },
+  "config_load_error": {
+    "message": "Failed to load qURL server configuration.",
+    "description": "Fallback error shown when loading the stored server URL fails"
+  },
   "config_invalid_url_error": {
     "message": "qURL server URL must be a valid http(s) URL.",
-    "description": "Shown when the configured QURL server URL cannot be parsed"
+    "description": "Shown when the configured qURL server URL cannot be parsed"
   },
   "config_https_required_error": {
     "message": "qURL server URL must start with https://",
-    "description": "Shown when the configured QURL server URL is not HTTPS"
+    "description": "Shown when the configured qURL server URL is not HTTPS"
   },
   "api_invalid_json_error": {
     "message": "Invalid JSON response: $SNIPPET$",
-    "description": "Shown when the QURL server responds with invalid JSON",
+    "description": "Shown when the qURL server responds with invalid JSON",
     "placeholders": {
       "snippet": {
         "content": "$1",
@@ -75,11 +79,11 @@
   },
   "save_config_btn": {
     "message": "Save",
-    "description": "Button label for saving the configured QURL server URL"
+    "description": "Button label for saving the configured qURL server URL"
   },
   "reset_config_btn": {
     "message": "Use default",
-    "description": "Button label for clearing the configured QURL server URL"
+    "description": "Button label for clearing the configured qURL server URL"
   },
   "select_label": {
     "message": "Select files",
@@ -177,15 +181,15 @@
   },
   "permission_missing_error": {
     "message": "Permission to access the configured qURL server is missing. Open settings and save the server URL again.",
-    "description": "Shown when the configured QURL server origin is no longer granted"
+    "description": "Shown when the configured qURL server origin is no longer granted"
   },
   "permission_request_denied_error": {
     "message": "Permission to access this qURL server was not granted.",
-    "description": "Shown when the user declines the permission prompt for a custom QURL server"
+    "description": "Shown when the user declines the permission prompt for a custom qURL server"
   },
   "permission_request_confirm": {
     "message": "Allow the extension to access $1 for qURL uploads? Chrome will show a permission prompt next.",
-    "description": "Confirmation shown before requesting host permission for a custom QURL server",
+    "description": "Confirmation shown before requesting host permission for a custom qURL server",
     "placeholders": {
       "origin": {
         "content": "$1",
@@ -195,7 +199,7 @@
   },
   "permission_request_cancelled": {
     "message": "Custom server access request was canceled.",
-    "description": "Shown when the user cancels the pre-permission confirmation for a custom QURL server"
+    "description": "Shown when the user cancels the pre-permission confirmation for a custom qURL server"
   },
   "permission_request_continue": {
     "message": "Continue",
@@ -246,8 +250,8 @@
     "description": "Shown when the Gmail insertion request remains pending for too long"
   },
   "compose_insert_evicted_error": {
-    "message": "Request evicted due to queue overflow. Please try again.",
-    "description": "Shown when a pending insertion request is evicted due to too many concurrent requests"
+    "message": "Insertion is taking longer than expected — check the draft before retrying.",
+    "description": "Shown when a pending insertion request is evicted; the insertion may have succeeded"
   },
   "expiry_suffix": {
     "message": " (Expires: $1)",

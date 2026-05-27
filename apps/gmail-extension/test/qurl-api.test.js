@@ -183,7 +183,7 @@ test('resolveDefaultQurlApiConfig falls back when the bundled default is malform
   }
 
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /Invalid bundled QURL API base URL/);
+  assert.match(errors[0], /Invalid bundled qURL API base URL/);
 });
 
 test('getQurlHostPermissionPattern and isDefaultQurlOrigin use normalized origins', function () {
@@ -360,7 +360,7 @@ test('uploadFile returns a permission error when a custom QURL origin is no long
     qurl_link: null,
     resource_url: null,
     expires_at: null,
-    error: 'Permission to access the configured QURL server is missing. Open settings and save the server URL again.',
+    error: 'Permission to access the configured qURL server is missing. Open settings and save the server URL again.',
   });
 });
 
@@ -385,7 +385,7 @@ test('uploadFile fails closed for custom origins when the permissions API is una
 
   assert.equal(fetchCalled, false);
   assert.equal(result.success, false);
-  assert.equal(result.error, 'Permission to access the configured QURL server is missing. Open settings and save the server URL again.');
+  assert.equal(result.error, 'Permission to access the configured qURL server is missing. Open settings and save the server URL again.');
 });
 
 test('uploadFile surfaces API error payloads on non-OK responses', async function () {
@@ -579,14 +579,25 @@ test('setStoredQurlApiBase skips a second permission prompt when the caller alre
 
 test('setStoredQurlApiBase clears the override without requesting host permission', async function () {
   let removeCalled = false;
+  let permissionRevoked = false;
   global.chrome = {
     runtime: { lastError: null },
     storage: {
       local: {
+        get(key, callback) {
+          // Simulate a previously-stored custom origin
+          callback({ qurlApiBase: 'https://custom.example.com' });
+        },
         remove(key, callback) {
           removeCalled = key === 'qurlApiBase';
           callback();
         },
+      },
+    },
+    permissions: {
+      remove(opts, callback) {
+        permissionRevoked = opts.origins && opts.origins[0] === 'https://custom.example.com/*';
+        callback(true);
       },
     },
   };
@@ -595,6 +606,7 @@ test('setStoredQurlApiBase clears the override without requesting host permissio
 
   assert.equal(cleared, null);
   assert.equal(removeCalled, true);
+  assert.equal(permissionRevoked, true);
 });
 
 test('uploadFile reports network failures', async function () {

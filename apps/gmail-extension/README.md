@@ -263,7 +263,7 @@ apps/gmail-extension/
 ├── content/
 │   └── gmail-compose.js      # Gmail content script (DOM manipulation)
 ├── lib/
-│   ├── qurl-api.js           # QURL upload API client
+│   ├── qurl-api.js           # qURL upload API client
 │   └── qurl-compose-format.js # Shared draft/clipboard formatter
 ├── icons/
 │   ├── icon16.svg / .png

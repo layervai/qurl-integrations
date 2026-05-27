@@ -1,5 +1,5 @@
 /**
- * QURL Gmail Extension — Service Worker (Background Script)
+ * qURL Gmail Extension — Service Worker (Background Script)
  *
  * MV3 service worker: relays popup messages to the active Gmail tab
  * and reinjects content scripts when Gmail loses them after navigation.

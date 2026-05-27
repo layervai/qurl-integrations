@@ -1,7 +1,7 @@
 /**
- * QURL API Client
+ * qURL API Client
  *
- * Handles multipart file uploads to the QURL upload server.
+ * Handles multipart file uploads to the qURL upload server.
  * Ported from the Gmail Apps Script add-on and Node.js test script.
  */
 
@@ -12,7 +12,7 @@ const QURLI18n = typeof globalThis !== 'undefined' && globalThis.QURLI18n
   : (typeof module !== 'undefined' && module.exports ? require('./qurl-i18n.js') : null);
 
 // ===================== Configuration =====================
-// Default QURL server base URL used when no override is configured.
+// Default qURL server base URL used when no override is configured.
 // Release builds may rewrite this constant from QURL_API_BASE in .env or the shell environment.
 // Keep this declaration simple so scripts/build-release.js can rewrite it reliably.
 // Note: The build rewriter adds a trailing slash, but normalizeQurlApiBase (called via
@@ -32,7 +32,7 @@ const DEFAULT_QURL_API_ORIGIN = DEFAULT_QURL_API_CONFIG.origin;
 // ==================== Upload Logic ====================
 
 /**
- * Uploads a file to the QURL server.
+ * Uploads a file to the qURL server.
  *
  * @param {ArrayBuffer|Uint8Array} fileBuffer - Raw file bytes.
  * @param {string} filename - Original filename.
@@ -52,7 +52,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
       expires_at: null,
       error: getMessage(
         'permission_missing_error',
-        'Permission to access the configured QURL server is missing. Open settings and save the server URL again.'
+        'Permission to access the configured qURL server is missing. Open settings and save the server URL again.'
       ),
     };
   }
@@ -191,7 +191,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
 }
 
 /**
- * Returns the effective QURL API base URL.
+ * Returns the effective qURL API base URL.
  * Uses the stored override when available, otherwise falls back to the default.
  *
  * @returns {Promise<string>}
@@ -202,7 +202,7 @@ async function getQurlApiBase() {
 }
 
 /**
- * Reads the stored QURL API base URL override.
+ * Reads the stored qURL API base URL override.
  *
  * @returns {Promise<string|null>}
  */
@@ -220,7 +220,7 @@ async function getStoredQurlApiBase() {
       try {
         resolve(normalizeQurlApiBase(items[QURL_API_BASE_STORAGE_KEY]));
       } catch (err) {
-        console.warn('[qURL] Ignoring invalid stored QURL API base:', err.message);
+        console.warn('[qURL] Ignoring invalid stored qURL API base:', err.message);
         resolve(null);
       }
     });
@@ -228,7 +228,7 @@ async function getStoredQurlApiBase() {
 }
 
 /**
- * Stores a QURL API base URL override. Empty values clear the override.
+ * Stores a qURL API base URL override. Empty values clear the override.
  *
  * @param {string} value
  * @returns {Promise<string|null>} Normalized stored value, or null if cleared.
@@ -248,6 +248,25 @@ async function setStoredQurlApiBase(value, options) {
         'permission_request_denied_error',
         'Permission to access this qURL server was not granted.'
       ));
+    }
+  }
+
+  // When clearing the override, revoke any previously-granted custom origin permission.
+  // This honors the principle of least privilege — the user no longer needs access to
+  // the custom server once they've switched back to the bundled default.
+  if (!normalized) {
+    const previousBase = await getStoredQurlApiBase();
+    if (previousBase && !isDefaultQurlOrigin(previousBase)) {
+      const pattern = getQurlHostPermissionPattern(previousBase);
+      if (typeof chrome !== 'undefined' && chrome.permissions && chrome.permissions.remove) {
+        try {
+          await new Promise(function (res) {
+            chrome.permissions.remove({ origins: [pattern] }, res);
+          });
+        } catch (_err) {
+          // Best-effort revocation; failure is non-fatal.
+        }
+      }
     }
   }
 
@@ -276,7 +295,7 @@ async function setStoredQurlApiBase(value, options) {
 }
 
 /**
- * Ensures the extension has host permission for the given QURL server.
+ * Ensures the extension has host permission for the given qURL server.
  *
  * @param {string} baseUrl
  * @param {boolean} requestIfMissing
@@ -421,7 +440,7 @@ function _parseExpiry(payload) {
     || payload.expiration
     || payload.expires;
 
-  // Empty and zero-like values are treated as "no expiry" for current QURL payloads.
+  // Empty and zero-like values are treated as "no expiry" for current qURL payloads.
   if (!raw) return null;
 
   if (typeof raw === 'number') {
@@ -489,7 +508,7 @@ function createMultipartBoundary() {
 }
 
 /**
- * Normalizes a configured QURL API base URL.
+ * Normalizes a configured qURL API base URL.
  *
  * @param {string} value
  * @returns {string|null}
@@ -534,7 +553,7 @@ function resolveDefaultQurlApiConfig(baseUrl) {
     };
   } catch (err) {
     const normalized = normalizeQurlApiBase(DEFAULT_QURL_API_BASE_FALLBACK);
-    console.error('[qURL] Invalid bundled QURL API base URL, falling back to built-in default:', err.message);
+    console.error('[qURL] Invalid bundled qURL API base URL, falling back to built-in default:', err.message);
     return {
       normalized,
       origin: new URL(normalized).origin,
@@ -543,7 +562,7 @@ function resolveDefaultQurlApiConfig(baseUrl) {
 }
 
 /**
- * Builds the host permission pattern for the given QURL base URL.
+ * Builds the host permission pattern for the given qURL base URL.
  *
  * @param {string} baseUrl
  * @returns {string}
@@ -554,10 +573,10 @@ function getQurlHostPermissionPattern(baseUrl) {
 }
 
 /**
- * Checks whether the given base URL points to the built-in default QURL service.
+ * Checks whether the given base URL points to the built-in default qURL service.
  * Returns false for invalid URLs to fail closed.
  *
- * @param {string} baseUrl - A normalized QURL API base URL.
+ * @param {string} baseUrl - A normalized qURL API base URL.
  * @returns {boolean}
  */
 function isDefaultQurlOrigin(baseUrl) {

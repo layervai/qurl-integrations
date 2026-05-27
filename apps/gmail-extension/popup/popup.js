@@ -1,5 +1,5 @@
 /**
- * QURL Gmail Extension — Popup Logic
+ * qURL Gmail Extension — Popup Logic
  *
  * Handles file selection, upload orchestration, and result reporting.
  */
@@ -253,7 +253,7 @@ async function initializePopup() {
       setCustomConfigIndicator(false);
     }
   } catch (err) {
-    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save qURL server URL.'), 'error');
+    setConfigHint(err.message || getMessage('config_load_error', 'Failed to load qURL server configuration.'), 'error');
   }
 }
 

@@ -1,8 +1,8 @@
 /**
- * QURL Gmail Extension — Gmail Compose Content Script
+ * qURL Gmail Extension — Gmail Compose Content Script
  *
  * Injected into Gmail pages. Listens for messages from the popup
- * and inserts QURL links into the active compose draft body.
+ * and inserts qURL links into the active compose draft body.
  */
 
 (function () {
@@ -136,7 +136,7 @@
           success: false,
           error: getMessage(
             'compose_insert_evicted_error',
-            'Request evicted due to queue overflow. Please try again.'
+            'Insertion is taking longer than expected — check the draft before retrying.'
           ),
         };
         evictedEntry.callbacks.forEach(function (callback) {
