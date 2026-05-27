@@ -185,6 +185,12 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		wantTgt   string
 	}{
 		{name: "happy URL", input: "$staging https://example.com", wantAlias: testAliasName, wantTgt: testAliasURL},
+		// Slack wraps user-typed URLs as <url|display> when the slash
+		// command has should_escape:true (set on /qurl-admin so
+		// `admin add <@U…>` mentions resolve). Unwrap before url.Parse
+		// and store the bare URL.
+		{name: "happy URL slack-autolinked", input: "$staging <https://example.com|https://example.com>", wantAlias: testAliasName, wantTgt: testAliasURL},
+		{name: "happy URL slack-autolinked no display", input: "$staging <https://example.com>", wantAlias: testAliasName, wantTgt: testAliasURL},
 		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
 		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
 		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},

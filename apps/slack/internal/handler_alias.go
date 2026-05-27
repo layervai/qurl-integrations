@@ -178,12 +178,32 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 		out.Target = "$" + slug
 		return out, ""
 	}
+	// Slack's `should_escape: true` (set on /qurl-admin so `admin add
+	// <@U…>` resolves) wraps user-typed URLs as `<url|display>`. Strip
+	// the wrapping so url.Parse below sees a bare URL and the stored
+	// target stays clean.
+	tgt = unwrapSlackAutolink(tgt)
 	u, err := url.Parse(tgt)
 	if err != nil || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
 		return nil, msgAliasTargetInvalid
 	}
 	out.Target = tgt
 	return out, ""
+}
+
+// unwrapSlackAutolink strips the `<url|display>` (or `<url>`) wrapping
+// Slack applies to typed URLs when the slash command has
+// `should_escape: true`. Returns the inner URL when wrapping is
+// present, else returns the input unchanged.
+func unwrapSlackAutolink(tgt string) string {
+	if len(tgt) < 2 || tgt[0] != '<' || tgt[len(tgt)-1] != '>' {
+		return tgt
+	}
+	inner := tgt[1 : len(tgt)-1]
+	if i := strings.IndexByte(inner, '|'); i >= 0 {
+		return inner[:i]
+	}
+	return inner
 }
 
 // requireAlias checks that `tok` is `$<alias>` and returns the alias
