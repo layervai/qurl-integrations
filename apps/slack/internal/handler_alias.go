@@ -23,10 +23,9 @@ import (
 // carries an app-managed `alias_bindings: Map<alias_name,
 // resource_id>` attribute so a channel can host `$grafana`,
 // `$staging-db`, `$logs` etc. simultaneously, each pointing at a
-// distinct resource. A small interface here rather than a direct dep
-// on the slackdata package keeps this PR shippable against main even
-// while #231/#233's slackdata pivot rework is in flight; the eventual
-// store satisfies the same shape.
+// distinct resource. The concrete slackdata.Store satisfies this small
+// interface, which keeps handler tests focused on Slack behavior instead of
+// DynamoDB plumbing.
 //
 // Schema decision locked 2026-05-17: app-managed Map attribute on the
 // existing PK/SK; no GSI, no SK reshape, no data migration (the table
@@ -37,28 +36,16 @@ type AliasStore interface {
 	// `SET alias_bindings.#a = :rid` with
 	// `ConditionExpression: attribute_not_exists(alias_bindings.#a)` so
 	// a duplicate alias name in the same channel returns
-	// ErrAliasAlreadyBound rather than overwriting a teammate's
+	// slackdata.ErrAliasAlreadyBound rather than overwriting a teammate's
 	// binding. Other aliases on the same channel are untouched.
 	BindChannelAlias(ctx context.Context, teamID, channelID, aliasName, resourceID string) error
 	// UnbindChannelAlias removes aliasName from (teamID, channelID).
 	// Implementations issue `REMOVE alias_bindings.#a` with
 	// `ConditionExpression: attribute_exists(alias_bindings.#a)`.
-	// Returns ErrAliasNotFound when aliasName is not bound in the
+	// Returns slackdata.ErrAliasNotFound when aliasName is not bound in the
 	// channel. Other aliases on the same channel are untouched.
 	UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error
 }
-
-// ErrAliasAlreadyBound is returned by AliasStore implementations when
-// BindChannelAlias is called for an aliasName that already has a
-// binding in (teamID, channelID). Handlers use errors.Is to map this
-// to the 409 / "alias already bound" friendly copy.
-var ErrAliasAlreadyBound = slackdata.ErrAliasAlreadyBound
-
-// ErrAliasNotFound is returned by AliasStore implementations when
-// UnbindChannelAlias is called for an aliasName that has no binding
-// in (teamID, channelID). Handlers use errors.Is to map this to the
-// 404 / "alias not bound" friendly copy.
-var ErrAliasNotFound = slackdata.ErrAliasNotFound
 
 var errTunnelSlugNotFound = errors.New("tunnel slug not found")
 
@@ -327,12 +314,12 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
 	// on alias_bindings.#a with attribute_not_exists. A second alias
 	// name on the same channel succeeds (different map key); a
-	// duplicate alias name surfaces as ErrAliasAlreadyBound and is
+	// duplicate alias name surfaces as slackdata.ErrAliasAlreadyBound and is
 	// rendered as a refusal. The refusal copy names only the alias
 	// (not its bound target) to keep the info-disclosure surface
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.Alias, target)
-	if errors.Is(err, ErrAliasAlreadyBound) {
+	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 		respondSlack(w, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or pick a different alias.", args.Alias, args.Alias))
 		return
 	}
@@ -357,25 +344,15 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 	if err != nil {
 		return "", err
 	}
-	cursor := ""
-	for {
-		page, err := c.ListResources(ctx, client.ListResourcesInput{
-			Limit:  100,
-			Cursor: cursor,
-		})
-		if err != nil {
-			return "", err
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: slug})
+	if err != nil {
+		return "", err
+	}
+	for i := range page.Resources {
+		resource := &page.Resources[i]
+		if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
+			return resource.ResourceID, nil
 		}
-		for i := range page.Resources {
-			resource := &page.Resources[i]
-			if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
-				return resource.ResourceID, nil
-			}
-		}
-		if !page.HasMore || page.NextCursor == "" {
-			break
-		}
-		cursor = page.NextCursor
 	}
 	return "", errTunnelSlugNotFound
 }
@@ -412,7 +389,7 @@ func redactURLForLog(target string) string {
 //
 // **Not-bound posture:** UnbindChannelAlias is conditional on
 // attribute_exists(alias_bindings.#a) — clearing an alias that
-// isn't bound surfaces as ErrAliasNotFound and is rendered as
+// isn't bound surfaces as slackdata.ErrAliasNotFound and is rendered as
 // "no such alias on this channel." Other aliases on the same channel
 // are untouched.
 func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
@@ -432,7 +409,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	defer cancel()
 
 	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
-	if errors.Is(err, ErrAliasNotFound) {
+	if errors.Is(err, slackdata.ErrAliasNotFound) {
 		respondSlack(w, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", args.Alias))
 		return
 	}

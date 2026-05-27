@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -39,8 +40,8 @@ type fakeAliasStore struct {
 	rows map[string]map[string]string
 
 	// errBind, errUnbind let tests inject deterministic errors without
-	// spinning a real DDB fake. Set to a sentinel (ErrAliasAlreadyBound
-	// / ErrAliasNotFound) to exercise the typed-conflict branches.
+	// spinning a real DDB fake. Set to a slackdata sentinel to exercise
+	// the typed-conflict branches.
 	errBind   error
 	errUnbind error
 
@@ -81,7 +82,7 @@ func (f *fakeAliasStore) BindChannelAlias(ctx context.Context, teamID, channelID
 		f.rows[k] = row
 	}
 	if _, exists := row[aliasName]; exists {
-		return ErrAliasAlreadyBound
+		return slackdata.ErrAliasAlreadyBound
 	}
 	row[aliasName] = resourceID
 	return nil
@@ -96,10 +97,10 @@ func (f *fakeAliasStore) UnbindChannelAlias(_ context.Context, teamID, channelID
 	k := f.key(teamID, channelID)
 	row, ok := f.rows[k]
 	if !ok {
-		return ErrAliasNotFound
+		return slackdata.ErrAliasNotFound
 	}
 	if _, exists := row[aliasName]; !exists {
-		return ErrAliasNotFound
+		return slackdata.ErrAliasNotFound
 	}
 	delete(row, aliasName)
 	if len(row) == 0 {
@@ -340,11 +341,6 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 		}
 		gotQuery = r.URL.Query()
 		respondQURLEnvelope(t, w, []map[string]any{{
-			testKeyResourceID: "r_other_resource",
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       "other-dashboard",
-			testKeyStatus:     client.StatusActive,
-		}, {
 			testKeyResourceID: testTunnelResourceID,
 			testKeyType:       client.ResourceTypeTunnel,
 			testKeySlug:       testTunnelSlug,
@@ -368,8 +364,11 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	if !strings.Contains(got, testTunnelResourceID) {
 		t.Errorf("response = %q, want resolved resource id", got)
 	}
-	if gotQuery.Get("limit") != "100" {
-		t.Errorf("upstream query = %v, want limit=100", gotQuery)
+	if gotQuery.Get("slug") != testTunnelSlug {
+		t.Errorf("upstream query = %v, want slug=%q", gotQuery, testTunnelSlug)
+	}
+	if gotQuery.Get("limit") != "" || gotQuery.Get("cursor") != "" {
+		t.Errorf("upstream query = %v, want no pagination params", gotQuery)
 	}
 	b := store.bindings(testAliasTeamID, testAliasChannelID)
 	if b[testAliasName] != testTunnelResourceID {
@@ -387,6 +386,9 @@ func TestSetAlias_TunnelSlugMissingDoesNotCreateResource(t *testing.T) {
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
 			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+		if gotSlug := r.URL.Query().Get("slug"); gotSlug != testTunnelSlug {
+			t.Fatalf("upstream slug query = %q, want %q", gotSlug, testTunnelSlug)
 		}
 		respondQURLEnvelope(t, w, []map[string]any{})
 	}))
@@ -463,7 +465,7 @@ func TestSetChannelAlias_SecondAliasOnSameChannelSucceeds(t *testing.T) {
 
 func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 	// Binding the same alias name twice in the same channel must
-	// surface as a typed conflict (ErrAliasAlreadyBound). A different
+	// surface as a typed conflict (slackdata.ErrAliasAlreadyBound). A different
 	// resource id on the second call does NOT silently overwrite.
 	h, store := newAliasTestHandler(t)
 
@@ -653,7 +655,7 @@ func TestClearChannelAlias_OneOfManyLeavesOthers(t *testing.T) {
 
 func TestClearChannelAlias_NotPresentIsNoop(t *testing.T) {
 	// Clearing an alias that isn't bound surfaces the typed
-	// ErrAliasNotFound branch as "not bound; nothing to clear."
+	// slackdata.ErrAliasNotFound branch as "not bound; nothing to clear."
 	h, _ := newAliasTestHandler(t)
 
 	body, sign := aliasSlashRequest(t, "unsetalias $staging", testAliasTeamID, testAliasChannelID)

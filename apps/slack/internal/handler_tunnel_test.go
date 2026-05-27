@@ -264,7 +264,7 @@ func (r raceBindAliasStore) BindChannelAlias(ctx context.Context, teamID, channe
 	if err := r.store.BindChannelAlias(ctx, teamID, channelID, aliasName, resourceID); err != nil {
 		return err
 	}
-	return ErrAliasAlreadyBound
+	return slackdata.ErrAliasAlreadyBound
 }
 
 func (r raceBindAliasStore) UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error {

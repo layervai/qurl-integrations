@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -166,10 +167,10 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 		if existing == resourceID {
 			return fmt.Sprintf("Alias `$%s` was already bound to `%s` in this channel.", alias, resourceID), nil
 		}
-		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or choose `alias:$other-name`.", alias, alias), ErrAliasAlreadyBound
+		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or choose `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
-		if errors.Is(err, ErrAliasAlreadyBound) {
+		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 			existing, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 			if lookupErr == nil && found && existing == resourceID {
 				return fmt.Sprintf("Alias `$%s` was already bound to `%s` in this channel.", alias, resourceID), nil
@@ -182,8 +183,10 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 
 func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, resource *client.Resource, key *client.APIKey, aliasStatus string) string {
 	image := strings.TrimSpace(h.cfg.TunnelImage)
+	imageNote := ""
 	if image == "" {
 		image = defaultTunnelImage
+		imageNote = "\nImage: using the dev/sandbox fallback. Set `QURL_TUNNEL_IMAGE` to an immutable tag or digest before production rollout."
 	}
 	configYAML := fmt.Sprintf(`routes:
   - name: %s
@@ -205,10 +208,11 @@ docker run -d \
   -e QURL_TUNNEL_SLUG=%s \
   %s`, shellSingleQuote(key.APIKey), args.Slug, shellSingleQuote(image))
 
-	return fmt.Sprintf("Tunnel `%s` is ready.\nResource: `%s`\n%s\n\nBootstrap key %s. Delete this Slack message once the sidecar is running, and remove the mounted key file after the first successful sidecar start.\n\n`qurl-proxy.yaml`\n%s\n\nDocker sidecar\n%s\n\nAfter it is connected, users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready.\nResource: `%s`\n%s%s\n\nBootstrap key %s. Delete this Slack message once the sidecar is running, and remove the mounted key file after the first successful sidecar start.\n\n`qurl-proxy.yaml`\n%s\n\nDocker sidecar\n%s\n\nAfter it is connected, users can run `/qurl get $%s`.",
 		args.Slug,
 		resource.ResourceID,
 		aliasStatus,
+		imageNote,
 		tunnelBootstrapExpiryCopy(key),
 		slackCodeBlock("yaml", configYAML),
 		slackCodeBlock("sh", docker),

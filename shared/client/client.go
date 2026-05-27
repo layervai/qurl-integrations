@@ -970,13 +970,17 @@ func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resourc
 
 // ListResourcesInput is the paginated input shape for [Client.ListResources].
 // Mirrors the qurl-service `GET /v1/resources` query parameters
-// (`cursor`, `limit`).
+// (`cursor`, `limit`, `slug`).
 type ListResourcesInput struct {
 	// Limit caps the number of items returned in one page. Server
 	// accepts 1-100; zero falls back to the server default.
 	Limit int
 	// Cursor is the opaque next-page handle from a previous response.
 	Cursor string
+	// Slug filters to a single owner-scoped tunnel resource by immutable
+	// sidecar slug. The server returns a 0- or 1-item list and ignores
+	// cursor/limit when this is set.
+	Slug string
 }
 
 // ListResourcesOutput is the response shape from [Client.ListResources].
@@ -1011,6 +1015,9 @@ func (c *Client) ListResources(ctx context.Context, input ListResourcesInput) (*
 	}
 	if input.Cursor != "" {
 		params.Set("cursor", input.Cursor)
+	}
+	if input.Slug != "" {
+		params.Set("slug", input.Slug)
 	}
 	path := c.baseURL + "/v1/resources"
 	if len(params) > 0 {

@@ -874,6 +874,40 @@ func TestListResourcesLimitClamp(t *testing.T) {
 	}
 }
 
+func TestListResourcesSlugFilter(t *testing.T) {
+	const slug = "prod-dashboard"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("slug"); got != slug {
+			t.Errorf("slug query param: got %q, want %q", got, slug)
+		}
+		if r.URL.Query().Get("limit") != "" || r.URL.Query().Get("cursor") != "" {
+			t.Errorf("unexpected pagination params for slug lookup: %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{
+				"resource_id": "r_prod_dash01",
+				"type":        ResourceTypeTunnel,
+				"slug":        slug,
+				"status":      StatusActive,
+			}},
+			"meta": map[string]string{"request_id": "req_test"},
+		}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	out, err := c.ListResources(context.Background(), ListResourcesInput{Slug: slug})
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if len(out.Resources) != 1 || out.Resources[0].Slug != slug {
+		t.Fatalf("resources = %+v, want one slug match", out.Resources)
+	}
+}
+
 // TestCreatePathIsPlural pins the canonical /v1/qurls path as a named
 // regression assertion. TestCreate already asserts the path generically
 // at line 57; the value of this test is the explicit name — any future

@@ -696,7 +696,7 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl list` — Show your 5 most recent qURLs",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
-	if h.aliasStore != nil && h.cfg.AdminStore != nil {
+	if h.cfg.AdminStore != nil {
 		lines = append(lines,
 			"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
 		)
