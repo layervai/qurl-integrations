@@ -198,7 +198,9 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 // substitutions Slack applies under the same flag. The entity decode
 // only runs when the wrap is present — that's the signal `should_escape`
 // fired — so a user who literally typed `&amp;` outside an escaped
-// command keeps it intact.
+// command keeps it intact. Splits on the *first* `|` to match Slack's
+// `<url|display>` grammar; a URL containing a raw `|` would be ambiguous
+// here, and Slack autodetect percent-encodes `|` to `%7C` anyway.
 func unwrapSlackAutolink(tgt string) string {
 	if len(tgt) < 2 || tgt[0] != '<' || tgt[len(tgt)-1] != '>' {
 		return tgt
