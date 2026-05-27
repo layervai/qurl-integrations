@@ -15,6 +15,8 @@ const (
 	testKeyData       = "data"
 	testKeyError      = "error"
 	testKeyResourceID = "resource_id"
+	testKeySlug       = "slug"
+	testKeyStatus     = "status"
 	testKeyTitle      = "title"
 	testKeyType       = "type"
 	testKeyTargetURL  = "target_url"

@@ -22,6 +22,7 @@ const (
 	testResourceID    = "r_existing01"
 	testResourceIDAlt = "r_dev_dash01"
 	testTargetURL     = "https://internal.example.com"
+	testTunnelSlug    = "prod-dashboard"
 )
 
 // testClient creates a client with retries disabled for fast unit tests.
@@ -873,6 +874,40 @@ func TestListResourcesLimitClamp(t *testing.T) {
 	}
 }
 
+func TestListResourcesSlugFilter(t *testing.T) {
+	const slug = "prod-dashboard"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("slug"); got != slug {
+			t.Errorf("slug query param: got %q, want %q", got, slug)
+		}
+		if r.URL.Query().Get("limit") != "" || r.URL.Query().Get("cursor") != "" {
+			t.Errorf("unexpected pagination params for slug lookup: %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{
+				"resource_id": "r_prod_dash01",
+				"type":        ResourceTypeTunnel,
+				"slug":        slug,
+				"status":      StatusActive,
+			}},
+			"meta": map[string]string{"request_id": "req_test"},
+		}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	out, err := c.ListResources(context.Background(), ListResourcesInput{Slug: slug})
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if len(out.Resources) != 1 || out.Resources[0].Slug != slug {
+		t.Fatalf("resources = %+v, want one slug match", out.Resources)
+	}
+}
+
 // TestCreatePathIsPlural pins the canonical /v1/qurls path as a named
 // regression assertion. TestCreate already asserts the path generically
 // at line 57; the value of this test is the explicit name — any future
@@ -1237,6 +1272,48 @@ func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
 	}
 }
 
+func TestCreateResourceTunnelFindOrCreateSlug(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id":       "r_tunnel01",
+			"type":              ResourceTypeTunnel,
+			"slug":              testTunnelSlug,
+			"status":            StatusActive,
+			"knock_resource_id": "qurl-tunnel-server",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type:         ResourceTypeTunnel,
+		Slug:         testTunnelSlug,
+		FindOrCreate: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.Slug != testTunnelSlug {
+		t.Errorf("Slug = %q, want %s", got.Slug, testTunnelSlug)
+	}
+	if got.KnockResourceID != "qurl-tunnel-server" {
+		t.Errorf("KnockResourceID = %q, want qurl-tunnel-server", got.KnockResourceID)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if raw["slug"] != testTunnelSlug || raw["find_or_create"] != true {
+		t.Errorf("body = %s, want slug + find_or_create", gotBody)
+	}
+}
+
 // TestCreateResourceTunnelTypeRejectsTargetURL pins the inverse of
 // TestCreateResourceTunnelTypeAcceptsEmptyTargetURL — a tunnel resource
 // with a non-empty TargetURL is almost always a stale field from
@@ -1250,6 +1327,56 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 	})
 	if !errors.Is(err, ErrCreateResourceTunnelRejectsTargetURL) {
 		t.Fatalf("expected ErrCreateResourceTunnelRejectsTargetURL, got %v", err)
+	}
+}
+
+func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
+	var gotHeader string
+	var gotBody CreateAPIKeyInput
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/api-keys" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		gotHeader = r.Header.Get(HeaderIdempotencyKey)
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"key_id":      "key_abc123DEF456",
+			"api_key":     "lv_live_secret",
+			"name":        testTunnelSlug + " bootstrap",
+			"scopes":      []string{"qurl:agent", "qurl:write"},
+			"status":      StatusActive,
+			"purpose":     APIKeyPurposeTunnelBootstrap,
+			"tunnel_slug": testTunnelSlug,
+			"expires_at":  "2026-05-28T00:00:00Z",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
+		Name:           testTunnelSlug + " bootstrap",
+		Scopes:         []string{"qurl:agent", "qurl:write"},
+		Purpose:        APIKeyPurposeTunnelBootstrap,
+		TunnelSlug:     testTunnelSlug,
+		ExpiresIn:      "24h",
+		IdempotencyKey: "bootstrap-key-12345678901234567890",
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if gotHeader != "bootstrap-key-12345678901234567890" {
+		t.Errorf("Idempotency-Key = %q", gotHeader)
+	}
+	if gotBody.Purpose != APIKeyPurposeTunnelBootstrap || gotBody.TunnelSlug != testTunnelSlug {
+		t.Errorf("body = %+v, want tunnel bootstrap fields", gotBody)
+	}
+	if got.APIKey != "lv_live_secret" || got.Purpose != APIKeyPurposeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
+		t.Errorf("decoded key = %+v", got)
+	}
+	if got.ExpiresAt == nil {
+		t.Fatal("ExpiresAt should decode")
 	}
 }
 

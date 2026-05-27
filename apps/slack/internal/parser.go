@@ -25,7 +25,7 @@ const (
 	// `$alias` configured by an admin, or a raw `$r_<id>` resource
 	// token copy-pasted from `/qurl list`.
 	SubcmdGet Subcommand = "get"
-	// SubcmdSetAlias binds an alias to a target URL or resource ID.
+	// SubcmdSetAlias binds an alias to a target URL, resource ID, or tunnel slug.
 	SubcmdSetAlias Subcommand = "setalias"
 	// SubcmdUnsetAlias clears the alias on the resource it points at.
 	SubcmdUnsetAlias Subcommand = "unsetalias"
@@ -108,8 +108,8 @@ type Command struct {
 	// callers that want the legacy single-string view should read
 	// [Command.Alias] instead.
 	Resource ParsedResourceToken
-	// Target is the trailing positional arg used by `setalias` (a URL or
-	// raw resource_id) and the legacy `create <url>`.
+	// Target is the trailing positional arg used by `setalias` (a URL, raw
+	// resource_id, or `$slug`) and the legacy `create <url>`.
 	Target string
 	// UserID is the parsed Slack user ID from a `<@U12345>` mention
 	// argument used by `admin add` / `admin remove`. Distinct from the
@@ -511,7 +511,8 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	return cmd, nil
 }
 
-// parseSetAlias extracts `$alias <target>`. Strict-posture like the
+// parseSetAlias extracts `$alias <target>`. Target may be a URL, raw
+// resource_id, or `$slug`. Strict-posture like the
 // other verbs: exactly one alias and exactly one target. Quoted URLs
 // (e.g. `setalias $a "https://x with space"`) survive as a single
 // token because [tokenize] keeps quoted runs intact, so the

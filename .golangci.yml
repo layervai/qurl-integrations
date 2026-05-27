@@ -122,6 +122,8 @@ linters:
 
   exclusions:
     generated: lax
+    paths:
+      - (^|/)node_modules/
     rules:
       # Relax complexity checks in tests
       - linters:

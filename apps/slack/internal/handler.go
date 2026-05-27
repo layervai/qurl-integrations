@@ -153,6 +153,10 @@ type Config struct {
 	// cmd/main.go ships the bot-token plumbing; `/qurl get dm:true`
 	// surfaces a friendly fallback in that case.
 	PostDM func(ctx context.Context, slackUserID, text string) error
+
+	// TunnelImage is the Docker image shown by `/qurl tunnel install`.
+	// Empty falls back to the public client image with the `latest` tag.
+	TunnelImage string
 }
 
 // Handler processes Slack events and commands.
@@ -517,6 +521,43 @@ func classifySlackErr(err error) string {
 	}
 }
 
+func slashSubcommand(text, command string) bool {
+	matched, _ := slashVerb(text, command)
+	return matched
+}
+
+func slashVerb(text string, verbs ...string) (matched bool, rest string) {
+	for _, verb := range verbs {
+		if text == verb {
+			return true, ""
+		}
+		if strings.HasPrefix(text, verb+" ") {
+			return true, strings.TrimSpace(strings.TrimPrefix(text, verb))
+		}
+	}
+	return false, text
+}
+
+func setAliasSubcommand(text string) bool {
+	matched, _ := slashVerb(text, "setalias", "set-alias")
+	return matched
+}
+
+func stripSetAliasPrefix(text string) string {
+	_, rest := slashVerb(text, "setalias", "set-alias")
+	return rest
+}
+
+func unsetAliasSubcommand(text string) bool {
+	matched, _ := slashVerb(text, "unsetalias", "unset-alias")
+	return matched
+}
+
+func stripUnsetAliasPrefix(text string) string {
+	_, rest := slashVerb(text, "unsetalias", "unset-alias")
+	return rest
+}
+
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
@@ -534,7 +575,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		respondSlack(w, h.helpMessage())
 	case text == "setup":
 		h.handleSetup(w, values)
-	case text == "create" || strings.HasPrefix(text, "create "):
+	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated — its URL-form behavior is
 		// folded into `/qurl get <url>`, and the alias form was never
 		// promoted to a user-facing command. Surface a deprecation
@@ -549,7 +590,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// bare token falls through to the unknown-subcommand branch
 		// and gets a help nudge.
 		h.handleListResources(w, values)
-	case text == "get" || strings.HasPrefix(text, "get "):
+	case slashSubcommand(text, "get"):
 		// Exact-token boundary so `getter`, `get-foo` fall through
 		// to the unknown-subcommand branch instead of silently
 		// routing here. The parser then produces ErrEmptyResource
@@ -557,7 +598,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		h.handleGet(w, values)
 	case text == "aliases":
 		h.handleAliases(w, values)
-	case text == "admin" || strings.HasPrefix(text, "admin "):
+	case slashSubcommand(text, "admin"):
 		// All admin verbs (revoke / add / remove / list) route through
 		// the parse-then-dispatch handler. The retired `admin claim`
 		// verb surfaces as ErrUnknownAdminAction from the parser, so
@@ -565,12 +606,14 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// than a stale modal opener. Bare `admin` lands here so the
 		// parser emits the `missing admin action` error.
 		h.handleAdmin(w, values)
-	case text == "setalias" || strings.HasPrefix(text, "setalias "):
+	case slashSubcommand(text, "tunnel"):
+		h.handleTunnel(w, values)
+	case setAliasSubcommand(text):
 		// Bare `setalias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
 		h.handleSetAlias(w, values)
-	case text == "unsetalias" || strings.HasPrefix(text, "unsetalias "):
+	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
@@ -670,6 +713,11 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl list` — Show your 5 most recent qURLs",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
+	if h.aliasStore != nil && h.cfg.AdminStore != nil {
+		lines = append(lines,
+			"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+		)
+	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"
 		// on a sandbox deploy without an aliasStore; mirror the
@@ -678,8 +726,8 @@ func (h *Handler) helpMessage() string {
 		// verbs — the internal "alias" terminology is fine here
 		// because the audience for these lines is admins.
 		lines = append(lines,
-			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
-			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
+			"• `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` — Configure an alias in this channel (admin only)",
+			"• `/qurl unset-alias $<alias>` — Remove a configured alias in this channel (admin only)",
 			"• `/qurl aliases` — List the aliases configured in this channel",
 		)
 	}

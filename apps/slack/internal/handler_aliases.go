@@ -86,7 +86,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl setalias $<alias> <url-or-resource-id>` to add one.")
+		h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` to add one.")
 		return
 	}
 

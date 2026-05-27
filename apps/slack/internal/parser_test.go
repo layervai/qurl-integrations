@@ -40,6 +40,7 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "get with once, dm, and reason flags", text: `get $prod-db once:true dm:true reason:"audit"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{flagKeyOnce: "true", "dm": "true", "reason": "audit"}},
 		{name: "setalias url", text: "setalias $prod-db https://internal.example.com", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		{name: "setalias resource_id", text: "setalias $prod-db r_abc123", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "r_abc123", wantFlags: map[string]string{}},
+		{name: "setalias tunnel slug", text: "setalias $prod-db $prod-dashboard", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "$prod-dashboard", wantFlags: map[string]string{}},
 		{name: "unsetalias", text: "unsetalias $prod-db", wantSub: SubcmdUnsetAlias, wantAlias: "prod-db", wantFlags: map[string]string{}},
 		{name: "aliases", text: "aliases", wantSub: SubcmdAliases, wantFlags: map[string]string{}},
 		{name: "admin revoke qurl_id", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantTarget: "q_01HXYZ8ABCDEF0123456789AB", wantFlags: map[string]string{}},
