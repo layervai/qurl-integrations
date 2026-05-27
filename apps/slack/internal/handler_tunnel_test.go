@@ -1,0 +1,175 @@
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client"
+)
+
+const (
+	testTunnelSlug       = "prod-dashboard"
+	testTunnelResourceID = "r_prod_dash01"
+	testTunnelInstallCmd = "tunnel install " + testTunnelSlug
+)
+
+func TestParseTunnelInstall(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantErr   bool
+		wantSlug  string
+		wantAlias string
+		wantPort  int
+	}{
+		{name: "minimal", text: testTunnelInstallCmd, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
+		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: 9090},
+		{name: "bad slug uppercase", text: "tunnel install Prod", wantErr: true},
+		{name: "bad port", text: testTunnelInstallCmd + " port:70000", wantErr: true},
+		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := parseTunnelInstall(tc.text)
+			if tc.wantErr {
+				if msg == "" {
+					t.Fatalf("expected rejection, got %+v", got)
+				}
+				return
+			}
+			if msg != "" {
+				t.Fatalf("unexpected rejection: %s", msg)
+			}
+			if got.Slug != tc.wantSlug || got.Alias != tc.wantAlias || got.LocalPort != tc.wantPort {
+				t.Errorf("got %+v, want slug=%q alias=%q port=%d", got, tc.wantSlug, tc.wantAlias, tc.wantPort)
+			}
+		})
+	}
+}
+
+func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var resourceBody map[string]any
+	var apiKeyBody map[string]any
+	var idempotencyKey string
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&resourceBody); err != nil {
+			t.Fatalf("decode resource body: %v", err)
+		}
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+			"knock_resource_id": "qurl-tunnel-server",
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+		idempotencyKey = r.Header.Get(client.HeaderIdempotencyKey)
+		if err := json.NewDecoder(r.Body).Decode(&apiKeyBody); err != nil {
+			t.Fatalf("decode api key body: %v", err)
+		}
+		respondQURLEnvelope(t, w, map[string]any{
+			"key_id":      "key_tunnel_bootstrap",
+			"api_key":     "lv_live_test_bootstrap",
+			"name":        "Slack tunnel bootstrap " + testTunnelSlug,
+			"scopes":      []string{"qurl:agent", "qurl:write"},
+			testKeyStatus: client.StatusActive,
+			"purpose":     client.APIKeyPurposeTunnelBootstrap,
+			"tunnel_slug": testTunnelSlug,
+			"expires_at":  "2026-05-28T00:00:00Z",
+		})
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = "ghcr.io/layervai/qurl-reverse-tunnel-client:v-test"
+	h.SetAliasStore(h.cfg.AdminStore)
+	status, ack, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Working") {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
+		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
+	}
+	if apiKeyBody["purpose"] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody["tunnel_slug"] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
+		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
+	}
+	if idempotencyKey == "" {
+		t.Error("Idempotency-Key header was empty")
+	}
+	for _, want := range []string{
+		"Tunnel `" + testTunnelSlug + "` is ready.",
+		"lv_live_test_bootstrap",
+		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
+		"local_port: 9090",
+		"ghcr.io/layervai/qurl-reverse-tunnel-client:v-test",
+		"/qurl get $" + testTunnelSlug,
+	} {
+		if !strings.Contains(async, want) {
+			t.Errorf("async reply missing %q:\n%s", want, async)
+		}
+	}
+	for _, forbidden := range []string{"connect.layerv", "proxy.layerv", "frps-"} {
+		if strings.Contains(async, forbidden) {
+			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
+		}
+	}
+	gotRID, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testTunnelSlug)
+	if err != nil {
+		t.Fatalf("LookupChannelAlias: %v", err)
+	}
+	if !found || gotRID != testTunnelResourceID {
+		t.Fatalf("alias lookup = (%q, %v), want (%s, true)", gotRID, found, testTunnelResourceID)
+	}
+}
+
+func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testTunnelSlug: "r_other"})
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "already bound") {
+		t.Fatalf("async reply = %q, want already-bound refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; bootstrap key must not be minted when alias bind fails", apiKeyHits)
+	}
+}
+
+func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"data": data,
+		"meta": map[string]string{"request_id": "req_test"},
+	}); err != nil {
+		t.Fatalf("encode qurl envelope: %v", err)
+	}
+}

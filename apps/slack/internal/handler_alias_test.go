@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Shared fixture values for alias-handler tests. Lifted to package
@@ -183,6 +186,7 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
 		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
 		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},
+		{name: "happy tunnel slug", input: "$staging $prod-dashboard", wantAlias: testAliasName, wantTgt: "$prod-dashboard"},
 
 		{name: "missing target", input: "$staging", wantErr: true},
 		{name: "missing alias", input: testAliasURL, wantErr: true},
@@ -308,6 +312,49 @@ func TestSetAlias_HappyResourceID(t *testing.T) {
 	b := store.bindings(testAliasTeamID, testAliasChannelID)
 	if b[testAliasName] != "r_abc123" {
 		t.Errorf("stored bindings = %v, want {%q: r_abc123}", b, testAliasName)
+	}
+}
+
+func TestSetAlias_HappyTunnelSlug(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources" {
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	store := newFakeAliasStore()
+	h.aliasStore = store
+	body, sign := aliasSlashRequest(t, "set-alias $staging $"+testTunnelSlug, testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, testTunnelResourceID) {
+		t.Errorf("response = %q, want resolved resource id", got)
+	}
+	if gotBody[testKeyType] != client.ResourceTypeTunnel || gotBody[testKeySlug] != testTunnelSlug || gotBody["find_or_create"] != true {
+		t.Errorf("upstream body = %+v, want tunnel find-or-create for slug", gotBody)
+	}
+	b := store.bindings(testAliasTeamID, testAliasChannelID)
+	if b[testAliasName] != testTunnelResourceID {
+		t.Errorf("stored bindings = %v, want {%q: %s}", b, testAliasName, testTunnelResourceID)
 	}
 }
 
@@ -632,6 +679,9 @@ func TestHelpListsNewVerbs(t *testing.T) {
 	}
 	if !strings.Contains(got, "unsetalias") {
 		t.Errorf("/qurl help = %q, missing unsetalias", got)
+	}
+	if strings.Contains(got, "tunnel install") {
+		t.Errorf("/qurl help = %q, advertised tunnel install without AdminStore", got)
 	}
 }
 

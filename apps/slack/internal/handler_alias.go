@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // AliasStore is the persistence surface the alias verbs depend on.
@@ -49,13 +52,13 @@ type AliasStore interface {
 // BindChannelAlias is called for an aliasName that already has a
 // binding in (teamID, channelID). Handlers use errors.Is to map this
 // to the 409 / "alias already bound" friendly copy.
-var ErrAliasAlreadyBound = errors.New("alias already bound in this channel")
+var ErrAliasAlreadyBound = slackdata.ErrAliasAlreadyBound
 
 // ErrAliasNotFound is returned by AliasStore implementations when
 // UnbindChannelAlias is called for an aliasName that has no binding
 // in (teamID, channelID). Handlers use errors.Is to map this to the
 // 404 / "alias not bound" friendly copy.
-var ErrAliasNotFound = errors.New("alias not bound in this channel")
+var ErrAliasNotFound = slackdata.ErrAliasNotFound
 
 // resourceIDPrefix is the wire prefix on every qurl-service resource
 // id. setalias discriminates URL targets from resource-id targets on
@@ -80,7 +83,7 @@ var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 // aliasUsage is the help-text body returned when setalias/unsetalias
 // is invoked with an obvious typo. Centralized so the parser-rejection
 // path and the missing-arg path share the same copy.
-const aliasUsage = "Usage:\n• `/qurl setalias $<alias> <url-or-resource-id>`\n• `/qurl unsetalias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
+const aliasUsage = "Usage:\n• `/qurl setalias $<alias> <url-or-resource-id-or-$slug>`\n• `/qurl unsetalias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
 
 // URL scheme constants. Lifted so the parser, validator, and any
 // future caller can't drift on the literal string match — and so
@@ -102,7 +105,7 @@ const (
 // the user but trips ST1005 if we wrap in `error`, and (c) the
 // dispatcher needs the literal string anyway.
 const (
-	msgAliasTargetInvalid = "Target must be a URL (http/https) or a resource id (`r_…`).\n\n" + aliasUsage
+	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`).\n\n" + aliasUsage
 	msgAliasMissing       = "Missing alias.\n\n" + aliasUsage
 	msgAliasNoSigil       = "Alias must start with `$` (e.g. `$staging`).\n\n" + aliasUsage
 	msgAliasEmptyName     = "Missing alias name after `$`.\n\n" + aliasUsage
@@ -173,6 +176,14 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 			return nil, msgAliasTargetInvalid
 		}
 		out.Target = tgt
+		return out, ""
+	}
+	if strings.HasPrefix(tgt, "$") {
+		slug, msg := requireAlias(tgt)
+		if msg != "" || !tunnelSlugPattern.MatchString(slug) {
+			return nil, msgAliasTargetInvalid
+		}
+		out.Target = "$" + slug
 		return out, ""
 	}
 	u, err := url.Parse(tgt)
@@ -279,6 +290,9 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := strings.TrimSpace(strings.TrimPrefix(text, "setalias"))
+	if rest == text {
+		rest = strings.TrimSpace(strings.TrimPrefix(text, "set-alias"))
+	}
 
 	args, userMsg := parseAliasArgs(rest, true)
 	if userMsg != "" {
@@ -292,6 +306,17 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	}
 	defer cancel()
 
+	target := args.Target
+	if strings.HasPrefix(target, "$") {
+		resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, strings.TrimPrefix(target, "$"))
+		if err != nil {
+			slog.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
+			respondSlack(w, sanitizeAPIError(err, "Failed to resolve tunnel slug"))
+			return
+		}
+		target = resourceID
+	}
+
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
 	// on alias_bindings.#a with attribute_not_exists. A second alias
 	// name on the same channel succeeds (different map key); a
@@ -299,7 +324,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// rendered as a refusal. The refusal copy names only the alias
 	// (not its bound target) to keep the info-disclosure surface
 	// narrow — claude-bot review #5 on the prior single-alias version.
-	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.Alias, args.Target)
+	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.Alias, target)
 	if errors.Is(err, ErrAliasAlreadyBound) {
 		respondSlack(w, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or pick a different alias.", args.Alias, args.Alias))
 		return
@@ -316,8 +341,25 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// stripped) so credentials embedded by a setting admin don't
 	// land in operator-visible logs where the readership is wider
 	// than the writer's admin scope.
-	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", redactURLForLog(args.Target)) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
-	respondSlack(w, fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", args.Alias, args.Target))
+	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", redactURLForLog(target))
+	respondSlack(w, fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", args.Alias, target))
+}
+
+func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		return "", err
+	}
+	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
+		Type:         client.ResourceTypeTunnel,
+		Slug:         slug,
+		FindOrCreate: true,
+		Description:  "Slack alias target for " + slug,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resource.ResourceID, nil
 }
 
 // redactURLForLog strips userinfo (e.g. `user:token@`) and any raw

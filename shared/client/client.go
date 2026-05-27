@@ -96,6 +96,9 @@ var ErrCreateResourceRequiresTargetURL = errors.New("create resource: target_url
 // fast for a clearer error than a silent server discard.
 var ErrCreateResourceTunnelRejectsTargetURL = errors.New("create resource: type=tunnel must not set target_url (server ignores it)")
 
+// ErrCreateAPIKeyNilInput is returned by CreateAPIKey when input is nil.
+var ErrCreateAPIKeyNilInput = errors.New("create api key: input is nil")
+
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
 var ErrUpdateResourceEmptyID = errors.New("update resource: resource_id is empty")
@@ -144,6 +147,10 @@ const ResourceTypeURL = "url"
 
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
+
+// APIKeyPurposeTunnelBootstrap is the restricted key purpose used by the
+// Docker reverse-tunnel onboarding flow.
+const APIKeyPurposeTunnelBootstrap = "tunnel_bootstrap"
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -601,6 +608,7 @@ type Resource struct {
 	// (FRP-backed reverse tunnel). Mirrors the qurl-service
 	// `ResourceType` enum.
 	Type         string `json:"type,omitempty"`
+	Slug         string `json:"slug,omitempty"`
 	Alias        string `json:"alias,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	Description  string `json:"description,omitempty"`
@@ -622,6 +630,9 @@ type Resource struct {
 	// field that's structurally just "missing on the wire".
 	UpdatedAt    time.Time     `json:"updated_at,omitzero"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	// KnockResourceID is the client-safe NHP resource_id the tunnel sidecar
+	// knocks before dialing FRP. It is surfaced on tunnel resource creates.
+	KnockResourceID string `json:"knock_resource_id,omitempty"`
 }
 
 // CreateResourceInput is the input for `POST /v1/resources`. Idempotent on
@@ -640,6 +651,13 @@ type CreateResourceInput struct {
 	// or "tunnel". When type=tunnel, TargetURL is ignored server-side.
 	// Mirrors the qurl-service `ResourceType` enum.
 	Type string `json:"type,omitempty"`
+	// Slug is the per-owner stable tunnel handle for type=tunnel resources.
+	// When paired with FindOrCreate it lets headless sidecars reserve or
+	// recover a tunnel resource without the caller knowing the resource_id.
+	Slug string `json:"slug,omitempty"`
+	// FindOrCreate requests the server's idempotent resource lookup/create
+	// path. For type=tunnel this keys on (owner, slug).
+	FindOrCreate bool `json:"find_or_create,omitempty"`
 	// Alias: empty string elides via `omitempty` and yields a resource
 	// with no alias. Server validates non-empty values against
 	// `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`. If a caller passes an empty
@@ -654,6 +672,34 @@ type CreateResourceInput struct {
 	CustomDomain string        `json:"custom_domain,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// CreateAPIKeyInput is the input for `POST /v1/api-keys`.
+type CreateAPIKeyInput struct {
+	Name       string   `json:"name"`
+	Scopes     []string `json:"scopes"`
+	ExpiresIn  string   `json:"expires_in,omitempty"`
+	Purpose    string   `json:"purpose,omitempty"`
+	TunnelSlug string   `json:"tunnel_slug,omitempty"`
+
+	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
+	// request header so retries replay the same plaintext key.
+	IdempotencyKey string `json:"-"`
+}
+
+// APIKey represents an API key create response. APIKey is populated only on
+// create; list/update responses never return plaintext keys.
+type APIKey struct {
+	KeyID      string     `json:"key_id,omitempty"`
+	APIKey     string     `json:"api_key,omitempty"`
+	KeyPrefix  string     `json:"key_prefix,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	Scopes     []string   `json:"scopes,omitempty"`
+	Status     string     `json:"status,omitempty"`
+	CreatedAt  time.Time  `json:"created_at,omitzero"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Purpose    string     `json:"purpose,omitempty"`
+	TunnelSlug string     `json:"tunnel_slug,omitempty"`
 }
 
 // UpdateResourceInput is the input for `PATCH /v1/resources/{id}`.
@@ -782,6 +828,35 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 
 	var out Resource
 	if _, err := c.do(req, &out, "POST /v1/resources"); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CreateAPIKey creates a qURL API key. It is used by Slack onboarding to mint
+// short-lived, restricted tunnel bootstrap keys from a workspace API key.
+func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*APIKey, error) {
+	if input == nil {
+		return nil, ErrCreateAPIKeyNilInput
+	}
+	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal create api key input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/api-keys", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if input.IdempotencyKey != "" {
+		req.Header.Set(HeaderIdempotencyKey, input.IdempotencyKey)
+	}
+
+	var out APIKey
+	if _, err := c.do(req, &out, "POST /v1/api-keys"); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -153,6 +153,10 @@ type Config struct {
 	// cmd/main.go ships the bot-token plumbing; `/qurl get dm:true`
 	// surfaces a friendly fallback in that case.
 	PostDM func(ctx context.Context, slackUserID, text string) error
+
+	// TunnelImage is the Docker image shown by `/qurl tunnel install`.
+	// Empty falls back to the public client image with the `latest` tag.
+	TunnelImage string
 }
 
 // Handler processes Slack events and commands.
@@ -565,10 +569,14 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// than a stale modal opener. Bare `admin` lands here so the
 		// parser emits the `missing admin action` error.
 		h.handleAdmin(w, values)
+	case text == "tunnel" || strings.HasPrefix(text, "tunnel "):
+		h.handleTunnel(w, values)
 	case text == "setalias" || strings.HasPrefix(text, "setalias "):
 		// Bare `setalias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
+		h.handleSetAlias(w, values)
+	case text == "set-alias" || strings.HasPrefix(text, "set-alias "):
 		h.handleSetAlias(w, values)
 	case text == "unsetalias" || strings.HasPrefix(text, "unsetalias "):
 		h.handleUnsetAlias(w, values)
@@ -670,6 +678,11 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl list` — Show your 5 most recent qURLs",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
+	if h.aliasStore != nil && h.cfg.AdminStore != nil {
+		lines = append(lines,
+			"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+		)
+	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"
 		// on a sandbox deploy without an aliasStore; mirror the
@@ -678,7 +691,7 @@ func (h *Handler) helpMessage() string {
 		// verbs — the internal "alias" terminology is fine here
 		// because the audience for these lines is admins.
 		lines = append(lines,
-			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
+			"• `/qurl setalias $<alias> <url-or-resource-id-or-$slug>` — Configure an alias in this channel (admin only)",
 			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
 			"• `/qurl aliases` — List the aliases configured in this channel",
 		)
