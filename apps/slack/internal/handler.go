@@ -689,15 +689,20 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // (the alternative, taking team_id from an unsigned query param at
 // /start, was the workspace-rebind primitive flagged in PR review).
 //
-// Admin restriction: this handler does NOT verify the invoking user is
-// a workspace admin. That gate lives in the Slack app manifest — the
-// `/qurl setup` command must be declared admin-only (or restricted via
-// channel/role permissions in the install config). Without that gate,
-// any workspace user could initiate setup and overwrite the workspace's
-// qURL key with one minted against their own Auth0 account. Confirm
-// the manifest before shipping; an in-bot check would require an extra
-// Slack API round-trip per setup attempt that the manifest already
-// covers.
+// Owner-only rebind gate: on fresh install (no workspace_mappings
+// row), any workspace user may run /setup — that user becomes the
+// workspace owner. On subsequent runs only the owner is permitted;
+// other workspace members (including admins added via /qurl admin
+// add) get a "owner-only" reply. Without this gate, any added admin
+// could complete OAuth against their own Auth0 account and silently
+// rotate the workspace's qURL credential — the OAuth callback's
+// BindWorkspace also rejects that case as a defense in depth, but
+// gating here means non-owners don't get a setup URL minted in their
+// name at all (cleaner audit, no half-completed OAuth flows).
+//
+// AdminStore=nil (sandbox / no-DDB) skips the gate — same posture as
+// every other admin verb. The reply on missing AdminStore stays the
+// pre-existing "qURL OAuth is not configured" branch.
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
@@ -708,6 +713,32 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	if teamID == "" || userID == "" {
 		respondSlack(w, "Could not read your Slack workspace or user ID from the command payload.")
 		return
+	}
+	// Owner gate. AdminStore==nil skips entirely (sandbox/no-DDB);
+	// otherwise check whether the workspace has an owner and whether
+	// it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
+	// err); we only consume ownerID here — the admin-set membership
+	// is irrelevant for /setup specifically (added admins can't rerun
+	// /setup, only the owner can).
+	if h.cfg.AdminStore != nil {
+		gateCtx, gateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+		gateCancel()
+		if err != nil {
+			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "user_id", userID)
+			respondSlack(w, ":warning: could not verify workspace ownership (upstream error; see logs). Try again in a moment.")
+			return
+		}
+		// ownerID=="" → workspace not yet bound → fresh install, allow.
+		// ownerID==userID → idempotent rerun by owner (rotates the
+		// API key on OAuth-callback success), allow.
+		// otherwise → non-owner rebind attempt, refuse here so we
+		// don't even mint the state token / setup URL.
+		if ownerID != "" && ownerID != userID {
+			slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
+			respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is <@%s>. Ask them to re-run setup, or use `/qurl admin` for non-owner admin actions.", ownerID))
+			return
+		}
 	}
 	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
 	if err != nil {
@@ -770,7 +801,7 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl get <url|$name> once:true` — Get a single-use qURL; the link burns on first redemption",
 		"• `/qurl get <url|$name> reason:\"…\"` — Annotate the audit log with a reason",
 		"• `/qurl list` — Show your 5 most recent qURLs",
-		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
+		"• `/qurl setup` — Connect qURL to your Slack workspace and become its owner. After the first setup only the workspace owner can re-run this — other admins (added via `/qurl admin add`) can use the rest of the admin verbs but cannot rotate the qURL credential.",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {

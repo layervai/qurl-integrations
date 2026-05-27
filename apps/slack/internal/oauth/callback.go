@@ -359,9 +359,22 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 // key and never overwrites an existing admin's stored credential.
 //
 // AdminStore=nil is the sandbox / no-DDB path — log and skip.
-// qurlSub=="" means the verifier failed; we can't bind without the
-// OwnerID. Render a 500 — half-installing (API key minted, admin
-// verbs broken) is the worst-of-both-worlds state.
+// qurlSub=="" means the verifier failed; we still refuse the bind
+// (the Auth0 identity check is a security gate at OAuth time even
+// though qurlSub is no longer persisted in workspace_mappings —
+// without it, anyone with workspace OAuth-flow access could complete
+// /setup without proving qURL service identity). Render a 500 —
+// half-installing (API key minted, admin verbs broken) is the
+// worst-of-both-worlds state.
+//
+// `verified.UserID` is the Slack user ID of the /setup invoker
+// (HMAC-verified through the OAuth state token). That value becomes
+// BOTH the workspace_mappings.owner_id (the long-lived "only this
+// Slack user can re-run /setup" anchor) AND the initial entry in
+// admin_slack_user_ids. The two are the same value at first bind
+// by construction; /qurl admin add later grows the admin set but
+// leaves owner_id immutable. See WorkspaceMapping doc in slackdata
+// for the model rationale.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState, qurlSub string) bool {
@@ -379,7 +392,7 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
 	defer bindCancel()
 	bindErr := cfg.AdminStore.BindWorkspace(bindCtx,
-		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: qurlSub},
+		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: verified.UserID},
 		verified.UserID)
 	if bindErr == nil {
 		return true
