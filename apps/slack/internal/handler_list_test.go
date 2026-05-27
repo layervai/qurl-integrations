@@ -331,6 +331,150 @@ func TestHandleList_TunnelResourceWithoutAlias(t *testing.T) {
 	}
 }
 
+// TestHandleList_TunnelResourceWithSlug fences the customer-onboarding
+// Phase 3 rendering: a tunnel resource with a non-empty `slug` (set
+// by the sidecar's QURL_TUNNEL_SLUG bootstrap) surfaces the slug as
+// a "[slug:<slug>]" fragment between the "(tunnel)" placeholder and
+// the optional description suffix. The customer's bot user reads this
+// to match what the sidecar provisioned against a resource_id before
+// pairing it with an alias via `/qurl set-alias`.
+func TestHandleList_TunnelResourceWithSlug(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_tunnel_slg", fAttrAlias: "prod-dash", testKeyType: resourceTypeTunnel, testKeySlug: "prod-dashboard"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$prod-dash` → (tunnel) [slug:prod-dashboard]") {
+		t.Errorf("async reply missing tunnel-with-slug row: %q", async)
+	}
+}
+
+// TestHandleList_TunnelResourceWithSlugAndDescription fences the
+// composition of the slug fragment with the trailing-em-dash
+// description suffix. Slug fragment renders BEFORE the description,
+// so the line reads "(tunnel) [slug:<slug>] — <description>" — slug
+// is structural metadata about the resource identity, description is
+// operator-authored prose, and the visual axis preserves that order.
+func TestHandleList_TunnelResourceWithSlugAndDescription(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_tunnel_sd", fAttrAlias: "ops", testKeyType: resourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "ops jump host"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$ops` → (tunnel) [slug:ops-bastion] — ops jump host") {
+		t.Errorf("async reply missing tunnel-with-slug + description row: %q", async)
+	}
+}
+
+// TestHandleList_TunnelResourceWithoutSlugOmitsFragment fences the
+// legacy / pre-Phase-1A path: a tunnel resource with an empty Slug
+// (qurl-service didn't surface slug until PR #743; pre-existing tunnels
+// may carry no slug for the lifetime of the row) renders the
+// fragment-free "(tunnel)" shape. Choosing "omit cleanly" over
+// "slug:none" parallels how URL/transit rows already work and keeps
+// the row identical to the pre-Phase-3 shape for legacy tunnels.
+func TestHandleList_TunnelResourceWithoutSlugOmitsFragment(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_tunnel_nos", fAttrAlias: "legacy-tun", testKeyType: resourceTypeTunnel},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$legacy-tun` → (tunnel)") {
+		t.Errorf("async reply missing tunnel placeholder for legacy slug-less tunnel: %q", async)
+	}
+	if strings.Contains(async, "[slug:") {
+		t.Errorf("slug fragment leaked on tunnel row without a slug: %q", async)
+	}
+	if strings.Contains(async, "slug:none") {
+		t.Errorf("slug:none placeholder leaked — implementation chose to omit cleanly: %q", async)
+	}
+}
+
+// TestHandleList_URLResourceNeverShowsSlugFragment fences the
+// tunnel-scope of the slug fragment: a URL/transit resource MUST NOT
+// render a "[slug:...]" fragment even if a stray `slug` field shows
+// up on the wire (qurl-service rejects slug on non-tunnel creates,
+// but defense-in-depth: the renderer keys the fragment on Type=tunnel,
+// not on the slug field's presence).
+func TestHandleList_URLResourceNeverShowsSlugFragment(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			// Stray slug on a URL row — server shouldn't emit this,
+			// but the renderer must defend the type-scoped contract.
+			{testKeyResourceID: "r_url_xxxxxx", fAttrAlias: "prod-url", testKeyTargetURL: "https://url-row.example.com", testKeySlug: "should-not-render"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$prod-url` → https://url-row.example.com") {
+		t.Errorf("async reply missing URL row: %q", async)
+	}
+	if strings.Contains(async, "[slug:") {
+		t.Errorf("slug fragment leaked on a URL/transit row: %q", async)
+	}
+	if strings.Contains(async, "should-not-render") {
+		t.Errorf("stray wire-level slug bled through on a URL row: %q", async)
+	}
+}
+
+// TestHandleList_MixedTypesOnlyTunnelRowsShowSlug fences the
+// per-row scoping in a heterogeneous list: only tunnel rows surface
+// "[slug:...]" fragments; URL rows render plain.
+func TestHandleList_MixedTypesOnlyTunnelRowsShowSlug(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_tun_slug_a", fAttrAlias: "atun", testKeyType: resourceTypeTunnel, testKeySlug: "alpha-tunnel"},
+			{testKeyResourceID: "r_url_btarg1", fAttrAlias: "burl", testKeyTargetURL: "https://b.example.com"},
+			{testKeyResourceID: "r_tun_noslug", fAttrAlias: "ctun", testKeyType: resourceTypeTunnel},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	// Tunnel with slug → fragment present.
+	if !strings.Contains(async, "`$atun` → (tunnel) [slug:alpha-tunnel]") {
+		t.Errorf("async reply missing slug-bearing tunnel row: %q", async)
+	}
+	// URL row → no fragment, plain target.
+	if !strings.Contains(async, "`$burl` → https://b.example.com") {
+		t.Errorf("async reply missing URL row: %q", async)
+	}
+	// Tunnel without slug → bare "(tunnel)" with no fragment.
+	if !strings.Contains(async, "`$ctun` → (tunnel)") {
+		t.Errorf("async reply missing slug-less tunnel row: %q", async)
+	}
+	// Exactly one slug fragment in the whole reply — the URL and
+	// slug-less tunnel rows MUST NOT carry one.
+	if got := strings.Count(async, "[slug:"); got != 1 {
+		t.Errorf("expected exactly one [slug:...] fragment across mixed list, got %d: %q", got, async)
+	}
+}
+
 // TestHandleList_ResourceWithDescription fences the trailing
 // "— <description>" annotation. Legacy /qurl list rendered description
 // on a separate line; the resource-pivoted version preserves the
@@ -341,9 +485,9 @@ func TestHandleList_ResourceWithDescription(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_desc_aaaaa", fAttrAlias: "prod", testKeyTargetURL: "https://prod", "description": "production gateway"},
+			{testKeyResourceID: "r_desc_aaaaa", fAttrAlias: "prod", testKeyTargetURL: "https://prod", testKeyDescription: "production gateway"},
 			{testKeyResourceID: "r_nodesc_bbbb", fAttrAlias: "stage", testKeyTargetURL: "https://stage"},
-			{testKeyResourceID: "r_tun_descrip", fAttrAlias: "tun", testKeyType: resourceTypeTunnel, "description": "ops bastion"},
+			{testKeyResourceID: "r_tun_descrip", fAttrAlias: "tun", testKeyType: resourceTypeTunnel, testKeyDescription: "ops bastion"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)

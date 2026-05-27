@@ -252,10 +252,11 @@ func resourceSortKey(r *client.Resource) string {
 //   - With alias bound:    `• \`$<alias>\` → <target_url>`
 //   - Without alias bound: `• \`$<resource_id>\` → <target_url> (no alias set)`
 //   - Tunnel (Type=tunnel): `• \`$<token>\` → (tunnel)`
+//   - Tunnel with slug:    `• \`$<token>\` → (tunnel) [slug:<slug>]`
 //   - Empty target (other): `• \`$<token>\` → <empty>`
 //
 // When `r.Description` is set, it appends ` — <description>` as a
-// trailing annotation (after the alias-set/tunnel hints). Legacy
+// trailing annotation (after the alias-set/tunnel/slug hints). Legacy
 // /qurl list rendered description on a separate visual axis; the
 // trailing-em-dash form keeps the one-line-per-row shape needed for
 // the copy-paste-ready `$<token>` workflow while preserving the
@@ -273,6 +274,16 @@ func resourceSortKey(r *client.Resource) string {
 // type), NOT on empty target_url — keying on the empty field would
 // silently re-label any non-tunnel row with a missing target as
 // "(tunnel)", which would mislead operators triaging a data glitch.
+//
+// Slug fragment ([slug:<slug>]) renders ONLY on tunnel rows that carry
+// a non-empty Slug. URL/transit resources never carry a slug on the
+// wire (qurl-service rejects slug on non-tunnel creates) so the
+// fragment is structurally tunnel-scoped. A tunnel row WITHOUT a slug
+// — legacy / pre-Phase-1A — renders the fragment-free shape so existing
+// fixtures (and operator muscle memory) keep working. The customer's
+// onboarding flow runs `/qurl list resources` to match what their
+// sidecar provisioned (via QURL_TUNNEL_SLUG) against a resource_id
+// before pairing it with an alias.
 func formatResourceListLine(r *client.Resource) string {
 	token := r.Alias
 	noAlias := false
@@ -289,7 +300,11 @@ func formatResourceListLine(r *client.Resource) string {
 		// is the effective destination). Render a placeholder so the
 		// row still reads cleanly. The "(no alias set)" annotation
 		// is suppressed here — see godoc.
-		return fmt.Sprintf("• `$%s` → (tunnel)%s", token, descSuffix)
+		slugFrag := ""
+		if r.Slug != "" {
+			slugFrag = " [slug:" + r.Slug + "]"
+		}
+		return fmt.Sprintf("• `$%s` → (tunnel)%s%s", token, slugFrag, descSuffix)
 	}
 	target := r.TargetURL
 	if target == "" {
