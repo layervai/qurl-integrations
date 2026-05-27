@@ -178,10 +178,6 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 		out.Target = "$" + slug
 		return out, ""
 	}
-	// Slack's `should_escape: true` (set on /qurl-admin so `admin add
-	// <@U…>` resolves) wraps user-typed URLs as `<url|display>`. Strip
-	// the wrapping so url.Parse below sees a bare URL and the stored
-	// target stays clean.
 	tgt = unwrapSlackAutolink(tgt)
 	u, err := url.Parse(tgt)
 	if err != nil || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
