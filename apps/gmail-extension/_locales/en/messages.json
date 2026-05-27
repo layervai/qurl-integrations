@@ -63,7 +63,11 @@
   },
   "api_invalid_payload_error": {
     "message": "Invalid API response payload.",
-    "description": "Shown when the QURL server responds with an unexpected JSON shape"
+    "description": "Shown when the qURL server responds with an unexpected JSON shape"
+  },
+  "api_missing_link_error": {
+    "message": "Server returned success but no download link was provided.",
+    "description": "Shown when the qURL server returns a success response without a qurl_link field"
   },
   "config_reset_error": {
     "message": "Failed to reset qURL server URL.",

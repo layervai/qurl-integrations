@@ -167,7 +167,6 @@ Injected into Gmail at `document_start` and also reinjected on demand by `backgr
 |---|---|---|
 | 1 | Focused editable element | `.Am.Al.editable:not([contenteditable="false"]):focus` or semantic `[role="textbox"][contenteditable="true"]` fallbacks |
 | 2 | Any visible editable | Gmail class selectors first, then semantic compose-body fallbacks with `isVisible()` |
-| 3 | Compose iframe | `iframe[name="__frame"]` or `iframe[src*="compose"]` |
 
 The semantic fallback reduces reliance on Gmail's obfuscated class names when a compose body exposes stable `role="textbox"` and `contenteditable="true"` attributes.
 

@@ -1,6 +1,4 @@
 node_modules/
 .env
-.dual-graph/
-.dual-graph-context/
 release/
 dist/

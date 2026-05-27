@@ -220,7 +220,7 @@ async function getStoredQurlApiBase() {
       try {
         resolve(normalizeQurlApiBase(items[QURL_API_BASE_STORAGE_KEY]));
       } catch (err) {
-        console.warn('[QURL] Ignoring invalid stored QURL API base:', err.message);
+        console.warn('[qURL] Ignoring invalid stored QURL API base:', err.message);
         resolve(null);
       }
     });
@@ -246,7 +246,7 @@ async function setStoredQurlApiBase(value, options) {
     if (!granted) {
       throw new Error(getMessage(
         'permission_request_denied_error',
-        'Permission to access this QURL server was not granted.'
+        'Permission to access this qURL server was not granted.'
       ));
     }
   }
@@ -506,14 +506,14 @@ function normalizeQurlApiBase(value) {
   } catch (err) {
     throw new Error(getMessage(
       'config_invalid_url_error',
-      'QURL server URL must be a valid http(s) URL.'
+      'qURL server URL must be a valid http(s) URL.'
     ));
   }
 
   if (parsed.protocol !== 'https:') {
     throw new Error(getMessage(
       'config_https_required_error',
-      'QURL server URL must start with https://'
+      'qURL server URL must start with https://'
     ));
   }
 
@@ -534,7 +534,7 @@ function resolveDefaultQurlApiConfig(baseUrl) {
     };
   } catch (err) {
     const normalized = normalizeQurlApiBase(DEFAULT_QURL_API_BASE_FALLBACK);
-    console.error('[QURL] Invalid bundled QURL API base URL, falling back to built-in default:', err.message);
+    console.error('[qURL] Invalid bundled QURL API base URL, falling back to built-in default:', err.message);
     return {
       normalized,
       origin: new URL(normalized).origin,

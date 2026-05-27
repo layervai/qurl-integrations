@@ -143,7 +143,7 @@
           try {
             callback(evictionError);
           } catch (err) {
-            console.warn('[QURL] Eviction callback failed:', err);
+            console.warn('[qURL] Eviction callback failed:', err);
           }
         });
       }
@@ -171,7 +171,7 @@
       try {
         callback(response);
       } catch (err) {
-        console.warn('[QURL] INSERT_LINKS callback failed:', err);
+        console.warn('[qURL] INSERT_LINKS callback failed:', err);
       }
     });
 
@@ -415,10 +415,10 @@
   function insertLinksIntoGmailDraft(results, callback) {
     findComposeBodyAsync(function (composeBody) {
       if (!composeBody) {
-        console.warn('[QURL] Could not find Gmail compose body element.');
+        console.warn('[qURL] Could not find Gmail compose body element.');
         showGmailNotification(getMessage(
           'compose_body_missing_error',
-          'QURL: Could not find compose window. Please open a compose window and try again.'
+          'qURL: Could not find compose window. Please open a compose window and try again.'
         ));
         callback(false);
         return;
@@ -442,7 +442,7 @@
             return;
           }
         } catch (e) {
-          console.warn('[QURL] execCommand insertHTML failed:', e);
+          console.warn('[qURL] execCommand insertHTML failed:', e);
         }
       }
 
@@ -468,7 +468,7 @@
           return;
         }
       } catch (e) {
-        console.warn('[QURL] Selection API insertion failed:', e);
+        console.warn('[qURL] Selection API insertion failed:', e);
       }
 
       // Last resort: append without reparsing existing Gmail DOM
@@ -476,10 +476,10 @@
         composeBody.insertAdjacentHTML('beforeend', html);
         callback(true);
       } catch (e) {
-        console.warn('[QURL] innerHTML append failed:', e);
+        console.warn('[qURL] innerHTML append failed:', e);
         showGmailNotification(getMessage(
           'compose_insert_failed_notification',
-          'QURL: Failed to insert links. Please copy them manually from the popup.'
+          'qURL: Failed to insert links. Please copy them manually from the popup.'
         ));
         callback(false);
       }

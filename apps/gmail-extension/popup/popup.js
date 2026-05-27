@@ -110,7 +110,7 @@ saveConfigBtn.addEventListener('click', async () => {
     confirmation = getCustomServerPermissionConfirmation(value);
   } catch (err) {
     hidePermissionConfirmation();
-    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save QURL server URL.'), 'error');
+    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save qURL server URL.'), 'error');
     return;
   }
   if (confirmation) {
@@ -130,7 +130,7 @@ resetConfigBtn.addEventListener('click', async () => {
     setCustomConfigIndicator(false);
     // Keep the panel open after reset so users can immediately enter a new server URL.
   } catch (err) {
-    setConfigHint(err.message || getMessage('config_reset_error', 'Failed to reset QURL server URL.'), 'error');
+    setConfigHint(err.message || getMessage('config_reset_error', 'Failed to reset qURL server URL.'), 'error');
   } finally {
     setConfigButtonsLoading(false);
   }
@@ -151,7 +151,7 @@ permissionConfirmContinueBtn.addEventListener('click', async () => {
       if (!granted) {
         setConfigHint(getMessage(
           'permission_request_denied_error',
-          'Permission to access this QURL server was not granted.'
+          'Permission to access this qURL server was not granted.'
         ), 'error');
         return;
       }
@@ -161,7 +161,7 @@ permissionConfirmContinueBtn.addEventListener('click', async () => {
       skipPermissionRequest: true,
     });
   } catch (err) {
-    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save QURL server URL.'), 'error');
+    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save qURL server URL.'), 'error');
   } finally {
     setConfigButtonsLoading(false);
   }
@@ -253,7 +253,7 @@ async function initializePopup() {
       setCustomConfigIndicator(false);
     }
   } catch (err) {
-    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save QURL server URL.'), 'error');
+    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save qURL server URL.'), 'error');
   }
 }
 
@@ -376,7 +376,7 @@ copyBtn.addEventListener('click', async () => {
     await writeRichClipboard(html, text);
     copyBtn.textContent = getMessage('copy_done', 'Copied');
   } catch (err) {
-    console.warn('[QURL] Copy failed:', err.message);
+    console.warn('[qURL] Copy failed:', err.message);
     copyBtn.textContent = getMessage('copy_failed', 'Copy failed');
   }
 
@@ -429,7 +429,7 @@ async function insertIntoGmailDraft(results) {
     }
     return null;
   } catch (err) {
-    console.warn('[QURL] Could not insert links into Gmail draft:', err.message);
+    console.warn('[qURL] Could not insert links into Gmail draft:', err.message);
     return err.message
       || getMessage('gmail_insert_failed', 'Failed to insert links into the Gmail draft.');
   }
@@ -532,7 +532,7 @@ function setLoading(loading) {
   selectBtn.disabled = loading;
   uploadBtn.textContent = loading
     ? getMessage('uploading_label', 'Uploading...')
-    : getMessage('upload_btn', 'Upload to QURL');
+    : getMessage('upload_btn', 'Upload to qURL');
 }
 
 // ==================== Utilities ====================
@@ -640,7 +640,7 @@ function showPermissionConfirmation(details) {
   pendingPermissionRequest = details;
   permissionConfirmText.textContent = getMessage(
     'permission_request_confirm',
-    'Allow the extension to access $1 for QURL uploads? Chrome will show a permission prompt next.',
+    'Allow the extension to access $1 for qURL uploads? Chrome will show a permission prompt next.',
     [details.origin]
   );
   permissionConfirmPanel.classList.remove('hidden');
@@ -673,7 +673,7 @@ async function persistApiBaseValue(value, options) {
     hidePermissionConfirmation();
     scheduleSettingsPanelClose();
   } catch (err) {
-    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save QURL server URL.'), 'error');
+    setConfigHint(err.message || getMessage('config_save_error', 'Failed to save qURL server URL.'), 'error');
   } finally {
     if (!resolvedOptions.preserveLoadingState) {
       setConfigButtonsLoading(false);
@@ -761,7 +761,7 @@ async function writeRichClipboard(html, text) {
       await navigator.clipboard.write([item]);
       return;
     } catch (err) {
-      console.warn('[QURL] navigator.clipboard.write failed, falling back:', err.message);
+      console.warn('[qURL] navigator.clipboard.write failed, falling back:', err.message);
     }
   }
 

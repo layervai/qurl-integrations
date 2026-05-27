@@ -452,7 +452,7 @@ test('saving a custom server shows an inline confirmation before requesting orig
 
   assert.equal(setStoredCalled, false);
   assert.equal(confirmPanel.classList.contains('hidden'), false);
-  assert.equal(confirmText.textContent, 'Allow the extension to access https://custom.example.com for QURL uploads? Chrome will show a permission prompt next.');
+  assert.equal(confirmText.textContent, 'Allow the extension to access https://custom.example.com for qURL uploads? Chrome will show a permission prompt next.');
 });
 
 test('saving an invalid custom server surfaces the validation error inline', async function () {
@@ -469,7 +469,7 @@ test('saving an invalid custom server surfaces the validation error inline', asy
     },
     {
       normalizeQurlApiBase() {
-        throw new Error('QURL server URL must start with https://');
+        throw new Error('qURL server URL must start with https://');
       },
       setStoredQurlApiBase: async function () {
         setStoredCalled = true;
@@ -488,7 +488,7 @@ test('saving an invalid custom server surfaces the validation error inline', asy
   await saveButton.trigger('click');
 
   assert.equal(setStoredCalled, false);
-  assert.equal(configHint.textContent, 'QURL server URL must start with https://');
+  assert.equal(configHint.textContent, 'qURL server URL must start with https://');
   assert.equal(configHint.classList.contains('error'), true);
   assert.equal(confirmPanel.classList.contains('hidden'), true);
 });
@@ -582,7 +582,7 @@ test('denied custom-server permission does not persist the override', async func
 
   assert.equal(requestedOrigin, 'https://custom.example.com');
   assert.equal(setStoredCalled, false);
-  assert.equal(configHint.textContent, 'Permission to access this QURL server was not granted.');
+  assert.equal(configHint.textContent, 'Permission to access this qURL server was not granted.');
   assert.equal(configHint.classList.contains('error'), true);
 });
 

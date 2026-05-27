@@ -539,7 +539,7 @@ test('setStoredQurlApiBase surfaces a permission denial before saving', async fu
 
   await assert.rejects(
     qurlApi.setStoredQurlApiBase('https://custom.example.com'),
-    /Permission to access this QURL server was not granted\./
+    /Permission to access this qURL server was not granted\./
   );
   assert.equal(setCalled, false);
 });
