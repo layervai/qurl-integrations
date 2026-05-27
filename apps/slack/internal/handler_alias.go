@@ -94,7 +94,7 @@ const (
 // the user but trips ST1005 if we wrap in `error`, and (c) the
 // dispatcher needs the literal string anyway.
 const (
-	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`).\n\n" + aliasUsage
+	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`). Tunnel slugs are 3-64 chars, start with a lowercase letter, and contain lowercase letters/numbers/hyphens.\n\n" + aliasUsage
 	msgAliasMissing       = "Missing alias.\n\n" + aliasUsage
 	msgAliasNoSigil       = "Alias must start with `$` (e.g. `$staging`).\n\n" + aliasUsage
 	msgAliasEmptyName     = "Missing alias name after `$`.\n\n" + aliasUsage
@@ -353,8 +353,12 @@ func (h *Handler) bindAliasTarget(ctx context.Context, teamID, channelID, alias,
 	// stripped) so credentials embedded by a setting admin don't
 	// land in operator-visible logs where the readership is wider
 	// than the writer's admin scope.
-	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", alias, "target", redactURLForLog(target)) // #nosec G706 -- slog escapes control bytes; team/channel/alias are validated upstream and target is redacted before logging.
+	logAliasBound(teamID, channelID, alias, target)
 	return fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", alias, target), nil
+}
+
+func logAliasBound(teamID, channelID, alias, target string) {
+	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", alias, "target", redactURLForLog(target))
 }
 
 func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {

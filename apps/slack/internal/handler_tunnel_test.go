@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -16,6 +17,13 @@ const (
 	testTunnelResourceID = "r_prod_dash01"
 	testTunnelInstallCmd = "tunnel install " + testTunnelSlug
 )
+
+func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
+	t.Helper()
+	previous := tunnelBootstrapNow
+	tunnelBootstrapNow = func() time.Time { return now }
+	t.Cleanup(func() { tunnelBootstrapNow = previous })
+}
 
 func TestParseTunnelInstall(t *testing.T) {
 	cases := []struct {
@@ -53,6 +61,9 @@ func TestParseTunnelInstall(t *testing.T) {
 }
 
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
+	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
+	freezeTunnelBootstrapNow(t, now)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -107,6 +118,10 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
+	}
+	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, "C_test", testAdminUserID, testTunnelSlug, now)
+	if idempotencyKey != wantIdempotencyKey {
+		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
 		"Tunnel `" + testTunnelSlug + "` is ready.",
@@ -168,10 +183,14 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 }
 
 func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
+	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
+	freezeTunnelBootstrapNow(t, now)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
 	var apiKeyHits int
+	var idempotencyKeys []string
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID: testTunnelResourceID,
@@ -180,7 +199,8 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 			testKeyStatus:     client.StatusActive,
 		})
 	})
-	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+		idempotencyKeys = append(idempotencyKeys, r.Header.Get(client.HeaderIdempotencyKey))
 		apiKeyHits++
 		if apiKeyHits == 1 {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -209,6 +229,9 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	}
 	if apiKeyHits != 2 {
 		t.Fatalf("api key hits = %d, want 2", apiKeyHits)
+	}
+	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[0] != idempotencyKeys[1] {
+		t.Fatalf("idempotency keys = %v, want same non-empty retry key", idempotencyKeys)
 	}
 }
 

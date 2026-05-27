@@ -22,10 +22,11 @@ const (
 	// onboarding where the latest sidecar build is intentional.
 	defaultTunnelImage     = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
 	defaultTunnelLocalPort = 8080
-	tunnelBootstrapTTL     = "24h"
+	tunnelBootstrapTTL     = "1h"
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+var tunnelBootstrapNow = time.Now
 
 type tunnelInstallArgs struct {
 	Slug      string
@@ -134,7 +135,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 			Purpose:        client.APIKeyPurposeTunnelBootstrap,
 			TunnelSlug:     args.Slug,
 			ExpiresIn:      tunnelBootstrapTTL,
-			IdempotencyKey: IdempotencyKey(teamID, channelID, userID, values.Get(fieldTriggerID)) + "-tunnel-bootstrap",
+			IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, tunnelBootstrapNow()),
 		})
 		if err != nil {
 			log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
@@ -157,6 +158,11 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 	})
 }
 
+func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
+	bucket := now.UTC().Format("2006010215")
+	return IdempotencyKey(teamID, channelID, userID, "tunnel-bootstrap:"+slug+":"+bucket)
+}
+
 func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) (string, error) {
 	existing, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 	if err != nil {
@@ -166,7 +172,7 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 		if existing == resourceID {
 			return fmt.Sprintf("Alias `$%s` was already bound to `%s` in this channel.", alias, resourceID), nil
 		}
-		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or choose `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
+		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unset-alias $%s` first, or choose `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
@@ -229,6 +235,10 @@ func tunnelBootstrapExpiryCopy(key *client.APIKey) string {
 }
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {
+	// shellSingleQuote safely quotes arbitrary text. This check is an
+	// additional output-surface guard: qurl-service bootstrap keys should be
+	// printable single-line tokens, and refusing quote/control bytes keeps the
+	// rendered install snippet easy for operators to inspect.
 	if apiKey == "" {
 		return errors.New("empty api key")
 	}
