@@ -6,7 +6,7 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
 - `/qurl get <url>` — Mint a qURL for a URL
-- `/qurl get $alias` — Mint a qURL for a channel-bound resource alias
+- `/qurl get $alias` — Mint a qURL for a channel alias
 - `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias
 - `/qurl unset-alias $alias` — Remove a channel alias binding
 - `/qurl tunnel install <slug> [port:<n>] [alias:$alias]` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only; default local port is 8080)
@@ -24,10 +24,11 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
   KMS envelope encryption with `workspace_id` bound as AAD.
 - **Tunnel onboarding:** `/qurl tunnel install <slug>` uses the
   workspace API key to find-or-create a tunnel resource scoped to the
-  connected qURL account, bind `$<slug>` in the current Slack channel,
-  and mint a 1-hour `tunnel_bootstrap` API key. The Slack response
-  renders a Docker sidecar command that mounts the bootstrap key from
-  a file and passes `QURL_TUNNEL_SLUG=<slug>` to the client.
+  connected qURL account, bind `$<slug>` or the `alias:` override in
+  the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
+  key. The Slack response renders a Docker sidecar command that mounts
+  the bootstrap key from a file and passes `QURL_TUNNEL_SLUG=<slug>` to
+  the client.
 - **Endpoints:**
   - `POST /slack/commands` — Slash command handler (ack-then-async)
   - `POST /slack/events` — Event subscriptions (link unfurling planned)
@@ -80,7 +81,7 @@ docker buildx build --platform linux/arm64 \
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
 unconditionally required at startup — the bot needs DDB+KMS for
-per-workspace key lookups even on `/qurl create`/`/qurl list`.
+per-workspace key lookups even on `/qurl get`/`/qurl list`.
 
 The `OAuth` group is required only when the bot needs to serve the
 `/oauth/qurl/{start,callback}` surface. Boots without these vars still
