@@ -1,14 +1,14 @@
 {
   "ext_name": {
-    "message": "QURL File Upload",
+    "message": "qURL File Upload",
     "description": "Extension name"
   },
   "ext_desc": {
-    "message": "Upload files to QURL and insert secure access links into Gmail compose drafts.",
+    "message": "Upload files to qURL and insert secure access links into Gmail compose drafts.",
     "description": "Extension description"
   },
   "subtitle": {
-    "message": "Upload files to QURL and insert links",
+    "message": "Upload files to qURL and insert links",
     "description": "Subtitle shown under the title"
   },
   "settings_label": {
@@ -20,11 +20,11 @@
     "description": "Accessible label and tooltip for closing the settings panel"
   },
   "config_label": {
-    "message": "QURL server",
+    "message": "qURL server",
     "description": "Label for the QURL server configuration area"
   },
   "config_placeholder": {
-    "message": "Enter QURL server URL",
+    "message": "Enter qURL server URL",
     "description": "Placeholder text for the QURL server URL input"
   },
   "config_default_hint": {
@@ -40,15 +40,15 @@
     "description": "Success hint shown after saving a custom server URL"
   },
   "config_save_error": {
-    "message": "Failed to save QURL server URL.",
+    "message": "Failed to save qURL server URL.",
     "description": "Fallback error shown when saving the server URL fails"
   },
   "config_invalid_url_error": {
-    "message": "QURL server URL must be a valid http(s) URL.",
+    "message": "qURL server URL must be a valid http(s) URL.",
     "description": "Shown when the configured QURL server URL cannot be parsed"
   },
   "config_https_required_error": {
-    "message": "QURL server URL must start with https://",
+    "message": "qURL server URL must start with https://",
     "description": "Shown when the configured QURL server URL is not HTTPS"
   },
   "api_invalid_json_error": {
@@ -66,7 +66,7 @@
     "description": "Shown when the QURL server responds with an unexpected JSON shape"
   },
   "config_reset_error": {
-    "message": "Failed to reset QURL server URL.",
+    "message": "Failed to reset qURL server URL.",
     "description": "Fallback error shown when resetting the server URL fails"
   },
   "save_config_btn": {
@@ -108,7 +108,7 @@
     }
   },
   "upload_btn": {
-    "message": "Upload to QURL",
+    "message": "Upload to qURL",
     "description": "Main upload button label"
   },
   "uploading_label": {
@@ -172,15 +172,15 @@
     "description": "Error summary shown when uploads succeed but Gmail insertion fails"
   },
   "permission_missing_error": {
-    "message": "Permission to access the configured QURL server is missing. Open settings and save the server URL again.",
+    "message": "Permission to access the configured qURL server is missing. Open settings and save the server URL again.",
     "description": "Shown when the configured QURL server origin is no longer granted"
   },
   "permission_request_denied_error": {
-    "message": "Permission to access this QURL server was not granted.",
+    "message": "Permission to access this qURL server was not granted.",
     "description": "Shown when the user declines the permission prompt for a custom QURL server"
   },
   "permission_request_confirm": {
-    "message": "Allow the extension to access $1 for QURL uploads? Chrome will show a permission prompt next.",
+    "message": "Allow the extension to access $1 for qURL uploads? Chrome will show a permission prompt next.",
     "description": "Confirmation shown before requesting host permission for a custom QURL server",
     "placeholders": {
       "origin": {
@@ -222,11 +222,11 @@
     "description": "Fallback error shown when Gmail link insertion fails without a more specific reason"
   },
   "compose_body_missing_error": {
-    "message": "QURL: Could not find compose window. Please open a compose window and try again.",
+    "message": "qURL: Could not find compose window. Please open a compose window and try again.",
     "description": "Toast shown inside Gmail when no visible compose body can be found"
   },
   "compose_insert_failed_notification": {
-    "message": "QURL: Failed to insert links. Please copy them manually from the popup.",
+    "message": "qURL: Failed to insert links. Please copy them manually from the popup.",
     "description": "Toast shown inside Gmail when all compose insertion strategies fail"
   },
   "runtime_message_failed": {
@@ -240,6 +240,10 @@
   "compose_insert_timeout_error": {
     "message": "Timed out while waiting to insert links into Gmail.",
     "description": "Shown when the Gmail insertion request remains pending for too long"
+  },
+  "compose_insert_evicted_error": {
+    "message": "Request evicted due to queue overflow. Please try again.",
+    "description": "Shown when a pending insertion request is evicted due to too many concurrent requests"
   },
   "expiry_suffix": {
     "message": " (Expires: $1)",

@@ -5,6 +5,8 @@
  * Ported from the Gmail Apps Script add-on and Node.js test script.
  */
 
+'use strict';
+
 const QURLI18n = typeof globalThis !== 'undefined' && globalThis.QURLI18n
   ? globalThis.QURLI18n
   : (typeof module !== 'undefined' && module.exports ? require('./qurl-i18n.js') : null);

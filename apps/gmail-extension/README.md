@@ -1,6 +1,6 @@
-# QURL Gmail Chrome Extension
+# qURL Gmail Chrome Extension
 
-Upload local files to QURL directly from Gmail's compose window. After upload, secure access links (with expiry times) are automatically inserted into your email draft.
+Upload local files to qURL directly from Gmail's compose window. After upload, secure access links (with expiry times) are automatically inserted into your email draft.
 
 ---
 
@@ -8,7 +8,7 @@ Upload local files to QURL directly from Gmail's compose window. After upload, s
 
 - **Local file upload** — select files from your computer, no need to attach to Gmail first
 - **Batch upload** — upload multiple files at once
-- **Auto-insert links** — QURL access links + expiry times are appended to the active Gmail draft
+- **Auto-insert links** — qURL access links + expiry times are appended to the active Gmail draft
 - **Manual copy fallback** — if Gmail draft insertion fails, copy the generated content from the popup
 - **Native Gmail integration** — links are inserted directly into the compose body as HTML
 - **Clean popup UI** — simple, focused interface with upload progress and per-file status
@@ -18,15 +18,15 @@ Upload local files to QURL directly from Gmail's compose window. After upload, s
 ## Prerequisites
 
 - Google Chrome (or Chromium-based browser)
-- A running QURL upload server (the same server used by the Gmail Apps Script add-on)
+- A running qURL upload server (the same server used by the Gmail Apps Script add-on)
 
 ---
 
 ## Configuration
 
-### Step 1 — Configure the QURL API URL
+### Step 1 — Configure the qURL API URL
 
-Open the extension popup and set the **QURL server** field.
+Open the extension popup and set the **qURL server** field.
 
 - If you save a custom URL, uploads use that URL
 - If you leave it empty, uploads fall back to the built-in default: `https://getqurllink.layerv.xyz/`
@@ -45,10 +45,10 @@ If you plan to publish to the Chrome Web Store, see [docs/chrome-web-store-revie
 
 1. Open **Gmail** (`mail.google.com`)
 2. Click **Compose** to open a new email draft
-3. Click the **QURL File Upload** extension icon in the Chrome toolbar
+3. Click the **qURL File Upload** extension icon in the Chrome toolbar
 4. Click **Browse files** and select one or more files
-5. Click **Upload to QURL**
-6. Wait for the upload to complete — the QURL links will be automatically inserted at the bottom of your email draft
+5. Click **Upload to qURL**
+6. Wait for the upload to complete — the qURL links will be automatically inserted at the bottom of your email draft
 7. Continue composing your email and send as normal
 
 ---
@@ -77,7 +77,7 @@ gmail-compose.js — finds the Gmail compose body (.Am.Al.editable)
                    → insertHTML / Selection API / insertAdjacentHTML
          │
          ▼
-Email draft now contains QURL access links near the end of the message.
+Email draft now contains qURL access links near the end of the message.
 ```
 
 ---
@@ -87,7 +87,7 @@ Email draft now contains QURL access links near the end of the message.
 Each uploaded file generates an entry like:
 
 ```
-QURL File Access Links
+qURL File Access Links
 
 - report.pdf: https://xxx.layerv.ai/q/abc123 (expires: 2026-05-01T12:00:00Z)
 - screenshot.png: https://xxx.layerv.ai/q/def456 (expires: 2026-05-01T12:00:00Z)
@@ -253,7 +253,7 @@ The client also accepts a flat response (no `data` wrapper).
 ## File Structure
 
 ```
-qurl-gmail-chrome-extension/
+apps/gmail-extension/
 ├── manifest.json              # MV3 extension manifest
 ├── background.js             # Service worker
 ├── popup/
@@ -302,13 +302,13 @@ For local unpacked testing in Chrome, including screenshot-based validation of u
 | Symptom | Cause | Fix |
 |---|---|---|
 | "Could not find Gmail compose window" | No compose window open | Open a new compose window in Gmail first |
-| All uploads fail with "Failed to fetch" | Wrong API URL or server unreachable | Verify the configured QURL server URL in the popup |
+| All uploads fail with "Failed to fetch" | Wrong API URL or server unreachable | Verify the configured qURL server URL in the popup |
 | Links inserted but not visible in sent email | Recipient uses plain-text client | HTML is always inserted; some clients strip formatting |
 | Extension icon not showing | Not loaded in Chrome | Go to `chrome://extensions` and enable the extension |
 
 ## Permission Note
 
-`optional_host_permissions` remains `https://*/*` because the popup accepts user-configured QURL servers and requests only the single saved origin at runtime. The broad declaration exists to enable a per-origin prompt when the user saves a custom server.
+`optional_host_permissions` remains `https://*/*` because the popup accepts user-configured qURL servers and requests only the single saved origin at runtime. The broad declaration exists to enable a per-origin prompt when the user saves a custom server.
 
 ---
 

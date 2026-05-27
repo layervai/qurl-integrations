@@ -129,6 +129,24 @@
       if (evictedEntry && evictedEntry.pendingTimerId !== null) {
         window.clearTimeout(evictedEntry.pendingTimerId);
       }
+      // Notify pending callbacks before eviction so callers receive immediate feedback
+      // instead of hanging until their own timeout fires.
+      if (evictedEntry && evictedEntry.status === 'pending' && evictedEntry.callbacks.length > 0) {
+        const evictionError = {
+          success: false,
+          error: getMessage(
+            'compose_insert_evicted_error',
+            'Request evicted due to queue overflow. Please try again.'
+          ),
+        };
+        evictedEntry.callbacks.forEach(function (callback) {
+          try {
+            callback(evictionError);
+          } catch (err) {
+            console.warn('[QURL] Eviction callback failed:', err);
+          }
+        });
+      }
       insertRequestState.delete(evictedRequestId);
     }
   }
@@ -169,6 +187,12 @@
     // timer. A subsequent retry with the same requestId during the TTL window will receive the
     // stale "success" reply. This is intentional caching behavior — the insertion did eventually
     // succeed, and returning that result is more accurate than a spurious timeout.
+    //
+    // IMPORTANT: This dedup cache only covers SDK-level retries (sendRuntimeMessageWithRetry),
+    // which reuse the same requestId. User-initiated retries (clicking "Upload" again) generate
+    // a new crypto.randomUUID() in popup.js, so they will NOT hit this cache and will trigger
+    // a fresh insertion. If the user sees a timeout error but insertion actually succeeded,
+    // a manual retry may result in duplicate links in the draft.
     entry.cleanupTimerId = window.setTimeout(function () {
       insertRequestState.delete(requestId);
     }, INSERT_REQUEST_CACHE_TTL_MS);

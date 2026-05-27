@@ -4,6 +4,8 @@
  * Handles file selection, upload orchestration, and result reporting.
  */
 
+'use strict';
+
 // ==================== DOM References ====================
 const fileInput = document.getElementById('fileInput');
 const selectBtn = document.getElementById('selectBtn');
