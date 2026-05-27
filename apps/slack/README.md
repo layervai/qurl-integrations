@@ -7,12 +7,15 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
 - `/qurl get <url>` — Mint a qURL for a URL
 - `/qurl get $alias` — Mint a qURL for a channel alias
-- `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias
-- `/qurl unset-alias $alias` — Remove a channel alias binding
-- `/qurl tunnel install <slug> [port:<n>] [alias:$alias]` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only; default local port is 8080)
+- `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias (admin-only)
+- `/qurl unset-alias $alias` — Remove a channel alias binding (admin-only)
+- `/qurl tunnel install <slug> [port:<n>] [alias:$alias]` — Provision a Docker sidecar tunnel (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
+
+Run `/qurl help` in Slack for command modifiers such as `once:true`,
+`dm:true`, and `reason:"..."`.
 
 ## Architecture
 
@@ -28,7 +31,8 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
   key. The Slack response renders a Docker sidecar command that mounts
   the bootstrap key from a file and passes `QURL_TUNNEL_SLUG=<slug>` to
-  the client.
+  the client. Delete the Slack response and remove the mounted key file
+  after the first successful sidecar start.
 - **Endpoints:**
   - `POST /slack/commands` — Slash command handler (ack-then-async)
   - `POST /slack/events` — Event subscriptions (link unfurling planned)
