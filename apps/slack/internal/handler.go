@@ -521,6 +521,14 @@ func classifySlackErr(err error) string {
 	}
 }
 
+func slashSubcommand(text, command string) bool {
+	return text == command || strings.HasPrefix(text, command+" ")
+}
+
+func setAliasSubcommand(text string) bool {
+	return slashSubcommand(text, "setalias") || slashSubcommand(text, "set-alias")
+}
+
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
@@ -538,7 +546,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		respondSlack(w, h.helpMessage())
 	case text == "setup":
 		h.handleSetup(w, values)
-	case text == "create" || strings.HasPrefix(text, "create "):
+	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated — its URL-form behavior is
 		// folded into `/qurl get <url>`, and the alias form was never
 		// promoted to a user-facing command. Surface a deprecation
@@ -553,7 +561,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// bare token falls through to the unknown-subcommand branch
 		// and gets a help nudge.
 		h.handleListResources(w, values)
-	case text == "get" || strings.HasPrefix(text, "get "):
+	case slashSubcommand(text, "get"):
 		// Exact-token boundary so `getter`, `get-foo` fall through
 		// to the unknown-subcommand branch instead of silently
 		// routing here. The parser then produces ErrEmptyResource
@@ -561,7 +569,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		h.handleGet(w, values)
 	case text == "aliases":
 		h.handleAliases(w, values)
-	case text == "admin" || strings.HasPrefix(text, "admin "):
+	case slashSubcommand(text, "admin"):
 		// All admin verbs (revoke / add / remove / list) route through
 		// the parse-then-dispatch handler. The retired `admin claim`
 		// verb surfaces as ErrUnknownAdminAction from the parser, so
@@ -569,16 +577,14 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// than a stale modal opener. Bare `admin` lands here so the
 		// parser emits the `missing admin action` error.
 		h.handleAdmin(w, values)
-	case text == "tunnel" || strings.HasPrefix(text, "tunnel "):
+	case slashSubcommand(text, "tunnel"):
 		h.handleTunnel(w, values)
-	case text == "setalias" || strings.HasPrefix(text, "setalias "):
+	case setAliasSubcommand(text):
 		// Bare `setalias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
 		h.handleSetAlias(w, values)
-	case text == "set-alias" || strings.HasPrefix(text, "set-alias "):
-		h.handleSetAlias(w, values)
-	case text == "unsetalias" || strings.HasPrefix(text, "unsetalias "):
+	case slashSubcommand(text, "unsetalias"):
 		h.handleUnsetAlias(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command

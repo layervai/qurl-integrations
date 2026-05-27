@@ -310,7 +310,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	if strings.HasPrefix(target, "$") {
 		resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, strings.TrimPrefix(target, "$"))
 		if err != nil {
-			slog.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
+			slog.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are Slack IDs or validated slug-like input.
 			respondSlack(w, sanitizeAPIError(err, "Failed to resolve tunnel slug"))
 			return
 		}
@@ -341,7 +341,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// stripped) so credentials embedded by a setting admin don't
 	// land in operator-visible logs where the readership is wider
 	// than the writer's admin scope.
-	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", redactURLForLog(target))
+	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", redactURLForLog(target)) //nolint:gosec // G706: slog escapes control bytes in attribute values; target is redacted before logging.
 	respondSlack(w, fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", args.Alias, target))
 }
 
