@@ -5,10 +5,11 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 ## Features
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
-- `/qurl create <url>` — Create a qURL
+- `/qurl get <url>` — Mint a qURL for a URL
 - `/qurl get $alias` — Mint a qURL for a channel-bound resource alias
 - `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias
-- `/qurl tunnel install <slug> [port:8080] [alias:$alias]` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only)
+- `/qurl unset-alias $alias` — Remove a channel alias binding
+- `/qurl tunnel install <slug> [port:<n>] [alias:$alias]` — Create a tunnel resource, bind a channel alias, and mint a short-lived Docker sidecar bootstrap key (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
