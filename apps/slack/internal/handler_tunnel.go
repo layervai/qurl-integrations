@@ -40,9 +40,10 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 	if len(fields) < 2 || fields[0] != "install" {
 		return nil, tunnelInstallUsage()
 	}
+	slug := strings.TrimPrefix(fields[1], "$")
 	args = &tunnelInstallArgs{
-		Slug:      fields[1],
-		Alias:     fields[1],
+		Slug:      slug,
+		Alias:     slug,
 		LocalPort: defaultTunnelLocalPort,
 	}
 	if !tunnelSlugPattern.MatchString(args.Slug) {
@@ -74,7 +75,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 }
 
 func tunnelInstallUsage() string {
-	return "Usage: `/qurl tunnel install <slug> [port:8080] [alias:$alias]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
+	return "Usage: `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
 }
 
 // handleTunnel routes `/qurl tunnel install <slug>`.

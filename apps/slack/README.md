@@ -9,7 +9,7 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - `/qurl get $alias` — Mint a qURL for a channel alias
 - `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias (admin-only)
 - `/qurl unset-alias $alias` — Remove a channel alias binding (admin-only)
-- `/qurl tunnel install <slug> [port:<n>] [alias:$alias]` — Provision a Docker sidecar tunnel (admin-only; default local port is 8080)
+- `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$alias]` — Provision a Docker sidecar tunnel (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
@@ -25,7 +25,7 @@ by the current bot deployment.
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
-- **Tunnel onboarding:** `/qurl tunnel install <slug>` uses the
+- **Tunnel onboarding:** `/qurl tunnel install <slug>` (or `$slug`) uses the
   workspace API key to find-or-create a tunnel resource scoped to the
   connected qURL account, bind `$<slug>` or the `alias:` override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API

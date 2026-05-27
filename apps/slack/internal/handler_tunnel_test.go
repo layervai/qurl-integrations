@@ -35,9 +35,12 @@ func TestParseTunnelInstall(t *testing.T) {
 		wantPort  int
 	}{
 		{name: "minimal", text: testTunnelInstallCmd, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
+		{name: "slug with alias sigil", text: "tunnel install $" + testTunnelSlug, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
 		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: 9090},
 		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
 		{name: "bad slug uppercase", text: "tunnel install Prod", wantErr: true},
+		{name: "empty slug after sigil", text: "tunnel install $", wantErr: true},
+		{name: "double sigil slug", text: "tunnel install $$prod", wantErr: true},
 		{name: "bad port", text: testTunnelInstallCmd + " port:70000", wantErr: true},
 		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
 	}
