@@ -12,15 +12,16 @@ import (
 // constants in tests because goconst would otherwise flag the 4+
 // duplications across fixture builders.
 const (
-	testKeyData       = "data"
-	testKeyError      = "error"
-	testKeyResourceID = "resource_id"
-	testKeySlug       = "slug"
-	testKeyStatus     = "status"
-	testKeyTitle      = "title"
-	testKeyType       = "type"
-	testKeyTargetURL  = "target_url"
-	testResourceIDFix = "r_prod_db" // canonical test resource_id
+	testKeyData        = "data"
+	testKeyError       = "error"
+	testKeyResourceID  = "resource_id"
+	testKeySlug        = "slug"
+	testKeyStatus      = "status"
+	testKeyTitle       = "title"
+	testKeyType        = "type"
+	testKeyTargetURL   = "target_url"
+	testKeyDescription = "description"
+	testResourceIDFix  = "r_prod_db" // canonical test resource_id
 	// mintByTestResourcePath is the resource-scoped mint endpoint
 	// that `client.Create` hits when given a ResourceID (alias-form
 	// /qurl get). Lifted so the alias-form tests register their
