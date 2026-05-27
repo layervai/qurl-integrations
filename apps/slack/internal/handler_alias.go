@@ -198,8 +198,11 @@ var slackEscapeUndo = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">"
 // unwrapSlackAutolink strips the `<url|display>` (or `<url>`) wrapping
 // Slack applies to typed URLs when the slash command has
 // `should_escape: true`, and undoes the entity substitutions Slack
-// applies under the same flag. Splits on the *first* `|` to match
-// Slack's `<url|display>` grammar; a URL containing a raw `|` would be
+// applies under the same flag. The entity decode is intentionally
+// gated on wrap presence — Slack applies both transformations together,
+// so an unwrapped input is treated as literal user text and a stray
+// `&amp;` is left alone. Splits on the *first* `|` to match Slack's
+// `<url|display>` grammar; a URL containing a raw `|` would be
 // ambiguous here, and Slack autodetect percent-encodes `|` to `%7C`
 // anyway.
 func unwrapSlackAutolink(tgt string) string {
