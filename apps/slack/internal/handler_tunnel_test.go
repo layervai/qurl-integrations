@@ -2022,6 +2022,8 @@ func TestValidateBootstrapAPIKeyForShell(t *testing.T) {
 		{name: "empty rejected", key: "", wantErr: true},
 		{name: "quote rejected", key: "abc'def", wantErr: true},
 		{name: "backtick rejected", key: "abc`def", wantErr: true},
+		{name: "dollar rejected", key: "abc$def", wantErr: true},
+		{name: "backslash rejected", key: `abc\def`, wantErr: true},
 		{name: "newline rejected", key: "abc\ndef", wantErr: true},
 		{name: "del rejected", key: "abc\x7fdef", wantErr: true},
 		{name: "non ascii rejected", key: "abcédef", wantErr: true},

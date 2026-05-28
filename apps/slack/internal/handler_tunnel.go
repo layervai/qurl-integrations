@@ -785,18 +785,16 @@ func humanDurationCeilMinutes(d time.Duration) string {
 }
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {
-	// shellSingleQuote safely quotes arbitrary text. This check is an
-	// additional output-surface guard: qurl-service bootstrap keys must be
-	// printable single-line ASCII tokens. ASCII keeps ${#QURL_BOOTSTRAP_KEY}
-	// and head -c byte counts aligned across shells/locales. A dollar sign is
-	// safe because POSIX single quotes prevent shell expansion in Docker paths;
-	// the prompt-based heredoc renderers also read a fixed byte count from
-	// stdin, and the substituted bytes are not reparsed by the shell.
+	// qurl-service bootstrap keys must be printable single-line ASCII tokens
+	// without shell expansion bytes. ASCII keeps ${#QURL_BOOTSTRAP_KEY} and
+	// head -c byte counts aligned across shells/locales. Dollar signs and
+	// backslashes are rejected because the generated install snippets stream the
+	// prompt value through an unquoted heredoc so the key never appears in argv.
 	if apiKey == "" {
 		return errors.New("empty api key")
 	}
 	for _, r := range apiKey {
-		if r == '\'' || r == '`' || r < 0x20 || r > 0x7e {
+		if r == '\'' || r == '`' || r == '$' || r == '\\' || r < 0x20 || r > 0x7e {
 			return errors.New("api key contains unsupported characters")
 		}
 	}
