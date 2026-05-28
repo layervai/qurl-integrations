@@ -38,6 +38,11 @@ type ecsLogConfiguration struct {
 	Options   map[string]string `json:"options"`
 }
 
+const (
+	ecsFargateChecklistText         = "ECS/Fargate task-definition checklist"
+	ecsFargateRegionPlaceholderNote = "Also replace the `<region>` placeholder in the `awslogs-region` field below."
+)
+
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	containerJSON, err := renderECSSidecarContainerJSON(args, image)
 	if err != nil {
@@ -53,9 +58,10 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		return "", err
 	}
 	intro := strings.Join([]string{
-		"Use this as an ECS/Fargate task-definition checklist.",
+		"Use this as an " + ecsFargateChecklistText + ".",
 		"Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves.",
 		"Replace `<region>`, `<account-id>`, and `<suffix>` with the full secret ARN shown by Secrets Manager; AWS appends a random suffix to secret ARNs.",
+		ecsFargateRegionPlaceholderNote,
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
 	}, " ")
 	return intro + "\n\n" +

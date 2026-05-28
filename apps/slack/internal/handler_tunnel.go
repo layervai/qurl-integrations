@@ -59,7 +59,7 @@ type tunnelInstallWebRefKind string
 const (
 	tunnelEnvDocker     tunnelInstallEnvironment = "docker"
 	tunnelEnvCompose    tunnelInstallEnvironment = "docker-compose"
-	tunnelEnvComposeAlt                          = "compose"
+	tunnelEnvComposeAlt tunnelInstallEnvironment = "compose"
 	tunnelEnvECSFargate tunnelInstallEnvironment = "ecs-fargate"
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
 
@@ -158,7 +158,8 @@ func tunnelInstallUsage() string {
 	return strings.Join([]string{
 		"Usage:",
 		"• `/qurl tunnel install` for guided setup",
-		"• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`",
+		"• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`",
+		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
 		"Example: `/qurl tunnel install prod-dashboard port:8080`",
 	}, "\n")
 }
@@ -167,14 +168,14 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(tunnelEnvDocker):
 		return tunnelEnvDocker, ""
-	case string(tunnelEnvCompose), tunnelEnvComposeAlt:
+	case string(tunnelEnvCompose), string(tunnelEnvComposeAlt):
 		return tunnelEnvCompose, ""
 	case string(tunnelEnvECSFargate):
 		return tunnelEnvECSFargate, ""
 	case string(tunnelEnvKubernetes):
 		return tunnelEnvKubernetes, ""
 	default:
-		return "", "env must be one of docker, docker-compose, compose, ecs-fargate, or kubernetes"
+		return "", "env must be one of docker, docker-compose, ecs-fargate, or kubernetes; compose is accepted as shorthand for docker-compose"
 	}
 }
 
@@ -182,7 +183,7 @@ func (e tunnelInstallEnvironment) label() (string, error) {
 	switch e {
 	case tunnelEnvDocker:
 		return "Docker sidecar", nil
-	case tunnelEnvCompose:
+	case tunnelEnvCompose, tunnelEnvComposeAlt:
 		return "Docker Compose", nil
 	case tunnelEnvECSFargate:
 		return "AWS ECS/Fargate", nil
@@ -468,7 +469,7 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 		if existing == resourceID {
 			return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
 		}
-		return fmt.Sprintf("qURL shortcut `$%s` is already used in this channel. Run `/qurl unset-alias $%s` first, or choose `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
+		return fmt.Sprintf("qURL shortcut `$%s` is already used in this channel. Run `/qurl unset-alias $%s` first, or in the typed install command pass `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
@@ -537,6 +538,9 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 }
 
 func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
+	// Convenience wrapper for focused tests; production uses
+	// prepareTunnelInstallMessage(...).render(...) so render failures before
+	// CreateAPIKey cannot strand a bootstrap key.
 	prepared, err := h.prepareTunnelInstallMessage(args)
 	if err != nil {
 		return "", err
@@ -605,7 +609,7 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 		return renderECSFargateTunnelInstructions(args, image)
 	case tunnelEnvKubernetes:
 		return renderKubernetesTunnelInstructions(args, image)
-	case tunnelEnvCompose:
+	case tunnelEnvCompose, tunnelEnvComposeAlt:
 		return renderDockerComposeTunnelInstructions(args, image)
 	case tunnelEnvDocker:
 		return renderDockerTunnelInstructions(args, image)

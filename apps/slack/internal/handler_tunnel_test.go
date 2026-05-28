@@ -49,6 +49,7 @@ const (
 	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
 	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
 	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}`
+	testTunnelECSAPIKeyNameLine  = `"name": "QURL_API_KEY"`
 )
 
 func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
@@ -403,7 +404,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl tunnel install`", "/qurl tunnel install <slug>", "env:docker|compose|ecs-fargate|kubernetes", "container:<name>|service:<name>|web_container:<name>"} {
+	for _, want := range []string{"/qurl tunnel install`", "/qurl tunnel install <slug>", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>|service:<name>|web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
@@ -832,6 +833,17 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
 				"'qurl-tunnel-" + testTunnelSlug + "':",
 				"docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug,
+			},
+		},
+		{
+			name: string(tunnelEnvECSFargate),
+			env:  tunnelEnvECSFargate,
+			want: []string{
+				"Target environment: AWS ECS/Fargate.",
+				ecsFargateChecklistText,
+				ecsFargateRegionPlaceholderNote,
+				testTunnelECSAPIKeyNameLine,
+				`secret:qurl-tunnel-` + testTunnelSlug + `-\u003csuffix\u003e`,
 			},
 		},
 	}
@@ -1712,8 +1724,8 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			env:  string(tunnelEnvECSFargate),
 			want: []string{
 				"Target environment: AWS ECS/Fargate.",
-				"ECS/Fargate task-definition checklist",
-				`"name": "QURL_API_KEY"`,
+				ecsFargateChecklistText,
+				testTunnelECSAPIKeyNameLine,
 			},
 		},
 		{

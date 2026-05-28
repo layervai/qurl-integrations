@@ -16,10 +16,11 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}, testTunnelImageRef)
 
 	for _, want := range []string{
-		"ECS/Fargate task-definition checklist",
+		ecsFargateChecklistText,
 		"non-essential sidecar container",
 		"Fargate's awsvpc network mode",
 		"Replace `<region>`, `<account-id>`, and `<suffix>`",
+		ecsFargateRegionPlaceholderNote,
 		"AWS appends a random suffix",
 		"127.0.0.1:9090",
 		"AWS Secrets Manager",
@@ -35,7 +36,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		testTunnelLocalPort9090Line,
 		`"name": "QURL_TUNNEL_SLUG"`,
 		`"value": "` + testTunnelSlug + `"`,
-		`"name": "QURL_API_KEY"`,
+		testTunnelECSAPIKeyNameLine,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
 	} {
