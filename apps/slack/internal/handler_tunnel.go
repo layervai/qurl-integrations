@@ -303,6 +303,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		}
 		return
 	}
+	h.deleteOriginalResponse(log, responseURL)
 }
 
 func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs) {
@@ -347,13 +348,13 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(log, c, key, "missing_plaintext")
+		revokeBootstrapKeyAfterInstallFailure(ctx, log, c, key, "missing_plaintext")
 		h.postResponse(log, responseURL, "The qURL API did not return a bootstrap key. Please retry or contact support.")
 		return
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(log, c, key, "shell_validation_failed")
+		revokeBootstrapKeyAfterInstallFailure(ctx, log, c, key, "shell_validation_failed")
 		h.postResponse(log, responseURL, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
 		return
 	}
@@ -361,7 +362,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	msg, err := h.renderTunnelInstallMessage(args, key, aliasStatus)
 	if err != nil {
 		log.Error("tunnel install: render failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(log, c, key, "render_failed")
+		revokeBootstrapKeyAfterInstallFailure(ctx, log, c, key, "render_failed")
 		h.postResponse(log, responseURL, "Tunnel setup succeeded, but Slack could not render the install instructions. Please retry or contact support.")
 		return
 	}
@@ -371,12 +372,12 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 }
 
-func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
 	if key == nil || strings.TrimSpace(key.KeyID) == "" {
 		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "reason", reason)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tunnelBootstrapCleanupTimeout)
+	ctx, cancel := context.WithTimeout(parent, tunnelBootstrapCleanupTimeout)
 	defer cancel()
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
 		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "key_id", key.KeyID, "reason", reason)
@@ -471,7 +472,7 @@ func slackRetryAfterLabel(raw string) string {
 	}
 	seconds, err := strconv.Atoi(raw)
 	if err != nil || seconds <= 0 {
-		return "until " + raw
+		return ""
 	}
 	if seconds == 1 {
 		return "1 second"
@@ -555,7 +556,7 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
-  %s`, webContainer, args.Slug, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), shellSingleQuote(image))
+  %s`, webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), shellSingleQuote(image))
 
 	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running."
 	if args.WebContainer == "" {
@@ -626,7 +627,7 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, args.Slug, tunnelService, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), tunnelServiceName, yamlSingleQuoted(image))
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), tunnelServiceName, yamlSingleQuoted(image))
 
 	intro := "Run this from your Docker Compose project directory on the Linux Docker host."
 	if args.WebContainer == "" {
@@ -735,7 +736,8 @@ func kubernetesNameWithSlug(prefix, slug string) string {
 	sum := sha256.Sum256([]byte(slug))
 	hash := hex.EncodeToString(sum[:kubernetesNameHashLen/2])
 	maxSlugLen := kubernetesNameMaxLen - len(prefix) - 1 - len(hash)
-	return prefix + slug[:maxSlugLen] + "-" + hash
+	base := strings.TrimRight(slug[:maxSlugLen], "-")
+	return prefix + base + "-" + hash
 }
 
 func tunnelBootstrapTTLLabel() string {

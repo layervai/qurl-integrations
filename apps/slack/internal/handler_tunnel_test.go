@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -76,6 +78,7 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "bad environment", text: testTunnelInstallCmd + " env:prod", wantErr: true},
 		{name: "bad container ref", text: testTunnelInstallCmd + " container:../web", wantErr: true},
 		{name: "compose rejects dotted service", text: testTunnelInstallCmd + " service:web.1 env:compose", wantErr: true},
+		{name: "compose rejects dotted container ref", text: testTunnelInstallCmd + " env:compose container:web.1", wantErr: true},
 		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -208,7 +211,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"set -eu",
 		testTunnelAPIKey,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
-		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
+		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
 		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
@@ -264,7 +267,8 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 		return nil
 	}
 
-	status, ack := newAdminSlashInvoker(t, h).invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -313,6 +317,10 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal missing %q:\n%s", want, body)
 		}
+	}
+	deleteBody := inv.captured.waitForBody(t, 2*time.Second)
+	if got := parseSlackReplyBool(t, deleteBody, "delete_original"); !got {
+		t.Fatalf("delete_original = %v, want true after successful modal open", got)
 	}
 }
 
@@ -441,6 +449,31 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "Wait 2 seconds") || !strings.Contains(async, "/qurl tunnel install") {
 		t.Fatalf("async reply = %q, want retry-after guidance", async)
+	}
+}
+
+func TestTunnelInstallBareIgnoresInvalidRateLimitRetryAfter(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
+		return NewSlackRateLimitError("Wed, 21 Oct 2026 07:28:00 GMT")
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Opening guided tunnel setup") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "Wait a moment") || strings.Contains(async, "Wed, 21 Oct") {
+		t.Fatalf("async reply = %q, want generic retry guidance without raw Retry-After", async)
 	}
 }
 
@@ -896,7 +929,7 @@ func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 	}
 }
 
-func TestParseTunnelInstallModalArgsSkipsWebContainerValidationWhenEnvironmentMissing(t *testing.T) {
+func TestParseTunnelInstallModalArgsReportsWebContainerValidationWhenEnvironmentMissing(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
 	delete(values, tunnelInstallBlockEnvironment)
@@ -909,8 +942,8 @@ func TestParseTunnelInstallModalArgsSkipsWebContainerValidationWhenEnvironmentMi
 	if fieldErrors[tunnelInstallBlockEnvironment] == "" {
 		t.Fatalf("field errors = %+v, want target environment error", fieldErrors)
 	}
-	if fieldErrors[tunnelInstallBlockWebContainer] != "" {
-		t.Fatalf("web container error = %q, want no secondary error while environment is missing", fieldErrors[tunnelInstallBlockWebContainer])
+	if fieldErrors[tunnelInstallBlockWebContainer] == "" {
+		t.Fatalf("field errors = %+v, want web container error alongside missing environment", fieldErrors)
 	}
 }
 
@@ -1039,6 +1072,13 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
+}
+
+func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
+	t.Parallel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, nil, &client.APIKey{}, "missing_key_id")
 }
 
 func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) {
@@ -1280,7 +1320,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 
 func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	t.Parallel()
-	slug := strings.Repeat("a", 64)
+	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
 	args := &tunnelInstallArgs{
 		Slug:        slug,
 		Alias:       slug,
@@ -1298,6 +1338,9 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		}
 		if strings.HasSuffix(name, "-") {
 			t.Fatalf("%s name = %q, must end with an alphanumeric hash suffix", label, name)
+		}
+		if strings.Contains(name, "--") {
+			t.Fatalf("%s name = %q, should trim hyphens before hash suffix", label, name)
 		}
 	}
 
@@ -1346,7 +1389,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"depends_on:",
 		testTunnelAgentDirFragment,
 		"QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}",
-		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
+		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
 		`docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`,
 		"Verify with `docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug + "`",
 		"if you changed `APP_COMPOSE_FILE`, use that file there too",
@@ -1376,6 +1419,40 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
 		}
+	}
+}
+
+func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *testing.T) {
+	t.Parallel()
+	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
+		Slug:         testTunnelSlug,
+		Alias:        testTunnelSlug,
+		LocalPort:    9090,
+		Environment:  tunnelEnvCompose,
+		WebContainer: "web",
+	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+
+	start := "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n"
+	bodyStart := strings.Index(got, start)
+	if bodyStart < 0 {
+		t.Fatalf("Compose instructions missing generated fragment heredoc:\n%s", got)
+	}
+	bodyStart += len(start)
+	bodyEnd := strings.Index(got[bodyStart:], "\nQURL_COMPOSE_YAML_EOF")
+	if bodyEnd < 0 {
+		t.Fatalf("Compose instructions missing generated fragment heredoc terminator:\n%s", got)
+	}
+	var parsed struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(got[bodyStart:bodyStart+bodyEnd]), &parsed); err != nil {
+		t.Fatalf("Compose fragment did not parse: %v", err)
+	}
+	service := parsed.Services["qurl-tunnel-"+testTunnelSlug]
+	if service.Image != testTunnelImageRef {
+		t.Fatalf("Compose service image = %q, want %q", service.Image, testTunnelImageRef)
 	}
 }
 

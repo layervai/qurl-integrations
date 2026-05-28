@@ -185,6 +185,15 @@ func (h *Handler) postErrorResponse(log *slog.Logger, responseURL, message strin
 	return h.postResponseBody(log, responseURL, body)
 }
 
+func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) bool {
+	body, err := json.Marshal(map[string]bool{"delete_original": true})
+	if err != nil {
+		log.Error("marshal response_url delete payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
 func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []byte) bool {
 	if responseURL == "" {
 		log.Warn("missing response_url — async result has nowhere to go")

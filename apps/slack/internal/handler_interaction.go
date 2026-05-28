@@ -142,7 +142,7 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	}
 	if shortcutRaw != "" {
 		var aliasReason string
-		alias, aliasReason = requireAliasReason(shortcutRaw)
+		alias, aliasReason = validateAliasToken(shortcutRaw)
 		if aliasReason != "" {
 			fieldErrors[tunnelInstallBlockShortcut] = aliasReason
 		}
@@ -150,6 +150,9 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 
 	portRaw := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort))
 	port := defaultTunnelLocalPort
+	// The modal always submits this block; an absent value keeps the
+	// documented default so older Slack retries remain valid if the block is
+	// omitted from a stale payload.
 	if portRaw != "" {
 		var err error
 		port, err = strconv.Atoi(portRaw)
@@ -169,6 +172,8 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		if msg := tunnelWebContainerValidationMessage(env, webContainer); msg != "" {
 			fieldErrors[tunnelInstallBlockWebContainer] = msg
 		}
+	} else if msg := tunnelWebContainerValidationMessage(tunnelEnvDocker, webContainer); msg != "" {
+		fieldErrors[tunnelInstallBlockWebContainer] = msg
 	}
 
 	if len(fieldErrors) > 0 {

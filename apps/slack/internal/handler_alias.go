@@ -225,10 +225,6 @@ func requireAlias(tok string) (alias, userMsg string) {
 	return alias, ""
 }
 
-func requireAliasReason(tok string) (alias, reason string) {
-	return validateAliasToken(tok)
-}
-
 // aliasSyncTimeout caps the sync alias-verb deadline tight enough to
 // fail inside Slack's 3-second slash-command ack window. Two DDB
 // calls (lookup + write) typically resolve in <100ms, so 2.5s leaves
