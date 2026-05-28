@@ -239,10 +239,18 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	var gotTeamID string
 	var gotTriggerID string
 	var gotView []byte
-	h.cfg.OpenView = func(_ context.Context, teamID, triggerID string, viewJSON []byte) error {
+	h.cfg.OpenView = func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error {
 		gotTeamID = teamID
 		gotTriggerID = triggerID
 		gotView = append([]byte(nil), viewJSON...)
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("OpenView context missing deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > slackTriggerOpenViewBudget {
+			t.Fatalf("OpenView deadline remaining = %s, want within %s", remaining, slackTriggerOpenViewBudget)
+		}
 		return nil
 	}
 
@@ -352,6 +360,26 @@ func TestTunnelInstallBareReportsOpenViewFailure(t *testing.T) {
 	}
 	if !strings.Contains(ack, "Could not open guided tunnel setup") {
 		t.Fatalf("ack = %q, want OpenView failure copy", ack)
+	}
+}
+
+func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
+		return ErrSlackTriggerExpired
+	}
+
+	status, ack := newAdminSlashInvoker(t, h).invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "setup window expired") || !strings.Contains(ack, "/qurl tunnel install") {
+		t.Fatalf("ack = %q, want trigger-expiry retry copy", ack)
 	}
 }
 
@@ -596,17 +624,29 @@ func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 
 func TestParseTunnelInstallModalArgsPreservesAliasValidationReason(t *testing.T) {
 	t.Parallel()
-	longAlias := strings.Repeat("a", aliasMaxLen+1)
-	values := tunnelInstallModalValues(testTunnelSlug, longAlias, string(tunnelEnvDockerVM), "8080", "")
-
-	args, fieldErrors := parseTunnelInstallModalArgs(values)
-
-	if args != nil {
-		t.Fatalf("args = %+v, want nil", args)
+	cases := []struct {
+		name       string
+		shortcut   string
+		wantReason string
+	}{
+		{name: "too long", shortcut: strings.Repeat("a", aliasMaxLen+1), wantReason: "longer than"},
+		{name: "bad character", shortcut: "bad_alias", wantReason: "lowercase alphanumeric + dashes"},
 	}
-	got := fieldErrors[tunnelInstallBlockShortcut]
-	if !strings.Contains(got, "longer than") || strings.Contains(got, "Usage:") {
-		t.Fatalf("shortcut error = %q, want specific alias validation reason without usage suffix", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values := tunnelInstallModalValues(testTunnelSlug, tc.shortcut, string(tunnelEnvDockerVM), "8080", "")
+
+			args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+			if args != nil {
+				t.Fatalf("args = %+v, want nil", args)
+			}
+			got := fieldErrors[tunnelInstallBlockShortcut]
+			if !strings.Contains(got, tc.wantReason) || strings.Contains(got, "Usage:") {
+				t.Fatalf("shortcut error = %q, want %q without usage suffix", got, tc.wantReason)
+			}
+		})
 	}
 }
 
@@ -746,15 +786,12 @@ func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
 
 func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	t.Parallel()
-	got, err := renderECSFargateTunnelInstructions(&tunnelInstallArgs{
+	got := renderECSFargateTunnelInstructions(&tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvECSFargate,
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-	if err != nil {
-		t.Fatalf("renderECSFargateTunnelInstructions: %v", err)
-	}
 
 	for _, want := range []string{
 		"ECS/Fargate task-definition checklist",
@@ -796,7 +833,9 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	for _, want := range []string{
 		"Run this from your Docker Compose project directory.",
 		"WEB_SERVICE='web.1_2-3'",
-		"qurl-tunnel.compose.yaml",
+		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
+		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"`,
+		"qurl-tunnel-" + testTunnelSlug + ".compose.yaml",
 		`network_mode: "service:${WEB_SERVICE}"`,
 		"depends_on:",
 		"intentionally unquoted",
@@ -833,6 +872,7 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 
 	for _, want := range []string{
 		"WEB_CONTAINER='web.1_2-3'",
+		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
 		`--network "container:${WEB_CONTAINER}"`,
 		`TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`,
 		testTunnelAgentDirFragment,
@@ -846,6 +886,77 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 	}
 	if strings.Contains(got, "Replace `YOUR_WEB_CONTAINER_NAME`") {
 		t.Fatalf("Docker instructions still included placeholder warning:\n%s", got)
+	}
+}
+
+func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
+	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
+	freezeTunnelBootstrapNow(t, now)
+
+	cases := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{
+			name: "ecs fargate",
+			env:  string(tunnelEnvECSFargate),
+			want: []string{
+				"Target environment: AWS ECS/Fargate.",
+				"ECS/Fargate task-definition checklist",
+				`"name": "QURL_API_KEY"`,
+			},
+		},
+		{
+			name: "kubernetes",
+			env:  string(tunnelEnvKubernetes),
+			want: []string{
+				"Target environment: Kubernetes.",
+				"kubectl apply -f -",
+				"Pod spec additions:",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyResourceID: testTunnelResourceID,
+					testKeyType:       client.ResourceTypeTunnel,
+					testKeySlug:       testTunnelSlug,
+					testKeyStatus:     client.StatusActive,
+				})
+			})
+			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyKeyID:      testTunnelAPIKeyID,
+					testKeyAPIKey:     testTunnelAPIKey,
+					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+					testKeyTunnelSlug: testTunnelSlug,
+					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+				})
+			})
+
+			h := newAdminTestHandler(t, ts)
+			h.cfg.TunnelImage = testTunnelImageRef
+			h.SetAliasStore(h.cfg.AdminStore)
+
+			status, ack, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd+" env:"+tc.env, testAdminTeamID, testAdminUserID)
+
+			if status != http.StatusOK || !strings.Contains(ack, "Working") {
+				t.Fatalf("status=%d ack=%q, want async accepted", status, ack)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(async, want) {
+					t.Fatalf("%s async reply missing %q:\n%s", tc.name, want, async)
+				}
+			}
+			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelResourceID) {
+				t.Fatalf("%s async reply leaked resource details:\n%s", tc.name, async)
+			}
+		})
 	}
 }
 

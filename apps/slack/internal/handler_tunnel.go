@@ -21,14 +21,15 @@ const (
 	// Production deploys should set QURL_TUNNEL_IMAGE to an immutable
 	// release tag or digest. The floating fallback is for dev/sandbox
 	// onboarding where the latest sidecar build is intentional.
-	defaultTunnelImage     = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
-	defaultTunnelLocalPort = 8080
-	tunnelBootstrapTTL     = "1h"
-	tunnelBootstrapSkew    = 2 * time.Minute
-	tunnelInstallModalTTL  = 25 * time.Minute
-	tunnelScopeAgent       = "qurl:agent"
-	tunnelScopeWrite       = "qurl:write"
-	tunnelEnvAPIKey        = "QURL_API_KEY"
+	defaultTunnelImage         = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
+	defaultTunnelLocalPort     = 8080
+	tunnelBootstrapTTL         = "1h"
+	tunnelBootstrapSkew        = 2 * time.Minute
+	tunnelInstallModalTTL      = 25 * time.Minute
+	slackTriggerOpenViewBudget = time.Second
+	tunnelScopeAgent           = "qurl:agent"
+	tunnelScopeWrite           = "qurl:write"
+	tunnelEnvAPIKey            = "QURL_API_KEY"
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
@@ -251,10 +252,17 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		respondSlack(w, "Could not open guided tunnel setup. Please retry or contact support.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	// Slack trigger_ids expire quickly; after the admin gate, keep views.open
+	// on its own tighter budget so latency spikes fail while the operator can
+	// still immediately rerun the command.
+	ctx, cancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 	defer cancel()
 	if err := h.cfg.OpenView(ctx, teamID, triggerID, view); err != nil {
 		slog.Error("tunnel install: views.open failed", "error", err, "team_id", teamID, "user_id", userID)
+		if errors.Is(err, ErrSlackTriggerExpired) {
+			respondSlack(w, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.")
+			return
+		}
 		respondSlack(w, "Could not open guided tunnel setup. Please retry or contact support.")
 		return
 	}
@@ -389,7 +397,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) (string, error) {
 	switch args.Environment {
 	case tunnelEnvECSFargate:
-		return renderECSFargateTunnelInstructions(args, key, image)
+		return renderECSFargateTunnelInstructions(args, key, image), nil
 	case tunnelEnvKubernetes:
 		return renderKubernetesTunnelInstructions(args, key, image), nil
 	case tunnelEnvCompose:
@@ -437,10 +445,10 @@ QURL_TUNNEL_SLUG=%s
 TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"
 SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
-CONFIG_FILE="$PWD/qurl-proxy.yaml"
+CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
 
-# This intentionally overwrites $PWD/qurl-proxy.yaml so rerunning the install
-# refreshes the deterministic slug/port config in place.
+# This intentionally overwrites the per-slug config so rerunning the install
+# refreshes the deterministic slug/port values in place.
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
@@ -468,7 +476,7 @@ docker run -d \
 	if args.WebContainer == "" {
 		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
 	}
-	intro += " It writes or overwrites qurl-proxy.yaml in the current directory."
+	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory."
 	return intro + "\n\n" + slackCodeBlock(docker) + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file."
 }
 
@@ -499,8 +507,8 @@ fi
 QURL_TUNNEL_SLUG=%s
 SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
-CONFIG_FILE="$PWD/qurl-proxy.yaml"
-QURL_COMPOSE_FILE="$PWD/qurl-tunnel.compose.yaml"
+CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
+QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"
 
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
@@ -511,8 +519,8 @@ $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 printf '%%s' %s | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
 
 # This heredoc is intentionally unquoted so it writes concrete values into
-# qurl-tunnel.compose.yaml; future docker compose commands should not need the
-# install script's temporary environment variables.
+# the per-slug Compose fragment; future docker compose commands should not need
+# the install script's temporary environment variables.
 cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
 services:
   qurl-tunnel:
@@ -524,7 +532,7 @@ services:
     volumes:
       - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
       - ${SECRET_DIR}:/run/secrets/qurl-tunnel:ro
-      - ./qurl-proxy.yaml:/work/qurl-proxy.yaml:ro
+      - ./qurl-proxy-${QURL_TUNNEL_SLUG}.yaml:/work/qurl-proxy.yaml:ro
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-tunnel/api_key
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
@@ -536,15 +544,12 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d qurl-tunnel`
 	if args.WebContainer == "" {
 		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `container:<service>` in the typed command."
 	}
-	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate qurl-tunnel.compose.yaml when the slug, port, or service changes."
-	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f \"$APP_COMPOSE_FILE\" -f qurl-tunnel.compose.yaml logs -f qurl-tunnel`; after the tunnel connects, delete the bootstrap key file."
+	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the per-slug Compose fragment when the slug, port, or service changes."
+	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f \"$APP_COMPOSE_FILE\" -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel`; after the tunnel connects, delete the bootstrap key file."
 }
 
-func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) (string, error) {
-	containerJSON, err := renderECSSidecarContainerJSON(args, image)
-	if err != nil {
-		return "", fmt.Errorf("marshal ECS sidecar container: %w", err)
-	}
+func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
+	containerJSON := renderECSSidecarContainerJSON(args, image)
 	secretName := "qurl-tunnel-" + args.Slug
 	body := fmt.Sprintf(`1. Store this bootstrap key in AWS Secrets Manager, then delete this Slack message:
 %s
@@ -558,10 +563,10 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.API
 4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config.
 Do not share qurl-agent-state across concurrently running sidecars.`, key.APIKey, renderTunnelConfigYAML(args), containerJSON)
 
-	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. After the task logs show the tunnel connected, delete the bootstrap secret.\n\n" + slackCodeBlock(body), nil
+	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. After the task logs show the tunnel connected, delete the bootstrap secret.\n\n" + slackCodeBlock(body)
 }
 
-func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
+func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string {
 	container := ecsContainerDefinition{
 		Name:      "qurl-tunnel",
 		Image:     image,
@@ -585,11 +590,15 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 			},
 		},
 	}
-	b, err := json.MarshalIndent(container, "", "  ")
+	return string(mustMarshalStaticJSON(container))
+}
+
+func mustMarshalStaticJSON(v any) []byte {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return "", err
+		panic("marshal static Slack install JSON: " + err.Error())
 	}
-	return string(b), nil
+	return b
 }
 
 func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {

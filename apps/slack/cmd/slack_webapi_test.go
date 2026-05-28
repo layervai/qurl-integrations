@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal"
 )
 
 func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
@@ -53,8 +56,17 @@ func TestSlackOpenViewFuncSurfacesSlackError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
-	if err == nil || !strings.Contains(err.Error(), "invalid_trigger") {
-		t.Fatalf("error = %v, want invalid_trigger", err)
+	if !errors.Is(err, internal.ErrSlackTriggerExpired) || !strings.Contains(err.Error(), "invalid_trigger") {
+		t.Fatalf("error = %v, want trigger-expired sentinel wrapping invalid_trigger", err)
+	}
+}
+
+func TestSlackOpenViewFuncRejectsInvalidViewJSON(t *testing.T) {
+	t.Parallel()
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", []byte(`not-json`))
+	if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
+		t.Fatalf("error = %v, want invalid view JSON", err)
 	}
 }
 
@@ -81,5 +93,18 @@ func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON", err)
+	}
+}
+
+func TestSlackOpenViewFuncSurfacesOversizedResponse(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", 4097)))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
+		t.Fatalf("error = %v, want oversized response", err)
 	}
 }

@@ -192,6 +192,8 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 // is a textual no-op.
 //
 // Returns (alias, "") on success and ("", userCopy) on rejection.
+// Rejection copy is "<reason>\n\n<aliasUsage>"; tunnel install modals strip
+// the usage suffix and keep the specific reason in their field-level errors.
 // See [parseAliasArgs] for the rationale on plain strings vs error.
 func requireAlias(tok string) (alias, userMsg string) {
 	if tok == "" {

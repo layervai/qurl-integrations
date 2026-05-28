@@ -26,6 +26,10 @@ const (
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. A workspace admin can run `/qurl setup` to connect it."
 )
 
+// ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
+// trigger_id expiry distinctly from auth, network, and Slack API failures.
+var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
+
 // authErrorMessage maps an APIKey-lookup error to the right user-facing
 // reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
 // /qurl setup yet" path — surface a useful next-action instead of the
@@ -716,11 +720,10 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
-		tunnelHelp := []string{"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)"}
 		if h.cfg.OpenView != nil {
-			tunnelHelp = append([]string{"• `/qurl tunnel install` — Guided tunnel setup with Docker, Docker Compose, ECS/Fargate, and Kubernetes install output (admin only)"}, tunnelHelp...)
+			lines = append(lines, "• `/qurl tunnel install` — Guided tunnel setup with Docker, Docker Compose, ECS/Fargate, and Kubernetes install output (admin only)")
 		}
-		lines = append(lines, tunnelHelp...)
+		lines = append(lines, "• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)")
 	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"

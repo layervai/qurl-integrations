@@ -199,10 +199,16 @@ func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 }
 
 func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
-	// Slack modal submissions only support field-level errors, not a
-	// form-level banner. Use the environment block as a neutral anchor so
-	// auth/config failures do not look like malformed slug input.
-	respondViewErrors(w, map[string]string{tunnelInstallBlockEnvironment: message})
+	view, err := TunnelInstallErrorModal(message)
+	if err != nil {
+		slog.Error("tunnel install modal error render failed", "error", err)
+		respondViewErrors(w, map[string]string{tunnelInstallBlockEnvironment: message})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"response_action": "update",
+		"view":            json.RawMessage(view),
+	})
 }
 
 func tunnelInstallModalAliasError(aliasMsg string) string {

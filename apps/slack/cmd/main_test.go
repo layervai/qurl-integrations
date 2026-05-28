@@ -52,6 +52,29 @@ func validEnv() map[string]string {
 	}
 }
 
+func TestValidateSlackBotToken(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		token   string
+		wantErr bool
+	}{
+		{name: "unset"},
+		{name: "bot token", token: "xoxb-test-token"},
+		{name: "user token", token: "xoxp-test-token", wantErr: true},
+		{name: "app token", token: "xapp-test-token", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateSlackBotToken(tc.token)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateSlackBotToken(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // applyEnv writes every oauthEnvKeys entry — empty when absent from kvs
 // — so the test doesn't depend on what was inherited from the shell.
 // t.Setenv handles per-test cleanup.

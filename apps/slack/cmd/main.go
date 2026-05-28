@@ -130,6 +130,9 @@ func run() error {
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	var openView func(context.Context, string, string, []byte) error
 	if slackBotToken != "" {
+		if err := validateSlackBotToken(slackBotToken); err != nil {
+			return err
+		}
 		openView = slackOpenViewFunc(slackBotToken, userAgent)
 	} else {
 		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")
@@ -299,6 +302,16 @@ const minStateSecretBytes = oauth.StateMinSecret
 // calls oauth.NewJWKSVerifier directly via this seam.
 var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.IDTokenVerifier, error) {
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
+}
+
+func validateSlackBotToken(token string) error {
+	if token == "" {
+		return nil
+	}
+	if !strings.HasPrefix(token, "xoxb-") {
+		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-")
+	}
+	return nil
 }
 
 // missingOAuthEnvVars returns the env-var names with empty values, in

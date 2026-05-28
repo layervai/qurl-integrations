@@ -157,6 +157,21 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// TunnelInstallErrorModal replaces a submitted tunnel-install modal with a
+// form-level error. Slack's `response_action: errors` can only attach copy to
+// input fields, which makes auth/config failures look like bad user input.
+func TunnelInstallErrorModal(message string) ([]byte, error) {
+	payload := map[string]any{
+		blockKitFieldType:  blockKitTypeModal,
+		blockKitFieldTitle: plainTextObj("Tunnel setup"),
+		blockKitFieldClose: plainTextObj("Close"),
+		blockKitFieldBlocks: []any{
+			sectionBlock(":warning: " + message),
+		},
+	}
+	return json.Marshal(payload)
+}
+
 // escapeMrkdwnCode neutralizes the characters that can break out of
 // a mrkdwn code span: backtick (closes the span) and any line break
 // — \n, \r, or the \r\n pair (Slack's renderer ends the span at a
