@@ -620,7 +620,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 func tunnelInstallRateLimitMessage(err error) string {
 	retryAfter := slackRetryAfterLabel(SlackRateLimitRetryAfter(err))
 	if retryAfter == "" {
-		return "Slack rate-limited guided tunnel setup. Wait up to " + humanSlackRetryAfterDuration(slackRetryAfterDisplayCap) + ", then run `/qurl tunnel install` again."
+		return "Slack rate-limited guided tunnel setup. Wait up to " + humanDurationCeilMinutes(slackRetryAfterDisplayCap) + ", then run `/qurl tunnel install` again."
 	}
 	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl tunnel install` again."
 }
@@ -743,7 +743,7 @@ QURL_BOOTSTRAP_KEY_EOF
 unset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN`, targetPath)
 }
 
-func renderBootstrapKeyPipeShell(command string) string {
+func renderBootstrapKeyToCommandShell(command string) string {
 	// Stream exactly the key byte count from a here-doc so the trailing heredoc
 	// newline is not part of the secret and the key never appears in argv.
 	// This heredoc-with-pipe form is intentionally limited to Linux /bin/sh
@@ -765,7 +765,7 @@ func tunnelBootstrapExpiryLabel(key *client.APIKey) string {
 	if key != nil && key.ExpiresAt != nil {
 		remaining := key.ExpiresAt.Sub(tunnelBootstrapNow())
 		if remaining > 0 {
-			return "expires in " + humanTunnelBootstrapDuration(remaining)
+			return "expires in " + humanDurationCeilMinutes(remaining)
 		}
 		if remaining > -tunnelBootstrapSkew {
 			return "expires very soon"

@@ -80,9 +80,9 @@ func TestValidateSlackBotToken(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateSlackBotToken(tc.token)
+			err := validateSlackBotTokenShape(tc.token)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("validateSlackBotToken(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+				t.Fatalf("validateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
 			}
 		})
 	}

@@ -112,6 +112,9 @@ func defaultSlackViewsOpenClient() *http.Client {
 
 func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) error {
 	if statusCode == http.StatusTooManyRequests {
+		// Prefer Slack's Retry-After hint over any 429 response body; the delay
+		// is the operator-actionable part and Slack's body is not more useful
+		// than the typed rate-limit error.
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 300 {

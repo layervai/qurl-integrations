@@ -245,6 +245,7 @@ func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 	view, err := TunnelInstallErrorModal(message)
 	if err != nil {
+		slog.Error("tunnel install modal error render failed", "error", err)
 		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "Tunnel setup failed. Contact support."})
 		return
 	}

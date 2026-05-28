@@ -70,7 +70,7 @@ const (
 	maxHeaderBytes = 8 << 10 // 8 KiB
 	// Slack remains the token-validity authority; these bounds are only a local
 	// boot-time typo guard for obviously truncated or pasted-wrong values.
-	slackBotTokenTypoGuardMin = 20
+	slackBotTokenTypoGuardMin = 30
 	slackBotTokenTypoGuardMax = 320
 )
 
@@ -133,7 +133,7 @@ func run() error {
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	var openView internal.OpenViewFunc
-	if err := validateSlackBotToken(slackBotToken); err != nil {
+	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
 		return err
 	}
 	if slackBotToken != "" {
@@ -308,7 +308,7 @@ var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
 }
 
-func validateSlackBotToken(token string) error {
+func validateSlackBotTokenShape(token string) error {
 	if token == "" {
 		return nil
 	}

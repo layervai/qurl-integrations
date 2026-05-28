@@ -19,7 +19,7 @@ func slackRetryAfterLabel(raw string) string {
 		return ""
 	}
 	if time.Duration(seconds)*time.Second > slackRetryAfterDisplayCap {
-		return "at least " + humanSlackRetryAfterDuration(slackRetryAfterDisplayCap)
+		return "at least " + humanDurationCeilMinutes(slackRetryAfterDisplayCap)
 	}
 	if seconds >= 60 {
 		minutes := seconds / 60
@@ -48,14 +48,6 @@ func humanTunnelBootstrapTTL(ttl string) string {
 	if err != nil {
 		return "the requested " + ttl
 	}
-	return humanTunnelBootstrapDuration(d)
-}
-
-func humanTunnelBootstrapDuration(d time.Duration) string {
-	return humanDurationCeilMinutes(d)
-}
-
-func humanSlackRetryAfterDuration(d time.Duration) string {
 	return humanDurationCeilMinutes(d)
 }
 
