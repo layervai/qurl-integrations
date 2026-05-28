@@ -17,10 +17,10 @@ import (
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
 
-// slackViewsOpenTimeout is a belt-and-braces HTTP-client fallback for future
-// callers that do not pass their own tighter context deadline. The tunnel
-// install handler intentionally uses slackTriggerOpenViewBudget instead so it
-// stays inside Slack's short trigger_id window.
+// slackViewsOpenTimeout is the HTTP-client upper bound for every views.open
+// request made by this client. Callers can still pass a tighter context; the
+// tunnel install handler does that with slackTriggerOpenViewBudget so it stays
+// inside Slack's short trigger_id window.
 const slackViewsOpenTimeout = 2 * time.Second
 
 // Slack echoes the opened view in successful views.open responses. Keep the
@@ -125,6 +125,9 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
+		if bodySnippet := slackOpenViewBodySnippet(raw); bodySnippet != "" {
+			return fmt.Errorf("views.open response JSON: %w: %s", err, bodySnippet)
+		}
 		return fmt.Errorf("views.open response JSON: %w", err)
 	}
 	if out.OK {
@@ -157,7 +160,7 @@ func slackOpenViewBodySnippet(raw []byte) string {
 func printableLogSnippet(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
-		case r == '\n' || r == '\r' || r == '\t':
+		case r == '\n' || r == '\r' || r == '\t' || r == '\u2028' || r == '\u2029':
 			return ' '
 		case r < ' ' || r == 0x7f:
 			return '?'

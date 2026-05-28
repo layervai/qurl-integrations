@@ -59,6 +59,7 @@ type tunnelInstallWebRefKind string
 const (
 	tunnelEnvDocker     tunnelInstallEnvironment = "docker"
 	tunnelEnvCompose    tunnelInstallEnvironment = "docker-compose"
+	tunnelEnvComposeAlt                          = "compose"
 	tunnelEnvECSFargate tunnelInstallEnvironment = "ecs-fargate"
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
 
@@ -166,7 +167,7 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(tunnelEnvDocker):
 		return tunnelEnvDocker, ""
-	case string(tunnelEnvCompose), "compose":
+	case string(tunnelEnvCompose), tunnelEnvComposeAlt:
 		return tunnelEnvCompose, ""
 	case string(tunnelEnvECSFargate):
 		return tunnelEnvECSFargate, ""
@@ -299,6 +300,8 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	// Slack's roughly three-second trigger_id window. The admin store is the
 	// dominant tail-latency risk before views.open; expiry is converted into a
 	// retry prompt instead of leaving the admin with a silent modal miss.
+	// startAsyncWorker already derives ctx from h.baseCtx, so shutdown cancels
+	// this check coherently with the rest of the async slash-command work.
 	adminCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
 	cancel()
@@ -429,7 +432,9 @@ func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, k
 	// freshly minted bootstrap key for the rest of its TTL. Keep this
 	// synchronous while install work runs behind a bounded semaphore: it trades
 	// up to a few seconds of worker occupancy on rare render failures for
-	// deterministic cleanup before the user sees a retry prompt.
+	// deterministic cleanup before the user sees a retry prompt. If the cleanup
+	// endpoint stalls under saturation, back-pressure is visible through the
+	// existing async-worker pool instead of spawning unbounded cleanup work.
 	ctx, cancel := context.WithTimeout(context.Background(), tunnelBootstrapCleanupTimeout)
 	defer cancel()
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
@@ -443,6 +448,9 @@ func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now t
 	// Bucket on the modal TTL window, not the API key TTL. The modal path passes
 	// the modal creation timestamp, so duplicate submissions for one still-valid
 	// modal cannot shift buckets just because the async worker runs later.
+	// Typed slash-command retries use the command time instead; a retry that
+	// crosses a TTL bucket may mint a fresh key, which is acceptable because no
+	// Slack modal replay contract exists for that path.
 	windowSeconds := int64(tunnelInstallModalTTL / time.Second)
 	if windowSeconds <= 0 {
 		windowSeconds = 1
@@ -540,7 +548,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 	if !usingDefaultImage {
 		return ""
 	}
-	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_TUNNEL_IMAGE` to an immutable tag or digest before production rollout."
+	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_TUNNEL_IMAGE` to an immutable release tag or digest before production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`."
 }
 
 func tunnelInstallRateLimitMessage(err error) string {

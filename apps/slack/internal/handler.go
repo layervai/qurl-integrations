@@ -210,7 +210,9 @@ type Config struct {
 	PostDM func(ctx context.Context, slackUserID, text string) error
 
 	// TunnelImage is the Docker image shown by `/qurl tunnel install`.
-	// Empty falls back to the public client image with the `latest` tag.
+	// Empty falls back to the public client image with the `latest` tag for
+	// dev/sandbox installs; production deploys should set an immutable tag or
+	// digest so Slack never instructs customers to run a floating image.
 	TunnelImage string
 }
 

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +36,7 @@ const (
 	testTunnelPipefailLine = "set -o pipefail"
 	testTunnelComposeWeb   = "web_1"
 	testTunnelDockerWeb    = "web_1-2"
+	testSlackTriggerID     = "trigger_test"
 )
 
 const (
@@ -121,12 +124,20 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "old docker vm spelling rejected", text: testTunnelInstallCmd + " env:docker-vm", wantErr: true},
 		{name: "bad environment", text: testTunnelInstallCmd + " env:prod", wantErr: true},
 		{name: "bad container ref", text: testTunnelInstallCmd + " container:../web", wantErr: true},
+		{name: "container rejects semicolon", text: testTunnelInstallCmd + " container:web;rm", wantErr: true},
+		{name: "container rejects expansion", text: testTunnelInstallCmd + " container:$WEB", wantErr: true},
+		{name: "container rejects newline split", text: testTunnelInstallCmd + " container:web\nbad", wantErr: true},
 		{name: "docker rejects service ref", text: testTunnelInstallCmd + " service:web", wantErr: true},
 		{name: "kubernetes rejects container ref", text: testTunnelInstallCmd + " env:kubernetes container:web", wantErr: true},
 		{name: "ecs rejects container ref", text: testTunnelInstallCmd + " env:ecs-fargate container:web", wantErr: true},
 		{name: "compose rejects dotted service", text: testTunnelInstallCmd + " service:web.1 env:compose", wantErr: true},
+		{name: "compose rejects slash service", text: testTunnelInstallCmd + " service:web/bad env:compose", wantErr: true},
 		{name: "compose rejects dotted container ref", text: testTunnelInstallCmd + " env:compose container:web.1", wantErr: true},
 		{name: "compose rejects container ref", text: testTunnelInstallCmd + " env:compose container:web", wantErr: true},
+		{name: "alias rejects semicolon", text: testTunnelInstallCmd + " alias:$bad;rm", wantErr: true},
+		{name: "slug rejects shell metacharacter", text: "tunnel install prod;bad", wantErr: true},
+		{name: "slug rejects command substitution", text: "tunnel install prod$(whoami)", wantErr: true},
+		{name: "slug rejects newline split", text: "tunnel install prod\nbad", wantErr: true},
 		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -343,8 +354,8 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	if remaining := time.Until(call.deadline); remaining <= 0 || remaining > slackTriggerOpenViewBudget {
 		t.Fatalf("OpenView deadline remaining = %s, want within %s", remaining, slackTriggerOpenViewBudget)
 	}
-	if call.triggerID != "trigger_test" {
-		t.Fatalf("trigger_id = %q, want trigger_test", call.triggerID)
+	if call.triggerID != testSlackTriggerID {
+		t.Fatalf("trigger_id = %q, want %q", call.triggerID, testSlackTriggerID)
 	}
 	if call.teamID != testAdminTeamID {
 		t.Fatalf("team_id = %q, want %s", call.teamID, testAdminTeamID)
@@ -425,6 +436,35 @@ func TestTunnelInstallBareWithoutTriggerIDFallsBackToTypedInstall(t *testing.T) 
 	got := parseSlackText(t, w.Body.Bytes())
 	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl tunnel install <slug>") {
 		t.Fatalf("response = %q, want trigger_id fallback guidance", got)
+	}
+}
+
+func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = nil
+	values := url.Values{
+		fieldText:      {"tunnel install"},
+		fieldTeamID:    {testAdminTeamID},
+		fieldUserID:    {testAdminUserID},
+		fieldChannelID: {testTunnelChannelID},
+		fieldTriggerID: {testSlackTriggerID},
+	}
+	w := httptest.NewRecorder()
+
+	h.handleTunnel(w, values)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	got := parseSlackText(t, w.Body.Bytes())
+	for _, want := range []string{"Guided tunnel setup is not configured", "/qurl tunnel install <slug>", "port:8080"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("response = %q, missing %q", got, want)
+		}
 	}
 }
 
@@ -783,7 +823,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			},
 		},
 		{
-			name: "compose",
+			name: string(tunnelEnvCompose),
 			env:  tunnelEnvCompose,
 			web:  testTunnelComposeWeb,
 			want: []string{
@@ -1117,6 +1157,18 @@ func TestParseTunnelInstallModalArgsReadsInitialEnvironmentSelection(t *testing.
 	}
 }
 
+func TestInteractionStateValueTextPrefersDirectValue(t *testing.T) {
+	t.Parallel()
+	got := (interactionStateValue{
+		Value:          string(tunnelEnvCompose),
+		SelectedOption: &interactionSelectedOption{Value: string(tunnelEnvKubernetes)},
+	}).text()
+
+	if got != string(tunnelEnvCompose) {
+		t.Fatalf("interactionStateValue.text() = %q, want direct value precedence", got)
+	}
+}
+
 func TestParseTunnelInstallModalArgsSkipsWebRefValidationWhenEnvironmentMissing(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
@@ -1306,6 +1358,81 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 	}
 }
 
+func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
+	t.Parallel()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	const renderShellTestSlug = "prod-dash-1"
+	cases := []struct {
+		name   string
+		render func(*testing.T) string
+	}{
+		{
+			name: "docker",
+			render: func(t *testing.T) string {
+				return mustRenderDockerTunnelInstructions(t, &tunnelInstallArgs{
+					Slug:        renderShellTestSlug,
+					Alias:       renderShellTestSlug,
+					LocalPort:   9090,
+					Environment: tunnelEnvDocker,
+					WebRef:      "web.1_2-3",
+				}, testTunnelImageRef)
+			},
+		},
+		{
+			name: string(tunnelEnvCompose),
+			render: func(t *testing.T) string {
+				return mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
+					Slug:        renderShellTestSlug,
+					Alias:       renderShellTestSlug,
+					LocalPort:   9090,
+					Environment: tunnelEnvCompose,
+					WebRef:      "web_1-2",
+				}, testTunnelImageRef)
+			},
+		},
+		{
+			name: "kubernetes",
+			render: func(t *testing.T) string {
+				return mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
+					Slug:        renderShellTestSlug,
+					Alias:       renderShellTestSlug,
+					LocalPort:   9090,
+					Environment: tunnelEnvKubernetes,
+				}, testTunnelImageRef)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, sh, "-n")
+			cmd.Stdin = strings.NewReader(firstSlackCodeBlock(t, tc.render(t)))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s shell block did not parse: %v\n%s", tc.name, err, out)
+			}
+		})
+	}
+}
+
+func firstSlackCodeBlock(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, "```\n")
+	if start < 0 {
+		t.Fatalf("missing Slack code block:\n%s", body)
+	}
+	start += len("```\n")
+	end := strings.Index(body[start:], "\n```")
+	if end < 0 {
+		t.Fatalf("missing Slack code block terminator:\n%s", body)
+	}
+	return body[start : start+end]
+}
+
 func TestValidateTunnelImageRefRejectsBackticks(t *testing.T) {
 	t.Parallel()
 
@@ -1313,6 +1440,26 @@ func TestValidateTunnelImageRefRejectsBackticks(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "backticks") {
 		t.Fatalf("ValidateTunnelImageRef error = %v, want backtick rejection", err)
+	}
+}
+
+func TestValidateTunnelImageRefRejectsShellSyntaxBytes(t *testing.T) {
+	t.Parallel()
+	badTag := "ghcr.io/layervai/qurl-reverse-tunnel-client:bad"
+	for i, image := range []string{
+		badTag + " tag",
+		badTag + "$tag",
+		badTag + "'tag",
+		badTag + "\"tag",
+		badTag + "\ntag",
+		badTag + "\x00tag",
+	} {
+		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateTunnelImageRef(image); err == nil {
+				t.Fatalf("ValidateTunnelImageRef(%q) = nil, want rejection", image)
+			}
+		})
 	}
 }
 

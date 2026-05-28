@@ -99,7 +99,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
 | `SLACK_BASE_URL` | OAuth | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose `redirect_uri` and the `/qurl setup` link. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
-| `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl tunnel install`. Set this to an immutable release tag or digest for production rollout. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
+| `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl tunnel install`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are

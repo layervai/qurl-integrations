@@ -233,6 +233,9 @@ func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON", err)
 	}
+	if !strings.Contains(err.Error(), "not json") {
+		t.Fatalf("error = %v, want bounded body snippet", err)
+	}
 }
 
 func TestSlackOpenViewFuncSurfacesHTMLSuccessAsMalformedJSON(t *testing.T) {
@@ -246,6 +249,9 @@ func TestSlackOpenViewFuncSurfacesHTMLSuccessAsMalformedJSON(t *testing.T) {
 	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON for HTTP 200 HTML body", err)
+	}
+	if !strings.Contains(err.Error(), "<html>not slack json</html>") {
+		t.Fatalf("error = %v, want HTML body snippet", err)
 	}
 }
 
@@ -370,6 +376,39 @@ func TestSlackOpenViewFuncDrainsAndClosesOversizedResponse(t *testing.T) {
 	}
 	if !body.closed.Load() {
 		t.Fatal("oversized response body was not closed")
+	}
+}
+
+func TestSlackOpenViewFuncReadsAndClosesSuccessfulResponse(t *testing.T) {
+	t.Parallel()
+	body := &trackingReadCloser{reader: strings.NewReader(`{"ok":true}`)}
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+
+	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err != nil {
+		t.Fatalf("views.open: %v", err)
+	}
+	if !body.sawEOF.Load() {
+		t.Fatal("successful response body was not read to EOF")
+	}
+	if !body.closed.Load() {
+		t.Fatal("successful response body was not closed")
+	}
+}
+
+func TestPrintableLogSnippetNormalizesUnicodeLineSeparators(t *testing.T) {
+	t.Parallel()
+
+	got := printableLogSnippet("alpha\u2028beta\u2029gamma")
+
+	if got != "alpha beta gamma" {
+		t.Fatalf("printableLogSnippet = %q, want Unicode separators normalized", got)
 	}
 }
 

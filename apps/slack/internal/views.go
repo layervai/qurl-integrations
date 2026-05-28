@@ -14,7 +14,9 @@ import (
 // in PR-3c.3+ will pass them to `views.open` / `response_url` /
 // `chat.postMessage` as appropriate. We don't depend on the
 // slack-go/slack library here to avoid pulling a heavyweight
-// transitive into the binary just for a fixed set of view payloads.
+// transitive into the binary just for a fixed set of view payloads. If the
+// bot grows a broader Slack Web API surface, revisit that decision instead
+// of expanding hand-rolled clients indefinitely.
 
 // Modal callback IDs. The view-submission handler matches on these to
 // dispatch the submitted Block Kit state into the right command path.
@@ -40,6 +42,9 @@ const (
 
 const slackChannelFallbackText = "the channel where setup started"
 
+// Keep this intentionally wider than today's C*/D*/G* Slack channel prefixes:
+// it is only used for benign fallback display text, and Slack has changed ID
+// shapes before. Signature verification is the actual trust boundary.
 var slackChannelIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,127}$`)
 
 const (
