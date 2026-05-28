@@ -26,6 +26,7 @@ const slackViewsOpenTimeout = 2 * time.Second
 // Slack echoes the opened view in successful views.open responses. Keep the
 // body bounded, but leave room for modal blocks plus Slack-injected state.
 const slackViewsOpenResponseBodyLimit = 64 * 1024
+const slackOpenViewMaxErrorSnippetBytes = 200
 
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
 	return slackOpenViewFuncWithURL(token, userAgent, slackViewsOpenURL)
@@ -136,20 +137,19 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 }
 
 func slackOpenViewBodySnippet(raw []byte) string {
-	const maxSnippetBytes = 200
 	bodySnippet := printableLogSnippet(strings.TrimSpace(string(raw)))
-	if len(bodySnippet) <= maxSnippetBytes {
+	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
 		return bodySnippet
 	}
-	cut := maxSnippetBytes
-	// len(bodySnippet) > maxSnippetBytes above guarantees bodySnippet[cut]
+	cut := slackOpenViewMaxErrorSnippetBytes
+	// len(bodySnippet) > slackOpenViewMaxErrorSnippetBytes above guarantees bodySnippet[cut]
 	// exists; if that byte is a UTF-8 continuation byte, rewind to the rune
 	// start before slicing.
 	for cut > 0 && !utf8.RuneStart(bodySnippet[cut]) {
 		cut--
 	}
 	if cut == 0 {
-		return bodySnippet[:maxSnippetBytes] + "..."
+		return bodySnippet[:slackOpenViewMaxErrorSnippetBytes] + "..."
 	}
 	return bodySnippet[:cut] + "..."
 }

@@ -5,19 +5,17 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	t.Parallel()
-	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
+	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvCompose,
 		WebRef:      testTunnelDockerWeb,
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	}, testTunnelImageRef)
 
 	for _, want := range []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
@@ -73,13 +71,13 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 
 func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *testing.T) {
 	t.Parallel()
-	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
+	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvCompose,
 		WebRef:      "web",
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	}, testTunnelImageRef)
 
 	start := "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n"
 	bodyStart := strings.Index(got, start)
@@ -107,13 +105,13 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 
 func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *testing.T) {
 	t.Parallel()
-	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
+	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvCompose,
 		WebRef:      testTunnelComposeWeb,
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	}, testTunnelImageRef)
 
 	for _, want := range []string{
 		"WEB_SERVICE='" + testTunnelComposeWeb + "'",

@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 type ecsContainerDefinition struct {
@@ -39,9 +37,17 @@ type ecsLogConfiguration struct {
 	Options   map[string]string `json:"options"`
 }
 
-func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
+func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	containerJSON := renderECSSidecarContainerJSON(args, image)
 	secretName := "qurl-tunnel-" + args.Slug
+	configBlock, err := slackCodeBlock(renderTunnelConfigYAML(args))
+	if err != nil {
+		return "", err
+	}
+	containerBlock, err := slackCodeBlock(containerJSON)
+	if err != nil {
+		return "", err
+	}
 	intro := strings.Join([]string{
 		"Use this as an ECS/Fargate task-definition checklist.",
 		"Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves.",
@@ -51,10 +57,10 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKe
 	return intro + "\n\n" +
 		"1. Store the bootstrap key shown above in AWS Secrets Manager, then treat this Slack message as secret until the sidecar connects.\n\n" +
 		"2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n" +
-		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
+		configBlock + "\n\n" +
 		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects the bootstrap secret as `QURL_API_KEY`; file-mounted secret runtimes use `QURL_API_KEY_FILE` instead:\n\n" +
-		slackCodeBlock(containerJSON) + "\n\n" +
-		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the tunnel connected, delete the bootstrap secret."
+		containerBlock + "\n\n" +
+		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the tunnel connected, delete the bootstrap secret.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string {

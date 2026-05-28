@@ -2,11 +2,9 @@ package internal
 
 import (
 	"fmt"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-func renderDockerTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
+func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	webContainer := shellSingleQuote("YOUR_WEB_CONTAINER_NAME")
 	if args.WebRef != "" {
 		webContainer = shellSingleQuote(args.WebRef)
@@ -77,10 +75,14 @@ docker run -d \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
   %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), shellSingleQuote(image))
 
-	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup."
+	block, err := slackCodeBlock(docker)
+	if err != nil {
+		return "", err
+	}
+	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead."
 	if args.WebRef == "" {
 		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
 	}
 	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
-	return intro + "\n\n" + slackCodeBlock(docker) + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file."
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file.", nil
 }

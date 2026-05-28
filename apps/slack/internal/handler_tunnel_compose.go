@@ -3,11 +3,9 @@ package internal
 import (
 	"fmt"
 	"strings"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
+func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	webService := shellSingleQuote("YOUR_COMPOSE_SERVICE_NAME")
 	if args.WebRef != "" {
 		webService = shellSingleQuote(args.WebRef)
@@ -91,9 +89,13 @@ QURL_COMPOSE_YAML_EOF
 
 docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), yamlSingleQuoted(tunnelServiceName), yamlSingleQuoted(image))
 
+	block, err := slackCodeBlock(compose)
+	if err != nil {
+		return "", err
+	}
 	introParts := []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
-		"It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup.",
+		"It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead.",
 	}
 	if args.WebRef == "" {
 		introParts = append(introParts, "Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command.")
@@ -104,5 +106,5 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 		"If Compose recreates the web service container, bring the tunnel service up again too.",
 	)
 	intro := strings.Join(introParts, " ")
-	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file."
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file.", nil
 }

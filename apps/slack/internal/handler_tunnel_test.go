@@ -53,6 +53,42 @@ func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
 	t.Cleanup(func() { tunnelBootstrapNow = previous })
 }
 
+func mustRenderDockerTunnelInstructions(t *testing.T, args *tunnelInstallArgs, image string) string {
+	t.Helper()
+	got, err := renderDockerTunnelInstructions(args, image)
+	if err != nil {
+		t.Fatalf("renderDockerTunnelInstructions: %v", err)
+	}
+	return got
+}
+
+func mustRenderDockerComposeTunnelInstructions(t *testing.T, args *tunnelInstallArgs, image string) string {
+	t.Helper()
+	got, err := renderDockerComposeTunnelInstructions(args, image)
+	if err != nil {
+		t.Fatalf("renderDockerComposeTunnelInstructions: %v", err)
+	}
+	return got
+}
+
+func mustRenderKubernetesTunnelInstructions(t *testing.T, args *tunnelInstallArgs, image string) string {
+	t.Helper()
+	got, err := renderKubernetesTunnelInstructions(args, image)
+	if err != nil {
+		t.Fatalf("renderKubernetesTunnelInstructions: %v", err)
+	}
+	return got
+}
+
+func mustRenderECSFargateTunnelInstructions(t *testing.T, args *tunnelInstallArgs, image string) string {
+	t.Helper()
+	got, err := renderECSFargateTunnelInstructions(args, image)
+	if err != nil {
+		t.Fatalf("renderECSFargateTunnelInstructions: %v", err)
+	}
+	return got
+}
+
 func TestParseTunnelInstall(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1682,8 +1718,8 @@ func TestTunnelBootstrapExpiryLabelFallsBackOnClockSkew(t *testing.T) {
 	expiresAt := now.Add(-time.Second)
 
 	got := tunnelBootstrapExpiryLabel(&client.APIKey{ExpiresAt: &expiresAt})
-	if got != "expires in 1 hour" {
-		t.Fatalf("tunnelBootstrapExpiryLabel(skewed key) = %q, want requested TTL fallback", got)
+	if got != "expires very soon" {
+		t.Fatalf("tunnelBootstrapExpiryLabel(skewed key) = %q, want near-expiry copy", got)
 	}
 }
 
@@ -1698,19 +1734,19 @@ func TestTunnelBootstrapExpiryLabelShowsExpiredOutsideSkew(t *testing.T) {
 	}
 }
 
-func TestSlackCodeBlockPanicsOnNestedFence(t *testing.T) {
+func TestSlackCodeBlockRejectsNestedFence(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		if recover() == nil {
-			t.Fatal("slackCodeBlock did not panic on nested fence")
-		}
-	}()
-	_ = slackCodeBlock("echo before\n```inner\n```")
+	if _, err := slackCodeBlock("echo before\n```inner\n```"); err == nil {
+		t.Fatal("slackCodeBlock returned nil error for nested fence")
+	}
 }
 
 func TestSlackCodeBlock(t *testing.T) {
 	t.Parallel()
-	got := slackCodeBlock("echo ok")
+	got, err := slackCodeBlock("echo ok")
+	if err != nil {
+		t.Fatalf("slackCodeBlock: %v", err)
+	}
 	if strings.Count(got, "```") != 2 {
 		t.Fatalf("slackCodeBlock fences = %q, want one opening and one closing fence", got)
 	}

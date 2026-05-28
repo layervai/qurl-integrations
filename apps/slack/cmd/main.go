@@ -308,7 +308,9 @@ func validateSlackBotToken(token string) error {
 	if token == "" {
 		return nil
 	}
-	const slackBotTokenMinLen = 40
+	// Keep this as a light local shape check. Slack token formats have changed
+	// over time, and the Slack API remains the authority on token validity.
+	const slackBotTokenMinLen = 20
 	const slackBotTokenMaxLen = 512
 	if len(token) < slackBotTokenMinLen {
 		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenMinLen)

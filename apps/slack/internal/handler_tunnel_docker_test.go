@@ -3,19 +3,17 @@ package internal
 import (
 	"strings"
 	"testing"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	t.Parallel()
-	got := renderDockerTunnelInstructions(&tunnelInstallArgs{
+	got := mustRenderDockerTunnelInstructions(t, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvDocker,
 		WebRef:      "web.1_2-3",
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	}, testTunnelImageRef)
 
 	for _, want := range []string{
 		testTunnelKeyHistoryNote,

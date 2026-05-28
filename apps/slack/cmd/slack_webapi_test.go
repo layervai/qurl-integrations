@@ -171,8 +171,9 @@ func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want HTTP 502", err)
 	}
-	if len(err.Error()) > 260 {
-		t.Fatalf("error = %q, want capped body snippet", err.Error())
+	maxErrLen := len("views.open returned HTTP 502: ") + slackOpenViewMaxErrorSnippetBytes + len("...")
+	if len(err.Error()) > maxErrLen {
+		t.Fatalf("error length = %d, want <= %d; error = %q", len(err.Error()), maxErrLen, err.Error())
 	}
 }
 

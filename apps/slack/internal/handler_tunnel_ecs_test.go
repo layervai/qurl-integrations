@@ -4,18 +4,16 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	t.Parallel()
-	got := renderECSFargateTunnelInstructions(&tunnelInstallArgs{
+	got := mustRenderECSFargateTunnelInstructions(t, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvECSFargate,
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	}, testTunnelImageRef)
 
 	for _, want := range []string{
 		"ECS/Fargate task-definition checklist",

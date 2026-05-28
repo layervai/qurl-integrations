@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
@@ -18,7 +16,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		LocalPort:   9090,
 		Environment: tunnelEnvKubernetes,
 	}
-	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 
 	for _, want := range []string{
 		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
@@ -152,7 +150,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		}
 	}
 
-	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 	for _, want := range []string{
 		"QURL_BOOTSTRAP_SECRET='" + names.secret + "'",
 		"name: '" + names.configMap + "'",

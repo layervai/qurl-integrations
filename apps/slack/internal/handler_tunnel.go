@@ -397,10 +397,16 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 
-	msg := preparedMessage.render(args, key, aliasStatus)
+	msg, err := preparedMessage.render(args, key, aliasStatus)
+	if err != nil {
+		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "message_render_failed")
+		h.postResponse(log, responseURL, "Tunnel setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.")
+		return
+	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
 	if !h.postResponse(log, responseURL, msg) {
-		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(log, c, key, "response_url_delivery_failed")
 	}
 }
@@ -477,7 +483,7 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	if err != nil {
 		return preparedTunnelInstallMessage{}, err
 	}
-	instructions, err := h.renderTunnelInstallInstructions(args, nil, image)
+	instructions, err := h.renderTunnelInstallInstructions(args, image)
 	if err != nil {
 		return preparedTunnelInstallMessage{}, err
 	}
@@ -493,18 +499,22 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	}, nil
 }
 
-func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) string {
-	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s%s\n\n%s\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
+func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
+	keyBlock, err := slackCodeBlock(key.APIKey)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n%s%s\n\n%s\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
 		tunnelBootstrapExpiryLabel(key),
-		slackCodeBlock(key.APIKey),
+		keyBlock,
 		p.imageNote,
 		p.imageLine,
 		p.environmentLabel,
 		p.instructions,
 		args.Alias,
-	)
+	), nil
 }
 
 func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
@@ -512,7 +522,7 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 	if err != nil {
 		return "", err
 	}
-	return prepared.render(args, key, aliasStatus), nil
+	return prepared.render(args, key, aliasStatus)
 }
 
 func tunnelImageNote(usingDefaultImage bool) string {
@@ -542,7 +552,7 @@ func slackRetryAfterLabel(raw string) string {
 		return ""
 	}
 	if time.Duration(seconds)*time.Second > slackRetryAfterDisplayCap {
-		return "at least " + humanTunnelBootstrapDuration(slackRetryAfterDisplayCap)
+		return "at least " + humanSlackRetryAfterDuration(slackRetryAfterDisplayCap)
 	}
 	if seconds >= 60 {
 		minutes := seconds / 60
@@ -566,16 +576,20 @@ func slackRetryAfterLabel(raw string) string {
 	return fmt.Sprintf("%d seconds", seconds)
 }
 
-func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) (string, error) {
+func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image string) (string, error) {
+	// Instructions deliberately do not receive the plaintext bootstrap key:
+	// prepareTunnelInstallMessage can preflight all environment-specific
+	// rendering before CreateAPIKey, and the final message adds the secret in
+	// one audited code block after the key shape is validated.
 	switch args.Environment {
 	case tunnelEnvECSFargate:
-		return renderECSFargateTunnelInstructions(args, key, image), nil
+		return renderECSFargateTunnelInstructions(args, image)
 	case tunnelEnvKubernetes:
-		return renderKubernetesTunnelInstructions(args, key, image), nil
+		return renderKubernetesTunnelInstructions(args, image)
 	case tunnelEnvCompose:
-		return renderDockerComposeTunnelInstructions(args, key, image), nil
+		return renderDockerComposeTunnelInstructions(args, image)
 	case tunnelEnvDocker:
-		return renderDockerTunnelInstructions(args, key, image), nil
+		return renderDockerTunnelInstructions(args, image)
 	default:
 		return "", fmt.Errorf("unreachable tunnel install environment: %s", args.Environment)
 	}
@@ -636,7 +650,7 @@ func tunnelBootstrapExpiryLabel(key *client.APIKey) string {
 			return "expires in " + humanTunnelBootstrapDuration(remaining)
 		}
 		if remaining > -tunnelBootstrapSkew {
-			return tunnelBootstrapTTLLabel()
+			return "expires very soon"
 		}
 		return "is expired"
 	}
@@ -652,6 +666,14 @@ func humanTunnelBootstrapTTL(ttl string) string {
 }
 
 func humanTunnelBootstrapDuration(d time.Duration) string {
+	return humanDurationCeilMinutes(d)
+}
+
+func humanSlackRetryAfterDuration(d time.Duration) string {
+	return humanDurationCeilMinutes(d)
+}
+
+func humanDurationCeilMinutes(d time.Duration) string {
 	if d < time.Minute {
 		return "under 1 minute"
 	}
@@ -736,12 +758,12 @@ func ValidateTunnelImageRef(image string) error {
 	return nil
 }
 
-func slackCodeBlock(body string) string {
+func slackCodeBlock(body string) (string, error) {
 	// Slack cannot escape a nested triple-backtick fence inside a code block.
-	// Current callers render static install snippets, so panic on programmer
-	// error instead of silently rewriting future user-visible content.
+	// Return an error instead of panicking so request-path callers can fail
+	// closed if a future renderer accidentally includes unsanitized input.
 	if strings.Contains(body, "```") {
-		panic("slack code block body contains nested triple-backtick fence")
+		return "", errors.New("slack code block body contains nested triple-backtick fence")
 	}
-	return "```\n" + body + "\n```"
+	return "```\n" + body + "\n```", nil
 }

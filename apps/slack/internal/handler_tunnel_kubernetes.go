@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
+func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	names := kubernetesTunnelObjectNames(args.Slug)
 	objects := fmt.Sprintf(`set -eu
 %s
@@ -82,6 +80,14 @@ volumes:
     configMap:
       name: %s`, yamlSingleQuoted(image), yamlSingleQuoted(args.Slug), yamlSingleQuoted(names.agentPVC), yamlSingleQuoted(names.secret), yamlSingleQuoted(names.configMap))
 
+	objectsBlock, err := slackCodeBlock(objects)
+	if err != nil {
+		return "", err
+	}
+	patchBlock, err := slackCodeBlock(patch)
+	if err != nil {
+		return "", err
+	}
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then add the sidecar/securityContext/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",
 		"- Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.",
@@ -89,7 +95,7 @@ volumes:
 		"- The pod-level `fsGroup: 65532` lets the sidecar read the bootstrap Secret and write the qURL agent-state PVC. If your app cannot accept that fsGroup, pre-provision qURL agent-state ownership separately before merging the fragment.",
 		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
 	}, "\n")
-	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\nAppend the `qurl-tunnel` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + slackCodeBlock(patch)
+	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend the `qurl-tunnel` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }
 
 type kubernetesTunnelNames struct {
@@ -115,6 +121,8 @@ func kubernetesNameWithSlug(prefix, slug string) string {
 	hash := hex.EncodeToString(sum[:kubernetesNameHashLen/2])
 	maxSlugLen := kubernetesNameMaxLen - len(prefix) - 1 - len(hash)
 	if maxSlugLen <= 0 {
+		// Current qURL prefixes do not hit this path; keep the helper safe for
+		// future callers that pass a longer Kubernetes object prefix.
 		maxPrefixLen := kubernetesNameMaxLen - len(hash) - 1
 		prefixBase := strings.TrimRight(prefix[:maxPrefixLen], "-")
 		if prefixBase == "" {
