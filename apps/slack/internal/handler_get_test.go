@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // writeCreateFixture writes a POST /v1/qurls success envelope.
@@ -80,6 +82,13 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
+	})
+	// On an alias-binding miss, getWork falls back to a tunnel-slug
+	// lookup (GET /v1/resources?slug=…). `$missing` is neither a binding
+	// nor a live tunnel slug, so the resources listing returns empty and
+	// the user sees the "not configured for this channel" copy.
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -322,11 +331,12 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 }
 
-// TestHandleGet_OnceTrueDMTrue fences that the (one-time use) suffix
-// rides into the DM payload (not the channel reply) when once: and
-// dm: stack. Guards against a future refactor that reorders the
-// suffix-append and DM-dispatch branches in getWork.
-func TestHandleGet_OnceTrueDMTrue(t *testing.T) {
+// TestHandleGet_DMRidesOneTimeSuffix fences that the (one-time use)
+// suffix rides into the DM payload (not the channel reply) on dm:true.
+// One-time use is the unconditional default for `/qurl get`, so the
+// suffix is always present; this guards against a future refactor that
+// reorders the suffix-append and DM-dispatch branches in getWork.
+func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
@@ -341,7 +351,7 @@ func TestHandleGet_OnceTrueDMTrue(t *testing.T) {
 	}
 	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("get $prod-db once:true dm:true", testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 
 	if !strings.HasSuffix(strings.TrimSpace(dmText), "(one-time use)") {
 		t.Errorf("DM payload missing one-time-use suffix: %q", dmText)
@@ -446,38 +456,12 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_OnceTrue fences `one_time_use: true` on the
-// wire body and the `(one-time use)` suffix on the async reply.
-func TestCreateInputJSON_OnceTrue(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	var capturedBody []byte
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		capturedBody = b
-		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $prod-db once:true", testAdminTeamID, testAdminUserID)
-
-	var parsed map[string]any
-	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
-		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
-	}
-	if got, _ := parsed["one_time_use"].(bool); !got {
-		t.Errorf("one_time_use = %v, want true", parsed["one_time_use"])
-	}
-	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
-		t.Errorf("async reply missing one-time-use suffix: %q", async)
-	}
-}
-
-// TestCreateInputJSON_OnceAbsent fences `omitempty` — without the
-// flag, `one_time_use` is absent from the body and the suffix is
-// absent from the reply.
-func TestCreateInputJSON_OnceAbsent(t *testing.T) {
+// TestCreateInputJSON_OneTimeDefault fences that one-time use is the
+// unconditional default for `/qurl get`: with no flag at all, the wire
+// body carries `one_time_use: true` and the async reply carries the
+// `(one-time use)` suffix. There is no `once` flag — every `/qurl get`
+// link burns on first redemption.
+func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
@@ -495,42 +479,11 @@ func TestCreateInputJSON_OnceAbsent(t *testing.T) {
 	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
 		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
 	}
-	if _, ok := parsed["one_time_use"]; ok {
-		t.Errorf("one_time_use present on default mint body (omitempty must drop the false zero): %v", parsed)
+	if got, _ := parsed["one_time_use"].(bool); !got {
+		t.Errorf("one_time_use = %v, want true (one-time use is the unconditional default)", parsed["one_time_use"])
 	}
-	if strings.Contains(async, "(one-time use)") {
-		t.Errorf("async reply carries one-time-use suffix without the flag: %q", async)
-	}
-}
-
-// TestCreateInputJSON_OnceFalse fences the explicit-false branch:
-// `once:false` is accepted by the parser (Flags["once"]="false"),
-// `Once()` returns false via EqualFold, and `omitempty` drops the
-// zero from the body. Distinct from [TestCreateInputJSON_OnceAbsent]
-// because that test never populates the flag at all.
-func TestCreateInputJSON_OnceFalse(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	var capturedBody []byte
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		capturedBody = b
-		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $prod-db once:false", testAdminTeamID, testAdminUserID)
-
-	var parsed map[string]any
-	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
-		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
-	}
-	if _, ok := parsed["one_time_use"]; ok {
-		t.Errorf("one_time_use present on once:false mint body (omitempty must drop the false zero): %v", parsed)
-	}
-	if strings.Contains(async, "(one-time use)") {
-		t.Errorf("async reply carries one-time-use suffix on once:false: %q", async)
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
+		t.Errorf("async reply missing one-time-use suffix: %q", async)
 	}
 }
 
@@ -670,12 +623,151 @@ func TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin(t *testing.T) {
 	}
 }
 
+// addTunnelSlugResource registers a GET /v1/resources handler that
+// resolves testTunnelSlug → testResourceIDFix as an active tunnel — the
+// upstream half of the `/qurl get $<slug>` slug-fallback path.
+func addTunnelSlugResource(t *testing.T, ts *adminTestServers) {
+	t.Helper()
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: testResourceIDFix,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+}
+
+// TestHandleGet_DollarSlugAllowedSetNonAdmin fences the list→get
+// round-trip for a tunnel that reaches a non-admin's /qurl list via
+// allowed_resource_ids only — no alias_binding in this channel (e.g. a
+// tunnel installed in another channel, then granted here). /qurl list
+// renders `$<slug>`; pasting it into /qurl get must mint. The token
+// misses the alias-binding lookup, falls back to slug resolution, and
+// the resolved resource_id passes the channel allow-set gate.
+func TestHandleGet_DollarSlugAllowedSetNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{testResourceIDFix})
+	addTunnelSlugResource(t, ts)
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/by-slug", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/by-slug") {
+		t.Errorf("slug round-trip failed — async reply missing link: %q", async)
+	}
+}
+
+// TestHandleGet_DollarSlugNotAllowedNonAdmin fences the slug-fallback
+// authorization gate AND its anti-enumeration posture: a non-admin
+// pasting a tunnel slug whose resource isn't in the channel allow-set
+// sees the SAME "not configured for this channel" copy as a
+// non-existent slug — not a distinct "not allowed" — so the wire text
+// can't be used to enumerate tunnel slugs that exist elsewhere in the
+// workspace. The resolved r_<id> never leaks and the mint never runs.
+func TestHandleGet_DollarSlugNotAllowedNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	addTunnelSlugResource(t, ts)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	// Collapsed to the not-found copy — see resolveTokenForGet.
+	if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
+		t.Errorf("async reply missing anti-enumeration not-configured copy: %q", async)
+	}
+	if strings.Contains(async, "is not allowed in this channel") {
+		t.Errorf("not-allowed copy leaked the slug-exists-elsewhere distinction: %q", async)
+	}
+	if strings.Contains(async, testResourceIDFix) {
+		t.Errorf("resolved resource_id leaked in rejection message: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached despite slug not in allow-set (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_DollarTokenBindingWinsOverSlug fences the resolution
+// precedence in resolveTokenForGet: when a channel alias_binding exists
+// for the token, it is authoritative and the tunnel-slug fallback is
+// NOT consulted — even if a different tunnel happens to carry the same
+// name as its slug. Pins the ordering against a future refactor that
+// might flip it (which would let a same-named slug shadow an admin's
+// explicit binding).
+func TestHandleGet_DollarTokenBindingWinsOverSlug(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	// Bind the token to testResourceIDFix in this channel.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		testTunnelSlug: testResourceIDFix,
+	})
+	// A slug lookup, if (wrongly) consulted, would resolve to a DIFFERENT
+	// resource — its mint must never be hit.
+	var slugMintHits atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: "r_shadow_tun",
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+	ts.addCustomer("POST", "/v1/resources/r_shadow_tun/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		slugMintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/SHADOW", "r_shadow_tun")
+	})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/from-binding", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/from-binding") {
+		t.Errorf("binding did not win — async reply missing binding link: %q", async)
+	}
+	if slugMintHits.Load() != 0 {
+		t.Errorf("slug fallback was consulted despite a live binding (shadow mint hits = %d)", slugMintHits.Load())
+	}
+}
+
+// TestHandleGet_DollarSlugAdminBypassesAllowedSet fences the admin
+// round-trip: a workspace admin sees every tunnel in /qurl list
+// (unfiltered) and can mint its `$<slug>` even with no alias_binding
+// and no allow-set entry in the current channel.
+func TestHandleGet_DollarSlugAdminBypassesAllowedSet(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	addTunnelSlugResource(t, ts)
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/admin-slug", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/admin-slug") {
+		t.Errorf("admin slug round-trip failed: %q", async)
+	}
+}
+
 // TestHandleGet_DollarResourceIDAdminBypassesAllowedSet fences the
 // admin asymmetry resolution: a workspace admin can mint `$r_<id>`
 // without the resource being in the current channel's allow-set,
 // matching `/qurl list`'s unfiltered admin view. Without this
-// bypass, the list footer's copy-paste promise ("Copy any `$token`
-// and run `/qurl get $token`") breaks for admins on cross-channel
+// bypass, the list footer's copy-paste promise ("Copy any `$slug`
+// and run `/qurl get $slug`") breaks for admins on cross-channel
 // resources.
 func TestHandleGet_DollarResourceIDAdminBypassesAllowedSet(t *testing.T) {
 	ts := newAdminTestServers(t)
