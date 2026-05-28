@@ -63,6 +63,9 @@ func NewSlackRateLimitError(retryAfter string) error {
 	return &SlackRateLimitError{RetryAfter: retryAfter}
 }
 
+// OpenViewFunc posts a Slack modal through `views.open`.
+type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
+
 // SlackRateLimitRetryAfter returns Slack's Retry-After hint from err when the
 // OpenView implementation preserved one with [NewSlackRateLimitError].
 func SlackRateLimitRetryAfter(err error) string {
@@ -194,7 +197,7 @@ type Config struct {
 	// Tests inject a stub that records the call. Tunnel install uses this
 	// for guided setup; setalias-rebind can use the same seam for
 	// confirmation modals.
-	OpenView func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
+	OpenView OpenViewFunc
 
 	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
 	// on `/qurl get`. Production wires this in cmd/main.go; tests

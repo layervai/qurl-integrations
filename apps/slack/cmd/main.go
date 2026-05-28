@@ -128,7 +128,7 @@ func run() error {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
-	var openView func(context.Context, string, string, []byte) error
+	var openView internal.OpenViewFunc
 	if err := validateSlackBotToken(slackBotToken); err != nil {
 		return err
 	}

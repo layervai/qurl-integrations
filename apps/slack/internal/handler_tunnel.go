@@ -2,6 +2,8 @@ package internal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,6 +38,8 @@ const (
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
+	kubernetesNameMaxLen       = 63
+	kubernetesNameHashLen      = 8
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
@@ -128,7 +132,7 @@ func parseTunnelInstallOption(args *tunnelInstallArgs, token string) string {
 	case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "web_container:"):
 		_, value, _ := strings.Cut(token, ":")
 		if !dockerContainerRefPattern.MatchString(value) {
-			return "container/service/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
+			return "container/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
 		}
 		args.WebContainer = value
 	default:
@@ -156,18 +160,18 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 	}
 }
 
-func (e tunnelInstallEnvironment) label() string {
+func (e tunnelInstallEnvironment) label() (string, error) {
 	switch e {
 	case tunnelEnvDocker:
-		return "Docker sidecar"
+		return "Docker sidecar", nil
 	case tunnelEnvCompose:
-		return "Docker Compose"
+		return "Docker Compose", nil
 	case tunnelEnvECSFargate:
-		return "AWS ECS/Fargate"
+		return "AWS ECS/Fargate", nil
 	case tunnelEnvKubernetes:
-		return "Kubernetes"
+		return "Kubernetes", nil
 	default:
-		panic("unreachable tunnel install environment: " + string(e))
+		return "", fmt.Errorf("unreachable tunnel install environment: %s", e)
 	}
 }
 
@@ -208,7 +212,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 }
 
 func tunnelInstallWizardRequest(text string) bool {
-	matched, rest := slashVerb(text, "tunnel")
+	matched, rest := slashVerb(strings.TrimSpace(text), "tunnel")
 	return matched && rest == "install"
 }
 
@@ -421,6 +425,10 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 	if image == "" {
 		image = defaultTunnelImage
 	}
+	environmentLabel, err := args.Environment.label()
+	if err != nil {
+		return "", err
+	}
 	instructions, err := h.renderTunnelInstallInstructions(args, key, image)
 	if err != nil {
 		return "", err
@@ -433,7 +441,7 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 	return fmt.Sprintf("Tunnel `%s` is ready.\n%s\n\nTarget environment: %s.\n\n%s%s\n\nBootstrap key %s. After the sidecar connects, delete this Slack message and remove the mounted bootstrap key from the runtime.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
-		args.Environment.label(),
+		environmentLabel,
 		instructions,
 		imageNote,
 		tunnelBootstrapExpiryLabel(key),
@@ -549,7 +557,7 @@ docker run -d \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
   %s`, webContainer, args.Slug, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), shellSingleQuote(image))
 
-	intro := "Run this whole block on the Docker host where your local HTTP server container is running."
+	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running."
 	if args.WebContainer == "" {
 		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
 	}
@@ -620,7 +628,7 @@ QURL_COMPOSE_YAML_EOF
 
 docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, args.Slug, tunnelService, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), tunnelServiceName, yamlSingleQuoted(image))
 
-	intro := "Run this from your Docker Compose project directory."
+	intro := "Run this from your Docker Compose project directory on the Linux Docker host."
 	if args.WebContainer == "" {
 		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command."
 	}
@@ -629,11 +637,12 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 }
 
 func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
+	names := kubernetesTunnelObjectNames(args.Slug)
 	objects := fmt.Sprintf(`kubectl apply -f - <<'QURL_K8S_YAML_EOF'
 apiVersion: v1
 kind: Secret
 metadata:
-  name: qurl-tunnel-%s
+  name: %s
 type: Opaque
 stringData:
   api_key: %s
@@ -641,7 +650,7 @@ stringData:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: qurl-proxy-%s
+  name: %s
 data:
   qurl-proxy.yaml: |
 %s
@@ -649,13 +658,13 @@ data:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: qurl-agent-%s
+  name: %s
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
       storage: 1Gi
-QURL_K8S_YAML_EOF`, args.Slug, yamlSingleQuoted(key.APIKey), args.Slug, indentLines(renderTunnelConfigYAML(args), 4), args.Slug)
+QURL_K8S_YAML_EOF`, names.secret, yamlSingleQuoted(key.APIKey), names.configMap, indentLines(renderTunnelConfigYAML(args), 4), names.agentPVC)
 
 	patch := fmt.Sprintf(`initContainers:
   - name: qurl-agent-state-permissions
@@ -692,16 +701,41 @@ containers:
 volumes:
   - name: qurl-agent-state
     persistentVolumeClaim:
-      claimName: qurl-agent-%s
+      claimName: %s
   - name: qurl-bootstrap
     secret:
-      secretName: qurl-tunnel-%s
+      secretName: %s
       defaultMode: 0444
   - name: qurl-proxy
     configMap:
-      name: qurl-proxy-%s`, yamlSingleQuoted(image), args.Slug, args.Slug, args.Slug, args.Slug)
+      name: %s`, yamlSingleQuoted(image), args.Slug, names.agentPVC, names.secret, names.configMap)
 
-	return "Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC. The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership. After the pod logs show the tunnel connected, delete the bootstrap Secret.\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
+	return "Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC. The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership. The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; delete it after the pod logs show the tunnel connected.\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
+}
+
+type kubernetesTunnelNames struct {
+	secret    string
+	configMap string
+	agentPVC  string
+}
+
+func kubernetesTunnelObjectNames(slug string) kubernetesTunnelNames {
+	return kubernetesTunnelNames{
+		secret:    kubernetesNameWithSlug("qurl-tunnel-", slug),
+		configMap: kubernetesNameWithSlug("qurl-proxy-", slug),
+		agentPVC:  kubernetesNameWithSlug("qurl-agent-", slug),
+	}
+}
+
+func kubernetesNameWithSlug(prefix, slug string) string {
+	name := prefix + slug
+	if len(name) <= kubernetesNameMaxLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(slug))
+	hash := hex.EncodeToString(sum[:kubernetesNameHashLen/2])
+	maxSlugLen := kubernetesNameMaxLen - len(prefix) - 1 - len(hash)
+	return prefix + slug[:maxSlugLen] + "-" + hash
 }
 
 func tunnelBootstrapTTLLabel() string {

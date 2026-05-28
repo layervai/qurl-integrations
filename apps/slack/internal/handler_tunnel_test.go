@@ -37,6 +37,7 @@ const (
 	testForbiddenSlackYAMLFence  = "```yaml"
 	testForbiddenSlackShellFence = "```sh"
 	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent`
+	testTunnelLocalPort9090Line  = "local_port: 9090"
 )
 
 func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
@@ -113,7 +114,7 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 		want bool
 	}{
 		{text: testTunnelWizardCmd, want: true},
-		{text: " " + testTunnelWizardCmd + " ", want: false},
+		{text: " " + testTunnelWizardCmd + " ", want: true},
 		{text: testTunnelInstallVerb, want: false},
 		{text: testTunnelInstallCmd, want: false},
 		{text: "tunnel", want: false},
@@ -203,12 +204,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"Tunnel `" + testTunnelSlug + "` is ready.",
 		"Channel shortcut `$" + testTunnelSlug + "` is ready.",
-		"Run this whole block on the Docker host",
+		"Run this whole block on the Linux Docker host",
 		"set -eu",
 		testTunnelAPIKey,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
 		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
-		"local_port: 9090",
+		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
 		`docker rm -f "$TUNNEL_CONTAINER"`,
@@ -590,7 +591,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"QURL_TUNNEL_SLUG",
 		"value: " + testTunnelSlug,
 		testTunnelModalKey,
-		"local_port: 9090",
+		testTunnelLocalPort9090Line,
 		testTunnelImageRef,
 		"/qurl get $team-dash",
 	} {
@@ -895,6 +896,24 @@ func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseTunnelInstallModalArgsSkipsWebContainerValidationWhenEnvironmentMissing(t *testing.T) {
+	t.Parallel()
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
+	delete(values, tunnelInstallBlockEnvironment)
+
+	args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+	if args != nil {
+		t.Fatalf("args = %+v, want nil", args)
+	}
+	if fieldErrors[tunnelInstallBlockEnvironment] == "" {
+		t.Fatalf("field errors = %+v, want target environment error", fieldErrors)
+	}
+	if fieldErrors[tunnelInstallBlockWebContainer] != "" {
+		t.Fatalf("web container error = %q, want no secondary error while environment is missing", fieldErrors[tunnelInstallBlockWebContainer])
+	}
+}
+
 func TestParseTunnelInstallModalArgsRejectsDottedComposeService(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvCompose), "8080", "web.1")
@@ -1153,7 +1172,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"delete this Slack message before continuing",
 		testTunnelImageRef,
 		"Put qurl-proxy.yaml on an EFS access point",
-		"local_port: 9090",
+		testTunnelLocalPort9090Line,
 		`"name": "QURL_TUNNEL_SLUG"`,
 		`"value": "` + testTunnelSlug + `"`,
 		`"name": "QURL_API_KEY"`,
@@ -1259,6 +1278,52 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 }
 
+func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
+	t.Parallel()
+	slug := strings.Repeat("a", 64)
+	args := &tunnelInstallArgs{
+		Slug:        slug,
+		Alias:       slug,
+		LocalPort:   9090,
+		Environment: tunnelEnvKubernetes,
+	}
+	names := kubernetesTunnelObjectNames(slug)
+	for label, name := range map[string]string{
+		"secret":     names.secret,
+		"config_map": names.configMap,
+		"agent_pvc":  names.agentPVC,
+	} {
+		if len(name) > kubernetesNameMaxLen {
+			t.Fatalf("%s name length = %d for %q, want <= %d", label, len(name), name, kubernetesNameMaxLen)
+		}
+		if strings.HasSuffix(name, "-") {
+			t.Fatalf("%s name = %q, must end with an alphanumeric hash suffix", label, name)
+		}
+	}
+
+	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+	for _, want := range []string{
+		"name: " + names.secret,
+		"name: " + names.configMap,
+		"name: " + names.agentPVC,
+		"claimName: " + names.agentPVC,
+		"secretName: " + names.secret,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Kubernetes instructions missing shortened name %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"qurl-tunnel-" + slug,
+		"qurl-proxy-" + slug,
+		"qurl-agent-" + slug,
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Kubernetes instructions contain overlong name %q:\n%s", forbidden, got)
+		}
+	}
+}
+
 func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	t.Parallel()
 	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
@@ -1270,7 +1335,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
 	for _, want := range []string{
-		"Run this from your Docker Compose project directory.",
+		"Run this from your Docker Compose project directory on the Linux Docker host.",
 		"WEB_SERVICE='web_1-2'",
 		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
@@ -1286,7 +1351,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"Verify with `docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug + "`",
 		"if you changed `APP_COMPOSE_FILE`, use that file there too",
 		"logs -f qurl-tunnel-" + testTunnelSlug,
-		"local_port: 9090",
+		testTunnelLocalPort9090Line,
 		testTunnelAPIKey,
 		testTunnelImageRef,
 	} {
@@ -1330,7 +1395,7 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelDockerLine,
 		testTunnelAgentDirFragment,
-		"local_port: 9090",
+		testTunnelLocalPort9090Line,
 		testTunnelAPIKey,
 		testTunnelImageRef,
 	} {

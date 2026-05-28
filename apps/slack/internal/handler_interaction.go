@@ -165,8 +165,10 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	}
 
 	webContainer := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockWebContainer, tunnelInstallActionWebContainer))
-	if msg := tunnelWebContainerValidationMessage(env, webContainer); msg != "" {
-		fieldErrors[tunnelInstallBlockWebContainer] = msg
+	if envRaw != "" && envMsg == "" {
+		if msg := tunnelWebContainerValidationMessage(env, webContainer); msg != "" {
+			fieldErrors[tunnelInstallBlockWebContainer] = msg
+		}
 	}
 
 	if len(fieldErrors) > 0 {
@@ -197,9 +199,14 @@ func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 }
 
 func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
+	view, err := TunnelInstallErrorModal(message)
+	if err != nil {
+		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "Tunnel setup failed. Contact support."})
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]any{
 		"response_action": "update",
-		"view":            json.RawMessage(TunnelInstallErrorModal(message)),
+		"view":            json.RawMessage(view),
 	})
 }
 

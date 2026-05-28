@@ -109,9 +109,16 @@ func TestSlackOpenViewFuncRejectsInvalidViewJSON(t *testing.T) {
 func TestSlackOpenViewFuncRejectsNonObjectViewJSON(t *testing.T) {
 	t.Parallel()
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", []byte(`null`))
-	if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
-		t.Fatalf("error = %v, want invalid view JSON", err)
+	for _, raw := range [][]byte{
+		[]byte(`null`),
+		[]byte(`[1,2]`),
+		[]byte(`"str"`),
+		[]byte(`42`),
+	} {
+		err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", raw)
+		if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
+			t.Fatalf("input %s error = %v, want invalid view JSON", raw, err)
+		}
 	}
 }
 
@@ -158,6 +165,19 @@ func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncSurfacesEmptyResponseBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "empty response body") {
+		t.Fatalf("error = %v, want empty response body", err)
+	}
+}
+
 func TestSlackOpenViewFuncSurfacesOversizedResponse(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -193,7 +213,7 @@ func TestSlackOpenViewFuncRefusesRedirects(t *testing.T) {
 	}
 }
 
-func TestSlackOpenViewFuncDrainsOversizedResponse(t *testing.T) {
+func TestSlackOpenViewFuncClosesOversizedResponseWithoutDraining(t *testing.T) {
 	t.Parallel()
 	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", 8192))}
 	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -208,8 +228,8 @@ func TestSlackOpenViewFuncDrainsOversizedResponse(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
-	if !body.sawEOF.Load() {
-		t.Fatal("oversized response body was not drained to EOF")
+	if body.sawEOF.Load() {
+		t.Fatal("oversized response body was drained to EOF")
 	}
 	if !body.closed.Load() {
 		t.Fatal("oversized response body was not closed")

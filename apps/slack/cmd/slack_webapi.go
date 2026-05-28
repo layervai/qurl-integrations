@@ -76,7 +76,6 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 			return fmt.Errorf("views.open response read: %w", err)
 		}
 		if len(raw) > bodyCap {
-			_, _ = io.Copy(io.Discard, resp.Body)
 			return fmt.Errorf("views.open response exceeded %d bytes", bodyCap)
 		}
 		return slackOpenViewResponseError(resp.StatusCode, resp.Header, raw)
@@ -102,6 +101,9 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 			return fmt.Errorf("views.open returned HTTP %d", statusCode)
 		}
 		return fmt.Errorf("views.open returned HTTP %d: %s", statusCode, bodySnippet)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return errors.New("views.open: empty response body")
 	}
 
 	var out struct {
