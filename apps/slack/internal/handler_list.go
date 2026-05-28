@@ -24,6 +24,11 @@ import (
 // client-side tunnel filter reliable; tunnel resources are created
 // deliberately (via `/qurl tunnel install`) so a real workspace has few
 // of them, well within Slack's ephemeral-message budget.
+//
+// A server-side `type=tunnel` filter (tracked in #531) would let this
+// drop to a normal page size and make `page.HasMore` mean "more
+// tunnels" rather than "more resources of any type" — see the footer
+// caveat in [Handler.processListResources].
 const listResourcesScanLimit = 100
 
 // listTunnelsEmptyMessage is the friendly empty-state copy. Points the
@@ -281,8 +286,8 @@ func tunnelToken(r *client.Resource) string {
 // formatTunnelListLine renders one tunnel resource as a single text
 // line in /qurl list output:
 //
-//   - No description:   `• \`$<slug>\“
-//   - With description: `• \`$<slug>\` → <description>`
+//   - No description:   • `$<slug>`
+//   - With description: • `$<slug>` → <description>
 //
 // The token is [tunnelToken] (slug-first; never the opaque r_<id> in
 // the common case). The token-in-backticks shape lets Slack render it

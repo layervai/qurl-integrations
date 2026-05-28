@@ -760,14 +760,14 @@ func (h *Handler) helpMessage() string {
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl get <url|$slug>` — Mint a one-time qURL for a URL or a `$slug` your Slack admin has configured in this channel",
+		"• `/qurl get <url|$slug>` — Mint a one-time qURL for a URL, or a `$slug` (tunnel or shortcut) configured in this channel",
 	}
 	if h.cfg.PostDM != nil {
 		lines = append(lines, "• `/qurl get <url|$slug> dm:true` — DM the link to you instead of posting it in-channel")
 	}
 	lines = append(lines,
 		"• `/qurl get <url|$slug> reason:\"…\"` — Same, annotating the audit log with a reason",
-		"• `/qurl list` — List the tunnels available in this workspace",
+		"• `/qurl list` — List the tunnels available to you",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {

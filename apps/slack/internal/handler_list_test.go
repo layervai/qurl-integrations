@@ -98,14 +98,16 @@ func TestHandleList_NonAdminFiltersToChannelPolicy(t *testing.T) {
 	}
 }
 
-// TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAlias fences the
-// `allowed_resource_ids`-only branch of the union: a tunnel whose
+// TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAliasBinding fences
+// the `allowed_resource_ids`-only branch of the union: a tunnel whose
 // channel_policies has only `allowed_resource_ids` populated (no
 // `alias_bindings`) MUST surface in non-admin `/qurl list`. Pre-fix the
 // list handler walked alias-bindings only, so a pure-allowed-set
 // resource was `/qurl get`-mintable but invisible in `/qurl list` —
-// the two surfaces diverged. The row still renders its slug token.
-func TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAlias(t *testing.T) {
+// the two surfaces diverged. The row still renders its slug token
+// (the slug is a resource attribute, independent of the channel
+// alias_binding this test deliberately omits).
+func TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAliasBinding(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
 	// alias="" → seedPolicySet skips the auto-attached alias_bindings

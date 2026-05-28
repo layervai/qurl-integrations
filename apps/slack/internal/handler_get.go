@@ -246,9 +246,8 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 
 	input := client.CreateInput{
 		Reason: args.cmd.Reason(),
-		// One-time use is the default and only mode for `/qurl get` —
-		// every minted link burns on first redemption. There is no
-		// `once` flag; the behavior is unconditional.
+		// One-time use is the only mode for `/qurl get` — there is no
+		// `once` flag; every minted link burns on first redemption.
 		OneTimeUse:     true,
 		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
@@ -305,9 +304,8 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// Every `/qurl get` link is one-time use (see OneTimeUse above), so
-	// the suffix is unconditional — it sets the expectation that the
-	// link burns on first redemption.
+	// Unconditional suffix — every `/qurl get` link is one-time use
+	// (see OneTimeUse above).
 	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use)"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
