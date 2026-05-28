@@ -92,7 +92,7 @@ volumes:
 		"- If your workload can safely use pod-level `fsGroup: 65532`, you may change the Secret `defaultMode` to `0440`.",
 		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
 	}, "\n")
-	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
+	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\nMerge this fragment into the target pod spec under the same indentation as the existing `containers` and `volumes` fields.\n\n" + slackCodeBlock(patch)
 }
 
 type kubernetesTunnelNames struct {

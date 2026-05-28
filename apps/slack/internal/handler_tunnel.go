@@ -392,7 +392,10 @@ func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, k
 		return
 	}
 	// Use a cleanup-owned context so a canceled install request cannot strand a
-	// freshly minted bootstrap key for the rest of its TTL.
+	// freshly minted bootstrap key for the rest of its TTL. Keep this
+	// synchronous while install work runs behind a bounded semaphore: it trades
+	// up to a few seconds of worker occupancy on rare render failures for
+	// deterministic cleanup before the user sees a retry prompt.
 	ctx, cancel := context.WithTimeout(context.Background(), tunnelBootstrapCleanupTimeout)
 	defer cancel()
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
@@ -599,7 +602,7 @@ func humanTunnelBootstrapTTL(ttl string) string {
 
 func humanTunnelBootstrapDuration(d time.Duration) string {
 	if d < time.Minute {
-		return "less than 1 minute"
+		return "under 1 minute"
 	}
 	minutesTotal := int((d + time.Minute - time.Nanosecond) / time.Minute)
 	hours := minutesTotal / 60

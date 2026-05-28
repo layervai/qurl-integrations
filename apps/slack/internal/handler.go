@@ -46,7 +46,7 @@ func (e *SlackRateLimitError) Error() string {
 	if e == nil || e.RetryAfter == "" {
 		return ErrSlackRateLimited.Error()
 	}
-	return ErrSlackRateLimited.Error() + ": retry_after=" + e.RetryAfter
+	return fmt.Sprintf("%s: retry_after=%s", ErrSlackRateLimited, e.RetryAfter)
 }
 
 func (e *SlackRateLimitError) Unwrap() error {

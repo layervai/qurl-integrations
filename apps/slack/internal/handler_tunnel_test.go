@@ -633,6 +633,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"name: qurl-proxy-" + testTunnelSlug,
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
+		"Merge this fragment into the target pod spec",
 		"initContainers:",
 		"name: qurl-agent-state-permissions",
 		"securityContext:",
@@ -1067,7 +1068,7 @@ func TestParseTunnelInstallModalArgsRejectsMissingPortBlock(t *testing.T) {
 	}
 }
 
-func TestParseTunnelInstallModalArgsPreservesAliasValidationReason(t *testing.T) {
+func TestParseTunnelInstallModalArgsRendersShortcutValidationReason(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name       string
@@ -1088,8 +1089,8 @@ func TestParseTunnelInstallModalArgsPreservesAliasValidationReason(t *testing.T)
 				t.Fatalf("args = %+v, want nil", args)
 			}
 			got := fieldErrors[tunnelInstallBlockShortcut]
-			if !strings.Contains(got, tc.wantReason) || strings.Contains(got, "Usage:") {
-				t.Fatalf("shortcut error = %q, want %q without usage suffix", got, tc.wantReason)
+			if !strings.Contains(got, tc.wantReason) || strings.Contains(got, "Usage:") || strings.Contains(got, "Alias") {
+				t.Fatalf("shortcut error = %q, want shortcut-flavored %q without usage suffix", got, tc.wantReason)
 			}
 		})
 	}
@@ -1317,6 +1318,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"Target environment: Kubernetes.",
 				"kubectl apply -f -",
 				"Pod spec additions:",
+				"Merge this fragment into the target pod spec",
 			},
 		},
 	}

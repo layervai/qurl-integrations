@@ -157,7 +157,7 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		var aliasReason string
 		alias, aliasReason = validateAliasToken(shortcutRaw)
 		if aliasReason != "" {
-			fieldErrors[tunnelInstallBlockShortcut] = aliasReason
+			fieldErrors[tunnelInstallBlockShortcut] = aliasReasonAsChannelShortcut(aliasReason)
 		}
 	}
 
@@ -198,6 +198,13 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		WebRef:      webRef,
 	}
 	return args, nil
+}
+
+func aliasReasonAsChannelShortcut(reason string) string {
+	if strings.HasPrefix(reason, "Alias ") {
+		return "Shortcut " + strings.TrimPrefix(reason, "Alias ")
+	}
+	return reason
 }
 
 func interactionStateText(values map[string]map[string]interactionStateValue, blockID, actionID string) string {

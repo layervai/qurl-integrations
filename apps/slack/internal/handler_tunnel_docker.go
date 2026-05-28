@@ -67,6 +67,6 @@ docker run -d \
 	if args.WebRef == "" {
 		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
 	}
-	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory."
+	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
 	return intro + "\n\n" + slackCodeBlock(docker) + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file."
 }

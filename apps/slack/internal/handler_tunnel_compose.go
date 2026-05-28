@@ -94,6 +94,6 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 	if args.WebRef == "" {
 		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command."
 	}
-	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the per-slug Compose fragment when the slug, port, or service changes."
+	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the same slug's Compose fragment when the port or service changes; a different slug creates a separate per-slug fragment. If Compose recreates the web service container, bring the tunnel service up again too."
 	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file."
 }

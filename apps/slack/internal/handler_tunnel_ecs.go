@@ -50,7 +50,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKe
 	}, " ")
 	return intro + "\n\n" +
 		"1. Store the bootstrap key shown above in AWS Secrets Manager, then treat this Slack message as secret until the sidecar connects.\n\n" +
-		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
+		"2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n" +
 		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
 		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects the bootstrap secret as `QURL_API_KEY`; file-mounted secret runtimes use `QURL_API_KEY_FILE` instead:\n\n" +
 		slackCodeBlock(containerJSON) + "\n\n" +
