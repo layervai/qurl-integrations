@@ -2,7 +2,10 @@ package slackinstall
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,38 +18,62 @@ import (
 
 const testStateSecret = "0123456789abcdef0123456789abcdef"
 
+const (
+	testClientID        = "111.222"
+	testClientSecret    = "secret"
+	testScopeCSV        = "commands,views:write"
+	testWorkspaceID     = "T_WORKSPACE"
+	testWorkspaceToken  = "xoxb-workspace-token"
+	testAuthCode        = "abc123"
+	testAccessTokenKey  = "access_token"
+	testSlackInstallURL = CallbackPath + "?code=" + testAuthCode + "&state="
+)
+
 type fakeTokenStore struct {
 	workspaceID string
 	install     auth.SlackBotTokenInstall
 	err         error
 }
 
-func (f *fakeTokenStore) SetSlackBotToken(_ context.Context, workspaceID string, install auth.SlackBotTokenInstall) error {
+func (f *fakeTokenStore) SetSlackBotToken(_ context.Context, workspaceID string, install *auth.SlackBotTokenInstall) error {
 	f.workspaceID = workspaceID
-	f.install = install
+	if install != nil {
+		f.install = *install
+	}
 	return f.err
 }
 
 func testConfig(store *fakeTokenStore) Config {
 	return Config{
-		ClientID:     "111.222",
-		ClientSecret: "secret",
+		ClientID:     testClientID,
+		ClientSecret: testClientSecret,
 		SlackBaseURL: "https://slack-bot.example",
 		StateSecret:  []byte(testStateSecret),
-		BotScopes:    []string{"commands", "views:write"},
+		BotScopes:    []string{botScopeCommands, botScopeViewsWrite},
 		TokenStore:   store,
 		Now:          func() time.Time { return time.Unix(1800000000, 0).UTC() },
 	}
 }
 
+func testStateHTTPCookie(value string) *http.Cookie {
+	return &http.Cookie{
+		Name:     stateCookieName,
+		Value:    value,
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
 func TestConfigValidateRequiresGuidedInstallScopes(t *testing.T) {
 	cfg := testConfig(&fakeTokenStore{})
-	cfg.BotScopes = []string{"commands"}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "views:write") {
+	cfg.BotScopes = []string{botScopeCommands}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeViewsWrite) {
 		t.Fatalf("Validate error = %v, want missing views:write", err)
 	}
-	cfg.BotScopes = []string{"views:write"}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "commands") {
+	cfg.BotScopes = []string{botScopeViewsWrite}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeCommands) {
 		t.Fatalf("Validate error = %v, want missing commands", err)
 	}
 }
@@ -54,8 +81,9 @@ func TestConfigValidateRequiresGuidedInstallScopes(t *testing.T) {
 func TestInstallRedirectsToSlackAuthorizeWithStateCookie(t *testing.T) {
 	store := &fakeTokenStore{}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, InstallPath, http.NoBody)
-	Install(testConfig(store)).ServeHTTP(w, req)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, InstallPath, http.NoBody)
+	cfg := testConfig(store)
+	Install(&cfg).ServeHTTP(w, req)
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", w.Code)
@@ -68,10 +96,10 @@ func TestInstallRedirectsToSlackAuthorizeWithStateCookie(t *testing.T) {
 		t.Fatalf("Location = %s, want Slack authorize URL", loc.String())
 	}
 	q := loc.Query()
-	if q.Get("client_id") != "111.222" {
+	if q.Get("client_id") != testClientID {
 		t.Errorf("client_id = %q", q.Get("client_id"))
 	}
-	if q.Get("scope") != "commands,views:write" {
+	if q.Get("scope") != testScopeCSV {
 		t.Errorf("scope = %q", q.Get("scope"))
 	}
 	if q.Get("redirect_uri") != "https://slack-bot.example/oauth/slack/callback" {
@@ -111,13 +139,13 @@ func TestCallbackStoresWorkspaceBotToken(t *testing.T) {
 		gotForm = r.Form
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"access_token": "xoxb-workspace-token",
-			"scope":        "commands,views:write",
-			"bot_user_id":  "U_BOT",
-			"app_id":       "A_APP",
+			"ok":               true,
+			testAccessTokenKey: testWorkspaceToken,
+			"scope":            testScopeCSV,
+			"bot_user_id":      "U_BOT",
+			"app_id":           "A_APP",
 			"team": map[string]string{
-				"id":   "T_WORKSPACE",
+				"id":   testWorkspaceID,
 				"name": "Customer",
 			},
 			"enterprise": map[string]string{
@@ -133,33 +161,33 @@ func TestCallbackStoresWorkspaceBotToken(t *testing.T) {
 	cfg := testConfig(store)
 	cfg.OAuthAccessURL = slack.URL
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, CallbackPath+"?code=abc123&state="+url.QueryEscape(state), http.NoBody)
-	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: state})
-	Callback(cfg).ServeHTTP(w, req)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%q", w.Code, w.Body.String())
 	}
-	if gotForm.Get("client_id") != "111.222" || gotForm.Get("client_secret") != "secret" || gotForm.Get("code") != "abc123" {
+	if gotForm.Get("client_id") != testClientID || gotForm.Get("client_secret") != testClientSecret || gotForm.Get("code") != testAuthCode {
 		t.Fatalf("unexpected Slack exchange form: %v", gotForm)
 	}
 	if gotForm.Get("redirect_uri") != "https://slack-bot.example/oauth/slack/callback" {
 		t.Fatalf("redirect_uri = %q", gotForm.Get("redirect_uri"))
 	}
-	if store.workspaceID != "T_WORKSPACE" {
+	if store.workspaceID != testWorkspaceID {
 		t.Fatalf("workspaceID = %q", store.workspaceID)
 	}
-	if store.install.BotToken != "xoxb-workspace-token" ||
+	if store.install.BotToken != testWorkspaceToken ||
 		store.install.InstalledBy != "U_INSTALLER" ||
 		store.install.BotUserID != "U_BOT" ||
 		store.install.AppID != "A_APP" ||
 		store.install.EnterpriseID != "E_GRID" {
 		t.Fatalf("stored install mismatch: %+v", store.install)
 	}
-	if strings.Join(store.install.Scopes, ",") != "commands,views:write" {
+	if strings.Join(store.install.Scopes, ",") != testScopeCSV {
 		t.Fatalf("scopes = %v", store.install.Scopes)
 	}
-	if strings.Contains(w.Body.String(), "xoxb-workspace-token") {
+	if strings.Contains(w.Body.String(), testWorkspaceToken) {
 		t.Fatal("success page leaked bot token")
 	}
 }
@@ -171,15 +199,94 @@ func TestCallbackRejectsStateCookieMismatch(t *testing.T) {
 		t.Fatalf("mintState: %v", err)
 	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, CallbackPath+"?code=abc123&state="+url.QueryEscape(state), http.NoBody)
-	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: "different"})
-	Callback(testConfig(store)).ServeHTTP(w, req)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie("different"))
+	cfg := testConfig(store)
+	Callback(&cfg).ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 	if store.workspaceID != "" {
 		t.Fatalf("store should not be called on CSRF mismatch, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackRejectsExpiredState(t *testing.T) {
+	store := &fakeTokenStore{}
+	createdAt := time.Unix(1800000000, 0).UTC().Add(-stateTTL - time.Second)
+	state, err := mintState([]byte(testStateSecret), createdAt)
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	cfg := testConfig(store)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if store.workspaceID != "" {
+		t.Fatalf("store should not be called on expired state, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackRejectsWrongStateFlow(t *testing.T) {
+	store := &fakeTokenStore{}
+	payload, err := json.Marshal(statePayload{
+		Flow:          "qurl-oauth",
+		Nonce:         "nonce",
+		CreatedAtUnix: time.Unix(1800000000, 0).UTC().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	state := body + "." + signState([]byte(testStateSecret), body)
+	cfg := testConfig(store)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if store.workspaceID != "" {
+		t.Fatalf("store should not be called on wrong state flow, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackRejectsMissingQueryParams(t *testing.T) {
+	for _, rawQuery := range []string{"code=" + testAuthCode, "state=" + testAuthCode, ""} {
+		t.Run(rawQuery, func(t *testing.T) {
+			store := &fakeTokenStore{}
+			cfg := testConfig(store)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, CallbackPath+"?"+rawQuery, http.NoBody)
+			Callback(&cfg).ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", w.Code)
+			}
+			if store.workspaceID != "" {
+				t.Fatalf("store should not be called on missing params, got %q", store.workspaceID)
+			}
+		})
+	}
+}
+
+func TestCallbackRejectsNonGET(t *testing.T) {
+	cfg := testConfig(&fakeTokenStore{})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, CallbackPath, http.NoBody)
+	Callback(&cfg).ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", w.Code)
+	}
+	if w.Header().Get("Allow") != "GET" {
+		t.Fatalf("Allow = %q, want GET", w.Header().Get("Allow"))
 	}
 }
 
@@ -201,14 +308,130 @@ func TestCallbackSurfacesSlackOAuthError(t *testing.T) {
 	cfg := testConfig(store)
 	cfg.OAuthAccessURL = slack.URL
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, CallbackPath+"?code=abc123&state="+url.QueryEscape(state), http.NoBody)
-	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: state})
-	Callback(cfg).ServeHTTP(w, req)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", w.Code)
 	}
 	if store.workspaceID != "" {
 		t.Fatalf("store should not be called after Slack OAuth error, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackRejectsSlackResponseMissingTeamID(t *testing.T) {
+	store := &fakeTokenStore{}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":               true,
+			testAccessTokenKey: testWorkspaceToken,
+		})
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	if store.workspaceID != "" {
+		t.Fatalf("store should not be called without team id, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackSurfacesTokenStoreFailure(t *testing.T) {
+	store := &fakeTokenStore{err: errors.New("ddb down")}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":               true,
+			testAccessTokenKey: testWorkspaceToken,
+			"team": map[string]string{
+				"id": testWorkspaceID,
+			},
+		})
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+	if store.workspaceID != testWorkspaceID {
+		t.Fatalf("store should be called before surfacing persist failure, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackRejectsOversizedSlackOAuthResponse(t *testing.T) {
+	store := &fakeTokenStore{}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, strings.Repeat("x", slackOAuthBodyLimit+1))
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	if store.workspaceID != "" {
+		t.Fatalf("store should not be called on oversized Slack response, got %q", store.workspaceID)
+	}
+}
+
+func TestCallbackDoesNotLeakSlackHTTPErrorBody(t *testing.T) {
+	store := &fakeTokenStore{}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"access_token":"xoxb-should-not-leak"}`))
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "xoxb-should-not-leak") {
+		t.Fatal("callback response leaked Slack OAuth error body")
 	}
 }

@@ -11,19 +11,23 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-const testTeamID = "T123ABCDEF"
+const (
+	testTeamID        = "T123ABCDEF"
+	testSlackBotToken = "xoxb-secret"
+)
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
 // predetermined results. Captures Put/Delete inputs for assertion.
 type fakeDDBClient struct {
-	getOutput   *dynamodb.GetItemOutput
-	getErr      error
-	putInput    *dynamodb.PutItemInput
-	putErr      error
-	updateInput *dynamodb.UpdateItemInput
-	updateErr   error
-	delInput    *dynamodb.DeleteItemInput
-	delErr      error
+	getOutput    *dynamodb.GetItemOutput
+	getErr       error
+	putInput     *dynamodb.PutItemInput
+	putErr       error
+	updateInput  *dynamodb.UpdateItemInput
+	updateOutput *dynamodb.UpdateItemOutput
+	updateErr    error
+	delInput     *dynamodb.DeleteItemInput
+	delErr       error
 }
 
 func (f *fakeDDBClient) GetItem(_ context.Context, _ *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -35,6 +39,9 @@ func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ 
 }
 func (f *fakeDDBClient) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	f.updateInput = in
+	if f.updateOutput != nil {
+		return f.updateOutput, f.updateErr
+	}
 	return &dynamodb.UpdateItemOutput{}, f.updateErr
 }
 func (f *fakeDDBClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
@@ -253,6 +260,9 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "configured_at = if_not_exists(configured_at, :now)") {
 		t.Errorf("UpdateExpression should preserve configured_at with if_not_exists, got %q", got)
 	}
+	if ddb.updateInput.ReturnValues != ddbtypes.ReturnValueUpdatedOld {
+		t.Errorf("ReturnValues = %v, want UPDATED_OLD for rotation observability", ddb.updateInput.ReturnValues)
+	}
 }
 
 func TestDDBProviderSetAPIKeySurfacesUpdateError(t *testing.T) {
@@ -325,7 +335,7 @@ func TestDDBProviderSlackBotToken(t *testing.T) {
 			getOutput: &dynamodb.GetItemOutput{
 				Item: map[string]ddbtypes.AttributeValue{
 					attrTeamID:          &ddbtypes.AttributeValueMemberS{Value: testTeamID},
-					attrSlackBotToken:   &ddbtypes.AttributeValueMemberB{Value: []byte("xoxb-secret")},
+					attrSlackBotToken:   &ddbtypes.AttributeValueMemberB{Value: []byte(testSlackBotToken)},
 					attrSlackBotTokenDK: &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
 				},
 			},
@@ -335,8 +345,8 @@ func TestDDBProviderSlackBotToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SlackBotToken: %v", err)
 		}
-		if got != "xoxb-secret" {
-			t.Fatalf("got %q want %q", got, "xoxb-secret")
+		if got != testSlackBotToken {
+			t.Fatalf("got %q want %q", got, testSlackBotToken)
 		}
 	})
 
@@ -372,8 +382,8 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 		Encryptor: &passthroughEncryptor{},
 		Now:       func() time.Time { return fixedNow },
 	}
-	err := p.SetSlackBotToken(context.Background(), testTeamID, SlackBotTokenInstall{
-		BotToken:     "xoxb-secret",
+	err := p.SetSlackBotToken(context.Background(), testTeamID, &SlackBotTokenInstall{
+		BotToken:     testSlackBotToken,
 		InstalledBy:  "U_INSTALLER",
 		BotUserID:    "U_BOT",
 		AppID:        "A_APP",
@@ -387,7 +397,7 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 		t.Fatal("expected UpdateItem called")
 	}
 	values := ddb.updateInput.ExpressionAttributeValues
-	if v, ok := values[":token"].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != "xoxb-secret" {
+	if v, ok := values[":token"].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != testSlackBotToken {
 		t.Errorf("slack token wrong: %v", values[":token"])
 	}
 	if v, ok := values[":dk"].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != passthroughWrappedKey {
@@ -398,6 +408,31 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 	}
 	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "slack_bot_installed_at = if_not_exists(slack_bot_installed_at, :now)") {
 		t.Errorf("UpdateExpression should preserve original Slack installed_at, got %q", got)
+	}
+}
+
+func TestDDBProviderSetSlackBotTokenRemovesEmptyOptionalMetadata(t *testing.T) {
+	ddb := &fakeDDBClient{}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	}
+	err := p.SetSlackBotToken(context.Background(), testTeamID, &SlackBotTokenInstall{
+		BotToken: testSlackBotToken,
+	})
+	if err != nil {
+		t.Fatalf("SetSlackBotToken: %v", err)
+	}
+	got := *ddb.updateInput.UpdateExpression
+	for _, attr := range []string{attrSlackBotInstalledBy, attrSlackBotUserID, attrSlackAppID, attrSlackEnterpriseID, attrSlackBotScopes} {
+		if !strings.Contains(got, attr) {
+			t.Fatalf("UpdateExpression should mention %s in REMOVE branch, got %q", attr, got)
+		}
+	}
+	if _, ok := ddb.updateInput.ExpressionAttributeValues[":scopes"]; ok {
+		t.Fatal("empty scopes should not write :scopes")
 	}
 }
 

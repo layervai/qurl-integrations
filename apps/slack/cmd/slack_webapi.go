@@ -31,10 +31,6 @@ const slackViewsOpenResponseBodyLimit = 64 * 1024
 const slackOpenViewMaxErrorSnippetBytes = 200
 const slackOpenViewTruncationSuffix = "..."
 
-func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
-	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL)
-}
-
 func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
 }

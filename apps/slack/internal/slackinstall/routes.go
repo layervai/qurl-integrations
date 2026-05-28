@@ -8,7 +8,6 @@
 package slackinstall
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -29,7 +28,9 @@ import (
 )
 
 const (
-	InstallPath  = "/oauth/slack/install"
+	// InstallPath starts Slack app installation for customer workspaces.
+	InstallPath = "/oauth/slack/install"
+	// CallbackPath receives Slack's OAuth redirect after app installation.
 	CallbackPath = "/oauth/slack/callback"
 
 	defaultSlackOAuthAccessURL = "https://slack.com/api/oauth.v2.access"
@@ -40,6 +41,9 @@ const (
 	slackOAuthTimeout          = 10 * time.Second
 	persistTimeout             = 15 * time.Second
 	slackOAuthBodyLimit        = 8 << 10
+	slackInstallFlow           = "slack-install"
+	botScopeCommands           = "commands"
+	botScopeViewsWrite         = "views:write"
 )
 
 var successTemplate = template.Must(template.New("slack-install-success").Parse(`<!DOCTYPE html>
@@ -65,54 +69,65 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 </body>
 </html>`))
 
+// Config holds the Slack app OAuth installation settings.
 type Config struct {
-	ClientID       string
-	ClientSecret   string
-	SlackBaseURL   string
-	StateSecret    []byte
-	BotScopes      []string
-	TokenStore     TokenStore
-	HTTPClient     *http.Client
+	ClientID     string
+	ClientSecret string
+	SlackBaseURL string
+	StateSecret  []byte
+	BotScopes    []string
+	TokenStore   TokenStore
+	HTTPClient   *http.Client
+	// Now is injected for test-time clock pinning. Nil uses time.Now.
 	Now            func() time.Time
 	OAuthAccessURL string
 }
 
+// TokenStore persists the Slack-issued workspace bot token.
 type TokenStore interface {
-	SetSlackBotToken(ctx context.Context, workspaceID string, install auth.SlackBotTokenInstall) error
+	SetSlackBotToken(ctx context.Context, workspaceID string, install *auth.SlackBotTokenInstall) error
 }
 
+// DefaultBotScopes returns the minimum Slack bot scopes needed by qURL.
 func DefaultBotScopes() []string {
-	return []string{"commands", "views:write"}
+	return []string{botScopeCommands, botScopeViewsWrite}
 }
 
-func RegisterRoutes(mux *http.ServeMux, cfg Config) {
-	if err := cfg.Validate(); err != nil {
-		panic("slackinstall.RegisterRoutes: " + err.Error())
+// RegisterRoutes wires the Slack install OAuth endpoints onto mux.
+func RegisterRoutes(mux *http.ServeMux, cfg *Config) error {
+	if cfg == nil {
+		return errors.New("config is required")
 	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	cfg.ensureHTTPClient()
 	mux.HandleFunc(InstallPath, Install(cfg))
 	mux.HandleFunc(CallbackPath, Callback(cfg))
+	return nil
 }
 
-func (c Config) Validate() error {
+// Validate checks that cfg can safely serve the Slack install flow.
+func (c *Config) Validate() error {
 	if strings.TrimSpace(c.ClientID) == "" {
-		return errors.New("ClientID is required")
+		return errors.New("client ID is required")
 	}
 	if strings.TrimSpace(c.ClientSecret) == "" {
-		return errors.New("ClientSecret is required")
+		return errors.New("client secret is required")
 	}
 	if strings.TrimSpace(c.SlackBaseURL) == "" {
-		return errors.New("SlackBaseURL is required")
+		return errors.New("slack base URL is required")
 	}
 	if !strings.HasPrefix(c.SlackBaseURL, "https://") {
-		return fmt.Errorf("SlackBaseURL must be https:// (got %q)", c.SlackBaseURL)
+		return fmt.Errorf("slack base URL must be https:// (got %q)", c.SlackBaseURL)
 	}
 	if len(c.StateSecret) < stateMinSecretBytes {
-		return fmt.Errorf("StateSecret must be at least %d bytes", stateMinSecretBytes)
+		return fmt.Errorf("state secret must be at least %d bytes", stateMinSecretBytes)
 	}
 	if c.TokenStore == nil {
-		return errors.New("TokenStore is required")
+		return errors.New("token store is required")
 	}
-	scopes := normalizeScopes(c.BotScopes)
+	scopes := NormalizeScopes(c.BotScopes)
 	if len(scopes) == 0 {
 		return errors.New("at least one bot scope is required")
 	}
@@ -136,33 +151,39 @@ func missingRequiredScopes(scopes []string) []string {
 	return missing
 }
 
-func (c Config) now() time.Time {
+func (c *Config) now() time.Time {
 	if c.Now != nil {
 		return c.Now()
 	}
 	return time.Now()
 }
 
-func (c Config) client() *http.Client {
-	if c.HTTPClient != nil {
-		return c.HTTPClient
-	}
-	return &http.Client{
-		Timeout: slackOAuthTimeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+func (c *Config) ensureHTTPClient() {
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{
+			Timeout: slackOAuthTimeout,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 }
 
-func (c Config) oauthAccessURL() string {
+func (c *Config) client() *http.Client {
+	c.ensureHTTPClient()
+	return c.HTTPClient
+}
+
+func (c *Config) oauthAccessURL() string {
 	if strings.TrimSpace(c.OAuthAccessURL) != "" {
 		return strings.TrimSpace(c.OAuthAccessURL)
 	}
 	return defaultSlackOAuthAccessURL
 }
 
-func Install(cfg Config) http.HandlerFunc {
+// Install starts the Slack app OAuth installation flow.
+func Install(cfg *Config) http.HandlerFunc {
+	cfg.ensureHTTPClient()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -180,7 +201,9 @@ func Install(cfg Config) http.HandlerFunc {
 	}
 }
 
-func Callback(cfg Config) http.HandlerFunc {
+// Callback exchanges Slack's OAuth code and stores the workspace bot token.
+func Callback(cfg *Config) http.HandlerFunc {
+	cfg.ensureHTTPClient()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -188,7 +211,7 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 		if errParam := r.URL.Query().Get("error"); errParam != "" {
-			slog.Warn("Slack install callback returned error", "error", errParam)
+			logSlackInstallCallbackError(len(errParam))
 			clearStateCookie(w)
 			http.Error(w, "Slack install was not completed", http.StatusBadRequest)
 			return
@@ -221,7 +244,7 @@ func Callback(cfg Config) http.HandlerFunc {
 		}
 		teamID := strings.TrimSpace(resp.Team.ID)
 		if teamID == "" {
-			slog.Error("Slack install token exchange missing team id", "app_id", resp.AppID)
+			logSlackInstallMissingTeamID(strings.TrimSpace(resp.AppID) != "")
 			clearStateCookie(w)
 			http.Error(w, "Slack workspace install did not include a workspace id", http.StatusBadGateway)
 			return
@@ -230,23 +253,22 @@ func Callback(cfg Config) http.HandlerFunc {
 		installedBy := strings.TrimSpace(resp.AuthedUser.ID)
 		persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 		defer persistCancel()
-		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, teamID, auth.SlackBotTokenInstall{
+		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, teamID, &auth.SlackBotTokenInstall{
 			BotToken:     resp.AccessToken,
 			InstalledBy:  installedBy,
 			BotUserID:    resp.BotUserID,
 			AppID:        resp.AppID,
 			EnterpriseID: enterpriseID,
-			Scopes:       splitSlackScopes(resp.Scope),
+			Scopes:       NormalizeScopes([]string{resp.Scope}),
 		}); err != nil {
-			slog.Error("Slack install token persist failed",
-				"error", err, "team_id", teamID, "installed_by", installedBy)
+			logSlackInstallPersistFailed(err, teamID != "", installedBy != "")
 			clearStateCookie(w)
 			http.Error(w, "Slack install could not be stored", http.StatusInternalServerError)
 			return
 		}
 
 		clearStateCookie(w)
-		slog.Info("Slack app install stored workspace bot token",
+		slog.Info("Slack app install stored workspace bot token", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
 			"team_id", teamID, "installed_by", installedBy,
 			"bot_user_id", resp.BotUserID, "app_id", resp.AppID,
 			"enterprise_id", enterpriseID)
@@ -254,11 +276,11 @@ func Callback(cfg Config) http.HandlerFunc {
 	}
 }
 
-func authorizeURL(cfg Config, state string) string {
+func authorizeURL(cfg *Config, state string) string {
 	u, _ := url.Parse(slackAuthorizeURL)
 	q := u.Query()
 	q.Set("client_id", strings.TrimSpace(cfg.ClientID))
-	q.Set("scope", strings.Join(normalizeScopes(cfg.BotScopes), ","))
+	q.Set("scope", strings.Join(NormalizeScopes(cfg.BotScopes), ","))
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
@@ -274,16 +296,22 @@ func callbackURL(baseURL string) string {
 }
 
 type statePayload struct {
+	Flow          string `json:"flow"`
 	Nonce         string `json:"nonce"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
 }
 
+// Slack install state is signed and browser-bound, but not one-time-use: a
+// same-browser replay inside stateTTL can repeat the Slack code-exchange path.
+// That is acceptable for this install-only flow because Slack OAuth codes are
+// single-use and the persisted token update is idempotent by workspace.
 func mintState(secret []byte, now time.Time) (string, error) {
 	nonce := make([]byte, 24)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
 	payload, err := json.Marshal(statePayload{
+		Flow:          slackInstallFlow,
 		Nonce:         base64.RawURLEncoding.EncodeToString(nonce),
 		CreatedAtUnix: now.UTC().Unix(),
 	})
@@ -321,6 +349,9 @@ func verifyState(secret []byte, token string, now time.Time) error {
 	}
 	if payload.Nonce == "" {
 		return errors.New("state nonce is empty")
+	}
+	if payload.Flow != slackInstallFlow {
+		return errors.New("state flow mismatch")
 	}
 	return nil
 }
@@ -384,7 +415,7 @@ type oauthAccessResponse struct {
 	} `json:"authed_user"`
 }
 
-func exchangeCode(ctx context.Context, cfg Config, code string) (*oauthAccessResponse, error) {
+func exchangeCode(ctx context.Context, cfg *Config, code string) (*oauthAccessResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", strings.TrimSpace(cfg.ClientID))
 	form.Set("client_secret", strings.TrimSpace(cfg.ClientSecret))
@@ -412,7 +443,7 @@ func exchangeCode(ctx context.Context, cfg Config, code string) (*oauthAccessRes
 		return nil, fmt.Errorf("response exceeded %d bytes", slackOAuthBodyLimit)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, responseSnippet(raw))
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
 	}
 	var out oauthAccessResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -423,27 +454,22 @@ func exchangeCode(ctx context.Context, cfg Config, code string) (*oauthAccessRes
 		if code == "" {
 			code = "not_ok"
 		}
-		return nil, fmt.Errorf("Slack oauth.v2.access: %s", code)
+		return nil, fmt.Errorf("slack oauth.v2.access: %s", code)
 	}
 	if strings.TrimSpace(out.AccessToken) == "" {
-		return nil, errors.New("Slack oauth.v2.access returned empty access_token")
+		return nil, errors.New("slack oauth.v2.access returned empty access_token")
 	}
 	return &out, nil
 }
 
-func responseSnippet(raw []byte) string {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) > 200 {
-		raw = append(raw[:197], '.', '.', '.')
-	}
-	return strings.ToValidUTF8(string(raw), "\uFFFD")
-}
-
-func normalizeScopes(scopes []string) []string {
+// NormalizeScopes trims, splits, deduplicates, and preserves Slack scope order.
+func NormalizeScopes(scopes []string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(scopes))
 	for _, scope := range scopes {
-		for _, part := range strings.Split(scope, ",") {
+		for _, part := range strings.FieldsFunc(scope, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\n' || r == '\t'
+		}) {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
@@ -458,10 +484,17 @@ func normalizeScopes(scopes []string) []string {
 	return out
 }
 
-func splitSlackScopes(scope string) []string {
-	return normalizeScopes(strings.FieldsFunc(scope, func(r rune) bool {
-		return r == ',' || r == ' '
-	}))
+func logSlackInstallCallbackError(errorLen int) {
+	slog.Warn("Slack install callback returned error", "error_len", errorLen) // #nosec G706 -- only a length is logged; no request string reaches the attribute.
+}
+
+func logSlackInstallMissingTeamID(appIDPresent bool) {
+	slog.Error("Slack install token exchange missing team id", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
+}
+
+func logSlackInstallPersistFailed(err error, teamIDPresent, installedByPresent bool) {
+	slog.Error("Slack install token persist failed", // #nosec G706 -- only booleans plus the storage error are logged.
+		"error", err, "team_id_present", teamIDPresent, "installed_by_present", installedByPresent)
 }
 
 func renderSuccess(w http.ResponseWriter, teamID string) {

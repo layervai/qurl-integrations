@@ -213,16 +213,18 @@ func run() error {
 		// workspace admins; without that gate, any user could
 		// initiate a flow that overwrites the workspace's qURL key
 		// against their own Auth0 account.
-		slog.Info("CONFIGURATION REMINDER: /qurl setup is workspace-admin-only by manifest, not by code — verify the Slack app manifest restricts the command")
+		slog.Info("CONFIGURATION REMINDER: /qurl setup is workspace-admin-only by manifest, not by code - verify the Slack app manifest restricts the command")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
 	slackInstallCfg, ok, err := buildSlackInstallConfig(ddbProvider)
 	if err != nil {
-		return fmt.Errorf("Slack install config: %w", err)
+		return fmt.Errorf("slack install config: %w", err)
 	}
 	if ok {
-		slackinstall.RegisterRoutes(rootMux, slackInstallCfg)
+		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
+			return fmt.Errorf("slack install routes: %w", err)
+		}
 		slog.Info("registered /oauth/slack/{install,callback} routes")
 	}
 
@@ -515,10 +517,11 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 }
 
 const (
-	envSlackClientID           = "SLACK_CLIENT_ID"
-	envSlackClientSecret       = "SLACK_CLIENT_SECRET"
-	envSlackInstallStateSecret = "SLACK_INSTALL_STATE_SECRET"
-	envSlackBotScopes          = "SLACK_BOT_SCOPES"
+	envSlackClientID            = "SLACK_CLIENT_ID"
+	envSlackClientSecret        = "SLACK_CLIENT_SECRET"
+	envSlackInstallStateSecret  = "SLACK_INSTALL_STATE_SECRET"
+	envSlackBotScopes           = "SLACK_BOT_SCOPES"
+	slackInstallStateMissingKey = "SLACK_INSTALL_STATE"
 )
 
 func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, bool, error) {
@@ -531,10 +534,10 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	}
 
 	missing := missingSlackInstallEnvVars(map[string]string{
-		envSlackClientID:      clientID,
-		envSlackClientSecret:  clientSecret,
-		"SLACK_BASE_URL":      baseURL,
-		"SLACK_INSTALL_STATE": stateSecret,
+		envSlackClientID:            clientID,
+		envSlackClientSecret:        clientSecret,
+		"SLACK_BASE_URL":            baseURL,
+		slackInstallStateMissingKey: stateSecret,
 	})
 	if len(missing) > 0 {
 		slog.Warn("Slack install routes NOT registered — required env vars unset", "missing", missing)
@@ -546,7 +549,7 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
-		scopes = splitScopeEnv(raw)
+		scopes = slackinstall.NormalizeScopes([]string{raw})
 	}
 	cfg := slackinstall.Config{
 		ClientID:     clientID,
@@ -563,11 +566,11 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 }
 
 func missingSlackInstallEnvVars(values map[string]string) []string {
-	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", "SLACK_INSTALL_STATE"}
+	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", slackInstallStateMissingKey}
 	var missing []string
 	for _, k := range keys {
 		if values[k] == "" {
-			if k == "SLACK_INSTALL_STATE" {
+			if k == slackInstallStateMissingKey {
 				missing = append(missing, envSlackInstallStateSecret+" (or OAUTH_STATE_SECRET)")
 				continue
 			}
@@ -585,12 +588,6 @@ func validateSlackBaseOrigin(baseURL string) error {
 		return fmt.Errorf("SLACK_BASE_URL must be a bare https:// origin with no path/query/userinfo (got %q)", baseURL)
 	}
 	return nil
-}
-
-func splitScopeEnv(raw string) []string {
-	return strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\n' || r == '\t'
-	})
 }
 
 // adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore

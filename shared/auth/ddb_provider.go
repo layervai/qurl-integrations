@@ -353,20 +353,31 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 	}
 
 	now := p.nowOrDefault().UTC().Format(time.RFC3339)
-	if _, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
+		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
+	out, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-		UpdateExpression: aws.String("SET qurl_api_key = :key, qurl_api_key_dk = :dk, configured_by = :by, updated_at = :now, configured_at = if_not_exists(configured_at, :now)"),
+		UpdateExpression: aws.String(updateExpr),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":key": &ddbtypes.AttributeValueMemberB{Value: ct},
 			":dk":  &ddbtypes.AttributeValueMemberB{Value: wrapped},
 			":by":  &ddbtypes.AttributeValueMemberS{Value: configuredBy},
 			":now": &ddbtypes.AttributeValueMemberS{Value: now},
 		},
-	}); err != nil {
+		ReturnValues: ddbtypes.ReturnValueUpdatedOld,
+	})
+	if err != nil {
 		return fmt.Errorf("DDBProvider.SetAPIKey: UpdateItem: %w", err)
+	}
+	if out != nil {
+		if _, rotated := out.Attributes[attrQURLAPIKey]; rotated {
+			slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace API key",
+				"workspace_id", workspaceID,
+				"configured_by", configuredBy)
+		}
 	}
 	return nil
 }
@@ -374,9 +385,12 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 // SetSlackBotToken upserts the encrypted Slack bot token captured during Slack
 // app install or reinstall. It intentionally updates only Slack-specific
 // attributes so the qURL API key columns survive app reauthorization.
-func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, install SlackBotTokenInstall) error {
+func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, install *SlackBotTokenInstall) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetSlackBotToken: workspaceID is empty")
+	}
+	if install == nil {
+		return errors.New("DDBProvider.SetSlackBotToken: install is nil")
 	}
 	if install.BotToken == "" {
 		return errors.New("DDBProvider.SetSlackBotToken: bot token is empty")
@@ -389,10 +403,10 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	now := p.nowOrDefault().UTC().Format(time.RFC3339)
 
 	setParts := []string{
-		"slack_bot_token = :token",
-		"slack_bot_token_dk = :dk",
-		"slack_bot_updated_at = :now",
-		"slack_bot_installed_at = if_not_exists(slack_bot_installed_at, :now)",
+		attrSlackBotToken + " = :token",
+		attrSlackBotTokenDK + " = :dk",
+		attrSlackBotUpdatedAt + " = :now",
+		attrSlackBotInstalledAt + " = if_not_exists(" + attrSlackBotInstalledAt + ", :now)",
 	}
 	values := map[string]ddbtypes.AttributeValue{
 		":token": &ddbtypes.AttributeValueMemberB{Value: ct},
