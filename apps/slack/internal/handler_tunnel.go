@@ -57,14 +57,13 @@ type tunnelInstallEnvironment string
 type tunnelInstallWebRefKind string
 
 const (
-	tunnelEnvDocker  tunnelInstallEnvironment = "docker"
-	tunnelEnvCompose tunnelInstallEnvironment = "docker-compose"
-	// Input-only shorthand. parseTunnelEnvironment normalizes env:compose to
-	// tunnelEnvCompose; the typed constant stays for exhaustive defensive
-	// switches that may receive direct test or seam values.
-	tunnelEnvComposeAlt tunnelInstallEnvironment = "compose"
+	tunnelEnvDocker     tunnelInstallEnvironment = "docker"
+	tunnelEnvCompose    tunnelInstallEnvironment = "docker-compose"
 	tunnelEnvECSFargate tunnelInstallEnvironment = "ecs-fargate"
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
+	// Input-only shorthand; parseTunnelEnvironment normalizes this spelling to
+	// tunnelEnvCompose so renderers never receive a second Compose value.
+	tunnelEnvComposeAlt = "compose"
 
 	tunnelWebRefKindNone      tunnelInstallWebRefKind = ""
 	tunnelWebRefKindContainer tunnelInstallWebRefKind = "container"
@@ -171,7 +170,7 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(tunnelEnvDocker):
 		return tunnelEnvDocker, ""
-	case string(tunnelEnvCompose), string(tunnelEnvComposeAlt):
+	case string(tunnelEnvCompose), tunnelEnvComposeAlt:
 		return tunnelEnvCompose, ""
 	case string(tunnelEnvECSFargate):
 		return tunnelEnvECSFargate, ""
@@ -186,7 +185,7 @@ func (e tunnelInstallEnvironment) label() (string, error) {
 	switch e {
 	case tunnelEnvDocker:
 		return "Docker sidecar", nil
-	case tunnelEnvCompose, tunnelEnvComposeAlt:
+	case tunnelEnvCompose:
 		return "Docker Compose", nil
 	case tunnelEnvECSFargate:
 		return "AWS ECS/Fargate", nil
@@ -337,11 +336,14 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		log.Error("tunnel install wizard views.open failed",
 			"error", err,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+			"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
 			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
 		)
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
 			h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+		case errors.Is(err, context.DeadlineExceeded):
+			h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl tunnel install` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
 			h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
 		default:
@@ -618,7 +620,7 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 		return renderECSFargateTunnelInstructions(args, image)
 	case tunnelEnvKubernetes:
 		return renderKubernetesTunnelInstructions(args, image)
-	case tunnelEnvCompose, tunnelEnvComposeAlt:
+	case tunnelEnvCompose:
 		return renderDockerComposeTunnelInstructions(args, image)
 	case tunnelEnvDocker:
 		return renderDockerTunnelInstructions(args, image)
@@ -762,7 +764,9 @@ func validateBootstrapAPIKeyForShell(apiKey string) error {
 	// additional output-surface guard: qurl-service bootstrap keys should be
 	// printable single-line tokens, and refusing quote/control bytes keeps the
 	// rendered install snippet easy for operators to inspect. A dollar sign is
-	// safe here because POSIX single quotes prevent shell expansion.
+	// safe because POSIX single quotes prevent shell expansion in Docker paths;
+	// the prompt-based heredoc renderers also read a fixed byte count from
+	// stdin, and the substituted bytes are not reparsed by the shell.
 	if apiKey == "" {
 		return errors.New("empty api key")
 	}

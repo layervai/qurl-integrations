@@ -36,7 +36,7 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "qurl-slack/test", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "qurl-slack/test", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestSlackOpenViewFuncSurfacesSlackError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if !errors.Is(err, internal.ErrSlackTriggerExpired) || !strings.Contains(err.Error(), "invalid_trigger") {
 		t.Fatalf("error = %v, want trigger-expired sentinel wrapping invalid_trigger", err)
 	}
@@ -100,7 +100,7 @@ func TestSlackOpenViewFuncSurfacesRateLimit(t *testing.T) {
 			srv := httptest.NewServer(tc.handler)
 			t.Cleanup(srv.Close)
 
-			err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+			err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 			if !errors.Is(err, internal.ErrSlackRateLimited) {
 				t.Fatalf("error = %v, want rate-limited sentinel", err)
 			}
@@ -120,7 +120,7 @@ func TestSlackOpenViewFuncRejectsInvalidViewJSON(t *testing.T) {
 		[]byte(`   `),
 		[]byte(`not-json`),
 	} {
-		err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", raw)
+		err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", raw)
 		if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
 			t.Fatalf("input %q error = %v, want invalid view JSON", raw, err)
 		}
@@ -136,7 +136,7 @@ func TestSlackOpenViewFuncRejectsNonObjectViewJSON(t *testing.T) {
 		[]byte(`"str"`),
 		[]byte(`42`),
 	} {
-		err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", raw)
+		err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", raw)
 		if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
 			t.Fatalf("input %s error = %v, want invalid view JSON", raw, err)
 		}
@@ -150,7 +150,7 @@ func TestSlackOpenViewFuncSurfacesHTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want HTTP 502", err)
 	}
@@ -163,7 +163,7 @@ func TestSlackOpenViewFuncSurfacesRedirectAsHTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
 		t.Fatalf("error = %v, want HTTP 302 redirect error", err)
 	}
@@ -179,7 +179,7 @@ func TestSlackOpenViewFuncSurfacesEmptyRedirectBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || err.Error() != "views.open returned HTTP 307" {
 		t.Fatalf("error = %v, want bare HTTP 307", err)
 	}
@@ -193,7 +193,7 @@ func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want HTTP 502", err)
 	}
@@ -211,7 +211,7 @@ func TestSlackOpenViewFuncMakesHTTPErrorBodySnippetPrintable(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "<script>?alert(1)</script>") {
 		t.Fatalf("error = %v, want printable body snippet", err)
 	}
@@ -254,7 +254,7 @@ func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON", err)
 	}
@@ -271,7 +271,7 @@ func TestSlackOpenViewFuncSurfacesHTMLSuccessAsMalformedJSON(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want response JSON for HTTP 200 HTML body", err)
 	}
@@ -287,7 +287,7 @@ func TestSlackOpenViewFuncSurfacesEmptyResponseBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "empty response body") {
 		t.Fatalf("error = %v, want empty response body", err)
 	}
@@ -300,7 +300,7 @@ func TestSlackOpenViewFuncSurfacesNotOKFallback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "not_ok") {
 		t.Fatalf("error = %v, want not_ok fallback", err)
 	}
@@ -313,7 +313,7 @@ func TestSlackOpenViewFuncMakesSlackErrorCodePrintable(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "bad code") {
 		t.Fatalf("error = %v, want printable Slack error code", err)
 	}
@@ -348,7 +348,7 @@ func TestSlackOpenViewFuncAcceptsLargeSuccessfulViewEcho(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err = slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err = newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestSlackOpenViewFuncAcceptsResponseAtBodyLimit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open exactly at body limit: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestSlackOpenViewFuncSurfacesOversizedResponse(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
@@ -401,7 +401,7 @@ func TestSlackOpenViewFuncRefusesRedirects(t *testing.T) {
 	}))
 	t.Cleanup(redirector.Close)
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", redirector.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", redirector.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil {
 		t.Fatal("views.open followed redirect and returned nil error")
 	}
@@ -421,7 +421,7 @@ func TestSlackOpenViewFuncDrainsAndClosesOversizedResponse(t *testing.T) {
 		}, nil
 	})}
 
-	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
@@ -444,7 +444,7 @@ func TestSlackOpenViewFuncReadsAndClosesSuccessfulResponse(t *testing.T) {
 		}, nil
 	})}
 
-	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestSlackOpenViewFuncPropagatesContextCancellation(t *testing.T) {
 		return nil, r.Context().Err()
 	})}
 
-	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(ctx, "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.test/views.open", httpClient)(ctx, "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}

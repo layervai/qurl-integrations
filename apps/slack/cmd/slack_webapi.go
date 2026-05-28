@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 )
@@ -29,18 +28,14 @@ const slackViewsOpenResponseBodyLimit = 64 * 1024
 const slackOpenViewMaxErrorSnippetBytes = 200
 
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
-	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL, nil)
+	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL)
 }
 
-func slackOpenViewFuncWithURL(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
-	return newSlackOpenViewFunc(token, userAgent, viewsOpenURL, nil)
-}
-
-func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
-	return newSlackOpenViewFunc(token, userAgent, viewsOpenURL, httpClient)
-}
-
-func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string, httpClients ...*http.Client) func(context.Context, string, string, []byte) error {
+	var httpClient *http.Client
+	if len(httpClients) > 0 {
+		httpClient = httpClients[0]
+	}
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
@@ -149,9 +144,12 @@ func slackOpenViewBodySnippet(raw []byte) string {
 	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
 		return bodySnippet
 	}
-	cut := slackOpenViewMaxErrorSnippetBytes
-	for cut > 0 && !utf8.ValidString(bodySnippet[:cut]) {
-		cut--
+	cut := 0
+	for i := range bodySnippet {
+		if i > slackOpenViewMaxErrorSnippetBytes {
+			break
+		}
+		cut = i
 	}
 	if cut == 0 {
 		return "..."

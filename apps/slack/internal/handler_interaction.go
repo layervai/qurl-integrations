@@ -249,7 +249,7 @@ func tunnelWebRefValidationMessage(env tunnelInstallEnvironment, value string) s
 		return ""
 	}
 	switch env {
-	case tunnelEnvCompose, tunnelEnvComposeAlt:
+	case tunnelEnvCompose:
 		if dockerComposeServicePattern.MatchString(value) {
 			return ""
 		}
@@ -273,7 +273,7 @@ func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnel
 	if kind == tunnelWebRefKindNone {
 		return ""
 	}
-	if env == tunnelEnvCompose || env == tunnelEnvComposeAlt {
+	if env == tunnelEnvCompose {
 		if kind == tunnelWebRefKindService {
 			return ""
 		}

@@ -204,7 +204,6 @@ func TestTunnelWebRefKindValidationMessageMatrix(t *testing.T) {
 		{name: "compose none", env: tunnelEnvCompose, kind: tunnelWebRefKindNone},
 		{name: "compose service", env: tunnelEnvCompose, kind: tunnelWebRefKindService},
 		{name: "compose container", env: tunnelEnvCompose, kind: tunnelWebRefKindContainer, wantErr: true},
-		{name: "compose shorthand service", env: tunnelEnvComposeAlt, kind: tunnelWebRefKindService},
 		{name: "ecs container", env: tunnelEnvECSFargate, kind: tunnelWebRefKindContainer, wantErr: true},
 		{name: "kubernetes container", env: tunnelEnvKubernetes, kind: tunnelWebRefKindContainer, wantErr: true},
 		{name: "unknown container", env: tunnelInstallEnvironment("other"), kind: tunnelWebRefKindContainer, wantErr: true},
@@ -215,6 +214,24 @@ func TestTunnelWebRefKindValidationMessageMatrix(t *testing.T) {
 			msg := tunnelWebRefKindValidationMessage(tc.env, tc.kind)
 			if (msg != "") != tc.wantErr {
 				t.Fatalf("tunnelWebRefKindValidationMessage(%q, %q) = %q, wantErr=%v", tc.env, tc.kind, msg, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestDockerWebRefPatternsRejectShellMetacharacters(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{"$WEB", "`cmd`", `"quoted"`, "web;rm", "web|cat", "web name", "../web", "web\nnext"} {
+		t.Run(fmt.Sprintf("container/%q", input), func(t *testing.T) {
+			t.Parallel()
+			if dockerContainerRefPattern.MatchString(input) {
+				t.Fatalf("dockerContainerRefPattern accepted %q", input)
+			}
+		})
+		t.Run(fmt.Sprintf("compose/%q", input), func(t *testing.T) {
+			t.Parallel()
+			if dockerComposeServicePattern.MatchString(input) {
+				t.Fatalf("dockerComposeServicePattern accepted %q", input)
 			}
 		})
 	}
@@ -737,8 +754,8 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 		t.Fatal("OpenView context did not cancel within budget")
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "Could not open guided tunnel setup") {
-		t.Fatalf("async reply = %q, want OpenView failure copy", async)
+	if !strings.Contains(async, "Slack did not respond") || !strings.Contains(async, "/qurl tunnel install") {
+		t.Fatalf("async reply = %q, want deadline-expiry retry copy", async)
 	}
 }
 
