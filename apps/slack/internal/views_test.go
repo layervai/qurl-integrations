@@ -19,13 +19,13 @@ func TestSetAliasRebindModal_Shape(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if got["type"] != "modal" {
-		t.Errorf("type = %v, want modal", got["type"])
+	if got[blockKitFieldType] != blockKitTypeModal {
+		t.Errorf("type = %v, want modal", got[blockKitFieldType])
 	}
-	if got["callback_id"] != callbackIDSetAliasRebind {
-		t.Errorf("callback_id = %v, want %s", got["callback_id"], callbackIDSetAliasRebind)
+	if got[blockKitFieldCallbackID] != callbackIDSetAliasRebind {
+		t.Errorf("callback_id = %v, want %s", got[blockKitFieldCallbackID], callbackIDSetAliasRebind)
 	}
-	for _, k := range []string{"title", "submit", "close", "blocks"} {
+	for _, k := range []string{blockKitFieldTitle, blockKitFieldSubmit, blockKitFieldClose, blockKitFieldBlocks} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("missing required key %q", k)
 		}
@@ -150,7 +150,7 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 			if err := json.Unmarshal(raw, &modal); err != nil {
 				t.Fatalf("modal JSON: %v", err)
 			}
-			pm, ok := modal["private_metadata"].(string)
+			pm, ok := modal[blockKitFieldPrivateMetadata].(string)
 			if !ok {
 				t.Fatalf("private_metadata not a string: %T", modal["private_metadata"])
 			}
@@ -165,6 +165,60 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 				t.Errorf("new_target = %q, want %q", meta.NewTarget, tc.newTarget)
 			}
 		})
+	}
+}
+
+func TestTunnelInstallModal_Shape(t *testing.T) {
+	t.Parallel()
+	raw, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID:      "T_test",
+		ChannelID:   testTunnelChannelID,
+		UserID:      "U_test",
+		ResponseURL: "https://hooks.slack.com/services/test",
+	})
+	if err != nil {
+		t.Fatalf("TunnelInstallModal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if got[blockKitFieldType] != blockKitTypeModal {
+		t.Errorf("type = %v, want modal", got[blockKitFieldType])
+	}
+	if got[blockKitFieldCallbackID] != callbackIDTunnelInstall {
+		t.Errorf("callback_id = %v, want %s", got[blockKitFieldCallbackID], callbackIDTunnelInstall)
+	}
+	for _, k := range []string{blockKitFieldTitle, blockKitFieldSubmit, blockKitFieldClose, blockKitFieldBlocks, blockKitFieldPrivateMetadata} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing required key %q", k)
+		}
+	}
+	pm, ok := got[blockKitFieldPrivateMetadata].(string)
+	if !ok {
+		t.Fatalf("private_metadata not a string: %T", got[blockKitFieldPrivateMetadata])
+	}
+	var meta TunnelInstallModalMetadata
+	if err := json.Unmarshal([]byte(pm), &meta); err != nil {
+		t.Fatalf("private_metadata JSON: %v", err)
+	}
+	if meta.TeamID != "T_test" || meta.ChannelID != testTunnelChannelID || meta.UserID != "U_test" || meta.ResponseURL == "" {
+		t.Errorf("metadata = %+v, want team/channel/user/response_url", meta)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"Tunnel slug",
+		"Channel shortcut",
+		"Target environment",
+		string(tunnelEnvDockerVM),
+		string(tunnelEnvCompose),
+		string(tunnelEnvECSFargate),
+		string(tunnelEnvKubernetes),
+		"Local HTTP port",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("modal body missing %q", want)
+		}
 	}
 }
 

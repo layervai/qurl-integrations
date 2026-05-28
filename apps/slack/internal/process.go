@@ -67,12 +67,24 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 		"trigger_id", values.Get(fieldTriggerID),
 	)
 
+	if !h.startAsyncWorker(log, work) {
+		respondSlack(w, ackBusy)
+		return
+	}
+
+	respondSlack(w, ackWorkingOnIt)
+}
+
+// startAsyncWorker runs async slash-command or interaction work through the
+// same bounded pool, shutdown drain, timeout, and panic recovery. The caller
+// owns the Slack ack shape because slash commands and modal submissions have
+// different response contracts.
+func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Context, log *slog.Logger)) bool {
 	select {
 	case h.sem <- struct{}{}:
 	default:
 		log.Warn("async pool saturated — dropping request")
-		respondSlack(w, ackBusy)
-		return
+		return false
 	}
 
 	h.wg.Add(1)
@@ -101,8 +113,7 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 		defer cancel()
 		work(ctx, log)
 	}()
-
-	respondSlack(w, ackWorkingOnIt)
+	return true
 }
 
 // sanitizeAPIError builds a user-safe message from a (possibly non-nil)

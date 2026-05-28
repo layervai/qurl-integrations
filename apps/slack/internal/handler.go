@@ -141,11 +141,13 @@ type Config struct {
 	AdminStore *slackdata.Store
 
 	// OpenView posts a `views.open` Slack web API call to display a
-	// modal in response to a slash command. Production wires this in
-	// cmd/main.go using the workspace bot token; tests inject a stub
-	// that records the call. The setalias-rebind confirm modal is
-	// the only consumer today.
-	OpenView func(ctx context.Context, triggerID string, viewJSON []byte) error
+	// modal in response to a slash command. The teamID parameter is
+	// present so production can route through per-workspace OAuth bot
+	// tokens; the current cmd/main.go fallback uses one SLACK_BOT_TOKEN.
+	// Tests inject a stub that records the call. Tunnel install uses this
+	// for guided setup; setalias-rebind can use the same seam for
+	// confirmation modals.
+	OpenView func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
 
 	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
 	// on `/qurl get`. Production wires this in cmd/main.go; tests
@@ -714,9 +716,11 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
-		lines = append(lines,
-			"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
-		)
+		tunnelHelp := []string{"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)"}
+		if h.cfg.OpenView != nil {
+			tunnelHelp = append([]string{"• `/qurl tunnel install` — Guided tunnel setup with Docker, Docker Compose, ECS/Fargate, and Kubernetes install output (admin only)"}, tunnelHelp...)
+		}
+		lines = append(lines, tunnelHelp...)
 	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"

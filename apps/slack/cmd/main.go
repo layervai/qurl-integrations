@@ -127,6 +127,13 @@ func run() error {
 	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
+	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
+	var openView func(context.Context, string, string, []byte) error
+	if slackBotToken != "" {
+		openView = slackOpenViewFunc(slackBotToken, userAgent)
+	} else {
+		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")
+	}
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -143,6 +150,7 @@ func run() error {
 		BaseContext:        signalCtx,
 		MaxConcurrentAsync: maxConcurrentAsync,
 		AdminStore:         adminStore,
+		OpenView:           openView,
 		TunnelImage:        tunnelImage,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
