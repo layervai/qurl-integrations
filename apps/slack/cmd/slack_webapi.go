@@ -137,7 +137,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 }
 
 func slackOpenViewBodySnippet(raw []byte) string {
-	bodySnippet := strings.ToValidUTF8(printableLogSnippet(strings.TrimSpace(string(raw))), "?")
+	bodySnippet := printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(string(raw)), "?"))
 	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
 		return bodySnippet
 	}

@@ -256,7 +256,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"Tunnel `" + testTunnelSlug + "` is ready to install.",
 		"qURL shortcut `$" + testTunnelSlug + "` is ready in this channel.",
-		"Paste it only when prompted or into your secret manager",
+		"The shell block below prompts for it",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
 		"set -eu",
@@ -717,7 +717,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"Tunnel `" + testTunnelSlug + "` is ready to install.",
 		"qURL shortcut `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
-		"Paste it only when prompted or into your secret manager",
+		"The shell block below prompts for it",
 		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
 		testTunnelPipefailLine,
 		testTunnelKeyPromptLine,

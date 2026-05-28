@@ -217,8 +217,8 @@ func TestSlackOpenViewBodySnippetRepairsMalformedUTF8(t *testing.T) {
 	if !utf8.ValidString(got) {
 		t.Fatalf("snippet is not valid UTF-8: %q", got)
 	}
-	if !strings.HasSuffix(got, "...") {
-		t.Fatalf("snippet = %q, want truncation suffix", got)
+	if got != "?tail" {
+		t.Fatalf("snippet = %q, want repaired malformed bytes", got)
 	}
 }
 

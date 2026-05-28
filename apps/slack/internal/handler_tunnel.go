@@ -238,8 +238,7 @@ func tunnelInstallWizardRequest(text string) bool {
 	if len(fields) != 1 || fields[0] != "install" {
 		return false
 	}
-	args, userMsg := parseTunnelInstall(text)
-	return args == nil && userMsg == tunnelInstallUsage()
+	return true
 }
 
 func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Values) {
@@ -516,7 +515,7 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n%s%s\n\n%s\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. The shell block below prompts for it; do not add the key to the shell text itself. Paste it only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n%s%s\n\n%s\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
 		tunnelBootstrapExpiryLabel(key),
