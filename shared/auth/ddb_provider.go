@@ -399,11 +399,15 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	if install == nil {
 		return errors.New("DDBProvider.SetSlackBotToken: install is nil")
 	}
-	if install.BotToken == "" {
+	botToken := strings.TrimSpace(install.BotToken)
+	if botToken == "" {
 		return errors.New("DDBProvider.SetSlackBotToken: bot token is empty")
 	}
+	if err := ValidateSlackBotTokenShape(botToken); err != nil {
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: invalid bot token: %w", err)
+	}
 
-	ct, wrapped, err := p.Encryptor.Seal(ctx, []byte(install.BotToken), []byte(workspaceID))
+	ct, wrapped, err := p.Encryptor.Seal(ctx, []byte(botToken), []byte(workspaceID))
 	if err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: encrypt: %w", err)
 	}

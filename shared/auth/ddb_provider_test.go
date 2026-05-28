@@ -13,7 +13,7 @@ import (
 
 const (
 	testTeamID        = "T123ABCDEF"
-	testSlackBotToken = "xoxb-secret"
+	testSlackBotToken = "xoxb-123456789012345678901234567890"
 )
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
@@ -449,6 +449,20 @@ func TestDDBProviderSetSlackBotTokenRemovesEmptyOptionalMetadata(t *testing.T) {
 	}
 	if _, ok := ddb.updateInput.ExpressionAttributeValues[":scopes"]; ok {
 		t.Fatal("empty scopes should not write :scopes")
+	}
+}
+
+func TestDDBProviderSetSlackBotTokenRejectsMalformedToken(t *testing.T) {
+	ddb := &fakeDDBClient{}
+	p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+	err := p.SetSlackBotToken(context.Background(), testTeamID, &SlackBotTokenInstall{
+		BotToken: "xoxa-123456789012345678901234567890",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid bot token") {
+		t.Fatalf("err=%v, want invalid bot token", err)
+	}
+	if ddb.updateInput != nil {
+		t.Fatal("malformed token should not write DDB")
 	}
 }
 
