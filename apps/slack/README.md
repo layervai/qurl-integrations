@@ -33,7 +33,9 @@ by the current bot deployment.
   workspace bot token in `workspace_state` using the same KMS envelope
   encryption posture as qURL API keys. `SLACK_BOT_TOKEN` is only a legacy
   single-workspace fallback; production guided setup should use the
-  per-workspace token captured by Slack install OAuth.
+  per-workspace token captured by Slack install OAuth. Org-level Enterprise
+  Grid installs are not supported in this flow; install qURL to each workspace
+  that should use guided tunnel setup.
 - **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal with the
   bot token for the invoking workspace, letting an admin choose the tunnel
   slug, optional channel shortcut, local port, and target environment
@@ -136,6 +138,8 @@ For customer Slack installs, configure the Slack app with:
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
 - Bot scopes: at least `commands` and `views:write`
+- Installation mode: workspace-level installs; org-level Enterprise Grid
+  installs are rejected until enterprise-scoped tokens are supported
 
 After adding `views:write` or moving to per-workspace token storage, existing
 customer workspaces must reinstall or reauthorize the Slack app so Slack issues

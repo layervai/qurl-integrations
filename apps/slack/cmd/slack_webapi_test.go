@@ -220,6 +220,38 @@ func TestWorkspaceSlackTokenLookupCollapsesConcurrentMisses(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSlackTokenLookupCacheSweepsExpiredEntries(t *testing.T) {
+	at := time.Unix(1800000000, 0)
+	cache := &workspaceSlackTokenLookupCache{
+		positive: map[string]cachedSlackBotToken{
+			"T_expired": {token: testWorkspaceSlackBotToken, expiresAt: at.Add(-time.Second)},
+			"T_fresh":   {token: testWorkspaceSlackBotToken, expiresAt: at.Add(time.Minute)},
+		},
+		negative: map[string]time.Time{
+			"T_negative_expired": at.Add(-time.Second),
+			"T_negative_fresh":   at.Add(time.Minute),
+		},
+		inFlight: map[string]*workspaceSlackTokenLookupCall{},
+	}
+
+	start := cache.getOrStart("T_new", time.Minute, at)
+	if !start.owner {
+		t.Fatal("new team should start a provider lookup")
+	}
+	if _, ok := cache.positive["T_expired"]; ok {
+		t.Fatal("expired positive cache entry was not swept")
+	}
+	if _, ok := cache.negative["T_negative_expired"]; ok {
+		t.Fatal("expired negative cache entry was not swept")
+	}
+	if _, ok := cache.positive["T_fresh"]; !ok {
+		t.Fatal("fresh positive cache entry should remain")
+	}
+	if _, ok := cache.negative["T_negative_fresh"]; !ok {
+		t.Fatal("fresh negative cache entry should remain")
+	}
+}
+
 func TestSlackOpenViewFuncLookupErrorSkipsRequest(t *testing.T) {
 	t.Parallel()
 	var called atomic.Bool

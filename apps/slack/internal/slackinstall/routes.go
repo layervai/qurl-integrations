@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -37,7 +38,8 @@ const (
 	slackAuthorizeURL          = "https://slack.com/oauth/v2/authorize"
 	stateCookieName            = "__Host-qurl-slack-install-state"
 	stateTTL                   = 10 * time.Minute
-	stateMinSecretBytes        = 32
+	stateMinSecretBytes        = slackoauth.StateMinSecret
+	stateFutureSkew            = 30 * time.Second
 	slackOAuthTimeout          = 10 * time.Second
 	persistTimeout             = 15 * time.Second
 	slackOAuthBodyLimit        = 8 << 10
@@ -216,56 +218,60 @@ func Callback(cfg *Config) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		fail := func(message string, code int) {
+			clearStateCookie(w)
+			http.Error(w, message, code)
+		}
 		if errParam := r.URL.Query().Get("error"); errParam != "" {
 			logSlackInstallCallbackError(safeSlackOAuthErrorCode(errParam), len(errParam))
-			clearStateCookie(w)
-			http.Error(w, "Slack install was not completed", http.StatusBadRequest)
+			fail("Slack install was not completed", http.StatusBadRequest)
 			return
 		}
 		code := strings.TrimSpace(r.URL.Query().Get("code"))
 		state := strings.TrimSpace(r.URL.Query().Get("state"))
 		if code == "" || state == "" {
-			clearStateCookie(w)
-			http.Error(w, "missing Slack install code or state", http.StatusBadRequest)
+			fail("missing Slack install code or state", http.StatusBadRequest)
 			return
 		}
 		if !verifyCookieState(r, state) {
-			clearStateCookie(w)
-			http.Error(w, "Slack install must be completed in the same browser", http.StatusBadRequest)
+			fail("Slack install must be completed in the same browser", http.StatusBadRequest)
 			return
 		}
 		if err := verifyState(cfg.StateSecret, state, cfg.now()); err != nil {
 			slog.Warn("Slack install rejected invalid state", "error", err)
-			clearStateCookie(w)
-			http.Error(w, "invalid or expired Slack install link", http.StatusBadRequest)
+			fail("invalid or expired Slack install link", http.StatusBadRequest)
 			return
 		}
 
 		resp, err := exchangeCode(r.Context(), cfg, code)
 		if err != nil {
 			slog.Error("Slack install token exchange failed", "error", err)
-			clearStateCookie(w)
-			http.Error(w, "Slack install token exchange failed", http.StatusBadGateway)
-			return
-		}
-		teamID := strings.TrimSpace(resp.Team.ID)
-		if teamID == "" {
-			logSlackInstallMissingTeamID(strings.TrimSpace(resp.AppID) != "")
-			clearStateCookie(w)
-			http.Error(w, "Slack workspace install did not include a workspace id", http.StatusBadGateway)
+			fail("Slack install token exchange failed", http.StatusBadGateway)
 			return
 		}
 		enterpriseID := strings.TrimSpace(resp.Enterprise.ID)
+		teamID := strings.TrimSpace(resp.Team.ID)
+		if teamID == "" {
+			if resp.IsEnterpriseInstall || enterpriseID != "" {
+				logSlackInstallEnterpriseInstallUnsupported(resp.IsEnterpriseInstall, enterpriseID != "")
+				fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusBadGateway)
+				return
+			}
+			logSlackInstallMissingTeamID(strings.TrimSpace(resp.AppID) != "")
+			fail("Slack workspace install did not include a workspace id", http.StatusBadGateway)
+			return
+		}
 		installedBy := strings.TrimSpace(resp.AuthedUser.ID)
 		if installedBy == "" {
 			logSlackInstallMissingAuthedUser(teamID != "")
-			clearStateCookie(w)
-			http.Error(w, "Slack workspace install did not include an installer id", http.StatusBadGateway)
+			fail("Slack workspace install did not include an installer id", http.StatusBadGateway)
 			return
 		}
 		grantedScopes := NormalizeScopes([]string{resp.Scope})
 		if missing := missingRequiredScopes(grantedScopes); len(missing) > 0 {
 			logSlackInstallMissingRequiredScopes(missing, teamID != "")
+			fail("Slack install did not grant required bot scopes", http.StatusBadGateway)
+			return
 		}
 		// Slack OAuth codes are single-use, so persist should finish even if the
 		// browser disconnects after Slack redirects back to us.
@@ -280,8 +286,7 @@ func Callback(cfg *Config) http.HandlerFunc {
 			Scopes:       grantedScopes,
 		}); err != nil {
 			logSlackInstallPersistFailed(err, teamID != "", installedBy != "")
-			clearStateCookie(w)
-			http.Error(w, "Slack install could not be stored", http.StatusInternalServerError)
+			fail("Slack install could not be stored", http.StatusInternalServerError)
 			return
 		}
 
@@ -367,7 +372,7 @@ func verifyState(secret []byte, token string, now time.Time) error {
 		return fmt.Errorf("state payload JSON: %w", err)
 	}
 	createdAt := time.Unix(payload.CreatedAtUnix, 0)
-	if now.Before(createdAt.Add(-1 * time.Minute)) {
+	if now.Before(createdAt.Add(-1 * stateFutureSkew)) {
 		return errors.New("state timestamp is in the future")
 	}
 	if now.Sub(createdAt) > stateTTL {
@@ -423,19 +428,18 @@ func verifyCookieState(r *http.Request, state string) bool {
 }
 
 type oauthAccessResponse struct {
-	OK          bool   `json:"ok"`
-	Error       string `json:"error"`
-	AccessToken string `json:"access_token"`
-	Scope       string `json:"scope"`
-	BotUserID   string `json:"bot_user_id"`
-	AppID       string `json:"app_id"`
-	Team        struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+	OK                  bool   `json:"ok"`
+	Error               string `json:"error"`
+	AccessToken         string `json:"access_token"`
+	Scope               string `json:"scope"`
+	BotUserID           string `json:"bot_user_id"`
+	AppID               string `json:"app_id"`
+	IsEnterpriseInstall bool   `json:"is_enterprise_install"`
+	Team                struct {
+		ID string `json:"id"`
 	} `json:"team"`
 	Enterprise struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID string `json:"id"`
 	} `json:"enterprise"`
 	AuthedUser struct {
 		ID string `json:"id"`
@@ -536,6 +540,11 @@ func logSlackInstallCallbackError(errorCode string, errorLen int) {
 
 func logSlackInstallMissingTeamID(appIDPresent bool) {
 	slog.Error("Slack install token exchange missing team id", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
+}
+
+func logSlackInstallEnterpriseInstallUnsupported(isEnterpriseInstall, enterpriseIDPresent bool) {
+	slog.Error("Slack install rejected unsupported Enterprise Grid org install", // #nosec G706 -- only booleans are logged; no Slack string reaches the attribute.
+		"is_enterprise_install", isEnterpriseInstall, "enterprise_id_present", enterpriseIDPresent)
 }
 
 func logSlackInstallMissingAuthedUser(teamIDPresent bool) {

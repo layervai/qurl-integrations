@@ -75,6 +75,7 @@ const (
 	// legacy SLACK_BOT_TOKEN fallback window after a customer reinstalls.
 	slackWorkspaceTokenCacheTTL         = 30 * time.Second
 	slackWorkspaceTokenNegativeCacheTTL = 10 * time.Second
+	slackWorkspaceTokenCacheSweepEvery  = time.Minute
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -332,10 +333,11 @@ type workspaceSlackTokenLookupStart struct {
 }
 
 type workspaceSlackTokenLookupCache struct {
-	mu       sync.Mutex
-	positive map[string]cachedSlackBotToken
-	negative map[string]time.Time
-	inFlight map[string]*workspaceSlackTokenLookupCall
+	mu        sync.Mutex
+	positive  map[string]cachedSlackBotToken
+	negative  map[string]time.Time
+	inFlight  map[string]*workspaceSlackTokenLookupCall
+	lastSweep time.Time
 }
 
 func slackOpenViewFuncWithWorkspaceTokens(provider slackBotTokenProvider, fallbackToken, userAgent string) internal.OpenViewFunc {
@@ -390,6 +392,8 @@ func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvide
 			return "", false, false, errors.New("workspace Slack bot token is empty")
 		}
 		if err := auth.ValidateSlackBotTokenShape(token); err != nil {
+			// Do not cache malformed-token errors; once the workspace row is
+			// repaired, the next lookup should observe the fix immediately.
 			return "", false, false, fmt.Errorf("workspace Slack bot token: %w", err)
 		}
 		return token, true, false, nil
@@ -408,6 +412,7 @@ func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvide
 func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Duration, at time.Time) workspaceSlackTokenLookupStart {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepExpiredLocked(at)
 	if ttl > 0 {
 		cached, ok := c.positive[teamID]
 		if ok && at.Before(cached.expiresAt) {
@@ -459,6 +464,23 @@ func (c *workspaceSlackTokenLookupCache) finish(
 	call.workspaceSlackTokenLookupResult = result
 	delete(c.inFlight, teamID)
 	close(call.done)
+}
+
+func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {
+	if !c.lastSweep.IsZero() && at.Sub(c.lastSweep) < slackWorkspaceTokenCacheSweepEvery {
+		return
+	}
+	for teamID, cached := range c.positive {
+		if !at.Before(cached.expiresAt) {
+			delete(c.positive, teamID)
+		}
+	}
+	for teamID, expiresAt := range c.negative {
+		if !at.Before(expiresAt) {
+			delete(c.negative, teamID)
+		}
+	}
+	c.lastSweep = at
 }
 
 // minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.
