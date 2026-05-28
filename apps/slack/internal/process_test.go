@@ -621,15 +621,31 @@ func TestSanitizeAPIError(t *testing.T) {
 	}
 }
 
+func newContextBlockingQURLServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.CloseClientConnections()
+		srv.Close()
+	})
+	return srv
+}
+
 // TestHandle_AsyncWorkObservesBaseContextCancellation fences the
 // shutdown-cancellation contract: when h.baseCtx is canceled, an
 // in-flight worker exits promptly rather than blocking shutdown.
 func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
-	// Block forever so cancellation is the only exit.
-	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	t.Cleanup(qurlSrv.Close)
+	// Block until request cancellation; test cleanup also has an explicit
+	// release so httptest.Server.Close cannot hang if the transport delays
+	// propagating cancellation to r.Context().
+	qurlSrv := newContextBlockingQURLServer(t)
 
 	t.Setenv("QURL_API_KEY", "test-key")
 
@@ -677,10 +693,7 @@ func TestHandle_OrphanAckPreventionOnBaseContextCancel(t *testing.T) {
 	// processCreate then sanitizes and calls postResponse. If
 	// postResponse used the worker ctx, that POST would fail too
 	// (orphan ack); with a fresh context it should succeed.
-	qurlSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	t.Cleanup(qurlSrv.Close)
+	qurlSrv := newContextBlockingQURLServer(t)
 
 	t.Setenv("QURL_API_KEY", "test-key")
 
