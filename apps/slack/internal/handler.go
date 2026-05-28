@@ -30,6 +30,11 @@ const (
 // trigger_id expiry distinctly from auth, network, and Slack API failures.
 var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
 
+// ErrSlackRateLimited lets Config.OpenView surface Slack views.open rate
+// limiting distinctly so the slash-command follow-up can give the operator a
+// retry-shaped action instead of a generic setup failure.
+var ErrSlackRateLimited = errors.New("slack views.open rate limited")
+
 // authErrorMessage maps an APIKey-lookup error to the right user-facing
 // reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
 // /qurl setup yet" path — surface a useful next-action instead of the

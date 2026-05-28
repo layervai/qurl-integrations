@@ -18,6 +18,7 @@ import (
 // keep Slack modal input bounded so an accidental paste cannot dominate the
 // rendered install snippet.
 var dockerContainerRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var dockerComposeServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // handleInteraction routes Slack interaction POSTs (button clicks,
 // modal submissions) to the right inner handler. Unknown interactions
@@ -75,7 +76,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl tunnel install again.")
 		return
 	}
-	if meta.CreatedAtUnix > 0 && tunnelBootstrapNow().Sub(time.Unix(meta.CreatedAtUnix, 0)) > tunnelInstallModalTTL {
+	if meta.CreatedAtUnix <= 0 || tunnelBootstrapNow().Sub(time.Unix(meta.CreatedAtUnix, 0)) > tunnelInstallModalTTL {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix)
 		respondTunnelInstallModalError(w, "This modal expired. Run /qurl tunnel install again.")
 		return
@@ -167,8 +168,8 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	}
 
 	webContainer := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockWebContainer, tunnelInstallActionWebContainer))
-	if webContainer != "" && !dockerContainerRefPattern.MatchString(webContainer) {
-		fieldErrors[tunnelInstallBlockWebContainer] = "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
+	if msg := tunnelWebContainerValidationMessage(env, webContainer); msg != "" {
+		fieldErrors[tunnelInstallBlockWebContainer] = msg
 	}
 
 	if len(fieldErrors) > 0 {
@@ -199,16 +200,26 @@ func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 }
 
 func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
-	view, err := TunnelInstallErrorModal(message)
-	if err != nil {
-		slog.Error("tunnel install modal error render failed", "error", err)
-		respondViewErrors(w, map[string]string{tunnelInstallBlockEnvironment: message})
-		return
-	}
 	respondJSON(w, http.StatusOK, map[string]any{
 		"response_action": "update",
-		"view":            json.RawMessage(view),
+		"view":            json.RawMessage(TunnelInstallErrorModal(message)),
 	})
+}
+
+func tunnelWebContainerValidationMessage(env tunnelInstallEnvironment, value string) string {
+	if value == "" {
+		return ""
+	}
+	if env == tunnelEnvCompose {
+		if dockerComposeServicePattern.MatchString(value) {
+			return ""
+		}
+		return "Use a Docker Compose service name with letters, numbers, underscores, or hyphens. Dots are not allowed."
+	}
+	if dockerContainerRefPattern.MatchString(value) {
+		return ""
+	}
+	return "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
 }
 
 func tunnelInstallModalAliasError(aliasMsg string) string {

@@ -137,7 +137,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
-			inputBlock(tunnelInstallBlockSlug, "Tunnel slug", "Lowercase letters, numbers, and hyphens. Users will run /qurl get $slug.", false,
+			inputBlock(tunnelInstallBlockSlug, "Tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
 			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
@@ -150,7 +150,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 				}, optionObj("Docker sidecar", string(tunnelEnvDockerVM)))),
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
-			inputBlock(tunnelInstallBlockWebContainer, "Docker service/container", "Optional. Used for Docker and Docker Compose output.", true,
+			inputBlock(tunnelInstallBlockWebContainer, "Docker service/container", "Optional. Docker container name or Compose service name; Compose names cannot include dots.", true,
 				plainTextInput(tunnelInstallActionWebContainer, "web", "")),
 		},
 	}
@@ -160,7 +160,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 // TunnelInstallErrorModal replaces a submitted tunnel-install modal with a
 // form-level error. Slack's `response_action: errors` can only attach copy to
 // input fields, which makes auth/config failures look like bad user input.
-func TunnelInstallErrorModal(message string) ([]byte, error) {
+func TunnelInstallErrorModal(message string) []byte {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
 		blockKitFieldTitle: plainTextObj("Tunnel setup"),
@@ -169,7 +169,7 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 			sectionBlock(":warning: " + message),
 		},
 	}
-	return json.Marshal(payload)
+	return mustMarshalStaticJSON(payload)
 }
 
 // escapeMrkdwnCode neutralizes the characters that can break out of

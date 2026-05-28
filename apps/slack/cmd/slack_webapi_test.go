@@ -61,6 +61,40 @@ func TestSlackOpenViewFuncSurfacesSlackError(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncSurfacesRateLimit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "http 429",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "2")
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+		},
+		{
+			name: "json ratelimited",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(tc.handler)
+			t.Cleanup(srv.Close)
+
+			err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+			if !errors.Is(err, internal.ErrSlackRateLimited) {
+				t.Fatalf("error = %v, want rate-limited sentinel", err)
+			}
+		})
+	}
+}
+
 func TestSlackOpenViewFuncRejectsInvalidViewJSON(t *testing.T) {
 	t.Parallel()
 

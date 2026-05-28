@@ -21,11 +21,14 @@ const (
 	// Production deploys should set QURL_TUNNEL_IMAGE to an immutable
 	// release tag or digest. The floating fallback is for dev/sandbox
 	// onboarding where the latest sidecar build is intentional.
-	defaultTunnelImage         = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
-	defaultTunnelLocalPort     = 8080
-	tunnelBootstrapTTL         = "1h"
-	tunnelBootstrapSkew        = 2 * time.Minute
-	tunnelInstallModalTTL      = 25 * time.Minute
+	defaultTunnelImage     = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
+	defaultTunnelLocalPort = 8080
+	tunnelBootstrapTTL     = "1h"
+	tunnelBootstrapSkew    = 2 * time.Minute
+	tunnelInstallModalTTL  = 25 * time.Minute
+	// Slack trigger_ids expire after roughly three seconds. The slash-command
+	// ack now happens before views.open; this tighter bound preserves enough of
+	// the trigger window for one admin check plus the Slack Web API call.
 	slackTriggerOpenViewBudget = time.Second
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
@@ -136,6 +139,9 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 			return nil, tunnelInstallUsage()
 		}
 	}
+	if msg := tunnelWebContainerValidationMessage(args.Environment, args.WebContainer); msg != "" {
+		return nil, msg + "\n\n" + tunnelInstallUsage()
+	}
 	return args, ""
 }
 
@@ -232,41 +238,67 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		respondSlack(w, ":warning: missing channel_id in slash command payload")
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminAction("tunnel_install")) {
-		return
-	}
 	triggerID := strings.TrimSpace(values.Get(fieldTriggerID))
 	if triggerID == "" {
 		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl tunnel install <slug> [port:8080]` instead.")
+		return
+	}
+	log := slog.With(
+		"command", "tunnel_install_wizard",
+		"team_id", teamID,
+		"channel_id", channelID,
+		"user_id", userID,
+		"trigger_id", triggerID,
+	)
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		h.openTunnelInstallWizard(ctx, log, teamID, channelID, userID, triggerID, values.Get(fieldResponseURL))
+	}) {
+		respondSlack(w, ackBusy)
+		return
+	}
+	respondSlack(w, "Opening guided tunnel setup…")
+}
+
+func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string) {
+	adminCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
+	cancel()
+	if err != nil {
+		log.Error("tunnel install wizard admin check failed", "error", err)
+		h.postResponse(log, responseURL, "Could not verify admin status. Retry in a moment.")
+		return
+	}
+	if !isAdmin {
+		log.Warn("tunnel install wizard denied: non-admin")
+		h.postResponse(log, responseURL, "This command is admin-only.")
 		return
 	}
 	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
 		TeamID:        teamID,
 		ChannelID:     channelID,
 		UserID:        userID,
-		ResponseURL:   values.Get(fieldResponseURL),
+		ResponseURL:   responseURL,
 		CreatedAtUnix: tunnelBootstrapNow().Unix(),
 	})
 	if err != nil {
-		slog.Error("tunnel install: modal render failed", "error", err)
-		respondSlack(w, "Could not open guided tunnel setup. Please retry or contact support.")
+		log.Error("tunnel install wizard modal render failed", "error", err)
+		h.postResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.")
 		return
 	}
-	// Slack trigger_ids expire quickly; after the admin gate, keep views.open
-	// on its own tighter budget so latency spikes fail while the operator can
-	// still immediately rerun the command.
-	ctx, cancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+	openCtx, cancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
 	defer cancel()
-	if err := h.cfg.OpenView(ctx, teamID, triggerID, view); err != nil {
-		slog.Error("tunnel install: views.open failed", "error", err, "team_id", teamID, "user_id", userID)
-		if errors.Is(err, ErrSlackTriggerExpired) {
-			respondSlack(w, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.")
-			return
+	if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+		log.Error("tunnel install wizard views.open failed", "error", err, "slack_rate_limited", errors.Is(err, ErrSlackRateLimited))
+		switch {
+		case errors.Is(err, ErrSlackTriggerExpired):
+			h.postResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.")
+		case errors.Is(err, ErrSlackRateLimited):
+			h.postResponse(log, responseURL, "Slack rate-limited guided tunnel setup. Wait a moment, then run `/qurl tunnel install` again.")
+		default:
+			h.postResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.")
 		}
-		respondSlack(w, "Could not open guided tunnel setup. Please retry or contact support.")
 		return
 	}
-	respondSlack(w, "Opening guided tunnel setup…")
 }
 
 func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs) {
@@ -418,7 +450,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) string {
 }
 
 func renderDockerTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
-	webContainer := "YOUR_WEB_CONTAINER_NAME"
+	webContainer := shellSingleQuote("YOUR_WEB_CONTAINER_NAME")
 	if args.WebContainer != "" {
 		webContainer = shellSingleQuote(args.WebContainer)
 	}
@@ -481,7 +513,7 @@ docker run -d \
 }
 
 func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
-	webService := "YOUR_COMPOSE_SERVICE_NAME"
+	webService := shellSingleQuote("YOUR_COMPOSE_SERVICE_NAME")
 	if args.WebContainer != "" {
 		webService = shellSingleQuote(args.WebContainer)
 	}
@@ -542,7 +574,7 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d qurl-tunnel`
 
 	intro := "Run this from your Docker Compose project directory."
 	if args.WebContainer == "" {
-		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `container:<service>` in the typed command."
+		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command."
 	}
 	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the per-slug Compose fragment when the slug, port, or service changes."
 	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f \"$APP_COMPOSE_FILE\" -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel`; after the tunnel connects, delete the bootstrap key file."
@@ -551,6 +583,8 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d qurl-tunnel`
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
 	containerJSON := renderECSSidecarContainerJSON(args, image)
 	secretName := "qurl-tunnel-" + args.Slug
+	// validateBootstrapAPIKeyForShell keeps this plaintext token single-line
+	// and printable; slackCodeBlock rejects nested fences before Slack sees it.
 	body := fmt.Sprintf(`1. Store this bootstrap key in AWS Secrets Manager, then delete this Slack message:
 %s
 
@@ -563,7 +597,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.API
 4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config.
 Do not share qurl-agent-state across concurrently running sidecars.`, key.APIKey, renderTunnelConfigYAML(args), containerJSON)
 
-	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. After the task logs show the tunnel connected, delete the bootstrap secret.\n\n" + slackCodeBlock(body)
+	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves, and replace `<region>` / `<account-id>` in the JSON placeholders before registering the task definition. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. After the task logs show the tunnel connected, delete the bootstrap secret.\n\n" + slackCodeBlock(body)
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string {
@@ -630,7 +664,11 @@ spec:
       storage: 1Gi
 QURL_K8S_YAML_EOF`, args.Slug, yamlSingleQuoted(key.APIKey), args.Slug, indentLines(renderTunnelConfigYAML(args), 4), args.Slug)
 
-	patch := fmt.Sprintf(`containers:
+	patch := fmt.Sprintf(`securityContext:
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+containers:
   - name: qurl-tunnel
     image: %s
     env:
@@ -655,6 +693,7 @@ volumes:
   - name: qurl-bootstrap
     secret:
       secretName: qurl-tunnel-%s
+      defaultMode: 0400
   - name: qurl-proxy
     configMap:
       name: qurl-proxy-%s`, yamlSingleQuoted(image), args.Slug, args.Slug, args.Slug, args.Slug)

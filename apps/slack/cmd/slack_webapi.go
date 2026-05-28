@@ -29,6 +29,8 @@ func slackOpenViewFuncWithURL(token, userAgent, viewsOpenURL string) func(contex
 		// seam so the production wiring can move from this single-token
 		// deployment shape to per-team OAuth token lookup without changing
 		// the handler contract.
+		// TODO(slack-oauth): look up the workspace bot token by teamID once
+		// the per-workspace OAuth token store is the only production path.
 		_ = teamID
 		if !json.Valid(viewJSON) {
 			return errors.New("views.open: invalid view JSON")
@@ -69,29 +71,49 @@ func slackOpenViewFuncWithURL(token, userAgent, viewsOpenURL string) func(contex
 		if len(raw) > bodyCap {
 			return fmt.Errorf("views.open response exceeded %d bytes", bodyCap)
 		}
-		if resp.StatusCode >= 400 {
-			bodySnippet := strings.TrimSpace(string(raw))
-			if bodySnippet == "" {
-				return fmt.Errorf("views.open returned HTTP %d", resp.StatusCode)
-			}
-			return fmt.Errorf("views.open returned HTTP %d: %s", resp.StatusCode, bodySnippet)
+		return slackOpenViewResponseError(resp.StatusCode, resp.Header, raw)
+	}
+}
+
+func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) error {
+	if statusCode == http.StatusTooManyRequests {
+		retryAfter := strings.TrimSpace(header.Get("Retry-After"))
+		if retryAfter == "" {
+			return internal.ErrSlackRateLimited
 		}
-		var out struct {
-			OK    bool   `json:"ok"`
-			Error string `json:"error"`
+		return fmt.Errorf("%w: retry_after=%s", internal.ErrSlackRateLimited, retryAfter)
+	}
+	if statusCode >= 400 {
+		bodySnippet := strings.TrimSpace(string(raw))
+		if bodySnippet == "" {
+			return fmt.Errorf("views.open returned HTTP %d", statusCode)
 		}
-		if err := json.Unmarshal(raw, &out); err != nil {
-			return fmt.Errorf("views.open response JSON: %w", err)
-		}
-		if !out.OK {
-			if out.Error == "" {
-				out.Error = "not_ok"
-			}
-			if out.Error == "invalid_trigger" || out.Error == "trigger_expired" {
-				return fmt.Errorf("%w: %s", internal.ErrSlackTriggerExpired, out.Error)
-			}
-			return fmt.Errorf("views.open: %s", out.Error)
-		}
+		return fmt.Errorf("views.open returned HTTP %d: %s", statusCode, bodySnippet)
+	}
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("views.open response JSON: %w", err)
+	}
+	if out.OK {
 		return nil
+	}
+	if out.Error == "" {
+		out.Error = "not_ok"
+	}
+	return slackOpenViewAPIError(out.Error)
+}
+
+func slackOpenViewAPIError(code string) error {
+	switch code {
+	case "invalid_trigger", "trigger_expired":
+		return fmt.Errorf("%w: %s", internal.ErrSlackTriggerExpired, code)
+	case "ratelimited":
+		return internal.ErrSlackRateLimited
+	default:
+		return fmt.Errorf("views.open: %s", code)
 	}
 }
