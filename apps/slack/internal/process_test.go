@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +20,31 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
+
+type testRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type trackingResponseBody struct {
+	reader *strings.Reader
+	sawEOF atomic.Bool
+	closed atomic.Bool
+}
+
+func (b *trackingResponseBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.sawEOF.Store(true)
+	}
+	return n, err
+}
+
+func (b *trackingResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
 
 // responseURLRecorder is an httptest.Server that captures every
 // response_url POST it receives. Tests use it to assert the body the
@@ -50,6 +77,33 @@ func newResponseURLRecorder(t *testing.T) *responseURLRecorder {
 	t.Cleanup(srv.Close)
 	rec.URL = srv.URL
 	return rec
+}
+
+func TestPostResponseBodyDrainsOversizedErrorBody(t *testing.T) {
+	t.Parallel()
+	body := &trackingResponseBody{reader: strings.NewReader(strings.Repeat("x", 4097))}
+	h := &Handler{
+		responseURLClient: &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		})},
+		validateResponseURLFn: url.Parse,
+	}
+
+	ok := h.postResponseBody(slog.New(slog.NewTextHandler(io.Discard, nil)), "http://slack.test/response", []byte(`{"text":"test"}`))
+
+	if ok {
+		t.Fatal("postResponseBody returned true for HTTP 400")
+	}
+	if !body.sawEOF.Load() {
+		t.Fatal("oversized response_url body was not drained to EOF")
+	}
+	if !body.closed.Load() {
+		t.Fatal("oversized response_url body was not closed")
+	}
 }
 
 // getURLCommandBody builds a /slack/commands form payload for a

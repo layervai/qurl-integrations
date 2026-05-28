@@ -70,8 +70,8 @@ const (
 	maxHeaderBytes = 8 << 10 // 8 KiB
 	// Slack remains the token-validity authority; these bounds are only a local
 	// boot-time typo guard for obviously truncated or pasted-wrong values.
-	slackBotTokenMinLen = 50
-	slackBotTokenMaxLen = 320
+	slackBotTokenTypoGuardMin = 50
+	slackBotTokenTypoGuardMax = 320
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -320,11 +320,11 @@ func validateSlackBotToken(token string) error {
 	// guard, while Slack's auth response remains the validity oracle.
 	// TODO(slack-token-rotation): revisit the prefix check if Slack recommends
 	// xoxe.xoxb-style rotation tokens for bot-authenticated Web API calls.
-	if len(token) < slackBotTokenMinLen {
-		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenMinLen)
+	if len(token) < slackBotTokenTypoGuardMin {
+		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenTypoGuardMin)
 	}
-	if len(token) > slackBotTokenMaxLen {
-		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenMaxLen)
+	if len(token) > slackBotTokenTypoGuardMax {
+		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenTypoGuardMax)
 	}
 	if !strings.HasPrefix(token, "xoxb-") {
 		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-")

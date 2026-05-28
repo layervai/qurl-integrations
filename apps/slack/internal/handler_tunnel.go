@@ -66,7 +66,7 @@ const (
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
 	// Input-only shorthand; parseTunnelEnvironment normalizes this spelling to
 	// tunnelEnvCompose so renderers never receive a second Compose value.
-	tunnelEnvComposeAlt = "compose"
+	tunnelEnvComposeAlt string = "compose"
 
 	tunnelWebRefKindNone      tunnelInstallWebRefKind = ""
 	tunnelWebRefKindContainer tunnelInstallWebRefKind = "container"
@@ -724,6 +724,8 @@ unset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN`, targetPath)
 func renderBootstrapKeyPipeShell(command string) string {
 	// Stream exactly the key byte count from a here-doc so the trailing heredoc
 	// newline is not part of the secret and the key never appears in argv.
+	// This heredoc-with-pipe form is intentionally limited to Linux /bin/sh
+	// implementations used in our install targets: bash, dash, and BusyBox ash.
 	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
 head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | %s
 $QURL_BOOTSTRAP_KEY
@@ -794,10 +796,11 @@ func humanDurationCeilMinutes(d time.Duration) string {
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {
 	// qurl-service bootstrap keys must be printable single-line ASCII tokens
-	// without shell expansion bytes. ASCII keeps ${#QURL_BOOTSTRAP_KEY} and
-	// head -c byte counts aligned across shells/locales. Dollar signs and
-	// backslashes are rejected because the generated install snippets stream the
-	// prompt value through an unquoted heredoc so the key never appears in argv.
+	// without heredoc expansion bytes. ASCII keeps ${#QURL_BOOTSTRAP_KEY} and
+	// head -c byte counts aligned across shells/locales. Dollar signs,
+	// backticks, and backslashes are rejected because the generated install
+	// snippets stream the prompt value through an unquoted heredoc so the key
+	// never appears in argv; other shell metacharacters are not expanded there.
 	if apiKey == "" {
 		return errors.New("empty api key")
 	}

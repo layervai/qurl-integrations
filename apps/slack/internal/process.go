@@ -245,9 +245,10 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 	// the connection — without that, keep-alive degrades silently if
 	// Slack ever returns a body larger than the cap.
 	const respBodyCap = 4096
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap))
-	if len(respBody) == respBodyCap {
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap+1))
+	if len(respBody) > respBodyCap {
 		_, _ = io.Copy(io.Discard, resp.Body)
+		respBody = respBody[:respBodyCap]
 	}
 	if resp.StatusCode >= 400 {
 		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))

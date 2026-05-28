@@ -92,7 +92,8 @@ services:
     restart: on-failure:5
     network_mode: "service:${WEB_SERVICE}"
     depends_on:
-      - ${WEB_SERVICE}
+      ${WEB_SERVICE}:
+        condition: service_started
     volumes:
       - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
       - ${SECRET_DIR}:/run/secrets/qurl-tunnel:ro

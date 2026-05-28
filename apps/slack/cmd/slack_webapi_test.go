@@ -245,6 +245,9 @@ func TestSlackOpenViewBodySnippetTruncatesOnUTF8Boundary(t *testing.T) {
 	if !strings.HasSuffix(got, "...") {
 		t.Fatalf("snippet = %q, want truncation suffix", got)
 	}
+	if len(got) > slackOpenViewMaxErrorSnippetBytes {
+		t.Fatalf("snippet length = %d, want <= %d", len(got), slackOpenViewMaxErrorSnippetBytes)
+	}
 }
 
 func TestSlackOpenViewBodySnippetRepairsMalformedUTF8(t *testing.T) {

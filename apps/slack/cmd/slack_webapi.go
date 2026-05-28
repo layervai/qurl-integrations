@@ -29,6 +29,7 @@ const slackViewsOpenTimeout = 2 * time.Second
 // body bounded, but leave room for modal blocks plus Slack-injected state.
 const slackViewsOpenResponseBodyLimit = 64 * 1024
 const slackOpenViewMaxErrorSnippetBytes = 200
+const slackOpenViewTruncationSuffix = "..."
 
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL)
@@ -149,12 +150,17 @@ func slackOpenViewBodySnippet(raw []byte) string {
 	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
 		return bodySnippet
 	}
+	budget := slackOpenViewMaxErrorSnippetBytes - len(slackOpenViewTruncationSuffix)
+	if budget <= 0 {
+		return slackOpenViewTruncationSuffix
+	}
 	cut := 0
 	// Count complete runes so the bounded log snippet uses as much of the byte
-	// budget as possible without slicing through a multibyte UTF-8 sequence.
+	// budget as possible without the truncation suffix exceeding the cap or
+	// slicing through a multibyte UTF-8 sequence.
 	for _, r := range bodySnippet {
 		next := cut + utf8.RuneLen(r)
-		if next > slackOpenViewMaxErrorSnippetBytes {
+		if next > budget {
 			break
 		}
 		cut = next
@@ -164,7 +170,7 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		// if a future caller lowers the cap below a single UTF-8 rune width.
 		return "..."
 	}
-	return bodySnippet[:cut] + "..."
+	return bodySnippet[:cut] + slackOpenViewTruncationSuffix
 }
 
 func printableLogSnippet(s string) string {
