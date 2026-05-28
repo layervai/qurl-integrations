@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -193,6 +194,7 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 func slackChannelMention(channelID string) string {
 	channelID = strings.TrimSpace(channelID)
 	if !slackChannelIDPattern.MatchString(channelID) {
+		slog.Warn("using fallback Slack channel label for malformed channel id", "channel_id_present", channelID != "")
 		return slackChannelFallbackText
 	}
 	return "<#" + channelID + ">"

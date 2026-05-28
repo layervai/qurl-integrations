@@ -244,12 +244,18 @@ func TestInteractionStateLogValuesAllowlistsKnownNonSecretBlocks(t *testing.T) {
 			tunnelInstallActionSlug: {Value: testTunnelSlug},
 			"unexpected_action":     {Value: "should-not-log"},
 		},
+		tunnelInstallBlockEnvironment: {
+			tunnelInstallActionEnvironment: {SelectedOption: &interactionSelectedOption{Value: string(tunnelEnvECSFargate)}},
+		},
 		"future_secret_block": {
 			"secret_input": {Value: "lv_live_should_not_log"},
 		},
 	})
 	if got[tunnelInstallBlockSlug][tunnelInstallActionSlug] != testTunnelSlug {
 		t.Fatalf("known state value missing from log values: %#v", got)
+	}
+	if got[tunnelInstallBlockEnvironment][tunnelInstallActionEnvironment] != string(tunnelEnvECSFargate) {
+		t.Fatalf("selected option state value missing from log values: %#v", got)
 	}
 	if _, ok := got[tunnelInstallBlockSlug]["unexpected_action"]; ok {
 		t.Fatalf("unexpected known-block action logged: %#v", got)
@@ -1289,6 +1295,17 @@ func TestInteractionStateValueTextPrefersDirectValue(t *testing.T) {
 	}
 }
 
+func TestInteractionStateValueTextUsesSelectedOption(t *testing.T) {
+	t.Parallel()
+	got := (interactionStateValue{
+		SelectedOption: &interactionSelectedOption{Value: string(tunnelEnvKubernetes)},
+	}).text()
+
+	if got != string(tunnelEnvKubernetes) {
+		t.Fatalf("interactionStateValue.text() = %q, want selected option value", got)
+	}
+}
+
 func TestParseTunnelInstallModalArgsSkipsWebRefValidationWhenEnvironmentMissing(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
@@ -1654,7 +1671,7 @@ func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	c := client.New("http://127.0.0.1", "unused", client.WithRetry(0))
-	revokeBootstrapKeyAfterInstallFailure(log, c, &client.APIKey{}, "missing_key_id")
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{}, "missing_key_id")
 	if !strings.Contains(logs.String(), "missing_key_id") || !strings.Contains(logs.String(), "missing key_id") {
 		t.Fatalf("log = %q, want missing-key-id warning", logs.String())
 	}
@@ -1676,10 +1693,38 @@ func TestRevokeBootstrapKeyAfterInstallFailureLogsRevokeError(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	c := client.New(server.URL, "unused", client.WithRetry(0))
 
-	revokeBootstrapKeyAfterInstallFailure(log, c, &client.APIKey{KeyID: "key_cleanup_failed"}, "render_failed")
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{KeyID: "key_cleanup_failed"}, "render_failed")
 
 	if got := logs.String(); !strings.Contains(got, "cleanup failed") || !strings.Contains(got, "render_failed") {
 		t.Fatalf("log = %q, want cleanup error and reason", got)
+	}
+}
+
+func TestRevokeBootstrapKeyAfterInstallFailureHonorsParentCancellation(t *testing.T) {
+	t.Parallel()
+
+	hits := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	c := client.New(server.URL, "unused", client.WithRetry(0))
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	revokeBootstrapKeyAfterInstallFailure(parent, log, c, &client.APIKey{KeyID: "key_shutdown"}, "shutdown")
+
+	select {
+	case <-hits:
+		t.Fatal("revoke request reached server despite canceled parent context")
+	default:
+	}
+	if got := logs.String(); !strings.Contains(got, context.Canceled.Error()) || !strings.Contains(got, "shutdown") {
+		t.Fatalf("log = %q, want parent cancellation and reason", got)
 	}
 }
 

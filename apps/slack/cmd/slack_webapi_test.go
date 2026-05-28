@@ -417,7 +417,7 @@ func TestSlackOpenViewFuncDrainsAndClosesOversizedResponse(t *testing.T) {
 		}, nil
 	})}
 
-	err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
@@ -440,7 +440,7 @@ func TestSlackOpenViewFuncReadsAndClosesSuccessfulResponse(t *testing.T) {
 		}, nil
 	})}
 
-	err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestSlackOpenViewFuncPropagatesContextCancellation(t *testing.T) {
 		return nil, r.Context().Err()
 	})}
 
-	err := newSlackOpenViewFunc("xoxb-test", "", "https://slack.test/views.open", httpClient)(ctx, "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := newSlackOpenViewFuncWithClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(ctx, "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}

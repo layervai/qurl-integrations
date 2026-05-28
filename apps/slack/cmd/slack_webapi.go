@@ -31,11 +31,11 @@ func slackOpenViewFunc(token, userAgent string) func(context.Context, string, st
 	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL)
 }
 
-func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string, httpClients ...*http.Client) func(context.Context, string, string, []byte) error {
-	var httpClient *http.Client
-	if len(httpClients) > 0 {
-		httpClient = httpClients[0]
-	}
+func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
+	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
+}
+
+func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
