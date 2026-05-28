@@ -343,7 +343,7 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 	}
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {
-		log.Warn("get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", token)
+		log.Warn("get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
 	if found {
@@ -366,9 +366,16 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		return "", authErr
 	}
 	if !allowed {
-		// Word the rejection with the slug the user typed, not the
-		// resolved r_<id> (which they never saw).
-		return "", &userError{msg: notAllowedInChannelMessage(token)}
+		// Collapse to the SAME "not configured" copy as the
+		// slug-not-found branch above. A non-admin must not be able to
+		// distinguish "this slug exists in the workspace but isn't
+		// allowed in this channel" from "no such slug" — that gap is a
+		// tunnel-slug enumeration oracle. This preserves the mirrored-
+		// copy posture the `$r_<id>` form documents
+		// ([notAllowedInChannelMessage]) on the slug-fallback path. Logs
+		// the real reason for operators; the wire text stays uniform.
+		log.Debug("get: tunnel slug resolved but not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "slug", token)
+		return "", &userError{msg: noResourceForAliasMessage(token)}
 	}
 	return slugResourceID, nil
 }

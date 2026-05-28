@@ -663,10 +663,12 @@ func TestHandleGet_DollarSlugAllowedSetNonAdmin(t *testing.T) {
 }
 
 // TestHandleGet_DollarSlugNotAllowedNonAdmin fences the slug-fallback
-// authorization gate: a non-admin pasting a tunnel slug whose resource
-// isn't in the channel allow-set sees the slug-worded "not allowed"
-// copy (NOT the resolved r_<id>, which they never saw) and never
-// reaches the mint.
+// authorization gate AND its anti-enumeration posture: a non-admin
+// pasting a tunnel slug whose resource isn't in the channel allow-set
+// sees the SAME "not configured for this channel" copy as a
+// non-existent slug — not a distinct "not allowed" — so the wire text
+// can't be used to enumerate tunnel slugs that exist elsewhere in the
+// workspace. The resolved r_<id> never leaks and the mint never runs.
 func TestHandleGet_DollarSlugNotAllowedNonAdmin(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
@@ -681,14 +683,62 @@ func TestHandleGet_DollarSlugNotAllowedNonAdmin(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$"+testTunnelSlug+"` is not allowed in this channel") {
-		t.Errorf("async reply missing slug-worded not-allowed copy: %q", async)
+	// Collapsed to the not-found copy — see resolveTokenForGet.
+	if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
+		t.Errorf("async reply missing anti-enumeration not-configured copy: %q", async)
+	}
+	if strings.Contains(async, "is not allowed in this channel") {
+		t.Errorf("not-allowed copy leaked the slug-exists-elsewhere distinction: %q", async)
 	}
 	if strings.Contains(async, testResourceIDFix) {
-		t.Errorf("resolved resource_id leaked in not-allowed message: %q", async)
+		t.Errorf("resolved resource_id leaked in rejection message: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite slug not in allow-set (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_DollarTokenBindingWinsOverSlug fences the resolution
+// precedence in resolveTokenForGet: when a channel alias_binding exists
+// for the token, it is authoritative and the tunnel-slug fallback is
+// NOT consulted — even if a different tunnel happens to carry the same
+// name as its slug. Pins the ordering against a future refactor that
+// might flip it (which would let a same-named slug shadow an admin's
+// explicit binding).
+func TestHandleGet_DollarTokenBindingWinsOverSlug(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	// Bind the token to testResourceIDFix in this channel.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		testTunnelSlug: testResourceIDFix,
+	})
+	// A slug lookup, if (wrongly) consulted, would resolve to a DIFFERENT
+	// resource — its mint must never be hit.
+	var slugMintHits atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: "r_shadow_tun",
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+	ts.addCustomer("POST", "/v1/resources/r_shadow_tun/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		slugMintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/SHADOW", "r_shadow_tun")
+	})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/from-binding", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/from-binding") {
+		t.Errorf("binding did not win — async reply missing binding link: %q", async)
+	}
+	if slugMintHits.Load() != 0 {
+		t.Errorf("slug fallback was consulted despite a live binding (shadow mint hits = %d)", slugMintHits.Load())
 	}
 }
 
