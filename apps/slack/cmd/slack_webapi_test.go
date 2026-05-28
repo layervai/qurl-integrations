@@ -173,7 +173,7 @@ func TestSlackOpenViewFuncEscapesHTTPErrorBodySnippet(t *testing.T) {
 func TestSlackOpenViewBodySnippetTruncatesOnUTF8Boundary(t *testing.T) {
 	t.Parallel()
 
-	got := slackOpenViewBodySnippet([]byte(strings.Repeat("é", 120)))
+	got := slackOpenViewBodySnippet([]byte(strings.Repeat("\U0001F9EA", 100)))
 
 	if !utf8.ValidString(got) {
 		t.Fatalf("snippet is not valid UTF-8: %q", got)

@@ -163,7 +163,7 @@ func tunnelInstallUsage() string {
 
 func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg string) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", string(tunnelEnvDocker):
+	case string(tunnelEnvDocker):
 		return tunnelEnvDocker, ""
 	case string(tunnelEnvCompose), "compose":
 		return tunnelEnvCompose, ""
@@ -643,7 +643,7 @@ func humanTunnelBootstrapDuration(d time.Duration) string {
 	}
 	// Ceil to the next minute so near-boundary keys never display as
 	// "0 minutes" or understate the operator's remaining setup window.
-	minutesTotal := int((d + time.Minute - time.Nanosecond) / time.Minute)
+	minutesTotal := int((d + time.Minute - 1) / time.Minute)
 	hours := minutesTotal / 60
 	minutes := minutesTotal % 60
 	hourUnit := "hours"

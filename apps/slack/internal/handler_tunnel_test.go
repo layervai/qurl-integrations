@@ -79,6 +79,7 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "double sigil slug", text: "tunnel install $$prod", wantErr: true},
 		{name: "verb boundary", text: "tunnelhats install prod", wantErr: true},
 		{name: "bad port", text: testTunnelInstallCmd + " port:70000", wantErr: true},
+		{name: "empty environment option", text: testTunnelInstallCmd + " env:", wantErr: true},
 		{name: "old docker vm spelling rejected", text: testTunnelInstallCmd + " env:docker-vm", wantErr: true},
 		{name: "bad environment", text: testTunnelInstallCmd + " env:prod", wantErr: true},
 		{name: "bad container ref", text: testTunnelInstallCmd + " container:../web", wantErr: true},
@@ -1112,17 +1113,17 @@ func TestParseTunnelInstallModalArgsRejectsDottedComposeService(t *testing.T) {
 	}
 }
 
-func TestParseTunnelInstallModalArgsDefaultsEmptyPort(t *testing.T) {
+func TestParseTunnelInstallModalArgsRejectsEmptyPort(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "", "")
 
 	args, fieldErrors := parseTunnelInstallModalArgs(values)
 
-	if len(fieldErrors) != 0 {
-		t.Fatalf("field errors = %+v, want none", fieldErrors)
+	if args != nil {
+		t.Fatalf("args = %+v, want nil", args)
 	}
-	if args == nil || args.LocalPort != defaultTunnelLocalPort {
-		t.Fatalf("args = %+v, want default local port %d", args, defaultTunnelLocalPort)
+	if fieldErrors[tunnelInstallBlockLocalPort] == "" {
+		t.Fatalf("field errors = %+v, want local port error", fieldErrors)
 	}
 }
 
