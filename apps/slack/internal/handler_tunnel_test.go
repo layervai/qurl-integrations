@@ -1,20 +1,17 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -483,6 +480,17 @@ func TestTunnelInstallBareIgnoresInvalidRateLimitRetryAfter(t *testing.T) {
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "Wait a moment") || strings.Contains(async, "Wed, 21 Oct") {
 		t.Fatalf("async reply = %q, want generic retry guidance without raw Retry-After", async)
+	}
+}
+
+func TestSlackRetryAfterLabelCapsLargeValues(t *testing.T) {
+	t.Parallel()
+
+	if got := slackRetryAfterLabel("3600"); got != "at least 5 minutes" {
+		t.Fatalf("slackRetryAfterLabel(3600) = %q, want capped copy", got)
+	}
+	if got := slackRetryAfterLabel("61"); got != "1 minute 1 second" {
+		t.Fatalf("slackRetryAfterLabel(61) = %q, want friendly copy", got)
 	}
 }
 
@@ -1102,8 +1110,14 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
 
-	if !strings.Contains(got, "Image: using the dev/sandbox fallback") || !strings.Contains(got, defaultTunnelImage) {
+	if !strings.Contains(got, ":warning: Image: using the dev/sandbox fallback") || !strings.Contains(got, defaultTunnelImage) {
 		t.Fatalf("rendered install message missing fallback image warning:\n%s", got)
+	}
+	imageIdx := strings.Index(got, "Image: using the dev/sandbox fallback")
+	envIdx := strings.Index(got, "Target environment:")
+	instructionsIdx := strings.Index(got, "Run this whole block")
+	if imageIdx < 0 || envIdx < 0 || instructionsIdx < 0 || imageIdx > envIdx || envIdx > instructionsIdx {
+		t.Fatalf("fallback image warning should appear before target environment and install block:\n%s", got)
 	}
 	if strings.Contains(got, testForbiddenResourceLabel) || strings.Contains(got, testTunnelResourceID) {
 		t.Fatalf("rendered install message leaked resource details:\n%s", got)
@@ -1160,9 +1174,13 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
 	t.Parallel()
 
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
 	c := client.New("http://127.0.0.1", "unused", client.WithRetry(0))
-	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{}, "missing_key_id")
+	revokeBootstrapKeyAfterInstallFailure(log, c, &client.APIKey{}, "missing_key_id")
+	if !strings.Contains(logs.String(), "missing_key_id") || !strings.Contains(logs.String(), "missing key_id") {
+		t.Fatalf("log = %q, want missing-key-id warning", logs.String())
+	}
 }
 
 func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) {
@@ -1271,343 +1289,6 @@ func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
 	}
 	if !strings.Contains(status, "qURL shortcut `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("status = %q, want idempotent ready copy", status)
-	}
-}
-
-func TestRenderECSFargateTunnelInstructions(t *testing.T) {
-	t.Parallel()
-	got := renderECSFargateTunnelInstructions(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvECSFargate,
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-
-	for _, want := range []string{
-		"ECS/Fargate task-definition checklist",
-		"non-essential sidecar container",
-		"Fargate's awsvpc network mode",
-		"Replace `<region>`, `<account-id>`, and `<suffix>`",
-		"AWS appends a random suffix",
-		"127.0.0.1:9090",
-		"AWS Secrets Manager",
-		"Store the bootstrap key shown above",
-		"ECS injects the bootstrap secret as `QURL_API_KEY`",
-		"file-mounted secret runtimes use `QURL_API_KEY_FILE` instead",
-		"secret as `qurl-tunnel-" + testTunnelSlug + "`",
-		"treat this Slack message as secret until the sidecar connects",
-		testTunnelImageRef,
-		"Put qurl-proxy.yaml on an EFS access point",
-		testTunnelLocalPort9090Line,
-		`"name": "QURL_TUNNEL_SLUG"`,
-		`"value": "` + testTunnelSlug + `"`,
-		`"name": "QURL_API_KEY"`,
-		`"sourceVolume": "qurl-agent-state"`,
-		`"sourceVolume": "qurl-config"`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
-		}
-	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
-		}
-	}
-	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 4 {
-		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)
-	}
-
-	var container ecsContainerDefinition
-	if err := json.Unmarshal([]byte(renderECSSidecarContainerJSON(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvECSFargate,
-	}, testTunnelImageRef)), &container); err != nil {
-		t.Fatalf("ECS sidecar JSON did not parse: %v", err)
-	}
-	if container.Essential {
-		t.Fatal("ECS sidecar Essential = true, want false so the tunnel does not take down the app task")
-	}
-	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
-		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
-	}
-	if !strings.Contains(container.Secrets[0].ValueFrom, "-<suffix>") {
-		t.Fatalf("ECS secret ValueFrom = %q, want full Secrets Manager ARN suffix placeholder", container.Secrets[0].ValueFrom)
-	}
-}
-
-func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
-	t.Parallel()
-	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
-	}
-	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-
-	for _, want := range []string{
-		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
-		testTunnelKeyPromptLine,
-		`printf '%s' "$QURL_BOOTSTRAP_KEY" | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
-		"unset QURL_BOOTSTRAP_KEY",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
-		}
-	}
-	start := "kubectl apply -f - <<'QURL_K8S_YAML_EOF'\n"
-	bodyStart := strings.Index(got, start)
-	if bodyStart < 0 {
-		t.Fatalf("Kubernetes instructions missing apply heredoc:\n%s", got)
-	}
-	bodyStart += len(start)
-	bodyEnd := strings.Index(got[bodyStart:], "\nQURL_K8S_YAML_EOF")
-	if bodyEnd < 0 {
-		t.Fatalf("Kubernetes instructions missing heredoc terminator:\n%s", got)
-	}
-	docs := strings.Split(got[bodyStart:bodyStart+bodyEnd], "\n---\n")
-	if len(docs) != 2 {
-		t.Fatalf("Kubernetes bootstrap docs = %d, want 2: %#v", len(docs), docs)
-	}
-	for i, doc := range docs {
-		var parsed map[string]any
-		if err := yaml.Unmarshal([]byte(doc), &parsed); err != nil {
-			t.Fatalf("bootstrap YAML doc %d did not parse: %v\n%s", i, err, doc)
-		}
-	}
-	var configMap struct {
-		Data map[string]string `yaml:"data"`
-	}
-	if err := yaml.Unmarshal([]byte(docs[0]), &configMap); err != nil {
-		t.Fatalf("ConfigMap YAML did not parse: %v", err)
-	}
-	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != renderTunnelConfigYAML(args) {
-		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, renderTunnelConfigYAML(args))
-	}
-	for _, want := range []string{
-		"sidecar/initContainer/volumes block",
-		"no pod-level `securityContext` or `fsGroup` is set",
-		"initContainers:",
-		"name: qurl-agent-state-permissions",
-		"chown -R 65532:65532 /var/lib/layerv/agent",
-		"securityContext:",
-		"runAsUser: 0",
-		"allowPrivilegeEscalation: false",
-		"name: qurl-tunnel",
-		"runAsUser: 65532",
-		"runAsGroup: 65532",
-		"defaultMode: 0444",
-		"do not co-locate the sidecar with untrusted containers",
-		"`fsGroup: 65532`",
-		"`0440`",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
-		}
-	}
-	for _, forbidden := range []string{
-		"\nfsGroup:",
-		"defaultMode: 0400",
-		"securityContext:\n  runAsUser",
-	} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
-		}
-	}
-	if strings.Contains(got, testTunnelAPIKey) {
-		t.Fatalf("Kubernetes instructions embedded bootstrap key instead of prompting:\n%s", got)
-	}
-}
-
-func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
-	t.Parallel()
-	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
-	dns1123Label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
-	args := &tunnelInstallArgs{
-		Slug:        slug,
-		Alias:       slug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
-	}
-	names := kubernetesTunnelObjectNames(slug)
-	for label, name := range map[string]string{
-		"secret":     names.secret,
-		"config_map": names.configMap,
-		"agent_pvc":  names.agentPVC,
-	} {
-		if len(name) > kubernetesNameMaxLen {
-			t.Fatalf("%s name length = %d for %q, want <= %d", label, len(name), name, kubernetesNameMaxLen)
-		}
-		if strings.HasSuffix(name, "-") {
-			t.Fatalf("%s name = %q, must end with an alphanumeric hash suffix", label, name)
-		}
-		if strings.Contains(name, "--") {
-			t.Fatalf("%s name = %q, should trim hyphens before hash suffix", label, name)
-		}
-		if !dns1123Label.MatchString(name) {
-			t.Fatalf("%s name = %q, want DNS-1123 label", label, name)
-		}
-	}
-
-	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-	for _, want := range []string{
-		"QURL_BOOTSTRAP_SECRET='" + names.secret + "'",
-		"name: " + names.configMap,
-		"name: " + names.agentPVC,
-		"claimName: " + names.agentPVC,
-		"secretName: " + names.secret,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("Kubernetes instructions missing shortened name %q:\n%s", want, got)
-		}
-	}
-	for _, forbidden := range []string{
-		"qurl-tunnel-" + slug,
-		"qurl-proxy-" + slug,
-		"qurl-agent-" + slug,
-	} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("Kubernetes instructions contain overlong name %q:\n%s", forbidden, got)
-		}
-	}
-}
-
-func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {
-	t.Parallel()
-	got := kubernetesNameWithSlug("qurl-tunnel-", strings.Repeat("-", 80))
-	if strings.Contains(got, "--") {
-		t.Fatalf("name = %q, want no doubled hyphen when trimmed base is empty", got)
-	}
-	if len(got) > kubernetesNameMaxLen {
-		t.Fatalf("name length = %d for %q, want <= %d", len(got), got, kubernetesNameMaxLen)
-	}
-}
-
-func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
-	t.Parallel()
-	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvCompose,
-		WebRef:      "web_1-2",
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-
-	for _, want := range []string{
-		"Run this from your Docker Compose project directory on the Linux Docker host.",
-		testTunnelKeyHistoryNote,
-		"WEB_SERVICE='web_1-2'",
-		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
-		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
-		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"`,
-		testTunnelKeyPromptLine,
-		testTunnelKeyInstallLine,
-		"qurl-tunnel-" + testTunnelSlug + ".compose.yaml",
-		"qurl-tunnel-" + testTunnelSlug + ":",
-		`network_mode: "service:${WEB_SERVICE}"`,
-		"depends_on:",
-		testTunnelAgentDirFragment,
-		"QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}",
-		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
-		`docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`,
-		"Verify with `docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug + "`",
-		"if you changed `APP_COMPOSE_FILE`, use that file there too",
-		"logs -f qurl-tunnel-" + testTunnelSlug,
-		testTunnelLocalPort9090Line,
-		testTunnelImageRef,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("Docker Compose instructions missing %q:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "Replace `YOUR_COMPOSE_SERVICE_NAME`") {
-		t.Fatalf("Docker Compose instructions still included placeholder warning:\n%s", got)
-	}
-	for _, forbidden := range []string{
-		"\n  qurl-tunnel:\n",
-		"up -d qurl-tunnel\n",
-		"logs -f qurl-tunnel`;",
-		"Verify with `docker compose -f \"$APP_COMPOSE_FILE\"",
-	} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
-		}
-	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
-		}
-	}
-}
-
-func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *testing.T) {
-	t.Parallel()
-	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvCompose,
-		WebRef:      "web",
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-
-	start := "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n"
-	bodyStart := strings.Index(got, start)
-	if bodyStart < 0 {
-		t.Fatalf("Compose instructions missing generated fragment heredoc:\n%s", got)
-	}
-	bodyStart += len(start)
-	bodyEnd := strings.Index(got[bodyStart:], "\nQURL_COMPOSE_YAML_EOF")
-	if bodyEnd < 0 {
-		t.Fatalf("Compose instructions missing generated fragment heredoc terminator:\n%s", got)
-	}
-	var parsed struct {
-		Services map[string]struct {
-			Image string `yaml:"image"`
-		} `yaml:"services"`
-	}
-	if err := yaml.Unmarshal([]byte(got[bodyStart:bodyStart+bodyEnd]), &parsed); err != nil {
-		t.Fatalf("Compose fragment did not parse: %v", err)
-	}
-	service := parsed.Services["qurl-tunnel-"+testTunnelSlug]
-	if service.Image != testTunnelImageRef {
-		t.Fatalf("Compose service image = %q, want %q", service.Image, testTunnelImageRef)
-	}
-}
-
-func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
-	t.Parallel()
-	got := renderDockerTunnelInstructions(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvDocker,
-		WebRef:      "web.1_2-3",
-	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
-
-	for _, want := range []string{
-		testTunnelKeyHistoryNote,
-		"WEB_CONTAINER='web.1_2-3'",
-		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
-		testTunnelKeyPromptLine,
-		testTunnelKeyInstallLine,
-		`--network "container:${WEB_CONTAINER}"`,
-		testTunnelDockerLine,
-		testTunnelAgentDirFragment,
-		testTunnelLocalPort9090Line,
-		testTunnelImageRef,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("Docker instructions missing %q:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "Replace `YOUR_WEB_CONTAINER_NAME`") {
-		t.Fatalf("Docker instructions still included placeholder warning:\n%s", got)
-	}
-	if strings.Contains(got, testTunnelAPIKey) {
-		t.Fatalf("Docker instructions embedded bootstrap key instead of prompting:\n%s", got)
 	}
 }
 

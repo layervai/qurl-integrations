@@ -6,11 +6,11 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
 - `/qurl get <url>` — Mint a qURL for a URL
-- `/qurl get $alias` — Mint a qURL for a channel alias
-- `/qurl set-alias $alias <url|resource-id|$tunnel-slug>` — Bind a channel alias (admin-only)
-- `/qurl unset-alias $alias` — Remove a channel alias binding (admin-only)
+- `/qurl get $shortcut` — Mint a qURL for a channel shortcut
+- `/qurl set-alias $shortcut <url|resource-id|$tunnel-slug>` — Bind a channel shortcut (admin-only)
+- `/qurl unset-alias $shortcut` — Remove a channel shortcut binding (admin-only)
 - `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; requires `SLACK_BOT_TOKEN` with `views:write`)
-- `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$alias] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
+- `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
@@ -33,7 +33,7 @@ by the current bot deployment.
   `$slug`) remains available for CLI-style admins and sandbox deployments
   without modal support. Both paths use the
   workspace API key to find-or-create a tunnel resource scoped to the
-  connected qURL account, bind `$<slug>` or the `alias:` override in
+  connected qURL account, bind `$<slug>` or the `alias:` shortcut override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
   key. When `alias:` is omitted, the slug doubles as the channel shortcut.
   The Slack response hides the internal resource id and renders output

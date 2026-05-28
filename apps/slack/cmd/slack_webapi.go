@@ -16,8 +16,10 @@ import (
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
 
-// Handler callers use a tighter Slack trigger_id budget; this client timeout
-// is only a final guard for future callers that forget to pass a deadline.
+// slackViewsOpenTimeout is a belt-and-braces HTTP-client fallback for future
+// callers that do not pass their own tighter context deadline. The tunnel
+// install handler intentionally uses slackTriggerOpenViewBudget instead so it
+// stays inside Slack's short trigger_id window.
 const slackViewsOpenTimeout = 2 * time.Second
 
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
@@ -62,8 +64,6 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 			req.Header.Set("User-Agent", userAgent)
 		}
 
-		// Callers normally pass a tighter, Slack-ack-bound context; this
-		// timeout is a fallback for any future caller that forgets to do so.
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("views.open request: %w", err)

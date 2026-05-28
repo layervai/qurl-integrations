@@ -775,13 +775,13 @@ func (h *Handler) helpMessage() string {
 		// setalias/unsetalias/aliases reply ":warning: not configured"
 		// on a sandbox deploy without an aliasStore; mirror the
 		// PostDM gates above so help doesn't advertise verbs whose
-		// reply tells the user they can't be used. These are admin
-		// verbs — the internal "alias" terminology is fine here
-		// because the audience for these lines is admins.
+		// reply tells the user they can't be used. Keep user-facing copy
+		// on "shortcut" even though the admin verbs retain their
+		// historical set-alias/unset-alias names.
 		lines = append(lines,
-			"• `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` — Configure an alias in this channel (admin only)",
-			"• `/qurl unset-alias $<alias>` — Remove a configured alias in this channel (admin only)",
-			"• `/qurl aliases` — List the aliases configured in this channel",
+			"• `/qurl set-alias $<shortcut> <url-or-resource-id-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
+			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
+			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
 		)
 	}
 	if h.cfg.AdminStore != nil {

@@ -357,13 +357,13 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(ctx, log, c, key, "missing_plaintext")
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "missing_plaintext")
 		h.postResponse(log, responseURL, "The qURL API did not return a bootstrap key. Please retry or contact support.")
 		return
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(ctx, log, c, key, "shell_validation_failed")
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "shell_validation_failed")
 		h.postResponse(log, responseURL, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
 		return
 	}
@@ -371,7 +371,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	msg, err := h.renderTunnelInstallMessage(args, key, aliasStatus)
 	if err != nil {
 		log.Error("tunnel install: render failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(ctx, log, c, key, "render_failed")
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "render_failed")
 		h.postResponse(log, responseURL, "Tunnel setup succeeded, but Slack could not render the install instructions. Please retry or contact support.")
 		return
 	}
@@ -384,12 +384,14 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 }
 
-func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
 	if key == nil || strings.TrimSpace(key.KeyID) == "" {
 		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "reason", reason)
 		return
 	}
-	ctx, cancel := context.WithTimeout(parent, tunnelBootstrapCleanupTimeout)
+	// Use a cleanup-owned context so a canceled install request cannot strand a
+	// freshly minted bootstrap key for the rest of its TTL.
+	ctx, cancel := context.WithTimeout(context.Background(), tunnelBootstrapCleanupTimeout)
 	defer cancel()
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
 		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "key_id", key.KeyID, "reason", reason)
@@ -451,14 +453,14 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 		imageNote = "\n\n" + imageNote
 	}
 
-	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s\n\nTarget environment: %s.\n\n%s%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s%s\n\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
 		tunnelBootstrapExpiryLabel(key),
 		slackCodeBlock(key.APIKey),
+		imageNote,
 		environmentLabel,
 		instructions,
-		imageNote,
 		args.Alias,
 	), nil
 }
@@ -467,7 +469,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 	if !usingDefaultImage {
 		return ""
 	}
-	return "Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_TUNNEL_IMAGE` to an immutable tag or digest before production rollout."
+	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_TUNNEL_IMAGE` to an immutable tag or digest before production rollout."
 }
 
 func tunnelInstallRateLimitMessage(err error) string {
@@ -488,6 +490,25 @@ func slackRetryAfterLabel(raw string) string {
 		// Slack documents Retry-After as integer seconds. Treat any other
 		// shape as untrusted display text and fall back to generic retry copy.
 		return ""
+	}
+	if seconds > 5*60 {
+		return "at least 5 minutes"
+	}
+	if seconds >= 60 {
+		minutes := seconds / 60
+		remainingSeconds := seconds % 60
+		minuteLabel := "minutes"
+		if minutes == 1 {
+			minuteLabel = "minute"
+		}
+		if remainingSeconds == 0 {
+			return fmt.Sprintf("%d %s", minutes, minuteLabel)
+		}
+		secondLabel := "seconds"
+		if remainingSeconds == 1 {
+			secondLabel = "second"
+		}
+		return fmt.Sprintf("%d %s %d %s", minutes, minuteLabel, remainingSeconds, secondLabel)
 	}
 	if seconds == 1 {
 		return "1 second"
@@ -634,6 +655,9 @@ func indentLines(s string, spaces int) string {
 }
 
 func yamlSingleQuoted(s string) string {
+	// Renders a pre-validated single-line scalar for generated snippets. This
+	// is not a general YAML encoder; callers must reject controls/newlines and
+	// other syntax-bearing characters before reaching this helper.
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 

@@ -181,13 +181,14 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	if len(fieldErrors) > 0 {
 		return nil, fieldErrors
 	}
-	return &tunnelInstallArgs{
+	args = &tunnelInstallArgs{
 		Slug:        slug,
 		Alias:       alias,
 		LocalPort:   port,
 		Environment: env,
 		WebRef:      webRef,
-	}, nil
+	}
+	return args, nil
 }
 
 func interactionStateText(values map[string]map[string]interactionStateValue, blockID, actionID string) string {
