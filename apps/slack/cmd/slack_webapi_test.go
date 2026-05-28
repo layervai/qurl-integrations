@@ -152,6 +152,23 @@ func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncEscapesHTTPErrorBodySnippet(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<script>\x00alert(1)</script>"))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "&lt;script&gt;?alert(1)&lt;/script&gt;") {
+		t.Fatalf("error = %v, want escaped printable body snippet", err)
+	}
+	if strings.Contains(err.Error(), "<script>") {
+		t.Fatalf("error = %q, want HTML escaped snippet", err.Error())
+	}
+}
+
 func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

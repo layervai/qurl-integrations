@@ -158,3 +158,14 @@ func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {
 		t.Fatalf("name length = %d for %q, want <= %d", len(got), got, kubernetesNameMaxLen)
 	}
 }
+
+func TestKubernetesNameWithSlugHandlesLongPrefix(t *testing.T) {
+	t.Parallel()
+	got := kubernetesNameWithSlug(strings.Repeat("a", kubernetesNameMaxLen), testTunnelSlug)
+	if len(got) > kubernetesNameMaxLen {
+		t.Fatalf("name length = %d for %q, want <= %d", len(got), got, kubernetesNameMaxLen)
+	}
+	if strings.HasSuffix(got, "-") {
+		t.Fatalf("name = %q, must end with hash characters", got)
+	}
+}

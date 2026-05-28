@@ -14,11 +14,11 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, _ *client.AP
 	tunnelServiceName := "qurl-tunnel-" + args.Slug
 	tunnelService := shellSingleQuote(tunnelServiceName)
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
-	// write concrete paths and service names into the generated file. Keep
-	// dockerComposeServicePattern narrow: it rejects shell metacharacters such
-	// as '$', backticks, quotes, slashes, and whitespace. The runtime
-	// WEB_SERVICE guard below catches unsafe operator edits before rendering
-	// the Compose fragment.
+	// expand WEB_SERVICE, QURL_TUNNEL_SLUG, AGENT_STATE_DIR, and SECRET_DIR
+	// into the generated file. Keep dockerComposeServicePattern narrow: it
+	// rejects shell metacharacters such as '$', backticks, quotes, slashes, and
+	// whitespace. The runtime WEB_SERVICE guard below catches unsafe operator
+	// edits before rendering the Compose fragment.
 	compose := fmt.Sprintf(`set -eu
 
 if [ "$(id -u)" -eq 0 ]; then

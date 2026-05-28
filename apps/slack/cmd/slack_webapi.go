@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strings"
@@ -130,11 +131,24 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 
 func slackOpenViewBodySnippet(raw []byte) string {
 	const maxSnippetBytes = 200
-	bodySnippet := strings.TrimSpace(string(raw))
+	bodySnippet := html.EscapeString(printableLogSnippet(strings.TrimSpace(string(raw))))
 	if len(bodySnippet) <= maxSnippetBytes {
 		return bodySnippet
 	}
 	return bodySnippet[:maxSnippetBytes] + "..."
+}
+
+func printableLogSnippet(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < ' ' || r == 0x7f:
+			return '?'
+		default:
+			return r
+		}
+	}, s)
 }
 
 func slackOpenViewAPIError(code string) error {
