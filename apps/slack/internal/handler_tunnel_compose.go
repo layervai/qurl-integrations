@@ -34,35 +34,12 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	compose := fmt.Sprintf(`set -eu
 %s
 
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-  SUDO="sudo -n"
-else
-  echo "Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532." >&2
-  exit 1
-fi
+%s
 
 # Run from the directory with your existing Compose file.
 APP_COMPOSE_FILE=${APP_COMPOSE_FILE:-compose.yaml}
 WEB_SERVICE=%s
-if [ "$WEB_SERVICE" = "YOUR_COMPOSE_SERVICE_NAME" ] || [ -z "$WEB_SERVICE" ]; then
-  echo "Set WEB_SERVICE to the Compose service name for your local HTTP server." >&2
-  exit 1
-fi
-case "$WEB_SERVICE" in
-  [A-Za-z0-9]*) ;;
-  *)
-    echo "WEB_SERVICE must start with a letter or number." >&2
-    exit 1
-    ;;
-esac
-case "$WEB_SERVICE" in
-  *[!A-Za-z0-9_-]*)
-    echo "WEB_SERVICE may contain only letters, numbers, underscores, and hyphens." >&2
-    exit 1
-    ;;
-esac
+%s
 
 QURL_TUNNEL_SLUG=%s
 TUNNEL_SERVICE=%s
@@ -103,7 +80,7 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {

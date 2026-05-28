@@ -19,7 +19,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		ecsFargateChecklistText,
 		"non-essential sidecar container",
 		"Fargate's awsvpc network mode",
-		"Replace `<region>`, `<account-id>`, and `<suffix>`",
+		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_" + testTunnelSlug + "`",
 		ecsFargateRegionPlaceholderNote,
 		"AWS appends a random suffix",
 		"127.0.0.1:9090",
@@ -37,7 +37,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		`"name": "QURL_TUNNEL_SLUG"`,
 		`"value": "` + testTunnelSlug + `"`,
 		testTunnelECSAPIKeyNameLine,
-		`secret:qurl-tunnel-` + testTunnelSlug + `-<suffix>`,
+		`REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_` + testTunnelSlug,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
 	} {
@@ -76,7 +76,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
 		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
 	}
-	if !strings.Contains(container.Secrets[0].ValueFrom, "-<suffix>") {
-		t.Fatalf("ECS secret ValueFrom = %q, want full Secrets Manager ARN suffix placeholder", container.Secrets[0].ValueFrom)
+	if container.Secrets[0].ValueFrom != "REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_"+testTunnelSlug {
+		t.Fatalf("ECS secret ValueFrom = %q, want unmistakable replacement placeholder", container.Secrets[0].ValueFrom)
 	}
 }

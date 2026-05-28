@@ -16,35 +16,12 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 	docker := fmt.Sprintf(`set -eu
 %s
 
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-  SUDO="sudo -n"
-else
-  echo "Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532." >&2
-  exit 1
-fi
+%s
 
 # Keep this placeholder assignment so the block is pasteable; the guard below
 # fails before writing files until the operator replaces the quoted value.
 WEB_CONTAINER=%s
-if [ "$WEB_CONTAINER" = "YOUR_WEB_CONTAINER_NAME" ] || [ -z "$WEB_CONTAINER" ]; then
-  echo "Set WEB_CONTAINER to the Docker container name or ID for your local HTTP server." >&2
-  exit 1
-fi
-case "$WEB_CONTAINER" in
-  [A-Za-z0-9]*) ;;
-  *)
-    echo "WEB_CONTAINER must start with a letter or number." >&2
-    exit 1
-    ;;
-esac
-case "$WEB_CONTAINER" in
-  *[!A-Za-z0-9_.-]*)
-    echo "WEB_CONTAINER may contain only letters, numbers, dots, underscores, and hyphens." >&2
-    exit 1
-    ;;
-esac
+%s
 
 QURL_TUNNEL_SLUG=%s
 TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"
@@ -76,7 +53,7 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
-  %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {

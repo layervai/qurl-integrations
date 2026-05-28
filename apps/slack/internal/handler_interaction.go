@@ -170,6 +170,9 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	portText, portFound := interactionStateTextOK(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort)
 	portRaw := strings.TrimSpace(portText)
 	port := defaultTunnelLocalPort
+	// Slack marks this input required, so a missing block means client drift or
+	// malformed test data. Surface the same field error as an empty value; the
+	// operator action is identical.
 	if !portFound || portRaw == "" {
 		fieldErrors[tunnelInstallBlockLocalPort] = "Use a TCP port from 1 to 65535."
 	} else {

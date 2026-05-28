@@ -65,7 +65,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 	intro := strings.Join([]string{
 		"Use this as an " + ecsFargateChecklistText + ".",
 		"Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves.",
-		"Replace `<region>`, `<account-id>`, and `<suffix>` with the full secret ARN shown by Secrets Manager; AWS appends a random suffix to secret ARNs.",
+		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_" + args.Slug + "` with the full secret ARN shown by Secrets Manager; AWS appends a random suffix to secret ARNs.",
 		ecsFargateRegionPlaceholderNote,
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
 	}, " ")
@@ -90,7 +90,7 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		// ECS/Fargate guide uses a file-mounted secret runtime instead of native
 		// Secrets Manager environment injection.
 		Secrets: []ecsSecret{
-			{Name: tunnelEnvAPIKey, ValueFrom: "arn:aws:secretsmanager:<region>:<account-id>:secret:qurl-tunnel-" + args.Slug + "-<suffix>"},
+			{Name: tunnelEnvAPIKey, ValueFrom: "REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_" + args.Slug},
 		},
 		MountPoints: []ecsMountPoint{
 			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},

@@ -662,6 +662,37 @@ func renderPortablePipefailShell() string {
 fi`
 }
 
+func renderSudoDetectionShell() string {
+	return `if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
+else
+  echo "Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532." >&2
+  exit 1
+fi`
+}
+
+func renderRequiredShellNameGuard(varName, placeholder, targetDescription, allowedCharClass, allowedDescription string) string {
+	return fmt.Sprintf(`if [ "$%[1]s" = "%[2]s" ] || [ -z "$%[1]s" ]; then
+  echo "Set %[1]s to %[3]s." >&2
+  exit 1
+fi
+case "$%[1]s" in
+  [A-Za-z0-9]*) ;;
+  *)
+    echo "%[1]s must start with a letter or number." >&2
+    exit 1
+    ;;
+esac
+case "$%[1]s" in
+  *[!%[4]s]*)
+    echo "%[1]s may contain only %[5]s." >&2
+    exit 1
+    ;;
+esac`, varName, placeholder, targetDescription, allowedCharClass, allowedDescription)
+}
+
 func renderBootstrapKeyPromptShell() string {
 	return `if [ -z "${QURL_BOOTSTRAP_KEY:-}" ]; then
   if [ ! -t 0 ]; then

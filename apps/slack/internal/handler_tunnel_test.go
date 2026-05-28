@@ -976,7 +976,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				ecsFargateChecklistText,
 				ecsFargateRegionPlaceholderNote,
 				testTunnelECSAPIKeyNameLine,
-				`secret:qurl-tunnel-` + testTunnelSlug + `-<suffix>`,
+				`REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_` + testTunnelSlug,
 			},
 		},
 	}
