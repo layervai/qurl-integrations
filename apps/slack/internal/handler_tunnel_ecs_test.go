@@ -51,13 +51,17 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)
 	}
 
-	var container ecsContainerDefinition
-	if err := json.Unmarshal([]byte(renderECSSidecarContainerJSON(&tunnelInstallArgs{
+	containerJSON, err := renderECSSidecarContainerJSON(&tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvECSFargate,
-	}, testTunnelImageRef)), &container); err != nil {
+	}, testTunnelImageRef)
+	if err != nil {
+		t.Fatalf("renderECSSidecarContainerJSON: %v", err)
+	}
+	var container ecsContainerDefinition
+	if err := json.Unmarshal([]byte(containerJSON), &container); err != nil {
 		t.Fatalf("ECS sidecar JSON did not parse: %v", err)
 	}
 	if container.Essential {

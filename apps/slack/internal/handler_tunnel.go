@@ -223,8 +223,9 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
+	setupStartedAt := tunnelBootstrapNow()
 	h.runAsync(w, "tunnel_install", values, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, teamID, channelID, userID, values.Get(fieldResponseURL), args)
+		h.processTunnelInstall(ctx, log, teamID, channelID, userID, values.Get(fieldResponseURL), args, setupStartedAt)
 	})
 }
 
@@ -337,7 +338,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	h.deleteOriginalResponse(log, responseURL)
 }
 
-func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs) {
+func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
@@ -377,7 +378,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		Purpose:        client.APIKeyPurposeTunnelBootstrap,
 		TunnelSlug:     args.Slug,
 		ExpiresIn:      tunnelBootstrapTTL,
-		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, tunnelBootstrapNow()),
+		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, setupStartedAt),
 	})
 	if err != nil {
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
@@ -431,13 +432,11 @@ func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, k
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
-	// Hourly bucket matches the one-hour bootstrap key TTL: retries inside
-	// the same setup window replay safely, while a later install gets a fresh
-	// key instead of replaying an expired plaintext secret. A retry that
-	// straddles an hour boundary can mint a fresh key; the 25-minute modal TTL
-	// keeps that duplicate-key window bounded.
-	bucket := now.UTC().Format("2006010215")
-	return IdempotencyKey(teamID, channelID, userID, "tunnel-bootstrap:"+slug+":"+bucket)
+	// Bucket on the modal TTL window, not the API key TTL. The modal path passes
+	// the modal creation timestamp, so duplicate submissions for one still-valid
+	// modal cannot shift buckets just because the async worker runs later.
+	bucket := now.UTC().Unix() / int64(tunnelInstallModalTTL/time.Second)
+	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%d", slug, bucket))
 }
 
 func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) (string, error) {

@@ -309,7 +309,9 @@ func validateSlackBotToken(token string) error {
 		return nil
 	}
 	// Keep this as a light local shape check. Slack token formats have changed
-	// over time, and the Slack API remains the authority on token validity.
+	// over time, and the Slack API remains the authority on token validity. The
+	// upper bound is intentionally generous; when set, this only catches obvious
+	// config mistakes such as truncated, whitespace, or control-byte tokens.
 	const slackBotTokenMinLen = 20
 	const slackBotTokenMaxLen = 512
 	if len(token) < slackBotTokenMinLen {

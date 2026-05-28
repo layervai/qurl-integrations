@@ -2,6 +2,7 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -38,7 +39,10 @@ type ecsLogConfiguration struct {
 }
 
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
-	containerJSON := renderECSSidecarContainerJSON(args, image)
+	containerJSON, err := renderECSSidecarContainerJSON(args, image)
+	if err != nil {
+		return "", err
+	}
 	secretName := "qurl-tunnel-" + args.Slug
 	configBlock, err := slackCodeBlock(renderTunnelConfigYAML(args))
 	if err != nil {
@@ -63,7 +67,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the tunnel connected, delete the bootstrap secret.", nil
 }
 
-func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string {
+func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
 	container := ecsContainerDefinition{
 		Name:      "qurl-tunnel",
 		Image:     image,
@@ -89,9 +93,7 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string
 	}
 	b, err := json.MarshalIndent(container, "", "  ")
 	if err != nil {
-		// Unreachable with this fixed-shape struct; fail loud if a future
-		// field adds an unsupported JSON type.
-		panic("marshal ECS sidecar JSON: " + err.Error())
+		return "", fmt.Errorf("marshal ECS sidecar JSON: %w", err)
 	}
-	return string(b)
+	return string(b), nil
 }

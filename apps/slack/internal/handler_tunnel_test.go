@@ -630,6 +630,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
 	freezeTunnelBootstrapNow(t, now)
+	modalCreatedAt := now.Add(-10 * time.Minute)
 
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -674,7 +675,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   inv.responseU.URL,
-		CreatedAtUnix: now.Unix(),
+		CreatedAtUnix: modalCreatedAt.Unix(),
 	}
 	body := tunnelInstallViewSubmissionBody(t, meta, map[string]map[string]interactionStateValue{
 		tunnelInstallBlockSlug: {
@@ -706,7 +707,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
 		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
 	}
-	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now)
+	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, modalCreatedAt)
 	if idempotencyKey != wantIdempotencyKey {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
@@ -1100,6 +1101,20 @@ func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseTunnelInstallModalArgsReadsInitialEnvironmentSelection(t *testing.T) {
+	t.Parallel()
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvKubernetes), "8080", "")
+
+	args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+	if len(fieldErrors) != 0 {
+		t.Fatalf("field errors = %+v, want none", fieldErrors)
+	}
+	if args.Environment != tunnelEnvKubernetes {
+		t.Fatalf("environment = %q, want %q", args.Environment, tunnelEnvKubernetes)
+	}
+}
+
 func TestParseTunnelInstallModalArgsSkipsWebRefValidationWhenEnvironmentMissing(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
@@ -1446,7 +1461,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
-	})
+	}, tunnelBootstrapNow())
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -1504,9 +1519,9 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v, want same non-empty retry key", idempotencyKeys)
 	}
-	nextHourKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now.Add(time.Hour))
-	if nextHourKey == idempotencyKeys[0] {
-		t.Fatal("next-hour tunnel bootstrap idempotency key matched current-hour key")
+	nextWindowKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now.Add(tunnelInstallModalTTL))
+	if nextWindowKey == idempotencyKeys[0] {
+		t.Fatal("next-window tunnel bootstrap idempotency key matched current-window key")
 	}
 }
 

@@ -135,8 +135,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		"user_id", meta.UserID,
 		"view_id", payload.View.ID,
 	)
+	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, meta.TeamID, meta.ChannelID, meta.UserID, meta.ResponseURL, args)
+		h.processTunnelInstall(ctx, log, meta.TeamID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, setupStartedAt)
 	}) {
 		respondTunnelInstallModalError(w, "Slack bot is busy. Retry in a moment.")
 		return
@@ -315,6 +316,9 @@ type interactionStateValue struct {
 }
 
 func (v interactionStateValue) text() string {
+	// Slack block elements populate either value (plain inputs) or
+	// selected_option (static_select). If a malformed payload sends both,
+	// prefer the direct value because it is the text-input contract.
 	if v.Value != "" {
 		return v.Value
 	}
