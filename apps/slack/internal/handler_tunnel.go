@@ -165,8 +165,10 @@ func tunnelInstallUsage() string {
 	return strings.Join([]string{
 		"Usage:",
 		"• `/qurl tunnel install` for guided setup",
-		"• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`",
 		"Guided setup is exactly `/qurl tunnel install`; add arguments only when using typed setup.",
+		"• Docker: `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
+		"• Compose: `/qurl tunnel install <slug|$slug> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
+		"• ECS/Fargate or Kubernetes: `/qurl tunnel install <slug|$slug> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
 		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
 		"Example: `/qurl tunnel install prod-dashboard port:8080`",
 	}, "\n")
@@ -295,7 +297,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	// differs from typed tunnel installs: the guided path may briefly show
 	// neutral progress copy to a non-admin so admin-gate latency does not spend
 	// the trigger_id before the modal can open.
-	respondSlack(w, "Working on it…")
+	respondSlack(w, ackWorkingOnIt)
 }
 
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
@@ -464,6 +466,11 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 	ctx, cancel := context.WithTimeout(parent, tunnelBootstrapCleanupTimeout)
 	defer cancel()
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			log.Info("tunnel install: bootstrap key already absent after install failure", "event", "tunnel_bootstrap_cleanup_already_absent", "key_id", key.KeyID, "reason", reason)
+			return
+		}
 		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "event", "tunnel_bootstrap_cleanup_failed", "key_id", key.KeyID, "reason", reason)
 		return
 	}
@@ -478,6 +485,9 @@ func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now t
 	// typed retry crosses the same 25-minute bucket boundary it may mint a fresh
 	// key, which is acceptable because no Slack modal replay contract exists for
 	// that path.
+	// User-visible consequence: two submissions for the same still-valid modal
+	// collapse onto one bootstrap key, while retries after the bucket boundary
+	// intentionally receive a fresh key.
 	windowSeconds := int64(tunnelInstallModalTTL / time.Second)
 	if windowSeconds <= 0 {
 		windowSeconds = 1

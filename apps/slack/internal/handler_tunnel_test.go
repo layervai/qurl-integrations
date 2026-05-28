@@ -454,8 +454,8 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Working on it") {
-		t.Fatalf("ack = %q, want guided setup copy", ack)
+	if ack != ackWorkingOnIt {
+		t.Fatalf("ack = %q, want %q", ack, ackWorkingOnIt)
 	}
 	var call openViewCall
 	select {
@@ -521,6 +521,25 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	for _, want := range []string{"/qurl tunnel install`", "Guided tunnel setup", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestTunnelInstallUsageSplitsTypedEnvironmentExamples(t *testing.T) {
+	t.Parallel()
+
+	got := tunnelInstallUsage()
+	for _, want := range []string{
+		"Guided setup is exactly `/qurl tunnel install`",
+		"• Docker:",
+		"container:<name>|web_container:<name>",
+		"• Compose:",
+		"service:<name>",
+		"• ECS/Fargate or Kubernetes:",
+		"`env:compose` is accepted as shorthand",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("tunnelInstallUsage() = %q, missing %q", got, want)
 		}
 	}
 }
@@ -1697,6 +1716,33 @@ func TestRevokeBootstrapKeyAfterInstallFailureLogsRevokeError(t *testing.T) {
 
 	if got := logs.String(); !strings.Contains(got, "cleanup failed") || !strings.Contains(got, "render_failed") {
 		t.Fatalf("log = %q, want cleanup error and reason", got)
+	}
+}
+
+func TestRevokeBootstrapKeyAfterInstallFailureTreatsNotFoundAsBenign(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_already_absent" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_already_absent", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	c := client.New(server.URL, "unused", client.WithRetry(0))
+
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{KeyID: "key_already_absent"}, "response_url_delivery_failed")
+
+	got := logs.String()
+	if !strings.Contains(got, "already absent") || !strings.Contains(got, "response_url_delivery_failed") {
+		t.Fatalf("log = %q, want benign already-absent cleanup log", got)
+	}
+	if strings.Contains(got, "cleanup failed") {
+		t.Fatalf("log = %q, 404 should not be logged as cleanup failed", got)
 	}
 }
 

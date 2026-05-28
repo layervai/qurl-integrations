@@ -1399,6 +1399,29 @@ func TestRevokeAPIKey(t *testing.T) {
 	}
 }
 
+func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_missing" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_missing", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404,"detail":"key already gone"}}`))
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	err := c.RevokeAPIKey(context.Background(), "key_missing")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("RevokeAPIKey error = %v, want APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Detail != "key already gone" {
+		t.Fatalf("APIError = %+v, want 404 key already gone", apiErr)
+	}
+}
+
 func TestRevokeAPIKeyRejectsEmptyID(t *testing.T) {
 	c := testClient("https://qurl.invalid", "test-key")
 	if err := c.RevokeAPIKey(context.Background(), " \t "); !errors.Is(err, ErrRevokeAPIKeyEmptyID) {

@@ -198,6 +198,12 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	if len(fieldErrors) > 0 {
 		return nil, fieldErrors
 	}
+	// Re-check at the construction boundary so a future edit cannot carry a
+	// stale Docker/Compose web ref after relaxing the earlier field-error path.
+	if msg := tunnelWebRefValidationMessage(env, webRef); msg != "" {
+		fieldErrors[tunnelInstallBlockWebRef] = msg
+		return nil, fieldErrors
+	}
 	args = &tunnelInstallArgs{
 		Slug:        slug,
 		Alias:       alias,
