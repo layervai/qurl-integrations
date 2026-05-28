@@ -158,12 +158,8 @@ func TestSlackOpenViewFuncSurfacesHTTPError(t *testing.T) {
 
 func TestSlackOpenViewFuncSurfacesRedirectAsHTTPError(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/elsewhere", http.StatusFound)
-	}))
-	t.Cleanup(srv.Close)
 
-	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	err := slackOpenViewResponseError(http.StatusFound, http.Header{}, []byte(`<a href="/elsewhere">Found</a>`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
 		t.Fatalf("error = %v, want HTTP 302 redirect error", err)
 	}
