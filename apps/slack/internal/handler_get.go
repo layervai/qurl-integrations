@@ -127,18 +127,18 @@ func userErrorf(format string, args ...any) error {
 // completed the install.
 var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Please contact your Slack admin for assistance."}
 
-// handleGet implements `/qurl get <url|$alias|$r_<id>>`:
-//  1. Parse the slash-command text → [Command]. The positional arg
-//     is either a URL (`http://…` / `https://…`), a channel-scoped
-//     `$alias` name configured by a workspace admin, or a raw
-//     `$r_<id>` resource token copy-pasted from `/qurl list`.
+// handleGet implements `/qurl get <$slug|$alias>`:
+//  1. Parse the slash-command text → [Command]. The positional arg is
+//     a tunnel `$slug` / channel-scoped `$alias` (a workspace admin
+//     configures aliases), or a raw `$r_<id>` resource token. Raw URLs
+//     are rejected (ErrURLNotSupportedGet) — Slack only mints tunnels.
 //  2. Ack within 3s via [runAsync] (200 + ackWorkingOnIt).
-//  3. Async goroutine: for URL form, mint directly; for alias form,
-//     resolve alias → resource_id via channel_policies.alias_bindings
-//     then mint; for resource-ID form, gate against the channel's
-//     allow-set (union of alias_bindings + allowed_resource_ids)
-//     then mint by that ID. Rate-limit gates all three. POSTs the
-//     result to response_url.
+//  3. Async goroutine: for the token form, resolve `$slug`/`$alias` →
+//     resource_id (channel_policies.alias_bindings, then tunnel-slug
+//     fallback) then mint; for resource-ID form, gate against the
+//     channel's allow-set (union of alias_bindings +
+//     allowed_resource_ids) then mint by that ID. Rate-limit gates
+//     both. POSTs the result to response_url.
 //
 // Optional flags:
 //   - `dm:true` → final message via PostDM to the user's DM instead
@@ -159,8 +159,8 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 		return
 	}
-	if cmd.Alias == "" && cmd.Target == "" && cmd.Resource.Kind != ResourceTokenResourceID {
-		respondSlack(w, ":warning: Usage: `/qurl get <url>` to mint for a URL, or `/qurl get $slug` to mint for a tunnel or shortcut your Slack admin has configured here.")
+	if cmd.Alias == "" && cmd.Resource.Kind != ResourceTokenResourceID {
+		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
 		return
 	}
 
@@ -220,14 +220,13 @@ type getWorkArgs struct {
 	triggerID string
 }
 
-// getWork runs the inner resolve→rate-limit→mint pipeline for the
-// URL form (`/qurl get <url>`), the token form (`/qurl get $alias` or
-// `/qurl get $slug`), and the resource-ID form (`/qurl get $r_<id>`).
+// getWork runs the inner resolve→rate-limit→mint pipeline for the token
+// form (`/qurl get $slug` or `/qurl get $alias`) and the resource-ID
+// form (`/qurl get $r_<id>`). Raw URLs are rejected at parse time.
 // Returns the rendered reply text (without leading `:warning:`) on
 // success, or a [*userError] whose msg routes to the user.
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
-	target := args.cmd.Target
 	resourceID := ""
 	if args.cmd.Resource.Kind == ResourceTokenResourceID {
 		resourceID = args.cmd.Resource.Value
@@ -265,12 +264,14 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		}
 		input.ResourceID = resourceID
 	default:
-		// URL-form has no per-channel authorization gate — anyone in the
-		// workspace who can invoke `/qurl get` can mint against any URL on
-		// the workspace's API key (qurl-service's per-key quota is the
-		// only enforcer). Same posture the deprecated `/qurl create` had;
-		// the alias path is the surface that adds binding-scoped auth.
-		input.TargetURL = target
+		// Unreachable in practice: parseGet rejects raw URLs
+		// (ErrURLNotSupportedGet) and requireResourceToken guarantees the
+		// token is either an alias or a resource-id, so one branch above
+		// always fires. Defensive only — a future parser change that adds
+		// a third form MUST wire its authorization here rather than fall
+		// through to an unauthenticated mint.
+		log.Error("get: token resolved to neither alias nor resource-id form — refusing to mint", "raw", args.cmd.Raw)
+		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
 	c, err := h.authenticatedClient(ctx, args.teamID)
@@ -339,9 +340,8 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 // Returns a [*userError] on AdminStore-nil, lookup failure,
 // not-a-known-token, or not-allowed-here.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
-	// Refuse early on a no-DDB sandbox deploy. Token-form requires the
-	// channel-scoped binding store; URL form does not, so this gate
-	// only fires here.
+	// Refuse early on a no-DDB sandbox deploy — token resolution
+	// requires the channel-scoped binding store.
 	if h.cfg.AdminStore == nil {
 		log.Warn("get: AdminStore is nil; token-form lookup unavailable", "team_id", teamID)
 		return "", errAdminStoreNotConfigured

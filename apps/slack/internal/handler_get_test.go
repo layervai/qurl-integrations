@@ -210,59 +210,30 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	}
 }
 
-// TestHandleGet_URLForm_AdminStoreConfigured fences the URL-form
-// happy path under the production config (AdminStore wired): the
-// rate-limit gate runs (today a stubbed always-allow) and the mint
-// proceeds. Locks the contract so a future refactor that inverted
-// the form gate — routing URL-form through errAdminStoreNotConfigured
-// when AdminStore is wired — would be caught here.
-func TestHandleGet_URLForm_AdminStoreConfigured(t *testing.T) {
+// TestHandleGet_URLRejected fences that raw URLs are no longer mintable
+// through Slack: `/qurl get <url>` is rejected at parse with a friendly
+// pointer to slugs/aliases (the synchronous ack, since the parser fails
+// before runAsync), and never reaches the mint.
+func TestHandleGet_URLRejected(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	var mintHits atomic.Int32
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
-		writeCreateFixture(t, w, "https://qurl.link/url-form-cfg", testResourceIDFix)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("get https://example.com", testAdminTeamID, testAdminUserID)
-	if mintHits.Load() != 1 {
-		t.Errorf("mint hits = %d, want 1 (URL-form must reach mint with AdminStore wired)", mintHits.Load())
+	status, ack := inv.invokeAdmin("get https://example.com", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(async, "https://qurl.link/url-form-cfg") {
-		t.Errorf("async reply missing qURL link: %q", async)
+	if !strings.Contains(ack, "raw URLs aren't supported") {
+		t.Errorf("ack missing URL-rejection copy: %q", ack)
 	}
-}
-
-// TestHandleGet_URLForm_AdminStoreNil fences the symmetric URL-form
-// path on a no-DDB sandbox: `/qurl get <url>` MUST proceed to the
-// mint when AdminStore is nil — the AdminStore gate is alias-form
-// only, and the rate-limit gate is also alias-store-scoped. This
-// locks the gate asymmetry inside [Handler.getWork] (alias-form
-// refuses, URL-form proceeds) so a refactor that hoisted the
-// AdminStore-nil check above the form split would be caught here.
-func TestHandleGet_URLForm_AdminStoreNil(t *testing.T) {
-	ts := newAdminTestServers(t)
-	var mintHits atomic.Int32
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
-		mintHits.Add(1)
-		writeCreateFixture(t, w, "https://qurl.link/url-form", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	h.cfg.AdminStore = nil
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get https://example.com", testAdminTeamID, testAdminUserID)
-	if mintHits.Load() != 1 {
-		t.Errorf("mint hits = %d, want 1 (URL-form must reach mint even with nil AdminStore)", mintHits.Load())
-	}
-	if !strings.Contains(async, "https://qurl.link/url-form") {
-		t.Errorf("async reply missing qURL link: %q", async)
-	}
-	if strings.Contains(async, "admin features are not yet configured") {
-		t.Errorf("async reply leaked the alias-form not-configured copy on a URL-form invocation: %q", async)
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached on a rejected URL (hits = %d)", mintHits.Load())
 	}
 }
 

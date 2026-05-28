@@ -45,8 +45,6 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: testAdminListCmd, text: testAdminListCmd, wantSub: SubcmdAdmin, wantAdmin: AdminList, wantFlags: map[string]string{}},
 		{name: "list", text: "list", wantSub: SubcmdList, wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
-		{name: "get url form", text: "get https://example.com", wantSub: SubcmdGet, wantTarget: "https://example.com", wantFlags: map[string]string{}},
-		{name: "get url form with reason", text: `get https://example.com reason:"on-call"`, wantSub: SubcmdGet, wantTarget: "https://example.com", wantFlags: map[string]string{"reason": "on-call"}},
 		// Unbalanced quotes: tokenize tolerates (does not reject)
 		// odd-count `"` runs. The opening quote stays literal in
 		// Target and downstream URL validation surfaces the error.
@@ -123,6 +121,8 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "get without alias", text: "get", wantErr: ErrEmptyResource},
 		{name: "get without sigil", text: "get prod-db", wantErr: ErrMissingSigil},
 		{name: "get bare sigil", text: "get $", wantErr: ErrEmptyResource},
+		{name: "get https URL rejected", text: "get https://example.com", wantErr: ErrURLNotSupportedGet},
+		{name: "get http URL rejected", text: "get http://example.com", wantErr: ErrURLNotSupportedGet},
 		{name: "setalias without alias", text: "setalias", wantErr: ErrEmptyResource},
 		{name: "setalias without sigil", text: "setalias prod-db https://x.example", wantErr: ErrMissingSigil},
 		{name: "setalias without target", text: "setalias $prod-db", wantErr: ErrMissingTarget},
@@ -636,6 +636,7 @@ func FuzzParse(f *testing.F) {
 		ErrInvalidQURLID,
 		ErrUnexpectedArgument,
 		ErrInvalidFlag,
+		ErrURLNotSupportedGet,
 	}
 	f.Fuzz(func(t *testing.T, in string) {
 		cmd, err := Parse(in)

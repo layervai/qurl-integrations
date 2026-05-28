@@ -140,32 +140,68 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 	}
 }
 
-// getURLCommandBody builds a /slack/commands form payload for a
-// `/qurl get <url>` call. response_url is parameterized so a test
-// can wire it at the recorder it controls. user_id is set so the
-// async worker's IdempotencyKey derivation has the same input the
-// production handler sees from Slack.
-// getURLCommandTestChannelID / getURLCommandTestUserID are the
-// channel / user identifiers stamped on every test slash-command
-// body. Lifted so test assertions that derive the expected
-// IdempotencyKey from `(team, channel, user, trigger)` reference the
-// same constant the body carries — a typo on one side would otherwise
-// fail the test for the wrong reason.
+// getTokenCommandBody builds a /slack/commands form payload for a
+// `/qurl get $<alias>` mint. The infra tests in this file fence the
+// async machinery (ack latency, idempotency-key derivation, pool
+// saturation, orphan-ack on shutdown) rather than the resolution
+// surface, so they mint through the channel-alias token form
+// ([getTestAlias] → [getTestResourceID]) seeded into the handler's
+// AdminStore via [seedGetAliasBinding]. Raw URLs are no longer
+// mintable through Slack (parseGet rejects them), so the token form
+// is the only vehicle that reaches the mint pipeline.
+//
+// response_url is parameterized so a test can wire it at the recorder
+// it controls. team_id is parameterized so per-test idempotency-key
+// fixtures stay distinct; channel_id / user_id are pinned to
+// [getURLCommandTestChannelID] / [getURLCommandTestUserID] so
+// assertions that re-derive the expected IdempotencyKey from
+// `(team, channel, user, trigger)` reference the same constants the
+// body carries — a typo on one side would otherwise fail the test for
+// the wrong reason. The seeded alias binding is keyed on the same
+// channel, so a test that mints with a non-default channel would also
+// have to reseed.
 const (
 	getURLCommandTestChannelID = "C123"
 	getURLCommandTestUserID    = "U_test"
+
+	// getTestAlias is the channel alias the infra tests mint through.
+	// getTestResourceID is its bound resource_id — the mint then lands
+	// at POST /v1/resources/<getTestResourceID>/qurls, which the bare
+	// httptest qURL servers in this file (not path-routed) answer.
+	getTestAlias      = "tunnel-a"
+	getTestResourceID = "r_proc_test"
 )
 
-func getURLCommandBody(targetURL, teamID, triggerID, responseURL string) string {
+func getTokenCommandBody(teamID, triggerID, responseURL string) string {
 	return url.Values{
 		fieldCommand:     {testSlashCmd},
-		fieldText:        {"get " + targetURL},
+		fieldText:        {"get $" + getTestAlias},
 		fieldTeamID:      {teamID},
 		fieldChannelID:   {getURLCommandTestChannelID},
 		fieldUserID:      {getURLCommandTestUserID},
 		fieldTriggerID:   {triggerID},
 		fieldResponseURL: {responseURL},
 	}.Encode()
+}
+
+// seedGetAliasBinding wires an AdminStore onto h (a fakeDDB-backed
+// slackdata.Store) and seeds a single channel alias binding
+// ([getTestAlias] → [getTestResourceID]) on (teamID,
+// [getURLCommandTestChannelID]) so the token-form `/qurl get` issued
+// by [getTokenCommandBody] resolves via LookupChannelAlias and mints
+// against the resource-scoped endpoint. Used by the async-infra tests
+// in this file, which construct their *Handler with a bespoke Config
+// (custom pool size, retry, or BaseContext) and so can't share
+// newAdminTestHandler. The rate-limit gate is a stubbed always-allow
+// (slackdata.CheckRateLimit), so no rate-limit seed is needed.
+func seedGetAliasBinding(t *testing.T, h *Handler, teamID string) {
+	t.Helper()
+	names := defaultTestTableNames()
+	ddb := newFakeDDB(t, names, nil)
+	ddb.seedItem(t, names.channelPolicy, seedChannelPolicyAliasBindings(
+		teamID, getURLCommandTestChannelID, map[string]string{getTestAlias: getTestResourceID},
+	))
+	h.cfg.AdminStore = newStoreFromFake(t, ddb, names, nil)
 }
 
 // waitFor polls until cond returns true or the deadline elapses. Used
@@ -204,8 +240,9 @@ func TestHandle_AckIsFastUnderSlowAPI(t *testing.T) {
 
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, slowSrv)
+	seedGetAliasBinding(t, h, "T123")
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-fast", rec.URL)
+	body := getTokenCommandBody("T123", "trig-fast", rec.URL)
 
 	start := time.Now()
 	w := httptest.NewRecorder()
@@ -240,8 +277,9 @@ func TestHandle_AsyncGetPostsResultToResponseURL(t *testing.T) {
 
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
+	seedGetAliasBinding(t, h, "T123")
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-create", rec.URL)
+	body := getTokenCommandBody("T123", "trig-create", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -283,8 +321,9 @@ func TestHandle_AsyncGetSurfacesIdempotencyKey(t *testing.T) {
 
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
+	seedGetAliasBinding(t, h, "T999")
 
-	body := getURLCommandBody("https://example.com", "T999", "trig-dedup", rec.URL)
+	body := getTokenCommandBody("T999", "trig-dedup", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 	h.Wait()
@@ -336,9 +375,10 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
+	seedGetAliasBinding(t, h, "T-concurrent")
 	t.Cleanup(h.Wait)
 
-	body := getURLCommandBody("https://example.com", "T-concurrent", "trig-shared", rec.URL)
+	body := getTokenCommandBody("T-concurrent", "trig-shared", rec.URL)
 	// Sign once on the test goroutine. Doing it inside each spawned
 	// goroutine would mean 100 redundant HMAC computations and would
 	// expose us to t.Helper / t.Fatalf inside non-test goroutines —
@@ -403,9 +443,10 @@ func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
+	seedGetAliasBinding(t, h, "T123")
 	t.Cleanup(h.Wait)
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-err", rec.URL)
+	body := getTokenCommandBody("T123", "trig-err", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 	h.Wait()
@@ -474,10 +515,11 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
+	seedGetAliasBinding(t, h, "T123")
 	t.Cleanup(h.Wait)
 
 	send := func(triggerID string) string {
-		body := getURLCommandBody("https://example.com", "T123", triggerID, rec.URL)
+		body := getTokenCommandBody("T123", triggerID, rec.URL)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 		var ack map[string]string
@@ -530,8 +572,14 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
+	// Seed the alias so the worker resolves the token and reaches
+	// authenticatedClient, where panickingProvider.APIKey panics. The
+	// panic point sits AFTER alias resolution but BEFORE the rate-limit
+	// gate — without the seed the worker would fail closed at
+	// LookupChannelAlias and never exercise the recover defer.
+	seedGetAliasBinding(t, h, "T123")
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-panic", rec.URL)
+	body := getTokenCommandBody("T123", "trig-panic", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -749,8 +797,9 @@ func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
+	seedGetAliasBinding(t, h, "T123")
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-cancel", rec.URL)
+	body := getTokenCommandBody("T123", "trig-cancel", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -797,8 +846,9 @@ func TestHandle_OrphanAckPreventionOnBaseContextCancel(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
+	seedGetAliasBinding(t, h, "T123")
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-orphan", rec.URL)
+	body := getTokenCommandBody("T123", "trig-orphan", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -834,12 +884,13 @@ func TestHandler_WaitTimeout(t *testing.T) {
 
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
+	seedGetAliasBinding(t, h, "T123")
 	// Register the block-release AFTER newTestHandler so LIFO runs it
 	// BEFORE newTestHandler's t.Cleanup(h.Wait) — otherwise h.Wait
 	// blocks on the parked worker and t.Cleanup deadlocks.
 	t.Cleanup(func() { close(block) })
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-waittimeout", rec.URL)
+	body := getTokenCommandBody("T123", "trig-waittimeout", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -861,8 +912,9 @@ func TestHandler_WaitTimeout_DrainsOnSuccess(t *testing.T) {
 
 	rec := newResponseURLRecorder(t)
 	h := newTestHandler(t, qurlSrv)
+	seedGetAliasBinding(t, h, "T123")
 
-	body := getURLCommandBody("https://example.com", "T123", "trig-waittimeout-ok", rec.URL)
+	body := getTokenCommandBody("T123", "trig-waittimeout-ok", rec.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 
@@ -902,7 +954,8 @@ func TestHandle_PostResponseRefusesRedirectsEndToEnd(t *testing.T) {
 	t.Cleanup(responseSrv.Close)
 
 	h := newTestHandler(t, qurlSrv)
-	body := getURLCommandBody("https://example.com", "T123", "trig-redir-e2e", responseSrv.URL)
+	seedGetAliasBinding(t, h, "T123")
+	body := getTokenCommandBody("T123", "trig-redir-e2e", responseSrv.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 	h.Wait()

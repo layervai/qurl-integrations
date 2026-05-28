@@ -176,6 +176,13 @@ var ErrMissingAdminAction = errors.New("missing admin action")
 // without the trailing target/URL argument.
 var ErrMissingTarget = errors.New("missing target argument")
 
+// ErrURLNotSupportedGet is returned when `/qurl get` is handed a raw
+// URL. The Slack bot only mints links for tunnel resources now, reached
+// by their `$slug` or a channel `$alias` — never an arbitrary URL. The
+// message is user-facing (surfaced via the `:warning:` ack), so it
+// names the fix rather than the internal reason.
+var ErrURLNotSupportedGet = errors.New("`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels")
+
 // ErrMissingUserMention is returned when `admin add` / `admin remove`
 // are invoked without a `<@U…>` Slack user mention.
 var ErrMissingUserMention = errors.New("missing @user mention")
@@ -463,21 +470,21 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		return nil, ErrEmptyResource
 	}
 	if hasASCIIPrefixFold(rest[0], "https://") || hasASCIIPrefixFold(rest[0], "http://") {
-		cmd.Target = rest[0]
-	} else {
-		tok, err := requireResourceToken(rest[0])
-		if err != nil {
-			return nil, err
-		}
-		cmd.Resource = tok
-		if tok.Kind == ResourceTokenAlias {
-			// Keep [Command.Alias] populated so legacy read-sites in
-			// tests or future shared helpers don't have to
-			// special-case the get verb. The resource-ID branch
-			// leaves Alias empty — handlers that route on Kind use
-			// [Command.Resource] directly.
-			cmd.Alias = tok.Value
-		}
+		// Raw URLs are no longer mintable through Slack — get takes a
+		// tunnel `$slug` or a channel `$alias` only.
+		return nil, ErrURLNotSupportedGet
+	}
+	tok, err := requireResourceToken(rest[0])
+	if err != nil {
+		return nil, err
+	}
+	cmd.Resource = tok
+	if tok.Kind == ResourceTokenAlias {
+		// Keep [Command.Alias] populated so legacy read-sites in
+		// tests or future shared helpers don't have to special-case
+		// the get verb. The resource-ID branch leaves Alias empty —
+		// handlers that route on Kind use [Command.Resource] directly.
+		cmd.Alias = tok.Value
 	}
 	for _, tok := range rest[1:] {
 		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
