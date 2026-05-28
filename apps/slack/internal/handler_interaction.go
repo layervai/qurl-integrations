@@ -170,7 +170,7 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	port := defaultTunnelLocalPort
 	if !portFound || portRaw == "" {
 		fieldErrors[tunnelInstallBlockLocalPort] = "Use a TCP port from 1 to 65535."
-	} else if portRaw != "" {
+	} else {
 		var err error
 		port, err = strconv.Atoi(portRaw)
 		if err != nil || port < 1 || port > 65535 {

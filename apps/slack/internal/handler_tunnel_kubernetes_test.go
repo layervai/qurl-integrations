@@ -100,6 +100,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"type: RuntimeDefault",
 		"defaultMode: 0440",
 		"pre-provision qURL agent-state ownership separately",
+		"including existing app volumes",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)

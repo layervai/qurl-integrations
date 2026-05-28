@@ -30,17 +30,17 @@ const (
 	// the admin after Slack accepts the view submission.
 	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
-	// ack now happens before views.open; this tighter bound preserves enough of
-	// the trigger window for one admin check plus the Slack Web API call.
-	slackTriggerOpenViewBudget = time.Second
+	// ack now happens before views.open; this bound leaves room for the admin
+	// check while reducing false expiry on normal Slack Web API tail latency.
+	slackTriggerOpenViewBudget = 1500 * time.Millisecond
 	slackRetryAfterDisplayCap  = 5 * time.Minute
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
 	kubernetesNameMaxLen       = 63
-	// Hex chars appended to truncated Kubernetes object names. Six SHA-256
-	// bytes keeps collision risk negligible for expected workspace slug volume.
-	kubernetesNameHashLen = 12
+	// Hex chars appended to truncated Kubernetes object names. Twelve hex
+	// chars keeps collision risk negligible for expected workspace slug volume.
+	kubernetesNameHashHexLen = 12
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)

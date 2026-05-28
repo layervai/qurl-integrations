@@ -93,6 +93,7 @@ volumes:
 		"- Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.",
 		"- The fragment is compatible with Kubernetes Pod Security Admission `restricted`: no root initContainer, `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, and all capabilities dropped.",
 		"- The pod-level `fsGroup: 65532` lets the sidecar read the bootstrap Secret and write the qURL agent-state PVC. If your app cannot accept that fsGroup, pre-provision qURL agent-state ownership separately before merging the fragment.",
+		"- `fsGroup` and `fsGroupChangePolicy` apply to every volume in the pod, including existing app volumes; pre-set ownership on those volumes before merging if a chown-on-mount would be disruptive.",
 		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
 	}, "\n")
 	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend the `qurl-tunnel` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
@@ -118,7 +119,7 @@ func kubernetesNameWithSlug(prefix, slug string) string {
 		return name
 	}
 	sum := sha256.Sum256([]byte(slug))
-	hash := hex.EncodeToString(sum[:kubernetesNameHashLen/2])
+	hash := hex.EncodeToString(sum[:])[:kubernetesNameHashHexLen]
 	maxSlugLen := kubernetesNameMaxLen - len(prefix) - 1 - len(hash)
 	if maxSlugLen <= 0 {
 		// Current qURL prefixes do not hit this path; keep the helper safe for

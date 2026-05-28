@@ -193,6 +193,10 @@ func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) b
 		log.Error("marshal response_url delete payload failed", "error", err)
 		return false
 	}
+	if h.postResponseBody(log, responseURL, body) {
+		return true
+	}
+	log.Warn("response_url delete_original failed; retrying once")
 	return h.postResponseBody(log, responseURL, body)
 }
 
