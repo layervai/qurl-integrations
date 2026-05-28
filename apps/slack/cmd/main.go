@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,8 +72,9 @@ const (
 	maxHeaderBytes = 8 << 10 // 8 KiB
 	// Slack remains the token-validity authority; these bounds are only a local
 	// boot-time typo guard for obviously truncated or pasted-wrong values.
-	slackBotTokenTypoGuardMin = 30
-	slackBotTokenTypoGuardMax = 1024
+	slackBotTokenTypoGuardMin   = 30
+	slackBotTokenTypoGuardMax   = 1024
+	slackWorkspaceTokenCacheTTL = 5 * time.Minute
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -213,7 +215,7 @@ func run() error {
 		// workspace admins; without that gate, any user could
 		// initiate a flow that overwrites the workspace's qURL key
 		// against their own Auth0 account.
-		slog.Info("CONFIGURATION REMINDER: /qurl setup is workspace-admin-only by manifest, not by code - verify the Slack app manifest restricts the command")
+		slog.Info("CONFIGURATION REMINDER: /qurl setup is workspace-admin-only by manifest, not by code — verify the Slack app manifest restricts the command")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
@@ -306,17 +308,61 @@ func run() error {
 	return nil
 }
 
-func slackOpenViewFuncWithWorkspaceTokens(provider *auth.DDBProvider, fallbackToken, userAgent string) internal.OpenViewFunc {
-	return newSlackOpenViewFuncWithTokenLookup(func(ctx context.Context, teamID string) (string, error) {
+type slackBotTokenProvider interface {
+	SlackBotToken(ctx context.Context, workspaceID string) (string, error)
+}
+
+type cachedSlackBotToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+func slackOpenViewFuncWithWorkspaceTokens(provider slackBotTokenProvider, fallbackToken, userAgent string) internal.OpenViewFunc {
+	lookup := newWorkspaceSlackTokenLookup(provider, fallbackToken, slackWorkspaceTokenCacheTTL, time.Now)
+	return newSlackOpenViewFuncWithTokenLookup(lookup, userAgent, slackViewsOpenURL, nil)
+}
+
+func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) slackOpenViewTokenLookup {
+	if now == nil {
+		now = time.Now
+	}
+	var mu sync.Mutex
+	cache := map[string]cachedSlackBotToken{}
+	return func(ctx context.Context, teamID string) (string, error) {
+		teamID = strings.TrimSpace(teamID)
+		if teamID != "" && ttl > 0 {
+			mu.Lock()
+			cached, ok := cache[teamID]
+			mu.Unlock()
+			if ok && now().Before(cached.expiresAt) {
+				return cached.token, nil
+			}
+		}
+
 		token, err := provider.SlackBotToken(ctx, teamID)
 		if err == nil {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				return "", errors.New("workspace Slack bot token is empty")
+			}
+			if err := validateSlackBotTokenShape(token); err != nil {
+				return "", fmt.Errorf("workspace Slack bot token: %w", err)
+			}
+			if teamID != "" && ttl > 0 {
+				mu.Lock()
+				cache[teamID] = cachedSlackBotToken{
+					token:     token,
+					expiresAt: now().Add(ttl),
+				}
+				mu.Unlock()
+			}
 			return token, nil
 		}
 		if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) && fallbackToken != "" {
 			return fallbackToken, nil
 		}
 		return "", err
-	}, userAgent, slackViewsOpenURL, nil)
+	}
 }
 
 // minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.

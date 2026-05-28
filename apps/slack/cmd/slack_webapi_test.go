@@ -11,10 +11,25 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
+
+const testWorkspaceSlackBotToken = "xoxb-123456789012345678901234567890"
+
+type fakeSlackBotTokenProvider struct {
+	token string
+	err   error
+	calls atomic.Int64
+}
+
+func (f *fakeSlackBotTokenProvider) SlackBotToken(context.Context, string) (string, error) {
+	f.calls.Add(1)
+	return f.token, f.err
+}
 
 func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	t.Parallel()
@@ -79,6 +94,48 @@ func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	}
 	if gotAuth != "Bearer xoxb-workspace-token" {
 		t.Fatalf("Authorization = %q", gotAuth)
+	}
+}
+
+func TestWorkspaceSlackTokenLookupCachesDDBToken(t *testing.T) {
+	provider := &fakeSlackBotTokenProvider{token: testWorkspaceSlackBotToken}
+	now := time.Unix(1800000000, 0)
+	lookup := newWorkspaceSlackTokenLookup(provider, "", time.Minute, func() time.Time {
+		return now
+	})
+
+	for i := 0; i < 2; i++ {
+		token, err := lookup(context.Background(), "T_cache")
+		if err != nil {
+			t.Fatalf("lookup %d: %v", i, err)
+		}
+		if token != testWorkspaceSlackBotToken {
+			t.Fatalf("token = %q, want cached workspace token", token)
+		}
+	}
+	if calls := provider.calls.Load(); calls != 1 {
+		t.Fatalf("provider calls before TTL = %d, want 1", calls)
+	}
+
+	now = now.Add(time.Minute + time.Second)
+	if _, err := lookup(context.Background(), "T_cache"); err != nil {
+		t.Fatalf("lookup after TTL: %v", err)
+	}
+	if calls := provider.calls.Load(); calls != 2 {
+		t.Fatalf("provider calls after TTL = %d, want 2", calls)
+	}
+}
+
+func TestWorkspaceSlackTokenLookupFallsBackWhenUnset(t *testing.T) {
+	provider := &fakeSlackBotTokenProvider{err: auth.ErrSlackBotTokenNotConfigured}
+	lookup := newWorkspaceSlackTokenLookup(provider, "xoxb-fallback", time.Minute, nil)
+
+	token, err := lookup(context.Background(), "T_legacy")
+	if err != nil {
+		t.Fatalf("lookup fallback: %v", err)
+	}
+	if token != "xoxb-fallback" {
+		t.Fatalf("token = %q, want fallback", token)
 	}
 }
 

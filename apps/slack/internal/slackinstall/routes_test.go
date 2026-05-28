@@ -23,7 +23,7 @@ const (
 	testClientSecret    = "secret"
 	testScopeCSV        = "commands,views:write"
 	testWorkspaceID     = "T_WORKSPACE"
-	testWorkspaceToken  = "xoxb-workspace-token"
+	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
 	testAuthCode        = "abc123"
 	testAccessTokenKey  = "access_token"
 	testSlackInstallURL = CallbackPath + "?code=" + testAuthCode + "&state="
@@ -118,6 +118,20 @@ func TestInstallRedirectsToSlackAuthorizeWithStateCookie(t *testing.T) {
 	}
 	if !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Fatalf("state cookie flags not hardened: %#v", cookies[0])
+	}
+}
+
+func TestInstallRejectsNonGET(t *testing.T) {
+	cfg := testConfig(&fakeTokenStore{})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, InstallPath, http.NoBody)
+	Install(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", w.Code)
+	}
+	if w.Header().Get("Allow") != "GET" {
+		t.Fatalf("Allow = %q, want GET", w.Header().Get("Allow"))
 	}
 }
 
@@ -383,6 +397,42 @@ func TestCallbackRejectsSlackResponseMissingAuthedUserID(t *testing.T) {
 	}
 }
 
+func TestCallbackRejectsMalformedSlackBotToken(t *testing.T) {
+	store := &fakeTokenStore{}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":               true,
+			testAccessTokenKey: "xoxa-123456789012345678901234567890",
+			"team": map[string]string{
+				"id": testWorkspaceID,
+			},
+			"authed_user": map[string]string{
+				"id": "U_INSTALLER",
+			},
+		})
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	if store.workspaceID != "" {
+		t.Fatalf("store should not be called with malformed token, got %q", store.workspaceID)
+	}
+}
+
 func TestCallbackSurfacesTokenStoreFailure(t *testing.T) {
 	store := &fakeTokenStore{err: errors.New("ddb down")}
 	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
@@ -473,10 +523,23 @@ func TestCallbackDoesNotLeakSlackHTTPErrorBody(t *testing.T) {
 }
 
 func TestSafeSlackOAuthErrorCode(t *testing.T) {
-	if got := safeSlackOAuthErrorCode(" invalid_scope "); got != "invalid_scope" {
-		t.Fatalf("allowlisted error = %q, want invalid_scope", got)
+	for _, code := range []string{
+		"access_denied",
+		"bad_redirect_uri",
+		"invalid_client_id",
+		"invalid_redirect_uri",
+		"invalid_scope",
+		"invalid_state",
+		"invalid_team_for_non_distributed_app",
+	} {
+		if got := safeSlackOAuthErrorCode(" " + code + " "); got != code {
+			t.Fatalf("allowlisted error = %q, want %q", got, code)
+		}
 	}
 	if got := safeSlackOAuthErrorCode("bad\nvalue"); got != slackOAuthErrorUnknown {
 		t.Fatalf("unexpected error = %q, want %s", got, slackOAuthErrorUnknown)
+	}
+	if got := safeSlackOAuthErrorCode("not_authed"); got != slackOAuthErrorUnknown {
+		t.Fatalf("unexpected Slack API error = %q, want %s", got, slackOAuthErrorUnknown)
 	}
 }

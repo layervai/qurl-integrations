@@ -44,6 +44,8 @@ const (
 	slackInstallFlow           = "slack-install"
 	botScopeCommands           = "commands"
 	botScopeViewsWrite         = "views:write"
+	slackBotTokenMinBytes      = 30
+	slackBotTokenMaxBytes      = 1024
 	slackOAuthErrorUnknown     = "unrecognized"
 )
 
@@ -263,6 +265,8 @@ func Callback(cfg *Config) http.HandlerFunc {
 			http.Error(w, "Slack workspace install did not include an installer id", http.StatusBadGateway)
 			return
 		}
+		// Slack OAuth codes are single-use, so persist should finish even if the
+		// browser disconnects after Slack redirects back to us.
 		persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 		defer persistCancel()
 		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, teamID, &auth.SlackBotTokenInstall{
@@ -479,6 +483,9 @@ func exchangeCode(ctx context.Context, cfg *Config, code string) (*oauthAccessRe
 	if strings.TrimSpace(out.AccessToken) == "" {
 		return nil, errors.New("slack oauth.v2.access returned empty access_token")
 	}
+	if err := validateSlackOAuthBotTokenShape(out.AccessToken); err != nil {
+		return nil, fmt.Errorf("slack oauth.v2.access returned invalid access_token: %w", err)
+	}
 	return &out, nil
 }
 
@@ -518,6 +525,25 @@ func safeSlackOAuthErrorCode(raw string) string {
 	default:
 		return slackOAuthErrorUnknown
 	}
+}
+
+func validateSlackOAuthBotTokenShape(token string) error {
+	if len(token) < slackBotTokenMinBytes {
+		return fmt.Errorf("token shorter than %d bytes", slackBotTokenMinBytes)
+	}
+	if len(token) > slackBotTokenMaxBytes {
+		return fmt.Errorf("token longer than %d bytes", slackBotTokenMaxBytes)
+	}
+	if !strings.HasPrefix(token, "xoxb-") && !strings.HasPrefix(token, "xoxe.xoxb-") {
+		return errors.New("token must start with xoxb- or xoxe.xoxb-")
+	}
+	for i, b := range []byte(token) {
+		if b >= '!' && b <= '~' {
+			continue
+		}
+		return fmt.Errorf("token contains invalid characters near byte %d", i)
+	}
+	return nil
 }
 
 func logSlackInstallCallbackError(errorCode string, errorLen int) {

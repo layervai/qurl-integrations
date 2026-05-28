@@ -355,8 +355,11 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 	now := p.nowOrDefault().UTC().Format(time.RFC3339)
 	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
 		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
-	// TODO(#265): UpdateItem closes the DDB row clobber race, but a losing
-	// concurrent qurl-service mint can still leave an orphaned upstream key.
+	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
+	// window and preserves Slack install metadata, but the upstream qurl-service
+	// mint still happens before this write. If concurrent admins mint different
+	// keys, the earlier key can still be overwritten here and left orphaned
+	// upstream because there is no losing-write signal to trigger a revoke.
 	out, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
