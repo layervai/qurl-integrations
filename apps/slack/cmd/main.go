@@ -318,16 +318,14 @@ func validateSlackBotToken(token string) error {
 	// config mistakes such as truncated tokens or bytes outside visible ASCII.
 	// Keep the lower bound loose: this boot-time check is only a local typo
 	// guard, while Slack's auth response remains the validity oracle.
-	// TODO(slack-token-rotation): revisit the prefix check if Slack recommends
-	// xoxe.xoxb-style rotation tokens for bot-authenticated Web API calls.
 	if len(token) < slackBotTokenTypoGuardMin {
 		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenTypoGuardMin)
 	}
 	if len(token) > slackBotTokenTypoGuardMax {
 		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenTypoGuardMax)
 	}
-	if !strings.HasPrefix(token, "xoxb-") {
-		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-")
+	if !validSlackBotTokenPrefix(token) {
+		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-, xoxe.xoxb-, or xoxe-")
 	}
 	for i := 0; i < len(token); i++ {
 		b := token[i]
@@ -337,6 +335,12 @@ func validateSlackBotToken(token string) error {
 		return fmt.Errorf("SLACK_BOT_TOKEN contains invalid characters near byte %d", i)
 	}
 	return nil
+}
+
+func validSlackBotTokenPrefix(token string) bool {
+	return strings.HasPrefix(token, "xoxb-") ||
+		strings.HasPrefix(token, "xoxe.xoxb-") ||
+		strings.HasPrefix(token, "xoxe-")
 }
 
 // missingOAuthEnvVars returns the env-var names with empty values, in

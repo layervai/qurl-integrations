@@ -89,7 +89,7 @@ docker buildx build --platform linux/arm64 \
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
-| `SLACK_BOT_TOKEN` | No | Slack bot token used for `views.open` so `/qurl tunnel install` can show the guided installer. Requires the Slack app to grant `views:write`. Without it, the typed `/qurl tunnel install <slug>` path still works. |
+| `SLACK_BOT_TOKEN` | No | Slack bot token used for `views.open` so `/qurl tunnel install` can show the guided installer. Requires the Slack app to grant `views:write`. Accepts `xoxb-`, `xoxe.xoxb-`, and `xoxe-` bot-token shapes; without it, the typed `/qurl tunnel install <slug>` path still works. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt the workspace API key column |

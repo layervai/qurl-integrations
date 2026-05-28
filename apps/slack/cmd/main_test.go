@@ -61,6 +61,8 @@ func TestValidateSlackBotToken(t *testing.T) {
 	}{
 		{name: "unset"},
 		{name: "bot token", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-")+10)},
+		{name: "rotating bot token", token: "xoxe.xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxe.xoxb-"))},
+		{name: "rotating bot token short prefix", token: "xoxe-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxe-"))},
 		{name: "user token", token: "xoxp-test-token", wantErr: true},
 		{name: "app token", token: "xapp-test-token", wantErr: true},
 		{name: "placeholder bot token", token: "xoxb-", wantErr: true},

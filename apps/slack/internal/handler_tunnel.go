@@ -166,6 +166,7 @@ func tunnelInstallUsage() string {
 		"Usage:",
 		"• `/qurl tunnel install` for guided setup",
 		"• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`",
+		"Guided setup is exactly `/qurl tunnel install`; add arguments only when using typed setup.",
 		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
 		"Example: `/qurl tunnel install prod-dashboard port:8080`",
 	}, "\n")
@@ -599,7 +600,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 func tunnelInstallRateLimitMessage(err error) string {
 	retryAfter := slackRetryAfterLabel(SlackRateLimitRetryAfter(err))
 	if retryAfter == "" {
-		return "Slack rate-limited guided tunnel setup. Wait up to 5 minutes, then run `/qurl tunnel install` again."
+		return "Slack rate-limited guided tunnel setup. Wait up to " + humanSlackRetryAfterDuration(slackRetryAfterDisplayCap) + ", then run `/qurl tunnel install` again."
 	}
 	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl tunnel install` again."
 }

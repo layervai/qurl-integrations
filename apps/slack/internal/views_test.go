@@ -210,11 +210,13 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 		"Tunnel slug",
 		"Channel shortcut",
 		"Target environment",
+		"Docker snippets assume a Linux host",
 		string(tunnelEnvDocker),
 		string(tunnelEnvCompose),
 		string(tunnelEnvECSFargate),
 		string(tunnelEnvKubernetes),
 		"Local HTTP port",
+		"Optional for Linux Docker and Docker Compose only",
 		"Leave blank for ECS/Fargate or Kubernetes",
 	} {
 		if !strings.Contains(body, want) {

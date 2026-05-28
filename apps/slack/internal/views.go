@@ -160,7 +160,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
 			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
-			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output.", false,
+			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output. Docker snippets assume a Linux host.", false,
 				staticSelect(tunnelInstallActionEnvironment, []map[string]any{
 					optionObj("Docker sidecar", string(tunnelEnvDocker)),
 					optionObj("Docker Compose", string(tunnelEnvCompose)),
@@ -169,7 +169,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 				}, optionObj("Docker sidecar", string(tunnelEnvDocker)))),
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
-			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional for Docker and Docker Compose only. Leave blank for ECS/Fargate or Kubernetes.", true,
+			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional for Linux Docker and Docker Compose only. Leave blank for ECS/Fargate or Kubernetes.", true,
 				plainTextInput(tunnelInstallActionWebRef, "web", "")),
 		},
 	}

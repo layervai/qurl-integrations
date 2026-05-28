@@ -248,6 +248,7 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap+1))
 	if len(respBody) > respBodyCap {
 		_, _ = io.Copy(io.Discard, resp.Body)
+		// Keep only the bounded prefix; the extra byte is just the overflow signal.
 		respBody = respBody[:respBodyCap]
 	}
 	if resp.StatusCode >= 400 {
