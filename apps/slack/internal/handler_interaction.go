@@ -172,8 +172,6 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		if msg := tunnelWebContainerValidationMessage(env, webContainer); msg != "" {
 			fieldErrors[tunnelInstallBlockWebContainer] = msg
 		}
-	} else if msg := tunnelWebContainerValidationMessage(tunnelEnvDocker, webContainer); msg != "" {
-		fieldErrors[tunnelInstallBlockWebContainer] = msg
 	}
 
 	if len(fieldErrors) > 0 {

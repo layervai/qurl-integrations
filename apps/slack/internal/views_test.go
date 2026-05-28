@@ -236,6 +236,28 @@ func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
 	}
 }
 
+func TestSlackChannelMentionValidatesWithoutLossyFiltering(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		channelID string
+		want      string
+	}{
+		{name: "ordinary Slack channel", channelID: "C0123456789", want: "<#C0123456789>"},
+		{name: "future safe hyphen", channelID: "C0123456789-ABC", want: "<#C0123456789-ABC>"},
+		{name: "invalid mention delimiter", channelID: "C0123>", want: slackChannelFallbackText},
+		{name: "empty", channelID: " ", want: slackChannelFallbackText},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := slackChannelMention(tc.channelID); got != tc.want {
+				t.Fatalf("slackChannelMention(%q) = %q, want %q", tc.channelID, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestErrorResponse_Shape fences the friendly-error payload. Both
 // branches (replace_original true/false) emit valid JSON with the
 // `:warning:` prefix users learn to recognize.

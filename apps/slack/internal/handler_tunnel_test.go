@@ -40,6 +40,9 @@ const (
 	testForbiddenSlackShellFence = "```sh"
 	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
+	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
+	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
+	testTunnelKeyInstallLine     = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
 )
 
 func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
@@ -207,11 +210,15 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"Tunnel `" + testTunnelSlug + "` is ready.",
 		"Channel shortcut `$" + testTunnelSlug + "` is ready.",
+		"Paste it only when prompted or into your secret manager",
 		"Run this whole block on the Linux Docker host",
+		testTunnelKeyHistoryNote,
 		"set -eu",
 		testTunnelAPIKey,
+		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
 		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
+		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
@@ -607,9 +614,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"Tunnel `" + testTunnelSlug + "` is ready.",
 		"Channel shortcut `$team-dash` is ready.",
 		"Target environment: Kubernetes.",
+		"Paste it only when prompted or into your secret manager",
+		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
+		testTunnelKeyPromptLine,
+		`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin`,
 		"kubectl apply -f -",
-		"kind: Secret",
-		"name: qurl-tunnel-" + testTunnelSlug,
 		"kind: ConfigMap",
 		"name: qurl-proxy-" + testTunnelSlug,
 		"kind: PersistentVolumeClaim",
@@ -929,7 +938,7 @@ func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 	}
 }
 
-func TestParseTunnelInstallModalArgsReportsWebContainerValidationWhenEnvironmentMissing(t *testing.T) {
+func TestParseTunnelInstallModalArgsSkipsWebContainerValidationWhenEnvironmentMissing(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
 	delete(values, tunnelInstallBlockEnvironment)
@@ -942,8 +951,8 @@ func TestParseTunnelInstallModalArgsReportsWebContainerValidationWhenEnvironment
 	if fieldErrors[tunnelInstallBlockEnvironment] == "" {
 		t.Fatalf("field errors = %+v, want target environment error", fieldErrors)
 	}
-	if fieldErrors[tunnelInstallBlockWebContainer] == "" {
-		t.Fatalf("field errors = %+v, want web container error alongside missing environment", fieldErrors)
+	if fieldErrors[tunnelInstallBlockWebContainer] != "" {
+		t.Fatalf("field errors = %+v, want web container validation deferred until environment is known", fieldErrors)
 	}
 }
 
@@ -1078,7 +1087,8 @@ func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
 	t.Parallel()
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, nil, &client.APIKey{}, "missing_key_id")
+	c := client.New("http://127.0.0.1", "unused", client.WithRetry(0))
+	revokeBootstrapKeyAfterInstallFailure(context.Background(), log, c, &client.APIKey{}, "missing_key_id")
 }
 
 func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) {
@@ -1206,6 +1216,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"replace `<region>` / `<account-id>`",
 		"127.0.0.1:9090",
 		"AWS Secrets Manager",
+		"Store the bootstrap key shown above",
 		"ECS injects the bootstrap secret as `QURL_API_KEY`",
 		"file-mounted secret runtimes use `QURL_API_KEY_FILE` instead",
 		"secret as `qurl-tunnel-" + testTunnelSlug + "`",
@@ -1218,19 +1229,18 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		`"name": "QURL_API_KEY"`,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
-		testTunnelAPIKey,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
 	}
-	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 6 {
-		t.Fatalf("ECS instructions rendered %d code fences, want 6 for three independently copyable artifacts:\n%s", gotFenceCount, got)
+	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 4 {
+		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)
 	}
 
 	var container ecsContainerDefinition
@@ -1260,6 +1270,16 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
+	for _, want := range []string{
+		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
+		testTunnelKeyPromptLine,
+		`printf '%s' "$QURL_BOOTSTRAP_KEY" | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
+		"unset QURL_BOOTSTRAP_KEY",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
+		}
+	}
 	start := "kubectl apply -f - <<'QURL_K8S_YAML_EOF'\n"
 	bodyStart := strings.Index(got, start)
 	if bodyStart < 0 {
@@ -1271,8 +1291,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		t.Fatalf("Kubernetes instructions missing heredoc terminator:\n%s", got)
 	}
 	docs := strings.Split(got[bodyStart:bodyStart+bodyEnd], "\n---\n")
-	if len(docs) != 3 {
-		t.Fatalf("Kubernetes bootstrap docs = %d, want 3: %#v", len(docs), docs)
+	if len(docs) != 2 {
+		t.Fatalf("Kubernetes bootstrap docs = %d, want 2: %#v", len(docs), docs)
 	}
 	for i, doc := range docs {
 		var parsed map[string]any
@@ -1283,7 +1303,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	var configMap struct {
 		Data map[string]string `yaml:"data"`
 	}
-	if err := yaml.Unmarshal([]byte(docs[1]), &configMap); err != nil {
+	if err := yaml.Unmarshal([]byte(docs[0]), &configMap); err != nil {
 		t.Fatalf("ConfigMap YAML did not parse: %v", err)
 	}
 	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != renderTunnelConfigYAML(args) {
@@ -1316,6 +1336,9 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
 		}
 	}
+	if strings.Contains(got, testTunnelAPIKey) {
+		t.Fatalf("Kubernetes instructions embedded bootstrap key instead of prompting:\n%s", got)
+	}
 }
 
 func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
@@ -1346,7 +1369,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 
 	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 	for _, want := range []string{
-		"name: " + names.secret,
+		"QURL_BOOTSTRAP_SECRET='" + names.secret + "'",
 		"name: " + names.configMap,
 		"name: " + names.agentPVC,
 		"claimName: " + names.agentPVC,
@@ -1379,10 +1402,13 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 
 	for _, want := range []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
+		testTunnelKeyHistoryNote,
 		"WEB_SERVICE='web_1-2'",
 		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
 		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"`,
+		testTunnelKeyPromptLine,
+		testTunnelKeyInstallLine,
 		"qurl-tunnel-" + testTunnelSlug + ".compose.yaml",
 		"qurl-tunnel-" + testTunnelSlug + ":",
 		`network_mode: "service:${WEB_SERVICE}"`,
@@ -1395,7 +1421,6 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"if you changed `APP_COMPOSE_FILE`, use that file there too",
 		"logs -f qurl-tunnel-" + testTunnelSlug,
 		testTunnelLocalPort9090Line,
-		testTunnelAPIKey,
 		testTunnelImageRef,
 	} {
 		if !strings.Contains(got, want) {
@@ -1415,7 +1440,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -1467,13 +1492,15 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
 	for _, want := range []string{
+		testTunnelKeyHistoryNote,
 		"WEB_CONTAINER='web.1_2-3'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
+		testTunnelKeyPromptLine,
+		testTunnelKeyInstallLine,
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelDockerLine,
 		testTunnelAgentDirFragment,
 		testTunnelLocalPort9090Line,
-		testTunnelAPIKey,
 		testTunnelImageRef,
 	} {
 		if !strings.Contains(got, want) {
@@ -1482,6 +1509,9 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 	}
 	if strings.Contains(got, "Replace `YOUR_WEB_CONTAINER_NAME`") {
 		t.Fatalf("Docker instructions still included placeholder warning:\n%s", got)
+	}
+	if strings.Contains(got, testTunnelAPIKey) {
+		t.Fatalf("Docker instructions embedded bootstrap key instead of prompting:\n%s", got)
 	}
 }
 

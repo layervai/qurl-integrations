@@ -37,14 +37,11 @@ type ecsLogConfiguration struct {
 	Options   map[string]string `json:"options"`
 }
 
-func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
+func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
 	containerJSON := renderECSSidecarContainerJSON(args, image)
 	secretName := "qurl-tunnel-" + args.Slug
-	// processTunnelInstall validates the plaintext key before rendering; the
-	// separate fences keep each ECS artifact independently copyable in Slack.
 	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves, and replace `<region>` / `<account-id>` in the JSON placeholders before registering the task definition. Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.\n\n" +
-		"1. Store this bootstrap key in AWS Secrets Manager, then delete this Slack message before continuing:\n\n" +
-		slackCodeBlock(key.APIKey) + "\n\n" +
+		"1. Store the bootstrap key shown above in AWS Secrets Manager, then delete this Slack message before continuing.\n\n" +
 		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
 		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
 		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects the bootstrap secret as `QURL_API_KEY`; file-mounted secret runtimes use `QURL_API_KEY_FILE` instead:\n\n" +

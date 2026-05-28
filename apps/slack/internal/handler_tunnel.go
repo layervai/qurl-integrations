@@ -2,8 +2,6 @@ package internal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -142,7 +140,12 @@ func parseTunnelInstallOption(args *tunnelInstallArgs, token string) string {
 }
 
 func tunnelInstallUsage() string {
-	return "Usage:\n• `/qurl tunnel install` for guided setup\n• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
+	return strings.Join([]string{
+		"Usage:",
+		"• `/qurl tunnel install` for guided setup",
+		"• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`",
+		"Example: `/qurl tunnel install prod-dashboard port:8080`",
+	}, "\n")
 }
 
 func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg string) {
@@ -368,6 +371,9 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
 	if !h.postResponse(log, responseURL, msg) {
+		// response_url delivery can fail after Slack has accepted or shown the
+		// message. Keep the fresh key live so visible instructions still work;
+		// expiry and the operator deletion step bound the exposure window.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 	}
 }
@@ -439,13 +445,14 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 		imageNote = "\n\n" + imageNote
 	}
 
-	return fmt.Sprintf("Tunnel `%s` is ready.\n%s\n\nTarget environment: %s.\n\n%s%s\n\nBootstrap key %s. After the sidecar connects, delete this Slack message and remove the mounted bootstrap key from the runtime.\n\nThen users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s\n\nTarget environment: %s.\n\n%s%s\n\nAfter the sidecar connects, delete this Slack message and remove the mounted bootstrap key from the runtime.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
+		tunnelBootstrapExpiryLabel(key),
+		slackCodeBlock(key.APIKey),
 		environmentLabel,
 		instructions,
 		imageNote,
-		tunnelBootstrapExpiryLabel(key),
 		args.Alias,
 	), nil
 }
@@ -503,241 +510,34 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) string {
     local_port: %d`, args.Slug, args.LocalPort)
 }
 
-func renderDockerTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
-	webContainer := shellSingleQuote("YOUR_WEB_CONTAINER_NAME")
-	if args.WebContainer != "" {
-		webContainer = shellSingleQuote(args.WebContainer)
-	}
-	docker := fmt.Sprintf(`set -eu
-
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-elif command -v sudo >/dev/null 2>&1; then
-  SUDO="sudo"
-else
-  echo "Run as root or install sudo so the state and secret directories can be owned by UID 65532." >&2
+func renderBootstrapKeyPromptShell() string {
+	return `if [ -z "${QURL_BOOTSTRAP_KEY:-}" ]; then
+  if [ ! -t 0 ]; then
+    echo "Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal." >&2
+    exit 1
+  fi
+  printf 'Paste qURL bootstrap key (input hidden): ' >&2
+  STTY_STATE="$(stty -g 2>/dev/null || true)"
+  if [ -n "$STTY_STATE" ]; then
+    stty -echo
+  fi
+  if ! IFS= read -r QURL_BOOTSTRAP_KEY; then
+    if [ -n "$STTY_STATE" ]; then
+      stty "$STTY_STATE"
+    fi
+    printf '\n' >&2
+    echo "Bootstrap key is required." >&2
+    exit 1
+  fi
+  if [ -n "$STTY_STATE" ]; then
+    stty "$STTY_STATE"
+  fi
+  printf '\n' >&2
+fi
+if [ -z "$QURL_BOOTSTRAP_KEY" ]; then
+  echo "Bootstrap key is required." >&2
   exit 1
-fi
-
-# Keep this placeholder assignment so the block is pasteable; the guard below
-# fails before writing files until the operator replaces it.
-WEB_CONTAINER=%s
-if [ "$WEB_CONTAINER" = "YOUR_WEB_CONTAINER_NAME" ] || [ -z "$WEB_CONTAINER" ]; then
-  echo "Set WEB_CONTAINER to the Docker container name or ID for your local HTTP server." >&2
-  exit 1
-fi
-
-QURL_TUNNEL_SLUG=%s
-TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"
-SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
-
-# This intentionally overwrites the per-slug config so rerunning the install
-# refreshes the deterministic slug/port values in place.
-cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
-%s
-QURL_PROXY_YAML_EOF
-
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
-printf '%%s' %s | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
-
-if docker ps -a --format '{{.Names}}' | grep -Fxq "$TUNNEL_CONTAINER"; then
-  docker rm -f "$TUNNEL_CONTAINER" >/dev/null
-fi
-
-docker run -d \
-  --name "$TUNNEL_CONTAINER" \
-  --network "container:${WEB_CONTAINER}" \
-  --restart=on-failure:5 \
-  -v "$AGENT_STATE_DIR:/var/lib/layerv/agent" \
-  -v "$SECRET_DIR:$SECRET_DIR:ro" \
-  -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
-  -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
-  -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
-  %s`, webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), shellSingleQuote(image))
-
-	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running."
-	if args.WebContainer == "" {
-		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
-	}
-	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory."
-	return intro + "\n\n" + slackCodeBlock(docker) + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file."
-}
-
-func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
-	webService := shellSingleQuote("YOUR_COMPOSE_SERVICE_NAME")
-	if args.WebContainer != "" {
-		webService = shellSingleQuote(args.WebContainer)
-	}
-	tunnelServiceName := "qurl-tunnel-" + args.Slug
-	tunnelService := shellSingleQuote(tunnelServiceName)
-	compose := fmt.Sprintf(`set -eu
-
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-elif command -v sudo >/dev/null 2>&1; then
-  SUDO="sudo"
-else
-  echo "Run as root or install sudo so the state and secret directories can be owned by UID 65532." >&2
-  exit 1
-fi
-
-# Run from the directory with your existing Compose file.
-APP_COMPOSE_FILE=${APP_COMPOSE_FILE:-compose.yaml}
-WEB_SERVICE=%s
-if [ "$WEB_SERVICE" = "YOUR_COMPOSE_SERVICE_NAME" ] || [ -z "$WEB_SERVICE" ]; then
-  echo "Set WEB_SERVICE to the Compose service name for your local HTTP server." >&2
-  exit 1
-fi
-
-QURL_TUNNEL_SLUG=%s
-TUNNEL_SERVICE=%s
-SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
-QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"
-
-cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
-%s
-QURL_PROXY_YAML_EOF
-
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
-printf '%%s' %s | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
-
-# This heredoc is intentionally unquoted so it writes concrete values into
-# the per-slug Compose fragment; future docker compose commands should not need
-# the install script's temporary environment variables.
-cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
-services:
-  %s:
-    image: %s
-    restart: on-failure:5
-    network_mode: "service:${WEB_SERVICE}"
-    depends_on:
-      - ${WEB_SERVICE}
-    volumes:
-      - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
-      - ${SECRET_DIR}:/run/secrets/qurl-tunnel:ro
-      - ./qurl-proxy-${QURL_TUNNEL_SLUG}.yaml:/work/qurl-proxy.yaml:ro
-    environment:
-      QURL_API_KEY_FILE: /run/secrets/qurl-tunnel/api_key
-      QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
-QURL_COMPOSE_YAML_EOF
-
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), tunnelServiceName, yamlSingleQuoted(image))
-
-	intro := "Run this from your Docker Compose project directory on the Linux Docker host."
-	if args.WebContainer == "" {
-		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command."
-	}
-	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the per-slug Compose fragment when the slug, port, or service changes."
-	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file."
-}
-
-func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
-	names := kubernetesTunnelObjectNames(args.Slug)
-	objects := fmt.Sprintf(`kubectl apply -f - <<'QURL_K8S_YAML_EOF'
-apiVersion: v1
-kind: Secret
-metadata:
-  name: %s
-type: Opaque
-stringData:
-  api_key: %s
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: %s
-data:
-  qurl-proxy.yaml: |
-%s
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: %s
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
-QURL_K8S_YAML_EOF`, names.secret, yamlSingleQuoted(key.APIKey), names.configMap, indentLines(renderTunnelConfigYAML(args), 4), names.agentPVC)
-
-	patch := fmt.Sprintf(`initContainers:
-  - name: qurl-agent-state-permissions
-    image: busybox:1.36
-    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/layerv/agent"]
-    securityContext:
-      runAsUser: 0
-      allowPrivilegeEscalation: false
-    volumeMounts:
-      - name: qurl-agent-state
-        mountPath: /var/lib/layerv/agent
-containers:
-  - name: qurl-tunnel
-    image: %s
-    securityContext:
-      runAsUser: 65532
-      runAsGroup: 65532
-      allowPrivilegeEscalation: false
-    env:
-      - name: QURL_API_KEY_FILE
-        value: /run/secrets/qurl-tunnel/api_key
-      - name: QURL_TUNNEL_SLUG
-        value: %s
-    volumeMounts:
-      - name: qurl-agent-state
-        mountPath: /var/lib/layerv/agent
-      - name: qurl-bootstrap
-        mountPath: /run/secrets/qurl-tunnel
-        readOnly: true
-      - name: qurl-proxy
-        mountPath: /work/qurl-proxy.yaml
-        subPath: qurl-proxy.yaml
-        readOnly: true
-volumes:
-  - name: qurl-agent-state
-    persistentVolumeClaim:
-      claimName: %s
-  - name: qurl-bootstrap
-    secret:
-      secretName: %s
-      defaultMode: 0444
-  - name: qurl-proxy
-    configMap:
-      name: %s`, yamlSingleQuoted(image), args.Slug, names.agentPVC, names.secret, names.configMap)
-
-	return "Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC. The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership. The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; delete it after the pod logs show the tunnel connected.\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
-}
-
-type kubernetesTunnelNames struct {
-	secret    string
-	configMap string
-	agentPVC  string
-}
-
-func kubernetesTunnelObjectNames(slug string) kubernetesTunnelNames {
-	return kubernetesTunnelNames{
-		secret:    kubernetesNameWithSlug("qurl-tunnel-", slug),
-		configMap: kubernetesNameWithSlug("qurl-proxy-", slug),
-		agentPVC:  kubernetesNameWithSlug("qurl-agent-", slug),
-	}
-}
-
-func kubernetesNameWithSlug(prefix, slug string) string {
-	name := prefix + slug
-	if len(name) <= kubernetesNameMaxLen {
-		return name
-	}
-	sum := sha256.Sum256([]byte(slug))
-	hash := hex.EncodeToString(sum[:kubernetesNameHashLen/2])
-	maxSlugLen := kubernetesNameMaxLen - len(prefix) - 1 - len(hash)
-	base := strings.TrimRight(slug[:maxSlugLen], "-")
-	return prefix + base + "-" + hash
+fi`
 }
 
 func tunnelBootstrapTTLLabel() string {

@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -36,6 +37,10 @@ const (
 	// pathological response_url making modal submission fail only after open.
 	slackPrivateMetadataMaxBytes = 3000
 )
+
+const slackChannelFallbackText = "the channel where setup started"
+
+var slackChannelIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,127}$`)
 
 const (
 	tunnelInstallBlockSlug          = "tunnel_slug"
@@ -181,23 +186,11 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 }
 
 func slackChannelMention(channelID string) string {
-	var b strings.Builder
-	for _, r := range channelID {
-		switch {
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '_':
-			b.WriteRune(r)
-		}
+	channelID = strings.TrimSpace(channelID)
+	if !slackChannelIDPattern.MatchString(channelID) {
+		return slackChannelFallbackText
 	}
-	if b.Len() == 0 {
-		return "the channel where setup started"
-	}
-	return "<#" + b.String() + ">"
+	return "<#" + channelID + ">"
 }
 
 func mustMarshalStaticJSON(v any) []byte {
