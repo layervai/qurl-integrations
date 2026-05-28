@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"strings"
@@ -83,6 +82,10 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 			return fmt.Errorf("views.open response read: %w", err)
 		}
 		if len(raw) > slackViewsOpenResponseBodyLimit {
+			// LimitReader consumes only the first limit+1 bytes from the
+			// original body. Drain the remainder before Close so a keep-alive
+			// transport can still reuse the connection after an oversized
+			// response.
 			_, _ = io.Copy(io.Discard, resp.Body)
 			return fmt.Errorf("views.open response exceeded %d bytes", slackViewsOpenResponseBodyLimit)
 		}
@@ -103,7 +106,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 	if statusCode == http.StatusTooManyRequests {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
-	if statusCode >= 400 {
+	if statusCode >= 300 {
 		bodySnippet := slackOpenViewBodySnippet(raw)
 		if bodySnippet == "" {
 			return fmt.Errorf("views.open returned HTTP %d", statusCode)
@@ -132,9 +135,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 
 func slackOpenViewBodySnippet(raw []byte) string {
 	const maxSnippetBytes = 200
-	// These snippets are logged today and may be included in future Slack-facing
-	// diagnostics, so escape angle brackets before returning display text.
-	bodySnippet := html.EscapeString(printableLogSnippet(strings.TrimSpace(string(raw))))
+	bodySnippet := printableLogSnippet(strings.TrimSpace(string(raw)))
 	if len(bodySnippet) <= maxSnippetBytes {
 		return bodySnippet
 	}

@@ -104,3 +104,29 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 		t.Fatalf("Compose service image = %q, want %q", service.Image, testTunnelImageRef)
 	}
 }
+
+func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *testing.T) {
+	t.Parallel()
+	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvCompose,
+		WebRef:      testTunnelComposeWeb,
+	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
+
+	for _, want := range []string{
+		"WEB_SERVICE='" + testTunnelComposeWeb + "'",
+		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
+		`case "$WEB_SERVICE" in`,
+		`*[!A-Za-z0-9_-]*)`,
+		"intentionally unquoted so it expands the validated variables",
+		"<<QURL_COMPOSE_YAML_EOF",
+		`network_mode: "service:${WEB_SERVICE}"`,
+		`QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Docker Compose instructions missing validated-expansion guard %q:\n%s", want, got)
+		}
+	}
+}

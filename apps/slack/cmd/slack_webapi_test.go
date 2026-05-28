@@ -143,6 +143,22 @@ func TestSlackOpenViewFuncSurfacesHTTPError(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncSurfacesRedirectAsHTTPError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("error = %v, want HTTP 302 redirect error", err)
+	}
+	if strings.Contains(err.Error(), "response JSON") {
+		t.Fatalf("error = %v, want redirect handled before JSON parse", err)
+	}
+}
+
 func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -160,7 +176,7 @@ func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	}
 }
 
-func TestSlackOpenViewFuncEscapesHTTPErrorBodySnippet(t *testing.T) {
+func TestSlackOpenViewFuncMakesHTTPErrorBodySnippetPrintable(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -169,11 +185,11 @@ func TestSlackOpenViewFuncEscapesHTTPErrorBodySnippet(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
-	if err == nil || !strings.Contains(err.Error(), "&lt;script&gt;?alert(1)&lt;/script&gt;") {
-		t.Fatalf("error = %v, want escaped printable body snippet", err)
+	if err == nil || !strings.Contains(err.Error(), "<script>?alert(1)</script>") {
+		t.Fatalf("error = %v, want printable body snippet", err)
 	}
-	if strings.Contains(err.Error(), "<script>") {
-		t.Fatalf("error = %q, want HTML escaped snippet", err.Error())
+	if strings.Contains(err.Error(), "\x00") {
+		t.Fatalf("error = %q, want control characters replaced", err.Error())
 	}
 }
 
@@ -245,6 +261,27 @@ func TestSlackOpenViewFuncAcceptsLargeSuccessfulViewEcho(t *testing.T) {
 	err = slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
+	}
+}
+
+func TestSlackOpenViewFuncAcceptsResponseAtBodyLimit(t *testing.T) {
+	t.Parallel()
+	paddingLen := slackViewsOpenResponseBodyLimit - len(`{"ok":true,"padding":""}`)
+	if paddingLen <= 0 {
+		t.Fatalf("invalid slackViewsOpenResponseBodyLimit: %d", slackViewsOpenResponseBodyLimit)
+	}
+	successBody := `{"ok":true,"padding":"` + strings.Repeat("x", paddingLen) + `"}`
+	if len(successBody) != slackViewsOpenResponseBodyLimit {
+		t.Fatalf("test body length = %d, want %d", len(successBody), slackViewsOpenResponseBodyLimit)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(successBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err != nil {
+		t.Fatalf("views.open exactly at body limit: %v", err)
 	}
 }
 

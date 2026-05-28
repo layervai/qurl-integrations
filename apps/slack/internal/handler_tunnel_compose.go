@@ -93,7 +93,7 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 
 	introParts := []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
-		"It prompts for the bootstrap key so the secret does not land in shell history.",
+		"It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup.",
 	}
 	if args.WebRef == "" {
 		introParts = append(introParts, "Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command.")

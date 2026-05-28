@@ -75,6 +75,10 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl tunnel install again.")
 		return
 	}
+	// The Slack request signature covers the full form body, including the
+	// view_submission payload and its private_metadata. CreatedAtUnix is still
+	// user-visible JSON, so treat it as freshness UX state; the team/user
+	// cross-checks below are the authorization boundary.
 	// The timestamp is minted and checked by Slack app pods. Platform clock
 	// sync should keep drift tiny; stale modals and far-future timestamps both
 	// fail closed instead of minting a fresh bootstrap key from stale state.

@@ -77,7 +77,7 @@ docker run -d \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
   %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), shellSingleQuote(image))
 
-	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history."
+	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup."
 	if args.WebRef == "" {
 		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
 	}
