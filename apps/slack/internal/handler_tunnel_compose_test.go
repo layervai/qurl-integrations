@@ -23,6 +23,8 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
 		testTunnelKeyHistoryNote,
 		"WEB_SERVICE='web_1-2'",
+		`case "$WEB_SERVICE" in`,
+		"WEB_SERVICE may contain only letters, numbers, underscores, and hyphens.",
 		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
 		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"`,

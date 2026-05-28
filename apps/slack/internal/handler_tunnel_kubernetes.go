@@ -85,13 +85,13 @@ volumes:
 
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",
-		"Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.",
-		"The initContainer runs `chown -R` on the qURL agent-state PVC at pod start, so keep that PVC dedicated to qURL agent state instead of reusing an application volume with many files.",
-		"The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership.",
-		"The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; do not co-locate the sidecar with untrusted containers while that Secret exists.",
-		"If your workload can safely use pod-level `fsGroup: 65532`, you may change the Secret `defaultMode` to `0440`.",
-		"Delete the bootstrap Secret after the pod logs show the tunnel connected.",
-	}, " ")
+		"- Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.",
+		"- The initContainer runs `chown -R` on the qURL agent-state PVC at pod start, so keep that PVC dedicated to qURL agent state instead of reusing an application volume with many files.",
+		"- The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership.",
+		"- The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; do not co-locate the sidecar with untrusted containers while that Secret exists.",
+		"- If your workload can safely use pod-level `fsGroup: 65532`, you may change the Secret `defaultMode` to `0440`.",
+		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
+	}, "\n")
 	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
 }
 

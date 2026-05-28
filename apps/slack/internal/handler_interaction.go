@@ -31,7 +31,13 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	slog.Info("interaction received", "payload", payload)
+	slog.Info("interaction received",
+		"type", payload.Type,
+		"callback_id", payload.View.CallbackID,
+		"team_id", payload.Team.ID,
+		"user_id", payload.User.ID,
+		"view_id", payload.View.ID,
+	)
 
 	if payload.Type != "view_submission" {
 		// Buttons + select menus + shortcut entries land here. Ack

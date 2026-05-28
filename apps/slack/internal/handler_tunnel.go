@@ -262,7 +262,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	// Acknowledge before the async admin check so Slack's short trigger_id
 	// window is preserved for views.open. Denials and open failures are sent
 	// back through response_url by openTunnelInstallWizard.
-	respondSlack(w, "Opening guided tunnel setup…")
+	respondSlack(w, "Checking admin permissions, then opening guided tunnel setup…")
 }
 
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {

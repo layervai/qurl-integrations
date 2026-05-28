@@ -178,15 +178,47 @@ func TestSlackOpenViewFuncSurfacesEmptyResponseBody(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncAcceptsLargeSuccessfulViewEcho(t *testing.T) {
+	t.Parallel()
+	successBody, err := json.Marshal(map[string]any{
+		"ok": true,
+		"view": map[string]any{
+			"id":               "V_test",
+			"team_id":          "T_test",
+			"private_metadata": strings.Repeat("m", 1024),
+			"state":            strings.Repeat("s", 8192),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal success body: %v", err)
+	}
+	if len(successBody) <= 4096 {
+		t.Fatalf("test body length = %d, want larger than old 4096-byte cap", len(successBody))
+	}
+	if len(successBody) > slackViewsOpenResponseBodyLimit {
+		t.Fatalf("test body length = %d, want within views.open cap", len(successBody))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(successBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	err = slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err != nil {
+		t.Fatalf("views.open: %v", err)
+	}
+}
+
 func TestSlackOpenViewFuncSurfacesOversizedResponse(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("x", 4097)))
+		_, _ = w.Write([]byte(strings.Repeat("x", slackViewsOpenResponseBodyLimit+1)))
 	}))
 	t.Cleanup(srv.Close)
 
 	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
-	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
+	if err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
 }
@@ -215,7 +247,7 @@ func TestSlackOpenViewFuncRefusesRedirects(t *testing.T) {
 
 func TestSlackOpenViewFuncDrainsAndClosesOversizedResponse(t *testing.T) {
 	t.Parallel()
-	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", 8192))}
+	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", slackViewsOpenResponseBodyLimit+1024))}
 	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -225,7 +257,7 @@ func TestSlackOpenViewFuncDrainsAndClosesOversizedResponse(t *testing.T) {
 	})}
 
 	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
-	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
+	if err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
 	if !body.sawEOF.Load() {

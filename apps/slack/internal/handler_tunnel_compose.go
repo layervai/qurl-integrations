@@ -16,7 +16,9 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, _ *client.AP
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
 	// write concrete paths and service names into the generated file. Keep
 	// dockerComposeServicePattern narrow: it rejects shell metacharacters such
-	// as '$', backticks, quotes, slashes, and whitespace.
+	// as '$', backticks, quotes, slashes, and whitespace. The runtime
+	// WEB_SERVICE guard below catches unsafe operator edits before rendering
+	// the Compose fragment.
 	compose := fmt.Sprintf(`set -eu
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -35,6 +37,19 @@ if [ "$WEB_SERVICE" = "YOUR_COMPOSE_SERVICE_NAME" ] || [ -z "$WEB_SERVICE" ]; th
   echo "Set WEB_SERVICE to the Compose service name for your local HTTP server." >&2
   exit 1
 fi
+case "$WEB_SERVICE" in
+  [A-Za-z0-9]*) ;;
+  *)
+    echo "WEB_SERVICE must start with a letter or number." >&2
+    exit 1
+    ;;
+esac
+case "$WEB_SERVICE" in
+  *[!A-Za-z0-9_-]*)
+    echo "WEB_SERVICE may contain only letters, numbers, underscores, and hyphens." >&2
+    exit 1
+    ;;
+esac
 
 QURL_TUNNEL_SLUG=%s
 TUNNEL_SERVICE=%s

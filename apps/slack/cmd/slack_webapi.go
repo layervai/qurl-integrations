@@ -22,6 +22,10 @@ const slackViewsOpenURL = "https://slack.com/api/views.open"
 // stays inside Slack's short trigger_id window.
 const slackViewsOpenTimeout = 2 * time.Second
 
+// Slack echoes the opened view in successful views.open responses. Keep the
+// body bounded, but leave room for modal blocks plus Slack-injected state.
+const slackViewsOpenResponseBodyLimit = 64 * 1024
+
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
 	return slackOpenViewFuncWithURL(token, userAgent, slackViewsOpenURL)
 }
@@ -36,7 +40,9 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 	}
 	// The teamID parameter is intentionally part of the Config.OpenView seam
 	// so production wiring can move from this single-token deployment shape to
-	// per-team OAuth token lookup without changing the handler contract.
+	// per-team OAuth token lookup without changing the handler contract. The
+	// workspace install row written by internal/oauth is the future lookup
+	// authority for this token.
 	// TODO(slack-oauth): look up the workspace bot token by teamID once the
 	// per-workspace OAuth token store is the only production path.
 	return func(ctx context.Context, _ string, triggerID string, viewJSON []byte) error {
@@ -70,14 +76,13 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		const bodyCap = 4096
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, bodyCap+1))
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackViewsOpenResponseBodyLimit+1))
 		if err != nil {
 			return fmt.Errorf("views.open response read: %w", err)
 		}
-		if len(raw) > bodyCap {
+		if len(raw) > slackViewsOpenResponseBodyLimit {
 			_, _ = io.Copy(io.Discard, resp.Body)
-			return fmt.Errorf("views.open response exceeded %d bytes", bodyCap)
+			return fmt.Errorf("views.open response exceeded %d bytes", slackViewsOpenResponseBodyLimit)
 		}
 		return slackOpenViewResponseError(resp.StatusCode, resp.Header, raw)
 	}

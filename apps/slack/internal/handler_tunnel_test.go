@@ -279,7 +279,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Opening guided tunnel setup") {
+	if !strings.Contains(ack, "Checking admin permissions") {
 		t.Fatalf("ack = %q, want guided setup copy", ack)
 	}
 	var call openViewCall
@@ -395,7 +395,7 @@ func TestTunnelInstallBareReportsOpenViewFailure(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Opening guided tunnel setup") {
+	if !strings.Contains(ack, "Checking admin permissions") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	asyncBody := inv.captured.waitForBody(t, 2*time.Second)
@@ -424,7 +424,7 @@ func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Opening guided tunnel setup") {
+	if !strings.Contains(ack, "Checking admin permissions") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
@@ -449,7 +449,7 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Opening guided tunnel setup") {
+	if !strings.Contains(ack, "Checking admin permissions") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
@@ -474,7 +474,7 @@ func TestTunnelInstallBareIgnoresInvalidRateLimitRetryAfter(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Opening guided tunnel setup") {
+	if !strings.Contains(ack, "Checking admin permissions") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
@@ -529,7 +529,7 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 		if got.status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", got.status)
 		}
-		if !strings.Contains(got.ack, "Opening guided tunnel setup") {
+		if !strings.Contains(got.ack, "Checking admin permissions") {
 			t.Fatalf("ack = %q, want immediate guided setup copy", got.ack)
 		}
 	case <-time.After(2 * time.Second):
