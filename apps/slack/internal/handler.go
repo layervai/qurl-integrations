@@ -194,15 +194,20 @@ type Config struct {
 	AdminStore *slackdata.Store
 
 	// OpenView posts a `views.open` Slack web API call to display a
-	// modal in response to a slash command. The teamID parameter is
-	// present so production can route through per-workspace OAuth bot
-	// tokens; the current cmd/main.go fallback uses one SLACK_BOT_TOKEN.
-	// TODO(slack-oauth): switch production wiring to per-workspace bot token
-	// lookup once OAuth installs are the only supported Slack deployment path.
-	// Tests inject a stub that records the call. Tunnel install uses this
-	// for guided setup; setalias-rebind can use the same seam for
-	// confirmation modals.
+	// modal in response to a slash command. The token owner parameter is
+	// usually the workspace team_id; Enterprise Grid org installs can pass
+	// enterprise_id instead while the modal metadata remains workspace-scoped.
+	// Legacy single-workspace deploys can still fall back to one
+	// SLACK_BOT_TOKEN. Tests inject a stub that records the call. Tunnel
+	// install uses this for guided setup; setalias-rebind can use the same seam
+	// for confirmation modals.
 	OpenView OpenViewFunc
+
+	// SlackInstallURL starts the Slack app install/reauthorization flow that
+	// stores the per-workspace bot token used by OpenView. When set, guided
+	// setup can give sandbox admins a direct recovery link instead of an
+	// operator-only reinstall prompt.
+	SlackInstallURL string
 
 	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
 	// on `/qurl get`. Production wires this in cmd/main.go; tests
@@ -322,6 +327,18 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	// poison every subsequent MintState call.
 	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
+}
+
+// SetSlackInstallURL wires the customer Slack install URL used to recover
+// guided tunnel setup when a workspace has no stored bot token yet. Must be
+// called before Serve. Empty is a no-op so deployments without Slack install
+// OAuth keep the operator-directed fallback copy.
+func (h *Handler) SetSlackInstallURL(installURL string) {
+	installURL = strings.TrimSpace(installURL)
+	if installURL == "" {
+		return
+	}
+	h.cfg.SlackInstallURL = installURL
 }
 
 // NewHandler creates a new Slack handler. Config is intentionally

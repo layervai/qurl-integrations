@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -37,6 +38,7 @@ const (
 	testTunnelComposeWeb   = "web_1"
 	testTunnelDockerWeb    = "web_1-2"
 	testSlackTriggerID     = "trigger_test"
+	testEnterpriseID       = "E_GRID"
 )
 
 const (
@@ -505,6 +507,146 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallBareFallsBackToEnterpriseInstallToken(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	adminChecks := make(chan string, 4)
+	ts.ddb.SetGetItemHook(func(table string, key map[string]string) {
+		if table == ts.tableNames.workspace {
+			adminChecks <- key[fAttrSlackTeamID]
+		}
+	})
+	type openViewCall struct {
+		tokenOwnerID string
+		triggerID    string
+		view         []byte
+	}
+	calls := make(chan openViewCall, 2)
+	unexpectedTokenOwner := make(chan string, 1)
+	h.cfg.OpenView = func(_ context.Context, tokenOwnerID, triggerID string, viewJSON []byte) error {
+		calls <- openViewCall{
+			tokenOwnerID: tokenOwnerID,
+			triggerID:    triggerID,
+			view:         append([]byte(nil), viewJSON...),
+		}
+		if tokenOwnerID == testAdminTeamID {
+			return fmt.Errorf("token lookup: %w", auth.ErrSlackBotTokenNotConfigured)
+		}
+		if tokenOwnerID != testEnterpriseID {
+			unexpectedTokenOwner <- tokenOwnerID
+			return fmt.Errorf("unexpected token lookup id %q", tokenOwnerID)
+		}
+		return nil
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	inv.enterpriseID = testEnterpriseID
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if ack != ackWorkingOnIt {
+		t.Fatalf("ack = %q, want %q", ack, ackWorkingOnIt)
+	}
+	var first, second openViewCall
+	select {
+	case first = <-calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace OpenView lookup was not called")
+	}
+	select {
+	case second = <-calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("enterprise OpenView fallback was not called")
+	}
+	if first.tokenOwnerID != testAdminTeamID || second.tokenOwnerID != testEnterpriseID {
+		t.Fatalf("OpenView token lookup order = %q, %q; want team then enterprise", first.tokenOwnerID, second.tokenOwnerID)
+	}
+	select {
+	case tokenOwnerID := <-unexpectedTokenOwner:
+		t.Fatalf("unexpected token lookup id %q", tokenOwnerID)
+	default:
+	}
+	select {
+	case adminTeamID := <-adminChecks:
+		if adminTeamID != testAdminTeamID {
+			t.Fatalf("admin check teamID = %q, want workspace team %q", adminTeamID, testAdminTeamID)
+		}
+	default:
+		t.Fatal("admin check was not recorded")
+	}
+	var modal map[string]any
+	if err := json.Unmarshal(second.view, &modal); err != nil {
+		t.Fatalf("modal JSON: %v", err)
+	}
+	pm, ok := modal[blockKitFieldPrivateMetadata].(string)
+	if !ok || pm == "" {
+		t.Fatalf("private_metadata = %T %q, want non-empty string", modal[blockKitFieldPrivateMetadata], modal[blockKitFieldPrivateMetadata])
+	}
+	var meta TunnelInstallModalMetadata
+	if err := json.Unmarshal([]byte(pm), &meta); err != nil {
+		t.Fatalf("private_metadata JSON: %v", err)
+	}
+	if meta.TeamID != testAdminTeamID {
+		t.Fatalf("metadata TeamID = %q, want workspace team %q", meta.TeamID, testAdminTeamID)
+	}
+	deleteBody := inv.captured.waitForBody(t, 2*time.Second)
+	if got := parseSlackReplyBool(t, deleteBody, "delete_original"); !got {
+		t.Fatalf("delete_original = %v, want true after enterprise-token modal open", got)
+	}
+}
+
+func TestTunnelInstallBareReportsInstallLinkWhenWorkspaceAndEnterpriseTokensMissing(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	calls := make(chan string, 2)
+	h.cfg.OpenView = func(_ context.Context, tokenOwnerID, _ string, _ []byte) error {
+		calls <- tokenOwnerID
+		return fmt.Errorf("token lookup: %w", auth.ErrSlackBotTokenNotConfigured)
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	inv.enterpriseID = testEnterpriseID
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Working on it") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
+	}
+	var gotCalls []string
+	for len(gotCalls) < 2 {
+		select {
+		case tokenOwnerID := <-calls:
+			gotCalls = append(gotCalls, tokenOwnerID)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("OpenView token lookups = %v, want workspace then enterprise", gotCalls)
+		}
+	}
+	if strings.Join(gotCalls, ",") != testAdminTeamID+","+testEnterpriseID {
+		t.Fatalf("OpenView token lookups = %v, want workspace then enterprise", gotCalls)
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	for _, want := range []string{
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"/qurl tunnel install",
+	} {
+		if !strings.Contains(async, want) {
+			t.Fatalf("async reply = %q, missing %q", async, want)
+		}
+	}
+}
+
 func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -681,6 +823,81 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallBareReportsSlackInstallLinkWhenWorkspaceBotTokenMissing(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
+		return fmt.Errorf("token lookup: %w", auth.ErrSlackBotTokenNotConfigured)
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Working on it") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	for _, want := range []string{
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"/qurl tunnel install",
+	} {
+		if !strings.Contains(async, want) {
+			t.Fatalf("async reply = %q, missing %q", async, want)
+		}
+	}
+	if strings.Contains(async, "operator provided") {
+		t.Fatalf("async reply = %q, should include the configured install link", async)
+	}
+}
+
+func TestTunnelInstallBareReportsOperatorFallbackWhenSlackInstallURLUnset(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
+		return fmt.Errorf("token lookup: %w", auth.ErrSlackBotTokenNotConfigured)
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Working on it") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "operator provided") {
+		t.Fatalf("async reply = %q, want operator-provided fallback copy", async)
+	}
+	if strings.Contains(async, "|the qURL Slack install link>") {
+		t.Fatalf("async reply = %q, should not render a Slack link without a configured install URL", async)
+	}
+}
+
+func TestGuidedTunnelSlackAppInstallMessageRejectsMrkdwnBreakout(t *testing.T) {
+	h := &Handler{cfg: Config{SlackInstallURL: "https://slack-bot.example/oauth/slack/install|bad"}}
+	got := h.guidedTunnelSlackAppInstallMessage()
+
+	if !strings.Contains(got, "operator provided") {
+		t.Fatalf("message = %q, want operator-provided fallback copy", got)
+	}
+	if strings.Contains(got, "|the qURL Slack install link>") {
+		t.Fatalf("message = %q, should not render a Slack link for malformed install URL", got)
+	}
+}
+
 func TestSlackTriggerBudgetsFitWithinTriggerWindow(t *testing.T) {
 	t.Parallel()
 
@@ -738,7 +955,7 @@ func TestTunnelInstallBareSkipsOpenViewWhenTriggerWindowAlreadySpent(t *testing.
 	}
 	inv := newAdminSlashInvoker(t, h)
 
-	h.openTunnelInstallWizard(context.Background(), slog.Default(), testAdminTeamID, testTunnelChannelID, testAdminUserID, testSlackTriggerID, inv.responseU.URL, fixedNow)
+	h.openTunnelInstallWizard(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, testSlackTriggerID, inv.responseU.URL, fixedNow)
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl tunnel install") {

@@ -222,6 +222,7 @@ func run() error {
 		return fmt.Errorf("slack install config: %w", err)
 	}
 	if ok {
+		handler.SetSlackInstallURL(strings.TrimRight(slackInstallCfg.SlackBaseURL, "/") + slackinstall.InstallPath)
 		slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
 		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
 			return fmt.Errorf("slack install routes: %w", err)
@@ -336,7 +337,10 @@ type workspaceSlackTokenLookupStart struct {
 }
 
 type workspaceSlackTokenLookupCache struct {
-	mu             sync.Mutex
+	mu sync.Mutex
+	// Cache keys are Slack token owners: workspace team_id values for
+	// workspace installs, and enterprise_id values for Enterprise Grid org
+	// installs. The ID spaces are disjoint, so one cache can hold both.
 	positive       map[string]cachedSlackBotToken
 	negative       map[string]time.Time
 	inFlight       map[string]*workspaceSlackTokenLookupCall
