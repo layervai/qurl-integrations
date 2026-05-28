@@ -110,6 +110,7 @@ func RegisterRoutes(mux *http.ServeMux, cfg *Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	cfg.BotScopes = NormalizeScopes(cfg.BotScopes)
 	cfg.ensureHTTPClient()
 	mux.HandleFunc(InstallPath, Install(cfg))
 	mux.HandleFunc(CallbackPath, Callback(cfg))
@@ -146,7 +147,6 @@ func (c *Config) Validate() error {
 	if missing := missingRequiredScopes(scopes); len(missing) > 0 {
 		return fmt.Errorf("bot scopes missing required scope(s): %s", strings.Join(missing, ","))
 	}
-	c.BotScopes = scopes
 	return nil
 }
 
@@ -208,6 +208,7 @@ func Install(cfg *Config) http.HandlerFunc {
 			http.Error(w, "could not start Slack install", http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		setStateCookie(w, state, cfg.now())
 		http.Redirect(w, r, authorizeURL(cfg, state), http.StatusFound)
 	}
@@ -253,9 +254,14 @@ func Callback(cfg *Config) http.HandlerFunc {
 			return
 		}
 		enterpriseID := strings.TrimSpace(resp.Enterprise.ID)
+		if resp.IsEnterpriseInstall {
+			logSlackInstallEnterpriseInstallUnsupported(resp.IsEnterpriseInstall, enterpriseID != "")
+			fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusUnprocessableEntity)
+			return
+		}
 		teamID := strings.TrimSpace(resp.Team.ID)
 		if teamID == "" {
-			if resp.IsEnterpriseInstall || enterpriseID != "" {
+			if enterpriseID != "" {
 				logSlackInstallEnterpriseInstallUnsupported(resp.IsEnterpriseInstall, enterpriseID != "")
 				fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusUnprocessableEntity)
 				return
@@ -572,6 +578,8 @@ func renderSuccess(w http.ResponseWriter, teamID string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
+	// The success page is a self-contained static HTML document. It relaxes
+	// style-src only for the inline style block above; no script is allowed.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

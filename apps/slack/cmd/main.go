@@ -345,11 +345,6 @@ type workspaceSlackTokenLookupCache struct {
 	lastSweep      time.Time
 }
 
-func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) slackOpenViewTokenLookup {
-	lookup, _ := newWorkspaceSlackTokenLookupWithInvalidation(provider, fallbackToken, ttl, now)
-	return lookup
-}
-
 func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) (lookup slackOpenViewTokenLookup, purge func(string)) {
 	if now == nil {
 		now = time.Now
@@ -522,9 +517,6 @@ func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
 	delete(c.negative, teamID)
 	delete(c.inFlight, teamID)
 	delete(c.fallbackWarned, teamID)
-	if c.generation == nil {
-		c.generation = map[string]uint64{}
-	}
 	c.generation[teamID]++
 }
 
@@ -553,6 +545,9 @@ func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {
 	if !c.lastSweep.IsZero() && at.Sub(c.lastSweep) < slackWorkspaceTokenCacheSweepEvery {
 		return
 	}
+	// The sweep is intentionally minute-gated: it is O(workspaces seen by this
+	// process), but the current customer cardinality keeps that below the Slack
+	// trigger budget while avoiding a background janitor goroutine.
 	for teamID, cached := range c.positive {
 		if !at.Before(cached.expiresAt) {
 			delete(c.positive, teamID)

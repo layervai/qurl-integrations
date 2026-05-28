@@ -146,7 +146,7 @@ func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
 func TestWorkspaceSlackTokenLookupCachesDDBToken(t *testing.T) {
 	provider := &fakeSlackBotTokenProvider{token: testWorkspaceSlackBotToken}
 	now := time.Unix(1800000000, 0)
-	lookup := newWorkspaceSlackTokenLookup(provider, "", time.Minute, func() time.Time {
+	lookup, _ := newWorkspaceSlackTokenLookupWithInvalidation(provider, "", time.Minute, func() time.Time {
 		return now
 	})
 
@@ -175,7 +175,7 @@ func TestWorkspaceSlackTokenLookupCachesDDBToken(t *testing.T) {
 func TestWorkspaceSlackTokenLookupFallsBackWhenUnset(t *testing.T) {
 	provider := &fakeSlackBotTokenProvider{err: auth.ErrSlackBotTokenNotConfigured}
 	now := time.Unix(1800000000, 0)
-	lookup := newWorkspaceSlackTokenLookup(provider, "xoxb-fallback", time.Minute, func() time.Time {
+	lookup, _ := newWorkspaceSlackTokenLookupWithInvalidation(provider, "xoxb-fallback", time.Minute, func() time.Time {
 		return now
 	})
 
@@ -297,7 +297,7 @@ func TestWorkspaceSlackTokenLookupCollapsesConcurrentMisses(t *testing.T) {
 	t.Cleanup(func() {
 		unblockOnce.Do(func() { close(provider.unblock) })
 	})
-	lookup := newWorkspaceSlackTokenLookup(provider, "", time.Minute, nil)
+	lookup, _ := newWorkspaceSlackTokenLookupWithInvalidation(provider, "", time.Minute, nil)
 
 	const callers = 8
 	errs := make(chan error, callers)
@@ -338,7 +338,7 @@ func TestWorkspaceSlackTokenLookupCollapsesConcurrentMisses(t *testing.T) {
 
 func TestWorkspaceSlackTokenLookupReleasesInFlightOnPanic(t *testing.T) {
 	provider := &panicOnceSlackBotTokenProvider{}
-	lookup := newWorkspaceSlackTokenLookup(provider, "", time.Minute, nil)
+	lookup, _ := newWorkspaceSlackTokenLookupWithInvalidation(provider, "", time.Minute, nil)
 
 	func() {
 		defer func() {
