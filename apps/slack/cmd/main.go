@@ -136,6 +136,9 @@ func run() error {
 	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
 		return err
 	}
+	if err := requireSlackBotTokenForAdminStore(slackBotToken, adminStore != nil); err != nil {
+		return err
+	}
 	if slackBotToken != "" {
 		openView = slackOpenViewFunc(slackBotToken, userAgent)
 	} else {
@@ -334,6 +337,13 @@ func validateSlackBotTokenShape(token string) error {
 		return fmt.Errorf("SLACK_BOT_TOKEN contains invalid characters near byte %d", i)
 	}
 	return nil
+}
+
+func requireSlackBotTokenForAdminStore(token string, adminStoreConfigured bool) error {
+	if !adminStoreConfigured || strings.TrimSpace(token) != "" {
+		return nil
+	}
+	return errors.New("SLACK_BOT_TOKEN is required when Slack admin/tunnel storage is configured; guided tunnel setup uses Slack views.open")
 }
 
 func validSlackBotTokenPrefix(token string) bool {

@@ -9,7 +9,7 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - `/qurl get $shortcut` — Mint a qURL for a channel shortcut
 - `/qurl set-alias $shortcut <url|resource-id|$tunnel-slug>` — Bind a channel shortcut (admin-only)
 - `/qurl unset-alias $shortcut` — Remove a channel shortcut binding (admin-only)
-- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; requires `SLACK_BOT_TOKEN` with `views:write`)
+- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; requires `SLACK_BOT_TOKEN` with `views:write` when admin/tunnel storage is configured)
 - `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
@@ -26,13 +26,14 @@ by the current bot deployment.
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
-- **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal when
-  `SLACK_BOT_TOKEN` is configured, letting an admin choose the tunnel slug,
+- **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal using
+  `SLACK_BOT_TOKEN`, letting an admin choose the tunnel slug,
   optional channel shortcut, local port, and target environment
   (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl tunnel install <slug>` (or
-  `$slug`) remains available for CLI-style admins and sandbox deployments
-  without modal support. Both paths use the
-  workspace API key to find-or-create a tunnel resource scoped to the
+  `$slug`) remains available for CLI-style admins. The packaged Slack bot
+  entrypoint requires `SLACK_BOT_TOKEN` whenever admin/tunnel storage is
+  configured, so sandbox deployments do not silently lose guided setup. Both
+  paths use the workspace API key to find-or-create a tunnel resource scoped to the
   connected qURL account, bind `$<slug>` or the `alias:` shortcut override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
   key. When `alias:` is omitted, the slug doubles as the channel shortcut.
@@ -93,7 +94,7 @@ docker buildx build --platform linux/arm64 \
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
-| `SLACK_BOT_TOKEN` | No | Slack bot token used for `views.open` so `/qurl tunnel install` can show the guided installer. Requires the Slack app to grant `views:write`. Accepts `xoxb-` and `xoxe.xoxb-` bot-token shapes; without it, the typed `/qurl tunnel install <slug>` path still works. |
+| `SLACK_BOT_TOKEN` | Admin/tunnel | Slack bot token used for `views.open` so `/qurl tunnel install` can show the guided installer. Required whenever `QURL_WORKSPACE_MAPPINGS_TABLE` and `QURL_CHANNEL_POLICIES_TABLE` are configured, including sandbox deployments with tunnel/admin storage. Requires the Slack app to grant `views:write`. Accepts `xoxb-` and `xoxe.xoxb-` bot-token shapes. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt the workspace API key column |

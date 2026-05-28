@@ -88,6 +88,31 @@ func TestValidateSlackBotToken(t *testing.T) {
 	}
 }
 
+func TestRequireSlackBotTokenForAdminStore(t *testing.T) {
+	t.Parallel()
+	validToken := "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-"))
+	cases := []struct {
+		name                 string
+		token                string
+		adminStoreConfigured bool
+		wantErr              bool
+	}{
+		{name: "sandbox without admin storage can omit token"},
+		{name: "admin storage requires token", adminStoreConfigured: true, wantErr: true},
+		{name: "admin storage rejects whitespace token", token: " \t", adminStoreConfigured: true, wantErr: true},
+		{name: "admin storage accepts token", token: validToken, adminStoreConfigured: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := requireSlackBotTokenForAdminStore(tc.token, tc.adminStoreConfigured)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("requireSlackBotTokenForAdminStore(%q, %v) err=%v, wantErr=%v", tc.token, tc.adminStoreConfigured, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // applyEnv writes every oauthEnvKeys entry — empty when absent from kvs
 // — so the test doesn't depend on what was inherited from the shell.
 // t.Setenv handles per-test cleanup.
