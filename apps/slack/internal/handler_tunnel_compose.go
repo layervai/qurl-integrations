@@ -69,7 +69,8 @@ printf '%%s' "$QURL_BOOTSTRAP_KEY" | $SUDO install -m 0400 -o 65532 -g 65532 /de
 unset QURL_BOOTSTRAP_KEY
 
 # This heredoc is intentionally unquoted so it expands the validated variables
-# now and writes a static per-slug Compose fragment for future compose commands.
+# now and writes a static per-slug Compose fragment. Future compose commands
+# do not need WEB_SERVICE exported unless you regenerate the fragment.
 cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
 services:
   %s:
@@ -102,7 +103,7 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 	}
 	introParts = append(introParts,
 		"If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it.",
-		"Re-run this install to regenerate the same slug's Compose fragment when the port or service changes; a different slug creates a separate per-slug fragment.",
+		"Re-run this install to regenerate the same slug's Compose fragment when the port or service changes; the generated fragment stores the expanded service name.",
 		"If Compose recreates the web service container, bring the tunnel service up again too.",
 	)
 	intro := strings.Join(introParts, " ")

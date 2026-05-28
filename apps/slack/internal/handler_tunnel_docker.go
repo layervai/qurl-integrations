@@ -22,7 +22,7 @@ else
 fi
 
 # Keep this placeholder assignment so the block is pasteable; the guard below
-# fails before writing files until the operator replaces it.
+# fails before writing files until the operator replaces the quoted value.
 WEB_CONTAINER=%s
 if [ "$WEB_CONTAINER" = "YOUR_WEB_CONTAINER_NAME" ] || [ -z "$WEB_CONTAINER" ]; then
   echo "Set WEB_CONTAINER to the Docker container name or ID for your local HTTP server." >&2
@@ -81,7 +81,7 @@ docker run -d \
 	}
 	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead."
 	if args.WebRef == "" {
-		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
+		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
 	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
 	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file.", nil

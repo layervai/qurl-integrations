@@ -66,6 +66,8 @@ func TestValidateSlackBotToken(t *testing.T) {
 		{name: "placeholder bot token", token: "xoxb-", wantErr: true},
 		{name: "token with whitespace", token: "xoxb-test-token\r", wantErr: true},
 		{name: "token with non-ascii", token: "xoxb-test-tokené", wantErr: true},
+		{name: "token with underscore", token: "xoxb-" + strings.Repeat("a", 20) + "_bad", wantErr: true},
+		{name: "token with dot", token: "xoxb-" + strings.Repeat("a", 20) + ".bad", wantErr: true},
 		{name: "long bot token", token: "xoxb-" + strings.Repeat("a", 250)},
 		{name: "token too long", token: "xoxb-" + strings.Repeat("a", 508), wantErr: true},
 	}

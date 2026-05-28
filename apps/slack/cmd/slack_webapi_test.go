@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -198,6 +199,20 @@ func TestSlackOpenViewBodySnippetTruncatesOnUTF8Boundary(t *testing.T) {
 	t.Parallel()
 
 	got := slackOpenViewBodySnippet([]byte(strings.Repeat("\U0001F9EA", 100)))
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("snippet is not valid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("snippet = %q, want truncation suffix", got)
+	}
+}
+
+func TestSlackOpenViewBodySnippetRepairsMalformedUTF8(t *testing.T) {
+	t.Parallel()
+
+	raw := append(bytes.Repeat([]byte{0x80}, slackOpenViewMaxErrorSnippetBytes+10), []byte("tail")...)
+	got := slackOpenViewBodySnippet(raw)
 
 	if !utf8.ValidString(got) {
 		t.Fatalf("snippet is not valid UTF-8: %q", got)
