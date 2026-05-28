@@ -1098,8 +1098,11 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		if strings.Contains(got, auth0Sub) {
 			t.Errorf("shape-bad owner: reply leaked the raw Auth0 sub (anywhere, incl. the mention surface): %q", got)
 		}
-		if !strings.Contains(got, "the existing workspace owner") {
-			t.Errorf("shape-bad owner: reply missing the shape-bad fallback copy, got: %q", got)
+		if strings.Contains(got, "<@") {
+			t.Errorf("shape-bad owner: reply rendered a mention surface instead of the malformed-record fallback: %q", got)
+		}
+		if !strings.Contains(got, "malformed") {
+			t.Errorf("shape-bad owner: reply missing the malformed-record fallback copy, got: %q", got)
 		}
 	})
 
