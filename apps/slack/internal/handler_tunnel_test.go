@@ -1004,14 +1004,20 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	for _, want := range []string{
 		"Run this from your Docker Compose project directory.",
 		"WEB_SERVICE='web_1-2'",
+		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
 		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"`,
 		"qurl-tunnel-" + testTunnelSlug + ".compose.yaml",
+		"qurl-tunnel-" + testTunnelSlug + ":",
 		`network_mode: "service:${WEB_SERVICE}"`,
 		"depends_on:",
 		testTunnelAgentDirFragment,
 		"QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}",
 		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
+		`docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`,
+		"Verify with `docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug + "`",
+		"if you changed `APP_COMPOSE_FILE`, use that file there too",
+		"logs -f qurl-tunnel-" + testTunnelSlug,
 		"local_port: 9090",
 		testTunnelAPIKey,
 		testTunnelImageRef,
@@ -1022,6 +1028,16 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	}
 	if strings.Contains(got, "Replace `YOUR_COMPOSE_SERVICE_NAME`") {
 		t.Fatalf("Docker Compose instructions still included placeholder warning:\n%s", got)
+	}
+	for _, forbidden := range []string{
+		"\n  qurl-tunnel:\n",
+		"up -d qurl-tunnel\n",
+		"logs -f qurl-tunnel`;",
+		"Verify with `docker compose -f \"$APP_COMPOSE_FILE\"",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
+		}
 	}
 	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID} {
 		if strings.Contains(got, forbidden) {

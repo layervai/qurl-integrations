@@ -25,7 +25,10 @@ const (
 	defaultTunnelLocalPort = 8080
 	tunnelBootstrapTTL     = "1h"
 	tunnelBootstrapSkew    = 2 * time.Minute
-	tunnelInstallModalTTL  = 25 * time.Minute
+	// Slack response_url values are valid for roughly 30 minutes; keep modal
+	// submissions inside that window so async install errors can still reach
+	// the admin after Slack accepts the view submission.
+	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
 	// ack now happens before views.open; this tighter bound preserves enough of
 	// the trigger window for one admin check plus the Slack Web API call.
@@ -517,6 +520,8 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, key *client.
 	if args.WebContainer != "" {
 		webService = shellSingleQuote(args.WebContainer)
 	}
+	tunnelServiceName := "qurl-tunnel-" + args.Slug
+	tunnelService := shellSingleQuote(tunnelServiceName)
 	compose := fmt.Sprintf(`set -eu
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -537,6 +542,7 @@ if [ "$WEB_SERVICE" = "YOUR_COMPOSE_SERVICE_NAME" ] || [ -z "$WEB_SERVICE" ]; th
 fi
 
 QURL_TUNNEL_SLUG=%s
+TUNNEL_SERVICE=%s
 SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
 CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
@@ -555,7 +561,7 @@ printf '%%s' %s | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DI
 # the install script's temporary environment variables.
 cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
 services:
-  qurl-tunnel:
+  %s:
     image: %s
     restart: on-failure:5
     network_mode: "service:${WEB_SERVICE}"
@@ -570,14 +576,14 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d qurl-tunnel`, webService, args.Slug, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), yamlSingleQuoted(image))
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, args.Slug, tunnelService, renderTunnelConfigYAML(args), shellSingleQuote(key.APIKey), tunnelServiceName, yamlSingleQuoted(image))
 
 	intro := "Run this from your Docker Compose project directory."
 	if args.WebContainer == "" {
 		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command."
 	}
 	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the per-slug Compose fragment when the slug, port, or service changes."
-	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f \"$APP_COMPOSE_FILE\" -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel`; after the tunnel connects, delete the bootstrap key file."
+	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file."
 }
 
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
