@@ -114,15 +114,22 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		// specific tunnels in *this channel*" — misleading,
 		// because by construction there's no channel.
 		//
-		// TODO(#531): page.HasMore is a master-list signal ("more
-		// resources of any type"), not "more tunnels". In a URL-heavy
-		// workspace with zero tunnels but >scan-limit resources, this
-		// branch fires and over-claims that allowed tunnels may sit
-		// past the page. The server-side type=tunnel filter in #531
-		// makes has_more tunnel-specific and removes the over-claim.
-		if !isAdmin && channelID != "" && page.HasMore {
-			log.Warn("list: non-admin filtered set is empty but master list has_more — allow-listed tunnels may sit past first page",
-				"team_id", teamID, "channel_id", channelID, "user_id", userID, "scan_limit", listResourcesScanLimit)
+		// The len(tunnels) > 0 guard keeps the gap-copy honest: it
+		// fires only when the scanned page DID contain tunnels that
+		// channel scoping filtered out for this non-admin. A URL-heavy
+		// workspace with zero tunnels on the page falls through to the
+		// plain empty-state instead of wrongly claiming "allowed tunnels
+		// may sit past the first page" when there are no tunnels at all.
+		//
+		// TODO(#531): page.HasMore is still a master-list signal ("more
+		// resources of any type"), so the residual ambiguity is a
+		// workspace with >scan-limit resources whose tunnels all sit
+		// past the first page — there the gap-copy is suppressed even
+		// though tunnels exist. The server-side type=tunnel filter in
+		// #531 makes has_more tunnel-accurate and removes the ambiguity.
+		if !isAdmin && channelID != "" && page.HasMore && len(tunnels) > 0 {
+			log.Warn("list: non-admin filtered set is empty but master list has_more with tunnels on the page — allow-listed tunnels may sit past first page",
+				"team_id", teamID, "channel_id", channelID, "user_id", userID, "scan_limit", listResourcesScanLimit, "page_tunnel_count", len(tunnels))
 			_ = h.postResponse(log, responseURL, listTunnelsNonAdminPaginationGapMessage)
 			return
 		}

@@ -331,6 +331,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //     so the list→get round-trip the list footer advertises stays
 //     honest without re-exposing the opaque r_<id> in the list.
 //
+// Cost note: every binding MISS now incurs one extra upstream hop
+// (GET /v1/resources?slug=…), including for plain typos. That's the
+// deliberate price of the round-trip honesty above — don't "optimize"
+// it away by short-circuiting the fallback on a binding miss.
+//
 // Returns a [*userError] on AdminStore-nil, lookup failure,
 // not-a-known-token, or not-allowed-here.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {

@@ -564,20 +564,18 @@ func TestTunnelToken(t *testing.T) {
 	}
 }
 
-// TestHandleList_NonAdminPaginationGapZeroTunnels pins the current
-// behavior of the non-admin pagination-gap branch when the scanned page
-// holds only URL/transit resources (zero tunnels) and reports has_more.
-// page.HasMore is a master-list signal, so the gap copy fires even
-// though no tunnels exist — see the TODO(#531) at the branch. This test
-// documents that bounded-but-imperfect behavior; the server-side
-// type=tunnel filter (#531) will flip the expectation to the plain
-// empty-state, at which point this test should be updated in lockstep.
+// TestHandleList_NonAdminPaginationGapZeroTunnels fences the len(tunnels)
+// > 0 guard on the non-admin pagination-gap branch: when the scanned
+// page holds only URL/transit resources (zero tunnels) and reports
+// has_more, the gap-copy is SUPPRESSED — claiming "allowed tunnels may
+// sit past the first page" would be misleading when there are no tunnels
+// at all. The user sees the plain empty-state instead.
 func TestHandleList_NonAdminPaginationGapZeroTunnels(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		// Page is all URL resources — filterTunnelResources drops them
-		// all, so the non-admin filtered set is empty with has_more=true.
+		// all, so len(tunnels)==0 even though has_more=true.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_url_aaaaaa", fAttrAlias: "u1", testKeyTargetURL: "https://a.example.com"},
 			{testKeyResourceID: "r_url_bbbbbb", fAttrAlias: "u2", testKeyTargetURL: "https://b.example.com"},
@@ -587,11 +585,14 @@ func TestHandleList_NonAdminPaginationGapZeroTunnels(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	// Current (pre-#531) behavior: pagination-gap copy fires.
-	if !strings.Contains(async, "past the first page") {
-		t.Errorf("async reply missing pagination-gap copy (current pre-#531 behavior): %q", async)
+	// Gap-copy suppressed (zero tunnels on the page) → plain empty-state.
+	if !strings.Contains(async, "No tunnels found") {
+		t.Errorf("async reply missing plain empty-state (gap-copy should be suppressed with zero tunnels): %q", async)
 	}
-	// Regardless, no URL resource leaks into the (empty) tunnel listing.
+	if strings.Contains(async, "past the first page") {
+		t.Errorf("gap-copy fired despite zero tunnels on the page: %q", async)
+	}
+	// No URL resource leaks into the (empty) tunnel listing.
 	if strings.Contains(async, "a.example.com") || strings.Contains(async, "b.example.com") {
 		t.Errorf("URL resource leaked into tunnel list: %q", async)
 	}
