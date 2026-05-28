@@ -4,7 +4,7 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 
 Customer onboarding is install-first:
 
-1. Install the qURL Slack app from `/oauth/slack/install`.
+1. Install the qURL Slack app from the install link your operator provided (`https://<SLACK_BASE_URL host>/oauth/slack/install`).
 2. Run `/qurl setup` in Slack.
 3. Use `/qurl tunnel install` or `/qurl get`.
 

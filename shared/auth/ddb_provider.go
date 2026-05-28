@@ -312,7 +312,7 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: GetItem: %w", err)
 	}
-	if len(out.Item) == 0 {
+	if out == nil || len(out.Item) == 0 {
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
 	}
 
