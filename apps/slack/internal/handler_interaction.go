@@ -78,6 +78,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		respondTunnelInstallModalError(w, "This modal expired. Run /qurl tunnel install again.")
 		return
 	}
+	// Slack signs the request envelope, not our private_metadata value by
+	// itself. These request-field cross-checks prevent replaying modal state
+	// across workspaces or users.
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
 		slog.Warn("tunnel install modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
 		respondTunnelInstallModalError(w, "This modal was opened for a different workspace. Run /qurl tunnel install again.")

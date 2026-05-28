@@ -936,7 +936,7 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 	}
 }
 
-func TestTunnelInstallModalRejectsFutureSubmissionBeforeMintingKey(t *testing.T) {
+func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing.T) {
 	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
 	freezeTunnelBootstrapNow(t, now)
 

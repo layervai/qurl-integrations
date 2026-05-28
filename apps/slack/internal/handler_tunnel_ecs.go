@@ -83,6 +83,8 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string
 	}
 	b, err := json.MarshalIndent(container, "", "  ")
 	if err != nil {
+		// Unreachable with this fixed-shape struct; fail loud if a future
+		// field adds an unsupported JSON type.
 		panic("marshal ECS sidecar JSON: " + err.Error())
 	}
 	return string(b)

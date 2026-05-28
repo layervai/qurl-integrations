@@ -15,8 +15,8 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, _ *client.AP
 	tunnelService := shellSingleQuote(tunnelServiceName)
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
 	// write concrete paths and service names into the generated file. Keep
-	// dockerComposeServicePattern narrow; allowing shell metacharacters there
-	// would turn this install snippet into an injection surface.
+	// dockerComposeServicePattern narrow: it rejects shell metacharacters such
+	// as '$', backticks, quotes, slashes, and whitespace.
 	compose := fmt.Sprintf(`set -eu
 
 if [ "$(id -u)" -eq 0 ]; then

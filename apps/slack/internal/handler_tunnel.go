@@ -37,7 +37,9 @@ const (
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
 	kubernetesNameMaxLen       = 63
-	kubernetesNameHashLen      = 8
+	// Hex chars appended to truncated Kubernetes object names. Six SHA-256
+	// bytes keeps collision risk negligible for expected workspace slug volume.
+	kubernetesNameHashLen = 12
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
