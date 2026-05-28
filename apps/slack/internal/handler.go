@@ -730,10 +730,19 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			return
 		}
 		// ownerID=="" → workspace not yet bound → fresh install, allow.
+		// (CheckAdmin reads eventually-consistent, and BindWorkspace
+		// validates OwnerID != "" before PutItem, so an empty ownerID
+		// reliably means "no row yet" rather than a half-written one.)
 		// ownerID==userID → idempotent rerun by owner (rotates the
 		// API key on OAuth-callback success), allow.
 		// otherwise → non-owner rebind attempt, refuse here so we
 		// don't even mint the state token / setup URL.
+		//
+		// This gate is best-effort: in the brief eventual-read window
+		// after a fresh bind a fast second-mover could still see "" and
+		// get a setup URL, but BindWorkspace's consistent owner check is
+		// the structural backstop — that caller just lands on the
+		// generic rebind-refused page instead of the friendly copy here.
 		if ownerID != "" && ownerID != userID {
 			// Shape-guard the stored owner_id before interpolating it
 			// into a `<@%s>` mention. BindWorkspace writes owner_id
