@@ -131,6 +131,8 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 
 func slackOpenViewBodySnippet(raw []byte) string {
 	const maxSnippetBytes = 200
+	// These snippets are logged today and may be included in future Slack-facing
+	// diagnostics, so escape angle brackets before returning display text.
 	bodySnippet := html.EscapeString(printableLogSnippet(strings.TrimSpace(string(raw))))
 	if len(bodySnippet) <= maxSnippetBytes {
 		return bodySnippet

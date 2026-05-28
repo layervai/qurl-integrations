@@ -12,6 +12,7 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, i
 		webContainer = shellSingleQuote(args.WebRef)
 	}
 	docker := fmt.Sprintf(`set -eu
+%s
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
@@ -61,7 +62,7 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
-  %s`, webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), shellSingleQuote(image))
+  %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), shellSingleQuote(image))
 
 	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history."
 	if args.WebRef == "" {

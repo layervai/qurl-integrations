@@ -195,21 +195,29 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 // (apps/slack/internal/parser.go on #228) so a future consolidation is a
 // textual no-op.
 func validateAliasToken(tok string) (alias, reason string) {
+	return validateAliasTokenForNoun(tok, "Alias")
+}
+
+func validateChannelShortcutToken(tok string) (alias, reason string) {
+	return validateAliasTokenForNoun(tok, "Shortcut")
+}
+
+func validateAliasTokenForNoun(tok, noun string) (alias, reason string) {
 	if tok == "" {
-		return "", reasonAliasMissing
+		return "", fmt.Sprintf("Missing %s.", strings.ToLower(noun))
 	}
 	if !strings.HasPrefix(tok, "$") {
-		return "", reasonAliasNoSigil
+		return "", noun + " must start with `$` (e.g. `$staging`)."
 	}
 	alias = strings.TrimPrefix(tok, "$")
 	if alias == "" {
-		return "", reasonAliasEmptyName
+		return "", fmt.Sprintf("Missing %s name after `$`.", strings.ToLower(noun))
 	}
 	if len(alias) > aliasMaxLen {
-		return "", fmt.Sprintf("Alias `$%s` is longer than %d characters.", alias, aliasMaxLen)
+		return "", fmt.Sprintf("%s `$%s` is longer than %d characters.", noun, alias, aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "", fmt.Sprintf("Alias `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).", alias)
+		return "", fmt.Sprintf("%s `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).", noun, alias)
 	}
 	return alias, ""
 }

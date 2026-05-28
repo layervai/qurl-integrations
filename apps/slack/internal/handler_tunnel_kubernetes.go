@@ -13,6 +13,7 @@ import (
 func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
 	names := kubernetesTunnelObjectNames(args.Slug)
 	objects := fmt.Sprintf(`set -eu
+%s
 
 QURL_BOOTSTRAP_SECRET=%s
 %s
@@ -37,7 +38,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-QURL_K8S_YAML_EOF`, shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), names.configMap, indentLines(renderTunnelConfigYAML(args), 4), names.agentPVC)
+QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), names.configMap, indentLines(renderTunnelConfigYAML(args), 4), names.agentPVC)
 
 	patch := fmt.Sprintf(`initContainers:
   - name: qurl-agent-state-permissions

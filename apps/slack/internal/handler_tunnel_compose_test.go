@@ -16,13 +16,14 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		Alias:       testTunnelSlug,
 		LocalPort:   9090,
 		Environment: tunnelEnvCompose,
-		WebRef:      "web_1-2",
+		WebRef:      testTunnelDockerWeb,
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
 	for _, want := range []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
 		testTunnelKeyHistoryNote,
-		"WEB_SERVICE='web_1-2'",
+		testTunnelPipefailLine,
+		"WEB_SERVICE='" + testTunnelDockerWeb + "'",
 		`case "$WEB_SERVICE" in`,
 		"WEB_SERVICE may contain only letters, numbers, underscores, and hyphens.",
 		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",

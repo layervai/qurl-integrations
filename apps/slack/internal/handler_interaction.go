@@ -155,9 +155,9 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	}
 	if shortcutRaw != "" {
 		var aliasReason string
-		alias, aliasReason = validateAliasToken(shortcutRaw)
+		alias, aliasReason = validateChannelShortcutToken(shortcutRaw)
 		if aliasReason != "" {
-			fieldErrors[tunnelInstallBlockShortcut] = aliasReasonAsChannelShortcut(aliasReason)
+			fieldErrors[tunnelInstallBlockShortcut] = aliasReason
 		}
 	}
 
@@ -198,13 +198,6 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		WebRef:      webRef,
 	}
 	return args, nil
-}
-
-func aliasReasonAsChannelShortcut(reason string) string {
-	if strings.HasPrefix(reason, "Alias ") {
-		return "Shortcut " + strings.TrimPrefix(reason, "Alias ")
-	}
-	return reason
 }
 
 func interactionStateText(values map[string]map[string]interactionStateValue, blockID, actionID string) string {
@@ -257,6 +250,22 @@ func tunnelWebRefValidationMessage(env tunnelInstallEnvironment, value string) s
 		return ""
 	}
 	return "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
+}
+
+func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnelInstallWebRefKind) string {
+	if kind == tunnelWebRefKindNone {
+		return ""
+	}
+	if env == tunnelEnvCompose {
+		if kind == tunnelWebRefKindService {
+			return ""
+		}
+		return "Use `service:<name>` with Docker Compose installs."
+	}
+	if kind == tunnelWebRefKindService {
+		return "Use `service:<name>` only with `env:docker-compose`; use `container:<name>` or `web_container:<name>` for Docker container installs."
+	}
+	return ""
 }
 
 // interactionPayload is the subset of Slack's view_submission

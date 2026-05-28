@@ -53,12 +53,17 @@ var dockerComposeServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{
 var tunnelBootstrapNow = time.Now
 
 type tunnelInstallEnvironment string
+type tunnelInstallWebRefKind string
 
 const (
 	tunnelEnvDocker     tunnelInstallEnvironment = "docker"
 	tunnelEnvCompose    tunnelInstallEnvironment = "docker-compose"
 	tunnelEnvECSFargate tunnelInstallEnvironment = "ecs-fargate"
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
+
+	tunnelWebRefKindNone      tunnelInstallWebRefKind = ""
+	tunnelWebRefKindContainer tunnelInstallWebRefKind = "container"
+	tunnelWebRefKindService   tunnelInstallWebRefKind = "service"
 )
 
 type tunnelInstallArgs struct {
@@ -67,6 +72,7 @@ type tunnelInstallArgs struct {
 	LocalPort   int
 	Environment tunnelInstallEnvironment
 	WebRef      string
+	WebRefKind  tunnelInstallWebRefKind
 }
 
 func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
@@ -94,6 +100,9 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		}
 	}
 	if msg := tunnelWebRefValidationMessage(args.Environment, args.WebRef); msg != "" {
+		return nil, msg + "\n\n" + tunnelInstallUsage()
+	}
+	if msg := tunnelWebRefKindValidationMessage(args.Environment, args.WebRefKind); msg != "" {
 		return nil, msg + "\n\n" + tunnelInstallUsage()
 	}
 	return args, ""
@@ -129,12 +138,14 @@ func parseTunnelInstallOption(args *tunnelInstallArgs, token string) string {
 			return "service must use letters, numbers, underscores, or hyphens.\n\n" + tunnelInstallUsage()
 		}
 		args.WebRef = value
+		args.WebRefKind = tunnelWebRefKindService
 	case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "web_container:"):
 		_, value, _ := strings.Cut(token, ":")
 		if !dockerContainerRefPattern.MatchString(value) {
 			return "container/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
 		}
 		args.WebRef = value
+		args.WebRefKind = tunnelWebRefKindContainer
 	default:
 		return tunnelInstallUsage()
 	}
@@ -344,6 +355,13 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 
+	preparedMessage, err := h.prepareTunnelInstallMessage(args)
+	if err != nil {
+		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+		h.postResponse(log, responseURL, "Tunnel setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.")
+		return
+	}
+
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
 		Name:           "Slack tunnel bootstrap " + args.Slug,
 		Scopes:         []string{tunnelScopeAgent, tunnelScopeWrite},
@@ -370,13 +388,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 
-	msg, err := h.renderTunnelInstallMessage(args, key, aliasStatus)
-	if err != nil {
-		log.Error("tunnel install: render failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
-		revokeBootstrapKeyAfterInstallFailure(log, c, key, "render_failed")
-		h.postResponse(log, responseURL, "Tunnel setup succeeded, but Slack could not render the install instructions. Please retry or contact support.")
-		return
-	}
+	msg := preparedMessage.render(args, key, aliasStatus)
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
 	if !h.postResponse(log, responseURL, msg) {
 		// response_url delivery can fail after Slack has accepted or shown the
@@ -439,7 +451,13 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 	return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
 }
 
-func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
+type preparedTunnelInstallMessage struct {
+	imageNote        string
+	environmentLabel string
+	instructions     string
+}
+
+func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (preparedTunnelInstallMessage, error) {
 	image := strings.TrimSpace(h.cfg.TunnelImage)
 	usingDefaultImage := image == ""
 	if image == "" {
@@ -447,27 +465,42 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 	}
 	environmentLabel, err := args.Environment.label()
 	if err != nil {
-		return "", err
+		return preparedTunnelInstallMessage{}, err
 	}
-	instructions, err := h.renderTunnelInstallInstructions(args, key, image)
+	instructions, err := h.renderTunnelInstallInstructions(args, nil, image)
 	if err != nil {
-		return "", err
+		return preparedTunnelInstallMessage{}, err
 	}
 	imageNote := tunnelImageNote(usingDefaultImage)
 	if imageNote != "" {
 		imageNote = "\n\n" + imageNote
 	}
+	return preparedTunnelInstallMessage{
+		imageNote:        imageNote,
+		environmentLabel: environmentLabel,
+		instructions:     instructions,
+	}, nil
+}
 
+func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) string {
 	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s%s\n\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
 		tunnelBootstrapExpiryLabel(key),
 		slackCodeBlock(key.APIKey),
-		imageNote,
-		environmentLabel,
-		instructions,
+		p.imageNote,
+		p.environmentLabel,
+		p.instructions,
 		args.Alias,
-	), nil
+	)
+}
+
+func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
+	prepared, err := h.prepareTunnelInstallMessage(args)
+	if err != nil {
+		return "", err
+	}
+	return prepared.render(args, key, aliasStatus), nil
 }
 
 func tunnelImageNote(usingDefaultImage bool) string {
@@ -542,6 +575,12 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) string {
     type: http
     local_ip: 127.0.0.1
     local_port: %d`, args.Slug, args.LocalPort)
+}
+
+func renderPortablePipefailShell() string {
+	return `if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+fi`
 }
 
 func renderBootstrapKeyPromptShell() string {

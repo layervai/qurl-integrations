@@ -20,6 +20,7 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, _ *client.AP
 	// whitespace. The runtime WEB_SERVICE guard below catches unsafe operator
 	// edits before rendering the Compose fragment.
 	compose := fmt.Sprintf(`set -eu
+%s
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
@@ -88,7 +89,7 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), tunnelServiceName, yamlSingleQuoted(image))
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), tunnelServiceName, yamlSingleQuoted(image))
 
 	intro := "Run this from your Docker Compose project directory on the Linux Docker host. It prompts for the bootstrap key so the secret does not land in shell history."
 	if args.WebRef == "" {

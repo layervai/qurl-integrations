@@ -18,18 +18,21 @@ import (
 )
 
 const (
-	testTunnelSlug        = "prod-dashboard"
-	testTunnelResourceID  = "r_prod_dash01"
-	testTunnelInstallVerb = "install"
-	testTunnelWizardCmd   = "tunnel " + testTunnelInstallVerb
-	testTunnelInstallCmd  = testTunnelWizardCmd + " " + testTunnelSlug
-	testTunnelChannelID   = "C_test"
-	testTunnelImageRef    = "ghcr.io/layervai/qurl-reverse-tunnel-client:v-test"
-	testTunnelAPIKey      = "lv_live_test_bootstrap"
-	testTunnelAPIKeyID    = "key_tunnel_bootstrap"
-	testSlackResponseURL  = "https://hooks.slack.test/response"
-	testTunnelDockerLine  = `TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`
-	testTunnelModalKey    = "lv_live_modal_bootstrap"
+	testTunnelSlug         = "prod-dashboard"
+	testTunnelResourceID   = "r_prod_dash01"
+	testTunnelInstallVerb  = "install"
+	testTunnelWizardCmd    = "tunnel " + testTunnelInstallVerb
+	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug
+	testTunnelChannelID    = "C_test"
+	testTunnelImageRef     = "ghcr.io/layervai/qurl-reverse-tunnel-client:v-test"
+	testTunnelAPIKey       = "lv_live_test_bootstrap"
+	testTunnelAPIKeyID     = "key_tunnel_bootstrap"
+	testSlackResponseURL   = "https://hooks.slack.test/response"
+	testTunnelDockerLine   = `TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`
+	testTunnelModalKey     = "lv_live_modal_bootstrap"
+	testTunnelPipefailLine = "set -o pipefail"
+	testTunnelComposeWeb   = "web_1"
+	testTunnelDockerWeb    = "web_1-2"
 )
 
 const (
@@ -67,8 +70,9 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
 		{name: "docker environment", text: testTunnelInstallCmd + " env:docker", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
 		{name: "environment", text: testTunnelInstallCmd + " env:ecs-fargate", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvECSFargate},
-		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:web_1", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWebRef: "web_1"},
-		{name: "container ref", text: testTunnelInstallCmd + " container:web_1-2", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: "web_1-2"},
+		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:" + testTunnelComposeWeb, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWebRef: testTunnelComposeWeb},
+		{name: "compose service before environment", text: testTunnelInstallCmd + " service:" + testTunnelComposeWeb + " env:compose", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWebRef: testTunnelComposeWeb},
+		{name: "container ref", text: testTunnelInstallCmd + " container:" + testTunnelDockerWeb, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: testTunnelDockerWeb},
 		{name: "web container ref", text: testTunnelInstallCmd + " web_container:web", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: "web"},
 		{name: "bad slug uppercase", text: "tunnel install Prod", wantErr: true},
 		{name: "empty slug after sigil", text: "tunnel install $", wantErr: true},
@@ -78,8 +82,10 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "old docker vm spelling rejected", text: testTunnelInstallCmd + " env:docker-vm", wantErr: true},
 		{name: "bad environment", text: testTunnelInstallCmd + " env:prod", wantErr: true},
 		{name: "bad container ref", text: testTunnelInstallCmd + " container:../web", wantErr: true},
+		{name: "docker rejects service ref", text: testTunnelInstallCmd + " service:web", wantErr: true},
 		{name: "compose rejects dotted service", text: testTunnelInstallCmd + " service:web.1 env:compose", wantErr: true},
 		{name: "compose rejects dotted container ref", text: testTunnelInstallCmd + " env:compose container:web.1", wantErr: true},
+		{name: "compose rejects container ref", text: testTunnelInstallCmd + " env:compose container:web", wantErr: true},
 		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -537,6 +543,49 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	openViewStarted := make(chan struct{})
+	openViewCanceled := make(chan error, 1)
+	h.cfg.OpenView = func(ctx context.Context, _ string, _ string, _ []byte) error {
+		close(openViewStarted)
+		<-ctx.Done()
+		openViewCanceled <- ctx.Err()
+		return ctx.Err()
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Checking admin permissions") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
+	}
+	select {
+	case <-openViewStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView did not start")
+	}
+	select {
+	case err := <-openViewCanceled:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("OpenView cancel err = %v, want deadline exceeded", err)
+		}
+	case <-time.After(slackTriggerOpenViewBudget + time.Second):
+		t.Fatal("OpenView context did not cancel within budget")
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "Could not open guided tunnel setup") {
+		t.Fatalf("async reply = %q, want OpenView failure copy", async)
+	}
+}
+
 func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
 	freezeTunnelBootstrapNow(t, now)
@@ -626,6 +675,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"Target environment: Kubernetes.",
 		"Paste it only when prompted or into your secret manager",
 		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
+		testTunnelPipefailLine,
 		testTunnelKeyPromptLine,
 		`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin`,
 		"kubectl apply -f -",
@@ -688,10 +738,10 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 		{
 			name: "compose",
 			env:  tunnelEnvCompose,
-			web:  "web_1",
+			web:  testTunnelComposeWeb,
 			want: []string{
 				"Target environment: Docker Compose.",
-				"WEB_SERVICE='web_1'",
+				"WEB_SERVICE='" + testTunnelComposeWeb + "'",
 				"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
 				"qurl-tunnel-" + testTunnelSlug + ":",
 				"docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug,
@@ -1068,6 +1118,20 @@ func TestParseTunnelInstallModalArgsRejectsMissingPortBlock(t *testing.T) {
 	}
 }
 
+func TestParseTunnelInstallModalArgsRejectsZeroPort(t *testing.T) {
+	t.Parallel()
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "0", "")
+
+	args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+	if args != nil {
+		t.Fatalf("args = %+v, want nil", args)
+	}
+	if got := fieldErrors[tunnelInstallBlockLocalPort]; !strings.Contains(got, "1 to 65535") {
+		t.Fatalf("local port error = %q, want range copy", got)
+	}
+}
+
 func TestParseTunnelInstallModalArgsRendersShortcutValidationReason(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -1091,6 +1155,22 @@ func TestParseTunnelInstallModalArgsRendersShortcutValidationReason(t *testing.T
 			got := fieldErrors[tunnelInstallBlockShortcut]
 			if !strings.Contains(got, tc.wantReason) || strings.Contains(got, "Usage:") || strings.Contains(got, "Alias") {
 				t.Fatalf("shortcut error = %q, want shortcut-flavored %q without usage suffix", got, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestValidateChannelShortcutTokenUsesShortcutCopy(t *testing.T) {
+	t.Parallel()
+	for _, token := range []string{"", "prod", "$", "$" + strings.Repeat("a", aliasMaxLen+1), "$bad_alias"} {
+		t.Run(token, func(t *testing.T) {
+			t.Parallel()
+			_, reason := validateChannelShortcutToken(token)
+			if reason == "" {
+				t.Fatalf("validateChannelShortcutToken(%q) reason = empty, want rejection", token)
+			}
+			if strings.Contains(reason, "Alias ") {
+				t.Fatalf("validateChannelShortcutToken(%q) reason = %q, want shortcut copy", token, reason)
 			}
 		})
 	}
@@ -1181,6 +1261,29 @@ func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
 	revokeBootstrapKeyAfterInstallFailure(log, c, &client.APIKey{}, "missing_key_id")
 	if !strings.Contains(logs.String(), "missing_key_id") || !strings.Contains(logs.String(), "missing key_id") {
 		t.Fatalf("log = %q, want missing-key-id warning", logs.String())
+	}
+}
+
+func TestRevokeBootstrapKeyAfterInstallFailureLogsRevokeError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_cleanup_failed" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_cleanup_failed", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"title":"cleanup failed","status":500}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	c := client.New(server.URL, "unused", client.WithRetry(0))
+
+	revokeBootstrapKeyAfterInstallFailure(log, c, &client.APIKey{KeyID: "key_cleanup_failed"}, "render_failed")
+
+	if got := logs.String(); !strings.Contains(got, "cleanup failed") || !strings.Contains(got, "render_failed") {
+		t.Fatalf("log = %q, want cleanup error and reason", got)
 	}
 }
 

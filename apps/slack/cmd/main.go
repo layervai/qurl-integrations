@@ -308,6 +308,10 @@ func validateSlackBotToken(token string) error {
 	if token == "" {
 		return nil
 	}
+	const slackBotTokenMaxLen = 200
+	if len(token) > slackBotTokenMaxLen {
+		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenMaxLen)
+	}
 	if !strings.HasPrefix(token, "xoxb-") {
 		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-")
 	}

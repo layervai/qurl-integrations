@@ -150,6 +150,8 @@ func sanitizeAPIError(err error, prefix string) string {
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.
 // Errors are logged, never retried. The bool tells sensitive callers whether
 // they should add extra audit context after a failed delivery.
+// Ordinary command handlers intentionally ignore the bool; callers that minted
+// sensitive material should branch on false and log the relevant audit fields.
 //
 // Validates scheme+host before dialing so a malformed (or attacker-
 // controlled, in the event of a signature-gate bypass) URL can't make

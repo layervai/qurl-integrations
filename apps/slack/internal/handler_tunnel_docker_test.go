@@ -19,6 +19,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 
 	for _, want := range []string{
 		testTunnelKeyHistoryNote,
+		testTunnelPipefailLine,
 		"WEB_CONTAINER='web.1_2-3'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
 		testTunnelKeyPromptLine,

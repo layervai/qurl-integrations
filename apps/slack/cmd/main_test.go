@@ -65,6 +65,7 @@ func TestValidateSlackBotToken(t *testing.T) {
 		{name: "app token", token: "xapp-test-token", wantErr: true},
 		{name: "token with whitespace", token: "xoxb-test-token\r", wantErr: true},
 		{name: "token with non-ascii", token: "xoxb-test-tokené", wantErr: true},
+		{name: "token too long", token: "xoxb-" + strings.Repeat("a", 196), wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
