@@ -20,17 +20,20 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// Slack-shaped test user IDs — kept Slack-shape (U-prefix uppercase
-// alphanumeric) so the handler-layer renderers' `looksLikeSlackUserID`
-// guard accepts them in /qurl admin list output. The dual-shape
-// fixtures below (testCallerSlackID for the BindWorkspace caller,
+// Slack-shaped test user IDs — kept in real Slack-ID shape (U-prefix
+// + uppercase-alphanumeric, matching `looksLikeSlackUserID`) so these
+// fixtures mirror production owner_id/admin values rather than ad-hoc
+// strings. These tests assert at the store boundary (BindWorkspace
+// classification), not the handler renderer, but matching the
+// production shape keeps the fixtures honest and copy-safe. The paired
+// fixtures (testCallerSlackID for the BindWorkspace caller,
 // testOtherSlackID for a different Slack user holding the workspace)
-// are paired so a same-caller rebind asserts AlreadyBoundToCaller
-// while a different-caller rebind asserts AlreadyBound.
+// let a same-caller rebind assert AlreadyBoundToCaller while a
+// different-caller rebind asserts AlreadyBound.
 const (
-	testCallerSlackID = "U_caller"
-	testOtherSlackID  = "U_other"
-	testOwnerSlackID  = "U_owner"
+	testCallerSlackID = "UCALLER01"
+	testOtherSlackID  = "UOTHER001"
+	testOwnerSlackID  = "UOWNER001"
 )
 
 // stubDDB is a minimal in-package DynamoDBClient that returns

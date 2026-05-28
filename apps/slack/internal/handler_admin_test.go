@@ -1074,6 +1074,35 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
+	t.Run("shape-bad owner_id (pre-pivot Auth0 sub): refused without broken mention", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Migration-day state: a pre-pivot row whose owner_id holds the
+		// Auth0 id_token sub, not a Slack ID. A non-owner rerun must be
+		// refused WITHOUT interpolating the sub into a `<@…>` mention
+		// (which Slack would render visibly broken). Seed the row
+		// directly since BindWorkspace now only ever writes Slack IDs.
+		const auth0Sub = "auth0|653fpre-pivot-subxyz"
+		ts.ddb.seedItem(t, ts.tableNames.workspace, map[string]ddbtypes.AttributeValue{
+			fAttrSlackTeamID:       stringMember(team),
+			fAttrOwnerID:           stringMember(auth0Sub),
+			fAttrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testAdminUserID}},
+			fAttrCreatedAt:         stringMember(testWorkspaceConfiguredAt.UTC().Format(time.RFC3339)),
+		})
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, stranger)
+		if strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("shape-bad owner: setup URL was minted (should be refused): %q", got)
+		}
+		if strings.Contains(got, auth0Sub) {
+			t.Errorf("shape-bad owner: reply leaked the raw Auth0 sub (anywhere, incl. the mention surface): %q", got)
+		}
+		if !strings.Contains(got, "the existing workspace owner") {
+			t.Errorf("shape-bad owner: reply missing the shape-bad fallback copy, got: %q", got)
+		}
+	})
+
 	t.Run("added admin (not owner) reruns setup: refused", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		// seedAdmin binds owner=UOWNER001 and seeds UADMIN001 on the

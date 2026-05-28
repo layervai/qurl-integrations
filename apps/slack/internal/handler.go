@@ -735,8 +735,22 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 		// otherwise → non-owner rebind attempt, refuse here so we
 		// don't even mint the state token / setup URL.
 		if ownerID != "" && ownerID != userID {
-			slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
-			respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is <@%s>. Ask them to re-run setup, or use `/qurl admin` for non-owner admin actions.", ownerID))
+			// Shape-guard the stored owner_id before interpolating it
+			// into a `<@%s>` mention. BindWorkspace writes owner_id
+			// from the OAuth callback (a different code path than the
+			// parser), and a pre-pivot row holds an Auth0 sub, not a
+			// Slack ID — exactly the case the migration runbook calls
+			// out. Mirrors the looksLikeSlackUserID guard in
+			// handleAdminList so a malformed value can't break out of
+			// the mention surface or render visibly broken.
+			ownerMention := "the existing workspace owner"
+			if looksLikeSlackUserID(ownerID) {
+				ownerMention = fmt.Sprintf("<@%s>", ownerID)
+				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID) //nolint:gosec // G706: slog escapes control bytes in attribute values; owner_user_id is shape-validated by looksLikeSlackUserID above.
+			} else {
+				slog.Error("/qurl setup: rebind refused; stored owner_id is shape-bad — likely a pre-pivot Auth0 sub. Operator must delete the workspace_mappings row to recover.", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID and owner_id_len is an int.
+			}
+			respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is %s. Ask them to re-run setup, or use `/qurl admin` for non-owner admin actions.", ownerMention))
 			return
 		}
 	}
@@ -801,7 +815,8 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl get <url|$name> once:true` — Get a single-use qURL; the link burns on first redemption",
 		"• `/qurl get <url|$name> reason:\"…\"` — Annotate the audit log with a reason",
 		"• `/qurl list` — Show your 5 most recent qURLs",
-		"• `/qurl setup` — Connect qURL to your Slack workspace and become its owner. After the first setup only the workspace owner can re-run this — other admins (added via `/qurl admin add`) can use the rest of the admin verbs but cannot rotate the qURL credential.",
+		"• `/qurl setup` — Connect qURL to your Slack workspace (one-time setup; the runner becomes the workspace owner)",
+		"• Re-running `/qurl setup` is owner-only — added admins (via `/qurl admin add`) can use the other admin verbs but cannot rotate the qURL credential",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {
