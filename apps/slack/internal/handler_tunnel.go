@@ -29,7 +29,9 @@ const (
 	// submissions inside that window so async install errors can still reach
 	// the admin after Slack accepts the view submission. This is intentionally
 	// shorter than tunnelBootstrapTTL so any submitted modal still leaves setup
-	// headroom after the one-time bootstrap key is minted.
+	// headroom after the one-time bootstrap key is minted; a modal submitted at
+	// the end of this window still leaves roughly 35 minutes on the bootstrap
+	// key for the operator to start the sidecar.
 	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
 	// ack now happens before views.open; this bound leaves room for the admin
@@ -615,42 +617,6 @@ func tunnelInstallRateLimitMessage(err error) string {
 	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl tunnel install` again."
 }
 
-func slackRetryAfterLabel(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	seconds, err := strconv.Atoi(raw)
-	if err != nil || seconds <= 0 {
-		// Slack documents Retry-After as integer seconds. Treat any other
-		// shape as untrusted display text and fall back to generic retry copy.
-		return ""
-	}
-	if time.Duration(seconds)*time.Second > slackRetryAfterDisplayCap {
-		return "at least " + humanSlackRetryAfterDuration(slackRetryAfterDisplayCap)
-	}
-	if seconds >= 60 {
-		minutes := seconds / 60
-		remainingSeconds := seconds % 60
-		minuteLabel := "minutes"
-		if minutes == 1 {
-			minuteLabel = "minute"
-		}
-		if remainingSeconds == 0 {
-			return fmt.Sprintf("%d %s", minutes, minuteLabel)
-		}
-		secondLabel := "seconds"
-		if remainingSeconds == 1 {
-			secondLabel = "second"
-		}
-		return fmt.Sprintf("%d %s %d %s", minutes, minuteLabel, remainingSeconds, secondLabel)
-	}
-	if seconds == 1 {
-		return "1 second"
-	}
-	return fmt.Sprintf("%d seconds", seconds)
-}
-
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	// Instructions deliberately do not receive the plaintext bootstrap key:
 	// prepareTunnelInstallMessage can preflight all environment-specific
@@ -768,49 +734,6 @@ func tunnelBootstrapExpiryLabel(key *client.APIKey) string {
 		return "is expired"
 	}
 	return tunnelBootstrapTTLLabel()
-}
-
-func humanTunnelBootstrapTTL(ttl string) string {
-	d, err := time.ParseDuration(ttl)
-	if err != nil {
-		return "the requested " + ttl
-	}
-	return humanTunnelBootstrapDuration(d)
-}
-
-func humanTunnelBootstrapDuration(d time.Duration) string {
-	return humanDurationCeilMinutes(d)
-}
-
-func humanSlackRetryAfterDuration(d time.Duration) string {
-	return humanDurationCeilMinutes(d)
-}
-
-func humanDurationCeilMinutes(d time.Duration) string {
-	if d < time.Minute {
-		return "under 1 minute"
-	}
-	// Ceil to the next minute so near-boundary keys never display as
-	// "0 minutes" or understate the operator's remaining setup window.
-	minutesTotal := int((d + time.Minute - 1) / time.Minute)
-	hours := minutesTotal / 60
-	minutes := minutesTotal % 60
-	hourUnit := "hours"
-	if hours == 1 {
-		hourUnit = "hour"
-	}
-	minuteUnit := "minutes"
-	if minutes == 1 {
-		minuteUnit = "minute"
-	}
-	switch {
-	case hours > 0 && minutes > 0:
-		return fmt.Sprintf("%d %s %d %s", hours, hourUnit, minutes, minuteUnit)
-	case hours > 0:
-		return fmt.Sprintf("%d %s", hours, hourUnit)
-	default:
-		return fmt.Sprintf("%d %s", minutes, minuteUnit)
-	}
 }
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {

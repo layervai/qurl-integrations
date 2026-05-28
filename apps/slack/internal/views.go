@@ -45,7 +45,8 @@ const slackChannelFallbackText = "the channel where setup started"
 
 // Keep this intentionally wider than today's C*/D*/G* Slack channel prefixes:
 // it is only used for benign fallback display text, and Slack has changed ID
-// shapes before. Signature verification is the actual trust boundary.
+// shapes before. The channel ID is not an auth signal here; signature
+// verification on the Slack request envelope is the trust boundary.
 var slackChannelIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,127}$`)
 
 const (

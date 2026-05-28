@@ -107,7 +107,9 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"pre-provision qURL agent-state ownership separately",
 		"including existing app volumes",
 		"local shell into `kubectl`",
-		"shared terminal session",
+		"shared, recorded",
+		"command-traced terminal session",
+		"generated Secret manifest",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)

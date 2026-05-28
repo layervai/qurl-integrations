@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -41,6 +42,8 @@ const (
 // The host string is the only Slack-controlled identifier the Slack
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
+
+const deleteOriginalRetryDelay = 250 * time.Millisecond
 
 // runAsync acks the request synchronously with ackWorkingOnIt and runs
 // `work` in a bounded-pool goroutine. Returns after the ack is written.
@@ -198,8 +201,11 @@ func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) b
 	}
 	// Retry only delete_original: a stale "Working on it" ack is uniquely
 	// confusing after a modal opens, while ordinary async replies are safer as
-	// single-attempt deliveries with explicit failure logging.
+	// single-attempt deliveries with explicit failure logging. The short delay
+	// makes the retry useful for transient Slack blips without materially
+	// extending the async worker's lifetime.
 	log.Warn("response_url delete_original failed; retrying once")
+	time.Sleep(deleteOriginalRetryDelay)
 	return h.postResponseBody(log, responseURL, body)
 }
 
@@ -248,7 +254,7 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap+1))
 	if len(respBody) > respBodyCap {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		// Keep only the bounded prefix; the extra byte is just the overflow signal.
+		// Keep only the bounded log prefix; the extra byte is just the overflow signal.
 		respBody = respBody[:respBodyCap]
 	}
 	if resp.StatusCode >= 400 {

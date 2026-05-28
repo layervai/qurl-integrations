@@ -191,19 +191,19 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 }
 
 func validateChannelShortcutToken(tok string) (alias, reason string) {
-	return validateAliasTokenForNoun(tok, "Channel shortcut")
+	return validateAliasTokenForNoun(tok, "Channel shortcut", "channel shortcut")
 }
 
-func validateAliasTokenForNoun(tok, noun string) (alias, reason string) {
+func validateAliasTokenForNoun(tok, noun, nounLower string) (alias, reason string) {
 	if tok == "" {
-		return "", fmt.Sprintf("Missing %s.", strings.ToLower(noun))
+		return "", fmt.Sprintf("Missing %s.", nounLower)
 	}
 	if !strings.HasPrefix(tok, "$") {
 		return "", noun + " must start with `$` (e.g. `$staging`)."
 	}
 	alias = strings.TrimPrefix(tok, "$")
 	if alias == "" {
-		return "", fmt.Sprintf("Missing %s name after `$`.", strings.ToLower(noun))
+		return "", fmt.Sprintf("Missing %s name after `$`.", nounLower)
 	}
 	if len(alias) > aliasMaxLen {
 		return "", fmt.Sprintf("%s `$%s` is longer than %d characters.", noun, alias, aliasMaxLen)
@@ -218,7 +218,7 @@ func validateAliasTokenForNoun(tok, noun string) (alias, reason string) {
 // slash-command responses. See [parseAliasArgs] for the rationale on plain
 // strings vs error.
 func requireAlias(tok string) (alias, userMsg string) {
-	alias, reason := validateAliasTokenForNoun(tok, "Alias")
+	alias, reason := validateAliasTokenForNoun(tok, "Alias", "alias")
 	if reason != "" {
 		return "", reason + "\n\n" + aliasUsage
 	}
