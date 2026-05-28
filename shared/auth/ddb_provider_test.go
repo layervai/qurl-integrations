@@ -122,6 +122,15 @@ func TestDDBProviderAPIKey(t *testing.T) {
 		}
 	})
 
+	t.Run("nil get output", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		}
+	})
+
 	t.Run("decrypt error", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{
@@ -368,6 +377,15 @@ func TestDDBProviderSlackBotToken(t *testing.T) {
 
 	t.Run("missing row", func(t *testing.T) {
 		ddb := &fakeDDBClient{getOutput: &dynamodb.GetItemOutput{}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		_, err := p.SlackBotToken(context.Background(), testTeamID)
+		if !errors.Is(err, ErrSlackBotTokenNotConfigured) {
+			t.Fatalf("want ErrSlackBotTokenNotConfigured, got %v", err)
+		}
+	})
+
+	t.Run("nil get output", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
 		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
 		_, err := p.SlackBotToken(context.Background(), testTeamID)
 		if !errors.Is(err, ErrSlackBotTokenNotConfigured) {

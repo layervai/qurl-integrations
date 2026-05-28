@@ -2,6 +2,12 @@
 
 Slack bot for creating and managing qURLs via slash commands, with per-workspace OAuth setup.
 
+Customer onboarding is install-first:
+
+1. Install the qURL Slack app from the install link your operator provided (`https://<SLACK_BASE_URL host>/oauth/slack/install`).
+2. Run `/qurl setup` in Slack.
+3. Use `/qurl tunnel install` or `/qurl get`.
+
 ## Features
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
@@ -9,7 +15,7 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - `/qurl get $shortcut` — Mint a qURL for a channel shortcut
 - `/qurl set-alias $shortcut <url|resource-id|$tunnel-slug>` — Bind a channel shortcut (admin-only)
 - `/qurl unset-alias $shortcut` — Remove a channel shortcut binding (admin-only)
-- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; requires Slack app install OAuth with `views:write`)
+- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install with `views:write`)
 - `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
@@ -32,10 +38,10 @@ by the current bot deployment.
   needed by the slash command and modal surfaces. The callback stores Slack's
   workspace bot token in `workspace_state` using the same KMS envelope
   encryption posture as qURL API keys. `SLACK_BOT_TOKEN` is only a legacy
-  single-workspace fallback; production guided setup should use the
-  per-workspace token captured by Slack install OAuth. Org-level Enterprise
-  Grid installs are not supported in this flow; install qURL to each workspace
-  that should use guided tunnel setup.
+  single-workspace fallback; customers do not manually provide bot tokens, and
+  production guided setup should use the per-workspace token captured by Slack
+  install OAuth. Org-level Enterprise Grid installs are not supported in this
+  flow; install qURL to each workspace that should use guided tunnel setup.
 - **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal with the
   bot token for the invoking workspace, letting an admin choose the tunnel
   slug, optional channel shortcut, local port, and target environment
@@ -125,6 +131,10 @@ docker buildx build --platform linux/arm64 \
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
 unconditionally required at startup — the bot needs DDB+KMS for
 per-workspace key lookups even on `/qurl get`/`/qurl list`.
+
+The `Slack install` group is required for low-friction customer onboarding.
+Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
+fallback, but customers cannot self-install the bot.
 
 The `OAuth` group is required only when the bot needs to serve the
 `/oauth/qurl/{start,callback}` surface. Boots without these vars still

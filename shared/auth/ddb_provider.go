@@ -1,9 +1,9 @@
 // Package auth — DDB-backed Provider for per-workspace API keys.
 //
-// DDBProvider stores per-workspace qURL API keys in the `workspace_state`
-// DynamoDB table, with the key column encrypted at the field level. The
-// PK (`team_id`) stays plaintext so GetItem can dispatch on it; only
-// `qurl_api_key` is wrapped in ciphertext.
+// DDBProvider stores per-workspace qURL API keys and Slack bot tokens in the
+// `workspace_state` DynamoDB table, with secret columns encrypted at the field
+// level. The PK (`team_id`) stays plaintext so GetItem can dispatch on it;
+// `qurl_api_key` and `slack_bot_token` are wrapped in ciphertext.
 //
 // Encryption strategy (envelope encryption via AWS KMS):
 //
@@ -268,7 +268,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
 	}
-	if len(out.Item) == 0 {
+	if out == nil || len(out.Item) == 0 {
 		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
 
@@ -312,7 +312,7 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: GetItem: %w", err)
 	}
-	if len(out.Item) == 0 {
+	if out == nil || len(out.Item) == 0 {
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
 	}
 
