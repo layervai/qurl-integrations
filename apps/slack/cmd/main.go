@@ -139,7 +139,8 @@ func run() error {
 	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
 		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
 	}
-	openView := slackOpenViewFuncWithWorkspaceTokens(ddbProvider, slackBotToken, userAgent)
+	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
+	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
 	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
@@ -221,6 +222,7 @@ func run() error {
 		return fmt.Errorf("slack install config: %w", err)
 	}
 	if ok {
+		slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
 		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
 			return fmt.Errorf("slack install routes: %w", err)
 		}
@@ -340,12 +342,12 @@ type workspaceSlackTokenLookupCache struct {
 	lastSweep time.Time
 }
 
-func slackOpenViewFuncWithWorkspaceTokens(provider slackBotTokenProvider, fallbackToken, userAgent string) internal.OpenViewFunc {
-	lookup := newWorkspaceSlackTokenLookup(provider, fallbackToken, slackWorkspaceTokenCacheTTL, time.Now)
-	return newSlackOpenViewFuncWithTokenLookup(lookup, userAgent, slackViewsOpenURL, nil)
+func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) slackOpenViewTokenLookup {
+	lookup, _ := newWorkspaceSlackTokenLookupWithInvalidation(provider, fallbackToken, ttl, now)
+	return lookup
 }
 
-func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) slackOpenViewTokenLookup {
+func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) (lookup slackOpenViewTokenLookup, purge func(string)) {
 	if now == nil {
 		now = time.Now
 	}
@@ -373,15 +375,12 @@ func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken 
 					return "", ctx.Err()
 				}
 			}
-			token, cachePositive, cacheNegative, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
-			result := workspaceSlackTokenLookupResult{token: token, err: err}
-			cache.finish(teamID, start.call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now())
-			return token, err
+			return fetchAndFinishWorkspaceSlackToken(ctx, provider, cache, start.call, teamID, fallbackToken, ttl, now)
 		}
 
 		token, _, _, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
 		return token, err
-	}
+	}, cache.purge
 }
 
 func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvider, teamID, fallbackToken string) (token string, cachePositive, cacheNegative bool, err error) {
@@ -407,6 +406,36 @@ func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvide
 		return "", false, true, err
 	}
 	return "", false, false, err
+}
+
+func fetchAndFinishWorkspaceSlackToken(
+	ctx context.Context,
+	provider slackBotTokenProvider,
+	cache *workspaceSlackTokenLookupCache,
+	call *workspaceSlackTokenLookupCall,
+	teamID string,
+	fallbackToken string,
+	ttl time.Duration,
+	now func() time.Time,
+) (token string, err error) {
+	var cachePositive bool
+	var cacheNegative bool
+	result := workspaceSlackTokenLookupResult{}
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				result = workspaceSlackTokenLookupResult{err: errors.New("workspace Slack bot token lookup panicked")}
+				cache.finish(teamID, call, result, false, false, ttl, slackWorkspaceTokenNegativeCacheTTL, now())
+			}
+			panic(rec)
+		}
+	}()
+	token, cachePositive, cacheNegative, err = fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
+	result = workspaceSlackTokenLookupResult{token: token, err: err}
+	cache.finish(teamID, call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now())
+	finished = true
+	return token, err
 }
 
 func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Duration, at time.Time) workspaceSlackTokenLookupStart {
@@ -464,6 +493,17 @@ func (c *workspaceSlackTokenLookupCache) finish(
 	call.workspaceSlackTokenLookupResult = result
 	delete(c.inFlight, teamID)
 	close(call.done)
+}
+
+func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.positive, teamID)
+	delete(c.negative, teamID)
 }
 
 func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {

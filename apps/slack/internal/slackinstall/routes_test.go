@@ -174,6 +174,10 @@ func TestCallbackStoresWorkspaceBotToken(t *testing.T) {
 
 	cfg := testConfig(store)
 	cfg.OAuthAccessURL = slack.URL
+	var invalidatedTeamID string
+	cfg.OnTokenStored = func(teamID string) {
+		invalidatedTeamID = teamID
+	}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
 	req.AddCookie(testStateHTTPCookie(state))
@@ -200,6 +204,9 @@ func TestCallbackStoresWorkspaceBotToken(t *testing.T) {
 	}
 	if strings.Join(store.install.Scopes, ",") != testScopeCSV {
 		t.Fatalf("scopes = %v", store.install.Scopes)
+	}
+	if invalidatedTeamID != testWorkspaceID {
+		t.Fatalf("OnTokenStored teamID = %q, want %q", invalidatedTeamID, testWorkspaceID)
 	}
 	if strings.Contains(w.Body.String(), testWorkspaceToken) {
 		t.Fatal("success page leaked bot token")
@@ -356,8 +363,8 @@ func TestCallbackRejectsSlackResponseMissingTeamID(t *testing.T) {
 	req.AddCookie(testStateHTTPCookie(state))
 	Callback(&cfg).ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", w.Code)
 	}
 	if store.workspaceID != "" {
 		t.Fatalf("store should not be called without team id, got %q", store.workspaceID)
@@ -394,8 +401,8 @@ func TestCallbackRejectsEnterpriseGridOrgInstall(t *testing.T) {
 	req.AddCookie(testStateHTTPCookie(state))
 	Callback(&cfg).ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", w.Code)
 	}
 	if store.workspaceID != "" {
 		t.Fatalf("store should not be called for org-level Enterprise Grid install, got %q", store.workspaceID)
@@ -431,8 +438,8 @@ func TestCallbackRejectsSlackResponseMissingAuthedUserID(t *testing.T) {
 	req.AddCookie(testStateHTTPCookie(state))
 	Callback(&cfg).ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", w.Code)
 	}
 	if store.workspaceID != "" {
 		t.Fatalf("store should not be called without authed user id, got %q", store.workspaceID)
@@ -468,8 +475,8 @@ func TestCallbackRejectsMissingRequiredSlackScopes(t *testing.T) {
 	req.AddCookie(testStateHTTPCookie(state))
 	Callback(&cfg).ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", w.Code)
 	}
 	if store.workspaceID != "" {
 		t.Fatalf("store should not be called without required scopes, got %q", store.workspaceID)

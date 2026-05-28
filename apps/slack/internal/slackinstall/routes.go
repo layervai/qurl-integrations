@@ -86,6 +86,9 @@ type Config struct {
 	// Now is injected for test-time clock pinning. Nil uses time.Now.
 	Now            func() time.Time
 	OAuthAccessURL string
+	// OnTokenStored is called after a workspace bot token is persisted. The
+	// main package uses it to evict any same-process views.open token cache.
+	OnTokenStored func(teamID string)
 }
 
 // TokenStore persists the Slack-issued workspace bot token.
@@ -191,7 +194,6 @@ func (c *Config) oauthAccessURL() string {
 
 // Install starts the Slack app OAuth installation flow.
 func Install(cfg *Config) http.HandlerFunc {
-	cfg.ensureHTTPClient()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -211,7 +213,6 @@ func Install(cfg *Config) http.HandlerFunc {
 
 // Callback exchanges Slack's OAuth code and stores the workspace bot token.
 func Callback(cfg *Config) http.HandlerFunc {
-	cfg.ensureHTTPClient()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -254,28 +255,29 @@ func Callback(cfg *Config) http.HandlerFunc {
 		if teamID == "" {
 			if resp.IsEnterpriseInstall || enterpriseID != "" {
 				logSlackInstallEnterpriseInstallUnsupported(resp.IsEnterpriseInstall, enterpriseID != "")
-				fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusBadGateway)
+				fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusUnprocessableEntity)
 				return
 			}
 			logSlackInstallMissingTeamID(strings.TrimSpace(resp.AppID) != "")
-			fail("Slack workspace install did not include a workspace id", http.StatusBadGateway)
+			fail("Slack workspace install did not include a workspace id", http.StatusUnprocessableEntity)
 			return
 		}
 		installedBy := strings.TrimSpace(resp.AuthedUser.ID)
 		if installedBy == "" {
 			logSlackInstallMissingAuthedUser(teamID != "")
-			fail("Slack workspace install did not include an installer id", http.StatusBadGateway)
+			fail("Slack workspace install did not include an installer id", http.StatusUnprocessableEntity)
 			return
 		}
 		grantedScopes := NormalizeScopes([]string{resp.Scope})
 		if missing := missingRequiredScopes(grantedScopes); len(missing) > 0 {
 			logSlackInstallMissingRequiredScopes(missing, teamID != "")
-			fail("Slack install did not grant required bot scopes", http.StatusBadGateway)
+			fail("Slack install did not grant required bot scopes", http.StatusUnprocessableEntity)
 			return
 		}
 		// Slack OAuth codes are single-use, so persist should finish even if the
-		// browser disconnects after Slack redirects back to us.
-		persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
+		// browser disconnects after Slack redirects back to us. WithoutCancel
+		// keeps request-scoped values for tracing while detaching client cancel.
+		persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(r.Context()), persistTimeout)
 		defer persistCancel()
 		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, teamID, &auth.SlackBotTokenInstall{
 			BotToken:     resp.AccessToken,
@@ -288,6 +290,9 @@ func Callback(cfg *Config) http.HandlerFunc {
 			logSlackInstallPersistFailed(err, teamID != "", installedBy != "")
 			fail("Slack install could not be stored", http.StatusInternalServerError)
 			return
+		}
+		if cfg.OnTokenStored != nil {
+			cfg.OnTokenStored(teamID)
 		}
 
 		clearStateCookie(w)
