@@ -1,0 +1,165 @@
+name: Main CI Notifications
+
+# Deploy workflows already notify once a build reaches qurl-integrations-infra.
+# This source-repo notifier covers the earlier failure mode: post-merge CI fails
+# before `trigger-deploy` can dispatch, leaving sandbox on the previous image
+# with no deploy notification to explain why.
+#
+# GitHub only runs workflow_run handlers from the default branch's copy of this
+# file, so this cannot notify for main-branch CI failures that happen before the
+# PR introducing the notifier has merged.
+on:
+  workflow_run:
+    workflows:
+      - "slack: Build and Test"
+      - "discord: Build and Test"
+      - "Shared Tests (All Apps)"
+      - "CodeQL"
+      - "Secrets Scan"
+      - "Release Please"
+      - "Validate issue templates"
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify-build-notifications:
+    name: "Notify #build-notifications"
+    # Main workflow cancellations are exceptional: the source app workflows do
+    # not auto-cancel default-branch runs, and a cancelled pre-dispatch run still
+    # leaves sandbox on the previous image with no deploy notification.
+    if: >-
+      github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+      contains(fromJson('["push","schedule"]'), github.event.workflow_run.event) &&
+      contains(fromJson('["failure","timed_out","cancelled"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+        run: |
+          set -euo pipefail
+
+          # Fail red instead of no-oping: if this secret is missing, the main
+          # CI notification surface is broken and needs operator attention.
+          if [[ -z "${SLACK_WEBHOOK_URL}" ]]; then
+            echo "::error::SLACK_WEBHOOK_URL is required for main CI failure notifications."
+            exit 1
+          fi
+
+          short_sha="${HEAD_SHA:0:7}"
+          commit_url="${REPOSITORY_URL}/commit/${HEAD_SHA}"
+          actor_display="${ACTOR:-unknown}"
+          if [[ "$EVENT" == "schedule" ]]; then
+            actor_display="schedule"
+          fi
+
+          # These labels must stay in sync with `on.workflow_run.workflows`
+          # above, and both must stay in sync with each upstream workflow's
+          # `name:`. A missed trigger-list rename means this workflow never
+          # fires; a missed case-arm rename still fires but falls back to the
+          # generic impact message.
+          case "$WORKFLOW_NAME" in
+            "slack: Build and Test")
+              impact="Slack bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Slack bot image until a hotfix lands."
+              ;;
+            "discord: Build and Test")
+              impact="Discord bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
+              ;;
+            "Shared Tests (All Apps)")
+              impact="Shared integration code failed after merge. Treat downstream app deploys from this SHA as suspect until the run is fixed or proven unrelated."
+              ;;
+            "CodeQL"|"Secrets Scan")
+              impact="Security CI failed on main. Review the run before trusting this SHA for deploy or promotion."
+              ;;
+            "Release Please")
+              impact="Release automation failed on main. Release PRs, tags, or changelog updates may be stale until the run is repaired."
+              ;;
+            "Validate issue templates")
+              impact="Issue-template validation failed on main. GitHub issue forms may be broken until the schema is fixed."
+              ;;
+            *)
+              impact="Main CI failed before the repository reached a clean post-merge state. Review the run and open a hotfix PR against this SHA."
+              ;;
+          esac
+
+          payload="$(jq -n \
+            --arg text ":rotating_light: ${WORKFLOW_NAME} ${CONCLUSION} on ${DEFAULT_BRANCH} - ${short_sha}" \
+            --arg repository "$REPOSITORY" \
+            --arg repository_url "$REPOSITORY_URL" \
+            --arg workflow "$WORKFLOW_NAME" \
+            --arg conclusion "$CONCLUSION" \
+            --arg branch "$DEFAULT_BRANCH" \
+            --arg short_sha "$short_sha" \
+            --arg commit_url "$commit_url" \
+            --arg run_number "$RUN_NUMBER" \
+            --arg run_url "$RUN_URL" \
+            --arg actor "$actor_display" \
+            --arg impact "$impact" \
+            '{
+              text: $text,
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: "*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`."
+                  }
+                },
+                {
+                  type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: "*Repository*\n<" + $repository_url + "|" + $repository + ">" },
+                    { type: "mrkdwn", text: "*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>" },
+                    { type: "mrkdwn", text: "*Triggered by*\n" + $actor },
+                    { type: "mrkdwn", text: "*Run*\n<" + $run_url + "|#" + $run_number + ">" }
+                  ]
+                },
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: "*Impact*\n" + $impact
+                  }
+                },
+                {
+                  type: "context",
+                  elements: [
+                    {
+                      type: "mrkdwn",
+                      text: "Posted from `workflow_run`, so source-repo CI failures are visible even when no deploy workflow runs."
+                    }
+                  ]
+                }
+              ]
+            }')"
+
+          for attempt in 1 2 3; do
+            if curl -sSf \
+              --max-time 30 \
+              -X POST \
+              -H 'Content-type: application/json' \
+              --data "$payload" \
+              "$SLACK_WEBHOOK_URL"; then
+              exit 0
+            fi
+
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((attempt * 2))"
+            fi
+          done
+
+          echo "::error::Slack notification failed after 3 attempts."
+          exit 1
