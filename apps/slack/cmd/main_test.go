@@ -60,7 +60,7 @@ func TestValidateSlackBotToken(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "unset"},
-		{name: "bot token", token: "xoxb-test-token-value"},
+		{name: "bot token", token: "xoxb-" + strings.Repeat("a", 40)},
 		{name: "user token", token: "xoxp-test-token", wantErr: true},
 		{name: "app token", token: "xapp-test-token", wantErr: true},
 		{name: "placeholder bot token", token: "xoxb-", wantErr: true},

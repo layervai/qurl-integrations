@@ -32,7 +32,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
 		"qurl-tunnel-" + testTunnelSlug + ".compose.yaml",
-		"qurl-tunnel-" + testTunnelSlug + ":",
+		"'qurl-tunnel-" + testTunnelSlug + "':",
 		`network_mode: "service:${WEB_SERVICE}"`,
 		"a different slug creates a separate per-slug fragment",
 		"bring the tunnel service up again too",
@@ -122,6 +122,7 @@ func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *te
 		`*[!A-Za-z0-9_-]*)`,
 		"intentionally unquoted so it expands the validated variables",
 		"<<QURL_COMPOSE_YAML_EOF",
+		`'qurl-tunnel-` + testTunnelSlug + `':`,
 		`network_mode: "service:${WEB_SERVICE}"`,
 		`QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}`,
 	} {

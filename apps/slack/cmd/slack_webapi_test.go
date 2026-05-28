@@ -219,6 +219,20 @@ func TestSlackOpenViewFuncSurfacesMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncSurfacesHTMLSuccessAsMalformedJSON(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html>not slack json</html>`))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "response JSON") {
+		t.Fatalf("error = %v, want response JSON for HTTP 200 HTML body", err)
+	}
+}
+
 func TestSlackOpenViewFuncSurfacesEmptyResponseBody(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

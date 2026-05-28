@@ -89,7 +89,7 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), tunnelServiceName, yamlSingleQuoted(image))
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), yamlSingleQuoted(tunnelServiceName), yamlSingleQuoted(image))
 
 	introParts := []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",

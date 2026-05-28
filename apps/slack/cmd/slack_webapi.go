@@ -146,6 +146,9 @@ func slackOpenViewBodySnippet(raw []byte) string {
 	for cut > 0 && !utf8.RuneStart(bodySnippet[cut]) {
 		cut--
 	}
+	if cut == 0 {
+		return bodySnippet[:maxSnippetBytes] + "..."
+	}
 	return bodySnippet[:cut] + "..."
 }
 

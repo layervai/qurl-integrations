@@ -38,7 +38,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), names.configMap, indentLines(renderTunnelConfigYAML(args), 4), names.agentPVC)
+QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), yamlSingleQuoted(names.configMap), indentLines(renderTunnelConfigYAML(args), 4), yamlSingleQuoted(names.agentPVC))
 
 	patch := fmt.Sprintf(`securityContext:
   fsGroup: 65532
@@ -80,7 +80,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, yamlSingleQuoted(image), yamlSingleQuoted(args.Slug), names.agentPVC, names.secret, names.configMap)
+      name: %s`, yamlSingleQuoted(image), yamlSingleQuoted(args.Slug), yamlSingleQuoted(names.agentPVC), yamlSingleQuoted(names.secret), yamlSingleQuoted(names.configMap))
 
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then add the sidecar/securityContext/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",

@@ -155,10 +155,10 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	got := renderKubernetesTunnelInstructions(args, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 	for _, want := range []string{
 		"QURL_BOOTSTRAP_SECRET='" + names.secret + "'",
-		"name: " + names.configMap,
-		"name: " + names.agentPVC,
-		"claimName: " + names.agentPVC,
-		"secretName: " + names.secret,
+		"name: '" + names.configMap + "'",
+		"name: '" + names.agentPVC + "'",
+		"claimName: '" + names.agentPVC + "'",
+		"secretName: '" + names.secret + "'",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing shortened name %q:\n%s", want, got)
