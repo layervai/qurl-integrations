@@ -387,6 +387,11 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 
+	// Bind/verify the channel shortcut before minting the bootstrap key so an
+	// alias conflict fails without creating a secret. After the resource exists,
+	// the binding is intentionally durable across later key/render/delivery
+	// failures: rerunning the same install reuses the same slug+shortcut and
+	// mints a fresh short-lived key.
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resource.ResourceID)
 	if err != nil {
 		log.Error("tunnel install: channel shortcut bind failed", "error", err, "shortcut", args.Alias, "resource_id", resource.ResourceID)

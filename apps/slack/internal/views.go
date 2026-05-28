@@ -171,7 +171,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
 			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional for Linux Docker and Docker Compose only. Leave blank for ECS/Fargate or Kubernetes.", true,
-				plainTextInput(tunnelInstallActionWebRef, "web", "")),
+				plainTextInput(tunnelInstallActionWebRef, "blank unless using Docker or Compose", "")),
 		},
 	}
 	return json.Marshal(payload)

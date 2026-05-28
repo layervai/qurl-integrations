@@ -217,6 +217,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 		string(tunnelEnvKubernetes),
 		"Local HTTP port",
 		"Optional for Linux Docker and Docker Compose only",
+		"blank unless using Docker or Compose",
 		"Leave blank for ECS/Fargate or Kubernetes",
 	} {
 		if !strings.Contains(body, want) {

@@ -205,8 +205,26 @@ func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) b
 	// makes the retry useful for transient Slack blips without materially
 	// extending the async worker's lifetime.
 	log.Warn("response_url delete_original failed; retrying once")
-	time.Sleep(deleteOriginalRetryDelay)
+	if !h.waitForDeleteOriginalRetry() {
+		log.Warn("response_url delete_original retry skipped because handler is shutting down")
+		return false
+	}
 	return h.postResponseBody(log, responseURL, body)
+}
+
+func (h *Handler) waitForDeleteOriginalRetry() bool {
+	ctx := h.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(deleteOriginalRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []byte) bool {

@@ -106,6 +106,40 @@ func TestPostResponseBodyDrainsOversizedErrorBody(t *testing.T) {
 	}
 }
 
+func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"slack temporarily unavailable"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := &Handler{
+		baseCtx:               baseCtx,
+		responseURLClient:     srv.Client(),
+		validateResponseURLFn: url.Parse,
+	}
+
+	start := time.Now()
+	ok := h.deleteOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL)
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatal("deleteOriginalResponse returned true for HTTP 500")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("response_url hits = %d, want 1 because canceled baseCtx skips retry", got)
+	}
+	if elapsed >= deleteOriginalRetryDelay/2 {
+		t.Fatalf("deleteOriginalResponse took %s with canceled baseCtx; retry sleep was not skipped", elapsed)
+	}
+}
+
 // getURLCommandBody builds a /slack/commands form payload for a
 // `/qurl get <url>` call. response_url is parameterized so a test
 // can wire it at the recorder it controls. user_id is set so the
