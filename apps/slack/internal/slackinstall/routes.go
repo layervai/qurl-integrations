@@ -562,6 +562,8 @@ func logSlackInstallPersistFailed(err error, teamIDPresent, installedByPresent b
 }
 
 func logSlackInstallMissingRequiredScopes(missing []string, teamIDPresent bool) {
+	// missing follows DefaultBotScopes order for operator readability. Stored
+	// scopes are normalized separately as a sorted DDB String Set.
 	slog.Warn("Slack install token exchange missing required bot scope(s)", // #nosec G706 -- missing scopes come from DefaultBotScopes constants.
 		"missing_scopes", strings.Join(missing, ","), "team_id_present", teamIDPresent)
 }

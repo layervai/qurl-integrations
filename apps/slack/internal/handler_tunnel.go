@@ -384,7 +384,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		case errors.Is(err, ErrSlackRateLimited):
 			_ = h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
 		case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
-			_ = h.postErrorResponse(log, responseURL, "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to reinstall qURL for Slack, then run `/qurl tunnel install` again.", true)
+			_ = h.postErrorResponse(log, responseURL, "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl tunnel install` again.", true)
 		default:
 			_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		}

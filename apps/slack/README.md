@@ -108,7 +108,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,views:write`. Keep `views:write` for guided tunnel setup. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,views:write`. Both `commands` and `views:write` are required; startup rejects configs missing either. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
@@ -140,6 +140,9 @@ For customer Slack installs, configure the Slack app with:
 - Bot scopes: at least `commands` and `views:write`
 - Installation mode: workspace-level installs; org-level Enterprise Grid
   installs are rejected until enterprise-scoped tokens are supported
+- Token posture: non-rotating bot tokens. The validator accepts `xoxe.xoxb-`
+  shapes defensively, but qURL does not request or persist Slack refresh tokens
+  yet, so rotation-enabled apps need refresh support before production use.
 
 After adding `views:write` or moving to per-workspace token storage, existing
 customer workspaces must reinstall or reauthorize the Slack app so Slack issues

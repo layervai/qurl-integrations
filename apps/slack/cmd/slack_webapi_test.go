@@ -50,6 +50,22 @@ func (f *blockingSlackBotTokenProvider) SlackBotToken(context.Context, string) (
 	return f.token, nil
 }
 
+type capturingBlockingSlackBotTokenProvider struct {
+	token   string
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+	calls   atomic.Int64
+}
+
+func (f *capturingBlockingSlackBotTokenProvider) SlackBotToken(context.Context, string) (string, error) {
+	f.calls.Add(1)
+	token := f.token
+	f.once.Do(func() { close(f.started) })
+	<-f.unblock
+	return token, nil
+}
+
 type panicOnceSlackBotTokenProvider struct {
 	calls atomic.Int64
 }
@@ -212,6 +228,59 @@ func TestWorkspaceSlackTokenLookupInvalidationPurgesCache(t *testing.T) {
 	}
 	if token != testRotatedWorkspaceSlackBotToken {
 		t.Fatalf("token = %q, want rotated token", token)
+	}
+	if calls := provider.calls.Load(); calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", calls)
+	}
+}
+
+func TestWorkspaceSlackTokenLookupPurgeDetachesStaleInFlight(t *testing.T) {
+	provider := &capturingBlockingSlackBotTokenProvider{
+		token:   testWorkspaceSlackBotToken,
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	var unblockOnce sync.Once
+	t.Cleanup(func() {
+		unblockOnce.Do(func() { close(provider.unblock) })
+	})
+	lookup, purge := newWorkspaceSlackTokenLookupWithInvalidation(provider, "", time.Minute, nil)
+	first := make(chan struct {
+		token string
+		err   error
+	}, 1)
+
+	go func() {
+		token, err := lookup(context.Background(), "T_race")
+		first <- struct {
+			token string
+			err   error
+		}{token: token, err: err}
+	}()
+
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider lookup did not start")
+	}
+	provider.token = testRotatedWorkspaceSlackBotToken
+	purge("T_race")
+	unblockOnce.Do(func() { close(provider.unblock) })
+
+	got := <-first
+	if got.err != nil {
+		t.Fatalf("first lookup: %v", got.err)
+	}
+	if got.token != testWorkspaceSlackBotToken {
+		t.Fatalf("first token = %q, want stale in-flight token", got.token)
+	}
+
+	token, err := lookup(context.Background(), "T_race")
+	if err != nil {
+		t.Fatalf("lookup after stale in-flight finishes: %v", err)
+	}
+	if token != testRotatedWorkspaceSlackBotToken {
+		t.Fatalf("token after purge = %q, want rotated token", token)
 	}
 	if calls := provider.calls.Load(); calls != 2 {
 		t.Fatalf("provider calls = %d, want 2", calls)

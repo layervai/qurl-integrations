@@ -332,14 +332,17 @@ type workspaceSlackTokenLookupStart struct {
 	negativeHit bool
 	call        *workspaceSlackTokenLookupCall
 	owner       bool
+	generation  uint64
 }
 
 type workspaceSlackTokenLookupCache struct {
-	mu        sync.Mutex
-	positive  map[string]cachedSlackBotToken
-	negative  map[string]time.Time
-	inFlight  map[string]*workspaceSlackTokenLookupCall
-	lastSweep time.Time
+	mu             sync.Mutex
+	positive       map[string]cachedSlackBotToken
+	negative       map[string]time.Time
+	inFlight       map[string]*workspaceSlackTokenLookupCall
+	generation     map[string]uint64
+	fallbackWarned map[string]struct{}
+	lastSweep      time.Time
 }
 
 func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) slackOpenViewTokenLookup {
@@ -352,9 +355,11 @@ func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider
 		now = time.Now
 	}
 	cache := &workspaceSlackTokenLookupCache{
-		positive: map[string]cachedSlackBotToken{},
-		negative: map[string]time.Time{},
-		inFlight: map[string]*workspaceSlackTokenLookupCall{},
+		positive:       map[string]cachedSlackBotToken{},
+		negative:       map[string]time.Time{},
+		inFlight:       map[string]*workspaceSlackTokenLookupCall{},
+		generation:     map[string]uint64{},
+		fallbackWarned: map[string]struct{}{},
 	}
 	return func(ctx context.Context, teamID string) (string, error) {
 		teamID = strings.TrimSpace(teamID)
@@ -364,6 +369,7 @@ func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider
 			case start.positiveHit:
 				return start.token, nil
 			case start.negativeHit && fallbackToken != "":
+				cache.warnLegacySlackBotTokenFallback(teamID)
 				return fallbackToken, nil
 			case start.negativeHit:
 				return "", auth.ErrSlackBotTokenNotConfigured
@@ -375,7 +381,7 @@ func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider
 					return "", ctx.Err()
 				}
 			}
-			return fetchAndFinishWorkspaceSlackToken(ctx, provider, cache, start.call, teamID, fallbackToken, ttl, now)
+			return fetchAndFinishWorkspaceSlackToken(ctx, provider, cache, start.call, teamID, fallbackToken, ttl, now, start.generation)
 		}
 
 		token, _, _, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
@@ -417,6 +423,7 @@ func fetchAndFinishWorkspaceSlackToken(
 	fallbackToken string,
 	ttl time.Duration,
 	now func() time.Time,
+	generation uint64,
 ) (token string, err error) {
 	var cachePositive bool
 	var cacheNegative bool
@@ -426,14 +433,17 @@ func fetchAndFinishWorkspaceSlackToken(
 		if rec := recover(); rec != nil {
 			if !finished {
 				result = workspaceSlackTokenLookupResult{err: errors.New("workspace Slack bot token lookup panicked")}
-				cache.finish(teamID, call, result, false, false, ttl, slackWorkspaceTokenNegativeCacheTTL, now())
+				cache.finish(teamID, call, result, false, false, ttl, 0, now(), generation)
 			}
 			panic(rec)
 		}
 	}()
 	token, cachePositive, cacheNegative, err = fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
 	result = workspaceSlackTokenLookupResult{token: token, err: err}
-	cache.finish(teamID, call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now())
+	if cacheNegative && err == nil && fallbackToken != "" {
+		cache.warnLegacySlackBotTokenFallback(teamID)
+	}
+	cache.finish(teamID, call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now(), generation)
 	finished = true
 	return token, err
 }
@@ -442,6 +452,7 @@ func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Dura
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepExpiredLocked(at)
+	generation := c.generation[teamID]
 	if ttl > 0 {
 		cached, ok := c.positive[teamID]
 		if ok && at.Before(cached.expiresAt) {
@@ -465,7 +476,7 @@ func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Dura
 	}
 	call := &workspaceSlackTokenLookupCall{done: make(chan struct{})}
 	c.inFlight[teamID] = call
-	return workspaceSlackTokenLookupStart{call: call, owner: true}
+	return workspaceSlackTokenLookupStart{call: call, owner: true, generation: generation}
 }
 
 func (c *workspaceSlackTokenLookupCache) finish(
@@ -477,21 +488,25 @@ func (c *workspaceSlackTokenLookupCache) finish(
 	positiveTTL time.Duration,
 	negativeTTL time.Duration,
 	at time.Time,
+	generation uint64,
 ) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cachePositive && positiveTTL > 0 {
+	canCache := generation == c.generation[teamID]
+	if cachePositive && positiveTTL > 0 && canCache {
 		c.positive[teamID] = cachedSlackBotToken{
 			token:     result.token,
 			expiresAt: at.Add(positiveTTL),
 		}
 		delete(c.negative, teamID)
 	}
-	if cacheNegative && negativeTTL > 0 {
+	if cacheNegative && negativeTTL > 0 && canCache {
 		c.negative[teamID] = at.Add(negativeTTL)
 	}
 	call.workspaceSlackTokenLookupResult = result
-	delete(c.inFlight, teamID)
+	if c.inFlight[teamID] == call {
+		delete(c.inFlight, teamID)
+	}
 	close(call.done)
 }
 
@@ -504,6 +519,33 @@ func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
 	defer c.mu.Unlock()
 	delete(c.positive, teamID)
 	delete(c.negative, teamID)
+	delete(c.inFlight, teamID)
+	delete(c.fallbackWarned, teamID)
+	if c.generation == nil {
+		c.generation = map[string]uint64{}
+	}
+	c.generation[teamID]++
+}
+
+func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID string) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" || !c.markLegacySlackBotTokenFallbackWarned(teamID) {
+		return
+	}
+	slog.Warn("legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token", "team_id", teamID) // #nosec G706 -- Slack team IDs are structured slog attributes; JSON handlers escape control bytes.
+}
+
+func (c *workspaceSlackTokenLookupCache) markLegacySlackBotTokenFallbackWarned(teamID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fallbackWarned == nil {
+		c.fallbackWarned = map[string]struct{}{}
+	}
+	if _, ok := c.fallbackWarned[teamID]; ok {
+		return false
+	}
+	c.fallbackWarned[teamID] = struct{}{}
+	return true
 }
 
 func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {
@@ -688,11 +730,11 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 }
 
 const (
-	envSlackClientID            = "SLACK_CLIENT_ID"
-	envSlackClientSecret        = "SLACK_CLIENT_SECRET"
-	envSlackInstallStateSecret  = "SLACK_INSTALL_STATE_SECRET"
-	envSlackBotScopes           = "SLACK_BOT_SCOPES"
-	slackInstallStateMissingKey = "SLACK_INSTALL_STATE"
+	envSlackClientID                    = "SLACK_CLIENT_ID"
+	envSlackClientSecret                = "SLACK_CLIENT_SECRET"
+	envSlackInstallStateSecret          = "SLACK_INSTALL_STATE_SECRET"
+	envSlackBotScopes                   = "SLACK_BOT_SCOPES"
+	displayKeySlackInstallStateFallback = "SLACK_INSTALL_STATE"
 )
 
 func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, bool, error) {
@@ -705,10 +747,10 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	}
 
 	missing := missingSlackInstallEnvVars(map[string]string{
-		envSlackClientID:            clientID,
-		envSlackClientSecret:        clientSecret,
-		"SLACK_BASE_URL":            baseURL,
-		slackInstallStateMissingKey: stateSecret,
+		envSlackClientID:                    clientID,
+		envSlackClientSecret:                clientSecret,
+		"SLACK_BASE_URL":                    baseURL,
+		displayKeySlackInstallStateFallback: stateSecret,
 	})
 	if len(missing) > 0 {
 		slog.Warn("Slack install routes NOT registered — required env vars unset", "missing", missing)
@@ -727,15 +769,18 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 		BotScopes:    scopes,
 		TokenStore:   provider,
 	}
+	if err := cfg.Validate(); err != nil {
+		return slackinstall.Config{}, false, err
+	}
 	return cfg, true, nil
 }
 
 func missingSlackInstallEnvVars(values map[string]string) []string {
-	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", slackInstallStateMissingKey}
+	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", displayKeySlackInstallStateFallback}
 	var missing []string
 	for _, k := range keys {
 		if values[k] == "" {
-			if k == slackInstallStateMissingKey {
+			if k == displayKeySlackInstallStateFallback {
 				missing = append(missing, envSlackInstallStateSecret+" (or OAUTH_STATE_SECRET)")
 				continue
 			}
