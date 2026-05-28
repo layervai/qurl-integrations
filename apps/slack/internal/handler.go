@@ -773,18 +773,38 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 // so help text doesn't advertise a path that will reply with
 // ":warning: not configured".
 func (h *Handler) helpMessage() string {
+	// Two sections: user verbs anyone can run under *Commands:*, and the
+	// admin-gated setup/install/alias/admin verbs under *Admin
+	// commands:*. The conditional gating below mirrors what each verb
+	// actually does at runtime — a verb whose only reply would be
+	// ":warning: not configured" (PostDM, aliasStore, AdminStore,
+	// OpenView all nil on sandbox deploys) is omitted so help never
+	// advertises a path the user can't take.
 	lines := []string{
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl get <url|$slug>` — Mint a one-time qURL for a URL, or a `$slug` (tunnel or shortcut) configured in this channel",
+		"• `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a `$alias` configured in this channel",
 	}
 	if h.cfg.PostDM != nil {
-		lines = append(lines, "• `/qurl get <url|$slug> dm:true` — DM the link to you instead of posting it in-channel")
+		lines = append(lines, "• `/qurl get <$slug|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 	}
 	lines = append(lines,
-		"• `/qurl get <url|$slug> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+		"• `/qurl get <$slug|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		"• `/qurl list` — List the tunnels available to you",
+	)
+	if h.aliasStore != nil {
+		// aliases reads channel_policies; on a sandbox deploy without an
+		// aliasStore it replies ":warning: not configured". Same gate as
+		// the set-alias/unset-alias admin lines below.
+		lines = append(lines,
+			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
+		)
+	}
+	lines = append(lines,
+		"• `/qurl help` — Show this help message",
+		"",
+		"*Admin commands:*",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
@@ -803,16 +823,15 @@ func (h *Handler) helpMessage() string {
 		}
 	}
 	if h.aliasStore != nil {
-		// setalias/unsetalias/aliases reply ":warning: not configured"
-		// on a sandbox deploy without an aliasStore; mirror the
-		// PostDM gates above so help doesn't advertise verbs whose
-		// reply tells the user they can't be used. Keep user-facing copy
-		// on "shortcut" even though the admin verbs retain their
-		// historical set-alias/unset-alias names.
+		// setalias/unsetalias reply ":warning: not configured" on a
+		// sandbox deploy without an aliasStore; mirror the PostDM gate
+		// above so help doesn't advertise verbs whose reply tells the
+		// user they can't be used. Keep user-facing copy on "shortcut"
+		// even though the admin verbs retain their historical
+		// set-alias/unset-alias names.
 		lines = append(lines,
-			"• `/qurl set-alias $<shortcut> <url-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
+			"• `/qurl set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
 			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
-			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
 		)
 	}
 	if h.cfg.AdminStore != nil {
@@ -829,9 +848,6 @@ func (h *Handler) helpMessage() string {
 			"• `/qurl admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
 		)
 	}
-	lines = append(lines,
-		"• `/qurl help` — Show this help message",
-	)
 	return strings.Join(lines, "\n")
 }
 
