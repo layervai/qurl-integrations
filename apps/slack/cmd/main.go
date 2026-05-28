@@ -70,11 +70,11 @@ const (
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
 	// the per-connection memory an attacker can force pre-handler.
 	maxHeaderBytes = 8 << 10 // 8 KiB
-	// Slack remains the token-validity authority; these bounds are only a local
-	// boot-time typo guard for obviously truncated or pasted-wrong values.
-	slackBotTokenTypoGuardMin   = 30
-	slackBotTokenTypoGuardMax   = 1024
-	slackWorkspaceTokenCacheTTL = 5 * time.Minute
+	// Keep reinstall propagation short while avoiding DDB/KMS on every modal
+	// open. Negative caching is deliberately shorter because it can extend the
+	// legacy SLACK_BOT_TOKEN fallback window after a customer reinstalls.
+	slackWorkspaceTokenCacheTTL         = 30 * time.Second
+	slackWorkspaceTokenNegativeCacheTTL = 10 * time.Second
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -135,15 +135,11 @@ func run() error {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
-	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
-		return err
+	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
+		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
 	}
 	openView := slackOpenViewFuncWithWorkspaceTokens(ddbProvider, slackBotToken, userAgent)
-	if slackBotToken != "" {
-		slog.Info("Slack views.open wired with per-workspace token lookup and legacy SLACK_BOT_TOKEN fallback")
-	} else {
-		slog.Info("Slack views.open wired with per-workspace token lookup")
-	}
+	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -317,6 +313,31 @@ type cachedSlackBotToken struct {
 	expiresAt time.Time
 }
 
+type workspaceSlackTokenLookupResult struct {
+	token string
+	err   error
+}
+
+type workspaceSlackTokenLookupCall struct {
+	done chan struct{}
+	workspaceSlackTokenLookupResult
+}
+
+type workspaceSlackTokenLookupStart struct {
+	token       string
+	positiveHit bool
+	negativeHit bool
+	call        *workspaceSlackTokenLookupCall
+	owner       bool
+}
+
+type workspaceSlackTokenLookupCache struct {
+	mu       sync.Mutex
+	positive map[string]cachedSlackBotToken
+	negative map[string]time.Time
+	inFlight map[string]*workspaceSlackTokenLookupCall
+}
+
 func slackOpenViewFuncWithWorkspaceTokens(provider slackBotTokenProvider, fallbackToken, userAgent string) internal.OpenViewFunc {
 	lookup := newWorkspaceSlackTokenLookup(provider, fallbackToken, slackWorkspaceTokenCacheTTL, time.Now)
 	return newSlackOpenViewFuncWithTokenLookup(lookup, userAgent, slackViewsOpenURL, nil)
@@ -326,43 +347,118 @@ func newWorkspaceSlackTokenLookup(provider slackBotTokenProvider, fallbackToken 
 	if now == nil {
 		now = time.Now
 	}
-	var mu sync.Mutex
-	cache := map[string]cachedSlackBotToken{}
+	cache := &workspaceSlackTokenLookupCache{
+		positive: map[string]cachedSlackBotToken{},
+		negative: map[string]time.Time{},
+		inFlight: map[string]*workspaceSlackTokenLookupCall{},
+	}
 	return func(ctx context.Context, teamID string) (string, error) {
 		teamID = strings.TrimSpace(teamID)
-		if teamID != "" && ttl > 0 {
-			mu.Lock()
-			cached, ok := cache[teamID]
-			mu.Unlock()
-			if ok && now().Before(cached.expiresAt) {
-				return cached.token, nil
+		if teamID != "" {
+			start := cache.getOrStart(teamID, ttl, now())
+			switch {
+			case start.positiveHit:
+				return start.token, nil
+			case start.negativeHit && fallbackToken != "":
+				return fallbackToken, nil
+			case start.negativeHit:
+				return "", auth.ErrSlackBotTokenNotConfigured
+			case !start.owner:
+				select {
+				case <-start.call.done:
+					return start.call.token, start.call.err
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
 			}
+			token, cachePositive, cacheNegative, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
+			result := workspaceSlackTokenLookupResult{token: token, err: err}
+			cache.finish(teamID, start.call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now())
+			return token, err
 		}
 
-		token, err := provider.SlackBotToken(ctx, teamID)
-		if err == nil {
-			token = strings.TrimSpace(token)
-			if token == "" {
-				return "", errors.New("workspace Slack bot token is empty")
-			}
-			if err := validateSlackBotTokenShape(token); err != nil {
-				return "", fmt.Errorf("workspace Slack bot token: %w", err)
-			}
-			if teamID != "" && ttl > 0 {
-				mu.Lock()
-				cache[teamID] = cachedSlackBotToken{
-					token:     token,
-					expiresAt: now().Add(ttl),
-				}
-				mu.Unlock()
-			}
-			return token, nil
-		}
-		if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) && fallbackToken != "" {
-			return fallbackToken, nil
-		}
-		return "", err
+		token, _, _, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
+		return token, err
 	}
+}
+
+func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvider, teamID, fallbackToken string) (token string, cachePositive, cacheNegative bool, err error) {
+	token, err = provider.SlackBotToken(ctx, teamID)
+	if err == nil {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return "", false, false, errors.New("workspace Slack bot token is empty")
+		}
+		if err := auth.ValidateSlackBotTokenShape(token); err != nil {
+			return "", false, false, fmt.Errorf("workspace Slack bot token: %w", err)
+		}
+		return token, true, false, nil
+	}
+	// The legacy fallback is only for workspaces that have not installed the
+	// Slack app yet. Other DDB/KMS failures should stay visible to operators.
+	if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+		if fallbackToken != "" {
+			return fallbackToken, false, true, nil
+		}
+		return "", false, true, err
+	}
+	return "", false, false, err
+}
+
+func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Duration, at time.Time) workspaceSlackTokenLookupStart {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ttl > 0 {
+		cached, ok := c.positive[teamID]
+		if ok && at.Before(cached.expiresAt) {
+			return workspaceSlackTokenLookupStart{token: cached.token, positiveHit: true}
+		}
+		if ok {
+			delete(c.positive, teamID)
+		}
+	}
+
+	expiresAt, ok := c.negative[teamID]
+	if ok && at.Before(expiresAt) {
+		return workspaceSlackTokenLookupStart{negativeHit: true}
+	}
+	if ok {
+		delete(c.negative, teamID)
+	}
+
+	if call, ok := c.inFlight[teamID]; ok {
+		return workspaceSlackTokenLookupStart{call: call}
+	}
+	call := &workspaceSlackTokenLookupCall{done: make(chan struct{})}
+	c.inFlight[teamID] = call
+	return workspaceSlackTokenLookupStart{call: call, owner: true}
+}
+
+func (c *workspaceSlackTokenLookupCache) finish(
+	teamID string,
+	call *workspaceSlackTokenLookupCall,
+	result workspaceSlackTokenLookupResult,
+	cachePositive bool,
+	cacheNegative bool,
+	positiveTTL time.Duration,
+	negativeTTL time.Duration,
+	at time.Time,
+) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cachePositive && positiveTTL > 0 {
+		c.positive[teamID] = cachedSlackBotToken{
+			token:     result.token,
+			expiresAt: at.Add(positiveTTL),
+		}
+		delete(c.negative, teamID)
+	}
+	if cacheNegative && negativeTTL > 0 {
+		c.negative[teamID] = at.Add(negativeTTL)
+	}
+	call.workspaceSlackTokenLookupResult = result
+	delete(c.inFlight, teamID)
+	close(call.done)
 }
 
 // minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.
@@ -376,39 +472,6 @@ const minStateSecretBytes = oauth.StateMinSecret
 // calls oauth.NewJWKSVerifier directly via this seam.
 var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.IDTokenVerifier, error) {
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
-}
-
-func validateSlackBotTokenShape(token string) error {
-	if token == "" {
-		return nil
-	}
-	// Keep this as a light local shape check. Slack token formats have changed
-	// over time, and the Slack API remains the authority on token validity. The
-	// upper bound is intentionally generous; when set, this only catches obvious
-	// config mistakes such as truncated tokens or bytes outside visible ASCII.
-	// Keep the lower bound loose: this boot-time check is only a local typo
-	// guard, while Slack's auth response remains the validity oracle.
-	if len(token) < slackBotTokenTypoGuardMin {
-		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenTypoGuardMin)
-	}
-	if len(token) > slackBotTokenTypoGuardMax {
-		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenTypoGuardMax)
-	}
-	if !validSlackBotTokenPrefix(token) {
-		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb- or xoxe.xoxb-")
-	}
-	for i, b := range []byte(token) {
-		if b >= '!' && b <= '~' {
-			continue
-		}
-		return fmt.Errorf("SLACK_BOT_TOKEN contains invalid characters near byte %d", i)
-	}
-	return nil
-}
-
-func validSlackBotTokenPrefix(token string) bool {
-	return strings.HasPrefix(token, "xoxb-") ||
-		strings.HasPrefix(token, "xoxe.xoxb-")
 }
 
 // missingOAuthEnvVars returns the env-var names with empty values, in

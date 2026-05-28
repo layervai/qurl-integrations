@@ -76,29 +76,29 @@ func TestValidateSlackBotToken(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "unset"},
-		{name: "bot token", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-")+10)},
-		{name: "rotating bot token", token: "xoxe.xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxe.xoxb-"))},
-		{name: "rotating refresh token", token: "xoxe-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxe-")), wantErr: true},
+		{name: "bot token", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")+10)},
+		{name: "rotating bot token", token: "xoxe.xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxe.xoxb-"))},
+		{name: "rotating refresh token", token: "xoxe-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxe-")), wantErr: true},
 		{name: "user token", token: "xoxp-test-token", wantErr: true},
 		{name: "app token", token: "xapp-test-token", wantErr: true},
 		{name: "placeholder bot token", token: "xoxb-", wantErr: true},
-		{name: "minimum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-"))},
-		{name: "one below typo-guard length", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-")-1), wantErr: true},
+		{name: "minimum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-"))},
+		{name: "one below typo-guard length", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")-1), wantErr: true},
 		{name: "token with whitespace", token: "xoxb-test-token\r", wantErr: true},
 		{name: "token with non-ascii", token: "xoxb-test-tokené", wantErr: true},
-		{name: "token with underscore", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-")) + "_ok"},
-		{name: "token with dot", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-")) + ".ok"},
+		{name: "token with underscore", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")) + "_ok"},
+		{name: "token with dot", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")) + ".ok"},
 		{name: "long bot token", token: "xoxb-" + strings.Repeat("a", 250)},
-		{name: "maximum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMax-len("xoxb-"))},
-		{name: "one above typo-guard length", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMax-len("xoxb-")+1), wantErr: true},
-		{name: "token too long", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMax-len("xoxb-")+100), wantErr: true},
+		{name: "maximum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMax-len("xoxb-"))},
+		{name: "one above typo-guard length", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMax-len("xoxb-")+1), wantErr: true},
+		{name: "token too long", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMax-len("xoxb-")+100), wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateSlackBotTokenShape(tc.token)
+			err := auth.ValidateSlackBotTokenShape(tc.token)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("validateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+				t.Fatalf("ValidateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
 			}
 		})
 	}

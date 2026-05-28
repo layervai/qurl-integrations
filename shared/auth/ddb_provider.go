@@ -316,6 +316,8 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
 	}
 
+	// Rows can exist before a Slack app install because /qurl setup writes the
+	// qURL API key first. Missing Slack columns are expected in that state.
 	ctBlob, ok := out.Item[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
 		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)

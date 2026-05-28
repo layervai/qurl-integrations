@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +30,21 @@ type fakeSlackBotTokenProvider struct {
 func (f *fakeSlackBotTokenProvider) SlackBotToken(context.Context, string) (string, error) {
 	f.calls.Add(1)
 	return f.token, f.err
+}
+
+type blockingSlackBotTokenProvider struct {
+	token   string
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+	calls   atomic.Int64
+}
+
+func (f *blockingSlackBotTokenProvider) SlackBotToken(context.Context, string) (string, error) {
+	f.calls.Add(1)
+	f.once.Do(func() { close(f.started) })
+	<-f.unblock
+	return f.token, nil
 }
 
 func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
@@ -128,14 +144,79 @@ func TestWorkspaceSlackTokenLookupCachesDDBToken(t *testing.T) {
 
 func TestWorkspaceSlackTokenLookupFallsBackWhenUnset(t *testing.T) {
 	provider := &fakeSlackBotTokenProvider{err: auth.ErrSlackBotTokenNotConfigured}
-	lookup := newWorkspaceSlackTokenLookup(provider, "xoxb-fallback", time.Minute, nil)
+	now := time.Unix(1800000000, 0)
+	lookup := newWorkspaceSlackTokenLookup(provider, "xoxb-fallback", time.Minute, func() time.Time {
+		return now
+	})
 
-	token, err := lookup(context.Background(), "T_legacy")
-	if err != nil {
-		t.Fatalf("lookup fallback: %v", err)
+	for i := 0; i < 2; i++ {
+		token, err := lookup(context.Background(), "T_legacy")
+		if err != nil {
+			t.Fatalf("lookup fallback %d: %v", i, err)
+		}
+		if token != "xoxb-fallback" {
+			t.Fatalf("token = %q, want fallback", token)
+		}
 	}
-	if token != "xoxb-fallback" {
-		t.Fatalf("token = %q, want fallback", token)
+	if calls := provider.calls.Load(); calls != 1 {
+		t.Fatalf("provider calls before negative TTL = %d, want 1", calls)
+	}
+
+	now = now.Add(slackWorkspaceTokenNegativeCacheTTL + time.Second)
+	if _, err := lookup(context.Background(), "T_legacy"); err != nil {
+		t.Fatalf("lookup fallback after negative TTL: %v", err)
+	}
+	if calls := provider.calls.Load(); calls != 2 {
+		t.Fatalf("provider calls after negative TTL = %d, want 2", calls)
+	}
+}
+
+func TestWorkspaceSlackTokenLookupCollapsesConcurrentMisses(t *testing.T) {
+	provider := &blockingSlackBotTokenProvider{
+		token:   testWorkspaceSlackBotToken,
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	var unblockOnce sync.Once
+	t.Cleanup(func() {
+		unblockOnce.Do(func() { close(provider.unblock) })
+	})
+	lookup := newWorkspaceSlackTokenLookup(provider, "", time.Minute, nil)
+
+	const callers = 8
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			token, err := lookup(context.Background(), "T_singleflight")
+			if err != nil {
+				errs <- err
+				return
+			}
+			if token != testWorkspaceSlackBotToken {
+				errs <- errors.New("unexpected token")
+			}
+		}()
+	}
+
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider lookup did not start")
+	}
+	unblockOnce.Do(func() { close(provider.unblock) })
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("lookup error: %v", err)
+		}
+	}
+	if calls := provider.calls.Load(); calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls)
 	}
 }
 

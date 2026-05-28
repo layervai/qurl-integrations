@@ -257,8 +257,24 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	if v, ok := values[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantTS {
 		t.Errorf("timestamp wrong: got %v want %q", values[":now"], wantTS)
 	}
-	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "configured_at = if_not_exists(configured_at, :now)") {
+	got := *ddb.updateInput.UpdateExpression
+	if !strings.Contains(got, "configured_at = if_not_exists(configured_at, :now)") {
 		t.Errorf("UpdateExpression should preserve configured_at with if_not_exists, got %q", got)
+	}
+	for _, attr := range []string{
+		attrSlackBotToken,
+		attrSlackBotTokenDK,
+		attrSlackBotInstalledBy,
+		attrSlackBotInstalledAt,
+		attrSlackBotUpdatedAt,
+		attrSlackBotUserID,
+		attrSlackAppID,
+		attrSlackEnterpriseID,
+		attrSlackBotScopes,
+	} {
+		if strings.Contains(got, attr) {
+			t.Errorf("SetAPIKey UpdateExpression should not touch Slack attr %s, got %q", attr, got)
+		}
 	}
 	if ddb.updateInput.ReturnValues != ddbtypes.ReturnValueUpdatedOld {
 		t.Errorf("ReturnValues = %v, want UPDATED_OLD for rotation observability", ddb.updateInput.ReturnValues)
