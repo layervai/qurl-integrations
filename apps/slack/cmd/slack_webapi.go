@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 )
@@ -137,7 +138,11 @@ func slackOpenViewBodySnippet(raw []byte) string {
 	if len(bodySnippet) <= maxSnippetBytes {
 		return bodySnippet
 	}
-	return bodySnippet[:maxSnippetBytes] + "..."
+	cut := maxSnippetBytes
+	for cut > 0 && !utf8.RuneStart(bodySnippet[cut]) {
+		cut--
+	}
+	return bodySnippet[:cut] + "..."
 }
 
 func printableLogSnippet(s string) string {

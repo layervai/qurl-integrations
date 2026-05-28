@@ -391,10 +391,8 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	msg := preparedMessage.render(args, key, aliasStatus)
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
 	if !h.postResponse(log, responseURL, msg) {
-		// response_url delivery can fail after Slack has accepted or shown the
-		// message. Keep the fresh key live so visible instructions still work;
-		// expiry and the operator deletion step bound the exposure window.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "response_url_delivery_failed")
 	}
 }
 

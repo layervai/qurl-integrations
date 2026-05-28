@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 )
@@ -166,6 +167,19 @@ func TestSlackOpenViewFuncEscapesHTTPErrorBodySnippet(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "<script>") {
 		t.Fatalf("error = %q, want HTML escaped snippet", err.Error())
+	}
+}
+
+func TestSlackOpenViewBodySnippetTruncatesOnUTF8Boundary(t *testing.T) {
+	t.Parallel()
+
+	got := slackOpenViewBodySnippet([]byte(strings.Repeat("é", 120)))
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("snippet is not valid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("snippet = %q, want truncation suffix", got)
 	}
 }
 

@@ -308,7 +308,11 @@ func validateSlackBotToken(token string) error {
 	if token == "" {
 		return nil
 	}
+	const slackBotTokenMinLen = 20
 	const slackBotTokenMaxLen = 200
+	if len(token) < slackBotTokenMinLen {
+		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenMinLen)
+	}
 	if len(token) > slackBotTokenMaxLen {
 		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenMaxLen)
 	}
