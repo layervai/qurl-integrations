@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -54,14 +55,14 @@ func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
 
 func TestParseTunnelInstall(t *testing.T) {
 	cases := []struct {
-		name      string
-		text      string
-		wantErr   bool
-		wantSlug  string
-		wantAlias string
-		wantPort  int
-		wantEnv   tunnelInstallEnvironment
-		wantWeb   string
+		name       string
+		text       string
+		wantErr    bool
+		wantSlug   string
+		wantAlias  string
+		wantPort   int
+		wantEnv    tunnelInstallEnvironment
+		wantWebRef string
 	}{
 		{name: "minimal", text: testTunnelInstallCmd, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
 		{name: "slug with alias sigil", text: "tunnel install $" + testTunnelSlug, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
@@ -69,9 +70,9 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
 		{name: "docker environment", text: testTunnelInstallCmd + " env:docker", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
 		{name: "environment", text: testTunnelInstallCmd + " env:ecs-fargate", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvECSFargate},
-		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:web_1", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWeb: "web_1"},
-		{name: "container ref", text: testTunnelInstallCmd + " container:web_1-2", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWeb: "web_1-2"},
-		{name: "web container ref", text: testTunnelInstallCmd + " web_container:web", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWeb: "web"},
+		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:web_1", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWebRef: "web_1"},
+		{name: "container ref", text: testTunnelInstallCmd + " container:web_1-2", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: "web_1-2"},
+		{name: "web container ref", text: testTunnelInstallCmd + " web_container:web", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: "web"},
 		{name: "bad slug uppercase", text: "tunnel install Prod", wantErr: true},
 		{name: "empty slug after sigil", text: "tunnel install $", wantErr: true},
 		{name: "double sigil slug", text: "tunnel install $$prod", wantErr: true},
@@ -106,8 +107,8 @@ func TestParseTunnelInstall(t *testing.T) {
 			if got.Environment != wantEnv {
 				t.Errorf("environment = %q, want %q", got.Environment, wantEnv)
 			}
-			if got.WebContainer != tc.wantWeb {
-				t.Errorf("web container = %q, want %q", got.WebContainer, tc.wantWeb)
+			if got.WebRef != tc.wantWebRef {
+				t.Errorf("web container = %q, want %q", got.WebRef, tc.wantWebRef)
 			}
 		})
 	}
@@ -641,7 +642,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "fsGroup: 65532"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "\nfsGroup:"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -739,7 +740,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 	}
 }
 
-func TestTunnelInstallModalRejectsUnsafeWebContainerBeforeMintingKey(t *testing.T) {
+func TestTunnelInstallModalRejectsUnsafeWebRefBeforeMintingKey(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -759,7 +760,7 @@ func TestTunnelInstallModalRejectsUnsafeWebContainerBeforeMintingKey(t *testing.
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), tunnelInstallBlockWebContainer) || !strings.Contains(w.Body.String(), "Docker container name") {
+	if !strings.Contains(w.Body.String(), tunnelInstallBlockWebRef) || !strings.Contains(w.Body.String(), "Docker container name") {
 		t.Fatalf("modal response = %s, want web_container field error", w.Body.String())
 	}
 }
@@ -938,7 +939,7 @@ func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 	}
 }
 
-func TestParseTunnelInstallModalArgsSkipsWebContainerValidationWhenEnvironmentMissing(t *testing.T) {
+func TestParseTunnelInstallModalArgsSkipsWebRefValidationWhenEnvironmentMissing(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "../bad")
 	delete(values, tunnelInstallBlockEnvironment)
@@ -951,7 +952,7 @@ func TestParseTunnelInstallModalArgsSkipsWebContainerValidationWhenEnvironmentMi
 	if fieldErrors[tunnelInstallBlockEnvironment] == "" {
 		t.Fatalf("field errors = %+v, want target environment error", fieldErrors)
 	}
-	if fieldErrors[tunnelInstallBlockWebContainer] != "" {
+	if fieldErrors[tunnelInstallBlockWebRef] != "" {
 		t.Fatalf("field errors = %+v, want web container validation deferred until environment is known", fieldErrors)
 	}
 }
@@ -965,7 +966,7 @@ func TestParseTunnelInstallModalArgsRejectsDottedComposeService(t *testing.T) {
 	if args != nil {
 		t.Fatalf("args = %+v, want nil", args)
 	}
-	got := fieldErrors[tunnelInstallBlockWebContainer]
+	got := fieldErrors[tunnelInstallBlockWebRef]
 	if !strings.Contains(got, "Compose service name") || !strings.Contains(got, "Dots are not allowed") {
 		t.Fatalf("web_container error = %q, want Compose service dot rejection", got)
 	}
@@ -982,6 +983,21 @@ func TestParseTunnelInstallModalArgsDefaultsEmptyPort(t *testing.T) {
 	}
 	if args == nil || args.LocalPort != defaultTunnelLocalPort {
 		t.Fatalf("args = %+v, want default local port %d", args, defaultTunnelLocalPort)
+	}
+}
+
+func TestParseTunnelInstallModalArgsRejectsMissingPortBlock(t *testing.T) {
+	t.Parallel()
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "")
+	delete(values, tunnelInstallBlockLocalPort)
+
+	args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+	if args != nil {
+		t.Fatalf("args = %+v, want nil", args)
+	}
+	if fieldErrors[tunnelInstallBlockLocalPort] == "" {
+		t.Fatalf("field errors = %+v, want local port error", fieldErrors)
 	}
 }
 
@@ -1213,7 +1229,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"ECS/Fargate task-definition checklist",
 		"non-essential sidecar container",
 		"Fargate's awsvpc network mode",
-		"replace `<region>` / `<account-id>`",
+		"Replace `<region>`, `<account-id>`, and `<suffix>`",
+		"AWS appends a random suffix",
 		"127.0.0.1:9090",
 		"AWS Secrets Manager",
 		"Store the bootstrap key shown above",
@@ -1257,6 +1274,9 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
 		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
+	}
+	if !strings.Contains(container.Secrets[0].ValueFrom, "-<suffix>") {
+		t.Fatalf("ECS secret ValueFrom = %q, want full Secrets Manager ARN suffix placeholder", container.Secrets[0].ValueFrom)
 	}
 }
 
@@ -1322,6 +1342,9 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
 		"defaultMode: 0444",
+		"do not co-locate the sidecar with untrusted containers",
+		"`fsGroup: 65532`",
+		"`0440`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
@@ -1344,6 +1367,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	t.Parallel()
 	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
+	dns1123Label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
 	args := &tunnelInstallArgs{
 		Slug:        slug,
 		Alias:       slug,
@@ -1364,6 +1388,9 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		}
 		if strings.Contains(name, "--") {
 			t.Fatalf("%s name = %q, should trim hyphens before hash suffix", label, name)
+		}
+		if !dns1123Label.MatchString(name) {
+			t.Fatalf("%s name = %q, want DNS-1123 label", label, name)
 		}
 	}
 
@@ -1393,11 +1420,11 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 	t.Parallel()
 	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
-		Slug:         testTunnelSlug,
-		Alias:        testTunnelSlug,
-		LocalPort:    9090,
-		Environment:  tunnelEnvCompose,
-		WebContainer: "web_1-2",
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvCompose,
+		WebRef:      "web_1-2",
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
 	for _, want := range []string{
@@ -1450,11 +1477,11 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *testing.T) {
 	t.Parallel()
 	got := renderDockerComposeTunnelInstructions(&tunnelInstallArgs{
-		Slug:         testTunnelSlug,
-		Alias:        testTunnelSlug,
-		LocalPort:    9090,
-		Environment:  tunnelEnvCompose,
-		WebContainer: "web",
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvCompose,
+		WebRef:      "web",
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
 	start := "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n"
@@ -1481,14 +1508,14 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 	}
 }
 
-func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
+func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	t.Parallel()
 	got := renderDockerTunnelInstructions(&tunnelInstallArgs{
-		Slug:         testTunnelSlug,
-		Alias:        testTunnelSlug,
-		LocalPort:    9090,
-		Environment:  tunnelEnvDocker,
-		WebContainer: "web.1_2-3",
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvDocker,
+		WebRef:      "web.1_2-3",
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 
 	for _, want := range []string{
@@ -1771,8 +1798,8 @@ func tunnelInstallModalValues(slug, shortcut, env, port, webContainer string) ma
 		},
 	}
 	if webContainer != "" {
-		values[tunnelInstallBlockWebContainer] = map[string]interactionStateValue{
-			tunnelInstallActionWebContainer: {Value: webContainer},
+		values[tunnelInstallBlockWebRef] = map[string]interactionStateValue{
+			tunnelInstallActionWebRef: {Value: webContainer},
 		}
 	}
 	return values

@@ -8,8 +8,8 @@ import (
 
 func renderDockerTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
 	webContainer := shellSingleQuote("YOUR_WEB_CONTAINER_NAME")
-	if args.WebContainer != "" {
-		webContainer = shellSingleQuote(args.WebContainer)
+	if args.WebRef != "" {
+		webContainer = shellSingleQuote(args.WebRef)
 	}
 	docker := fmt.Sprintf(`set -eu
 
@@ -64,7 +64,7 @@ docker run -d \
   %s`, webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), shellSingleQuote(image))
 
 	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history."
-	if args.WebContainer == "" {
+	if args.WebRef == "" {
 		intro += " Replace `YOUR_WEB_CONTAINER_NAME` first."
 	}
 	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory."

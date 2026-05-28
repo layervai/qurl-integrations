@@ -1,7 +1,9 @@
 package internal
 
 import (
+	"encoding/json"
 	"strconv"
+	"strings"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -40,7 +42,13 @@ type ecsLogConfiguration struct {
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
 	containerJSON := renderECSSidecarContainerJSON(args, image)
 	secretName := "qurl-tunnel-" + args.Slug
-	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves, and replace `<region>` / `<account-id>` in the JSON placeholders before registering the task definition. Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.\n\n" +
+	intro := strings.Join([]string{
+		"Use this as an ECS/Fargate task-definition checklist.",
+		"Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves.",
+		"Replace `<region>`, `<account-id>`, and `<suffix>` with the full secret ARN shown by Secrets Manager; AWS appends a random suffix to secret ARNs.",
+		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
+	}, " ")
+	return intro + "\n\n" +
 		"1. Store the bootstrap key shown above in AWS Secrets Manager, then delete this Slack message before continuing.\n\n" +
 		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
 		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
@@ -58,7 +66,7 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string
 			{Name: "QURL_TUNNEL_SLUG", Value: args.Slug},
 		},
 		Secrets: []ecsSecret{
-			{Name: tunnelEnvAPIKey, ValueFrom: "arn:aws:secretsmanager:<region>:<account-id>:secret:qurl-tunnel-" + args.Slug},
+			{Name: tunnelEnvAPIKey, ValueFrom: "arn:aws:secretsmanager:<region>:<account-id>:secret:qurl-tunnel-" + args.Slug + "-<suffix>"},
 		},
 		MountPoints: []ecsMountPoint{
 			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},
@@ -73,5 +81,9 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string
 			},
 		},
 	}
-	return string(mustMarshalStaticJSON(container))
+	b, err := json.MarshalIndent(container, "", "  ")
+	if err != nil {
+		panic("marshal ECS sidecar JSON: " + err.Error())
+	}
+	return string(b)
 }

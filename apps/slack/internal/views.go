@@ -43,16 +43,16 @@ const slackChannelFallbackText = "the channel where setup started"
 var slackChannelIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,127}$`)
 
 const (
-	tunnelInstallBlockSlug          = "tunnel_slug"
-	tunnelInstallActionSlug         = "slug_input"
-	tunnelInstallBlockShortcut      = "channel_shortcut"
-	tunnelInstallActionShortcut     = "channel_shortcut_input"
-	tunnelInstallBlockEnvironment   = "target_environment"
-	tunnelInstallActionEnvironment  = "target_environment_select"
-	tunnelInstallBlockLocalPort     = "local_port"
-	tunnelInstallActionLocalPort    = "local_port_input"
-	tunnelInstallBlockWebContainer  = "web_container"
-	tunnelInstallActionWebContainer = "web_container_input"
+	tunnelInstallBlockSlug         = "tunnel_slug"
+	tunnelInstallActionSlug        = "slug_input"
+	tunnelInstallBlockShortcut     = "channel_shortcut"
+	tunnelInstallActionShortcut    = "channel_shortcut_input"
+	tunnelInstallBlockEnvironment  = "target_environment"
+	tunnelInstallActionEnvironment = "target_environment_select"
+	tunnelInstallBlockLocalPort    = "local_port"
+	tunnelInstallActionLocalPort   = "local_port_input"
+	tunnelInstallBlockWebRef       = "web_container"
+	tunnelInstallActionWebRef      = "web_container_input"
 )
 
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
@@ -163,8 +163,8 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 				}, optionObj("Docker sidecar", string(tunnelEnvDocker)))),
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
-			inputBlock(tunnelInstallBlockWebContainer, "Docker service/container", "Optional. Docker container name or Compose service name; Compose names cannot include dots.", true,
-				plainTextInput(tunnelInstallActionWebContainer, "web", "")),
+			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional. Docker container name or Compose service name; Compose names cannot include dots.", true,
+				plainTextInput(tunnelInstallActionWebRef, "web", "")),
 		},
 	}
 	return json.Marshal(payload)
@@ -191,14 +191,6 @@ func slackChannelMention(channelID string) string {
 		return slackChannelFallbackText
 	}
 	return "<#" + channelID + ">"
-}
-
-func mustMarshalStaticJSON(v any) []byte {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		panic("marshal static Slack install JSON: " + err.Error())
-	}
-	return b
 }
 
 // escapeMrkdwnCode neutralizes the characters that can break out of

@@ -60,11 +60,11 @@ const (
 )
 
 type tunnelInstallArgs struct {
-	Slug         string
-	Alias        string
-	LocalPort    int
-	Environment  tunnelInstallEnvironment
-	WebContainer string
+	Slug        string
+	Alias       string
+	LocalPort   int
+	Environment tunnelInstallEnvironment
+	WebRef      string
 }
 
 func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
@@ -91,7 +91,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 			return nil, msg
 		}
 	}
-	if msg := tunnelWebContainerValidationMessage(args.Environment, args.WebContainer); msg != "" {
+	if msg := tunnelWebRefValidationMessage(args.Environment, args.WebRef); msg != "" {
 		return nil, msg + "\n\n" + tunnelInstallUsage()
 	}
 	return args, ""
@@ -126,13 +126,13 @@ func parseTunnelInstallOption(args *tunnelInstallArgs, token string) string {
 		if !dockerComposeServicePattern.MatchString(value) {
 			return "service must use letters, numbers, underscores, or hyphens.\n\n" + tunnelInstallUsage()
 		}
-		args.WebContainer = value
+		args.WebRef = value
 	case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "web_container:"):
 		_, value, _ := strings.Cut(token, ":")
 		if !dockerContainerRefPattern.MatchString(value) {
 			return "container/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
 		}
-		args.WebContainer = value
+		args.WebRef = value
 	default:
 		return tunnelInstallUsage()
 	}
@@ -295,7 +295,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	openCtx, openCancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
 	defer openCancel()
 	if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
-		log.Error("tunnel install wizard views.open failed", "error", err, "slack_rate_limited", errors.Is(err, ErrSlackRateLimited))
+		log.Error("tunnel install wizard views.open failed", "error", err, "slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired), "slack_rate_limited", errors.Is(err, ErrSlackRateLimited))
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
 			h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
@@ -479,6 +479,8 @@ func slackRetryAfterLabel(raw string) string {
 	}
 	seconds, err := strconv.Atoi(raw)
 	if err != nil || seconds <= 0 {
+		// Slack documents Retry-After as integer seconds. Treat any other
+		// shape as untrusted display text and fall back to generic retry copy.
 		return ""
 	}
 	if seconds == 1 {

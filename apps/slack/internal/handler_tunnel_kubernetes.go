@@ -83,7 +83,15 @@ volumes:
     configMap:
       name: %s`, yamlSingleQuoted(image), args.Slug, names.agentPVC, names.secret, names.configMap)
 
-	return "Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC. The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership. The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; delete it after the pod logs show the tunnel connected.\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
+	intro := strings.Join([]string{
+		"Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",
+		"Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.",
+		"The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership.",
+		"The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; do not co-locate the sidecar with untrusted containers while that Secret exists.",
+		"If your workload can safely use pod-level `fsGroup: 65532`, you may change the Secret `defaultMode` to `0440`.",
+		"Delete the bootstrap Secret after the pod logs show the tunnel connected.",
+	}, " ")
+	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
 }
 
 type kubernetesTunnelNames struct {

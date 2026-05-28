@@ -8,8 +8,8 @@ import (
 
 func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKey, image string) string {
 	webService := shellSingleQuote("YOUR_COMPOSE_SERVICE_NAME")
-	if args.WebContainer != "" {
-		webService = shellSingleQuote(args.WebContainer)
+	if args.WebRef != "" {
+		webService = shellSingleQuote(args.WebRef)
 	}
 	tunnelServiceName := "qurl-tunnel-" + args.Slug
 	tunnelService := shellSingleQuote(tunnelServiceName)
@@ -72,7 +72,7 @@ QURL_COMPOSE_YAML_EOF
 docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), tunnelServiceName, yamlSingleQuoted(image))
 
 	intro := "Run this from your Docker Compose project directory on the Linux Docker host. It prompts for the bootstrap key so the secret does not land in shell history."
-	if args.WebContainer == "" {
+	if args.WebRef == "" {
 		intro += " Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command."
 	}
 	intro += " If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it. Re-run this install to regenerate the per-slug Compose fragment when the slug, port, or service changes."

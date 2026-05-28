@@ -69,6 +69,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl tunnel install again.")
 		return
 	}
+	// The timestamp is minted and checked by Slack app pods. Platform clock
+	// sync should keep drift tiny; a large positive skew is fail-closed as an
+	// expired modal instead of minting a fresh bootstrap key from stale state.
 	if meta.CreatedAtUnix <= 0 || tunnelBootstrapNow().Sub(time.Unix(meta.CreatedAtUnix, 0)) > tunnelInstallModalTTL {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix)
 		respondTunnelInstallModalError(w, "This modal expired. Run /qurl tunnel install again.")
@@ -148,12 +151,12 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		}
 	}
 
-	portRaw := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort))
+	portText, portFound := interactionStateTextOK(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort)
+	portRaw := strings.TrimSpace(portText)
 	port := defaultTunnelLocalPort
-	// The modal always submits this block; an absent value keeps the
-	// documented default so older Slack retries remain valid if the block is
-	// omitted from a stale payload.
-	if portRaw != "" {
+	if !portFound {
+		fieldErrors[tunnelInstallBlockLocalPort] = "Use a TCP port from 1 to 65535."
+	} else if portRaw != "" {
 		var err error
 		port, err = strconv.Atoi(portRaw)
 		if err != nil || port < 1 || port > 65535 {
@@ -167,10 +170,10 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		fieldErrors[tunnelInstallBlockEnvironment] = "Choose one of the listed target environments."
 	}
 
-	webContainer := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockWebContainer, tunnelInstallActionWebContainer))
+	webRef := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockWebRef, tunnelInstallActionWebRef))
 	if envRaw != "" && envMsg == "" {
-		if msg := tunnelWebContainerValidationMessage(env, webContainer); msg != "" {
-			fieldErrors[tunnelInstallBlockWebContainer] = msg
+		if msg := tunnelWebRefValidationMessage(env, webRef); msg != "" {
+			fieldErrors[tunnelInstallBlockWebRef] = msg
 		}
 	}
 
@@ -178,20 +181,29 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		return nil, fieldErrors
 	}
 	return &tunnelInstallArgs{
-		Slug:         slug,
-		Alias:        alias,
-		LocalPort:    port,
-		Environment:  env,
-		WebContainer: webContainer,
+		Slug:        slug,
+		Alias:       alias,
+		LocalPort:   port,
+		Environment: env,
+		WebRef:      webRef,
 	}, nil
 }
 
 func interactionStateText(values map[string]map[string]interactionStateValue, blockID, actionID string) string {
+	text, _ := interactionStateTextOK(values, blockID, actionID)
+	return text
+}
+
+func interactionStateTextOK(values map[string]map[string]interactionStateValue, blockID, actionID string) (string, bool) {
 	block, ok := values[blockID]
 	if !ok {
-		return ""
+		return "", false
 	}
-	return block[actionID].text()
+	value, ok := block[actionID]
+	if !ok {
+		return "", false
+	}
+	return value.text(), true
 }
 
 func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
@@ -213,7 +225,7 @@ func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 	})
 }
 
-func tunnelWebContainerValidationMessage(env tunnelInstallEnvironment, value string) string {
+func tunnelWebRefValidationMessage(env tunnelInstallEnvironment, value string) string {
 	if value == "" {
 		return ""
 	}
