@@ -102,6 +102,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"defaultMode: 0440",
 		"pre-provision qURL agent-state ownership separately",
 		"including existing app volumes",
+		"local shell into `kubectl`",
+		"shared terminal session",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
@@ -179,6 +181,8 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 
 func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {
 	t.Parallel()
+	// Production tunnel slugs cannot be all hyphens; this protects the helper
+	// for future callers with different validated prefixes or names.
 	got := kubernetesNameWithSlug("qurl-tunnel-", strings.Repeat("-", 80))
 	if strings.Contains(got, "--") {
 		t.Fatalf("name = %q, want no doubled hyphen when trimmed base is empty", got)

@@ -68,6 +68,10 @@ const (
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
 	// the per-connection memory an attacker can force pre-handler.
 	maxHeaderBytes = 8 << 10 // 8 KiB
+	// Slack remains the token-validity authority; these bounds are only a local
+	// boot-time typo guard for obviously truncated or pasted-wrong values.
+	slackBotTokenMinLen = 20
+	slackBotTokenMaxLen = 320
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -314,8 +318,8 @@ func validateSlackBotToken(token string) error {
 	// config mistakes such as truncated tokens or bytes outside visible ASCII.
 	// Keep the lower bound loose: this boot-time check is only a local typo
 	// guard, while Slack's auth response remains the validity oracle.
-	const slackBotTokenMinLen = 20
-	const slackBotTokenMaxLen = 320
+	// TODO(slack-token-rotation): revisit the prefix check if Slack recommends
+	// xoxe.xoxb-style rotation tokens for bot-authenticated Web API calls.
 	if len(token) < slackBotTokenMinLen {
 		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenMinLen)
 	}

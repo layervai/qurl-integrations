@@ -454,7 +454,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Checking admin permissions") {
+	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want guided setup copy", ack)
 	}
 	var call openViewCall
@@ -599,7 +599,7 @@ func TestTunnelInstallBareReportsOpenViewFailure(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Checking admin permissions") {
+	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	asyncBody := inv.captured.waitForBody(t, 2*time.Second)
@@ -628,7 +628,7 @@ func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Checking admin permissions") {
+	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
@@ -653,7 +653,7 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Checking admin permissions") {
+	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
@@ -678,11 +678,11 @@ func TestTunnelInstallBareIgnoresInvalidRateLimitRetryAfter(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Checking admin permissions") {
+	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "Wait a moment") || strings.Contains(async, "Wed, 21 Oct") {
+	if !strings.Contains(async, "Wait up to 5 minutes") || strings.Contains(async, "Wed, 21 Oct") {
 		t.Fatalf("async reply = %q, want generic retry guidance without raw Retry-After", async)
 	}
 }
@@ -733,7 +733,7 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 		if got.status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", got.status)
 		}
-		if !strings.Contains(got.ack, "Checking admin permissions") {
+		if !strings.Contains(got.ack, "Working on it") {
 			t.Fatalf("ack = %q, want immediate guided setup copy", got.ack)
 		}
 	case <-time.After(2 * time.Second):
@@ -762,7 +762,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "Checking admin permissions") {
+	if !strings.Contains(ack, "Working on it") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	select {
@@ -1814,8 +1814,8 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
-	if len(responseBodies) != 2 || !strings.Contains(responseBodies[1], "bootstrap key was revoked") {
-		t.Fatalf("response_url bodies = %v, want original delivery plus revoked-key follow-up", responseBodies)
+	if len(responseBodies) != 2 || !strings.Contains(responseBodies[1], "bootstrap key was revoked") || !strings.Contains(responseBodies[1], "discard it") {
+		t.Fatalf("response_url bodies = %v, want original delivery plus revoked-key discard follow-up", responseBodies)
 	}
 }
 

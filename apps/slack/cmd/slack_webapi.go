@@ -15,6 +15,7 @@ import (
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
+const defaultSlackOpenViewUserAgent = "qurl-slack/unknown"
 
 // slackViewsOpenTimeout is the HTTP-client upper bound for every views.open
 // request made by this client. Callers can still pass a tighter context; the
@@ -38,6 +39,10 @@ func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Co
 func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
+	}
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		userAgent = defaultSlackOpenViewUserAgent
 	}
 	// The teamID parameter is intentionally part of the Config.OpenView seam
 	// so production wiring can move from this single-token deployment shape to
@@ -69,9 +74,7 @@ func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpC
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
-		if userAgent != "" {
-			req.Header.Set("User-Agent", userAgent)
-		}
+		req.Header.Set("User-Agent", userAgent)
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -154,6 +157,8 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		cut = i
 	}
 	if cut == 0 {
+		// Unreachable with the current 200-byte cap, but keep a defined fallback
+		// if a future caller lowers the cap below a single UTF-8 rune width.
 		return "..."
 	}
 	return bodySnippet[:cut] + "..."

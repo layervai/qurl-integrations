@@ -14,10 +14,10 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
-elif command -v sudo >/dev/null 2>&1; then
-  SUDO="sudo"
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
 else
-  echo "Run as root or install sudo so the state and secret directories can be owned by UID 65532." >&2
+  echo "Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532." >&2
   exit 1
 fi
 

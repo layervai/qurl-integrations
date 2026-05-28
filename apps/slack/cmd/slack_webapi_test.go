@@ -57,6 +57,24 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncDefaultsUserAgent(t *testing.T) {
+	t.Parallel()
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := newSlackOpenViewFunc("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err != nil {
+		t.Fatalf("views.open: %v", err)
+	}
+	if gotUA != defaultSlackOpenViewUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, defaultSlackOpenViewUserAgent)
+	}
+}
+
 func TestSlackOpenViewFuncSurfacesSlackError(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

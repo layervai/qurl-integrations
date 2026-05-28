@@ -41,7 +41,8 @@ const (
 	tunnelEnvAPIKey            = "QURL_API_KEY"
 	kubernetesNameMaxLen       = 63
 	// Hex chars appended to truncated Kubernetes object names. Twelve hex
-	// chars keeps collision risk negligible for expected workspace slug volume.
+	// chars is 48 bits (2^48 ~= 3e14), keeping collision risk negligible for
+	// expected workspace slug volume.
 	kubernetesNameHashHexLen = 12
 )
 
@@ -289,9 +290,9 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	// window is preserved for views.open. Denials and open failures are sent
 	// back through response_url by openTunnelInstallWizard. This intentionally
 	// differs from typed tunnel installs: the guided path may briefly show
-	// "checking" to a non-admin so the admin-gate latency does not spend the
-	// trigger_id before the modal can open.
-	respondSlack(w, "Checking admin permissions, then opening guided tunnel setup…")
+	// neutral progress copy to a non-admin so admin-gate latency does not spend
+	// the trigger_id before the modal can open.
+	respondSlack(w, "Working on it…")
 }
 
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
@@ -434,7 +435,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// confirmed, and the structured logs retain the resource/key IDs.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "response_url_delivery_failed")
-		h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. Run `/qurl tunnel install` again.")
+		h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl tunnel install` again.")
 	}
 }
 
@@ -593,7 +594,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 func tunnelInstallRateLimitMessage(err error) string {
 	retryAfter := slackRetryAfterLabel(SlackRateLimitRetryAfter(err))
 	if retryAfter == "" {
-		return "Slack rate-limited guided tunnel setup. Wait a moment, then run `/qurl tunnel install` again."
+		return "Slack rate-limited guided tunnel setup. Wait up to 5 minutes, then run `/qurl tunnel install` again."
 	}
 	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl tunnel install` again."
 }

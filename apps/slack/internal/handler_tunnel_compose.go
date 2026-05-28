@@ -22,19 +22,20 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	}
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
 	// expand WEB_SERVICE, QURL_TUNNEL_SLUG, AGENT_STATE_DIR, and SECRET_DIR
-	// into the generated file. Keep dockerComposeServicePattern narrow: it
-	// rejects shell metacharacters such as '$', backticks, quotes, slashes, and
-	// whitespace. The runtime WEB_SERVICE guard below catches unsafe operator
-	// edits before rendering the Compose fragment.
+	// into the generated file. Trust assumptions: WEB_SERVICE comes from
+	// dockerComposeServicePattern plus the runtime case guard below; the slug
+	// matches tunnelSlugPattern; state/secret dirs derive only from that slug.
+	// Keep dockerComposeServicePattern narrow: it rejects shell metacharacters
+	// such as '$', backticks, quotes, slashes, and whitespace.
 	compose := fmt.Sprintf(`set -eu
 %s
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
-elif command -v sudo >/dev/null 2>&1; then
-  SUDO="sudo"
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo -n"
 else
-  echo "Run as root or install sudo so the state and secret directories can be owned by UID 65532." >&2
+  echo "Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532." >&2
   exit 1
 fi
 
@@ -78,6 +79,8 @@ $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 # This heredoc is intentionally unquoted so it expands the validated variables
 # now and writes a static per-slug Compose fragment. Future compose commands
 # do not need WEB_SERVICE exported unless you regenerate the fragment.
+# If you edit this generated file by hand later, rerun the install instead of
+# adding new shell variables here.
 cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
 services:
   %s:
