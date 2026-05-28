@@ -490,6 +490,9 @@ func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now t
 	// User-visible consequence: two submissions for the same still-valid modal
 	// collapse onto one bootstrap key, while retries after the bucket boundary
 	// intentionally receive a fresh key.
+	// qurl-service must replay the plaintext key on same-key idempotent
+	// bootstrap creates; upstream integration coverage is tracked in
+	// layervai/qurl-service#775.
 	windowSeconds := int64(tunnelInstallModalTTL / time.Second)
 	if windowSeconds <= 0 {
 		windowSeconds = 1

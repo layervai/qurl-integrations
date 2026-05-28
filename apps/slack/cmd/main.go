@@ -325,7 +325,7 @@ func validateSlackBotToken(token string) error {
 		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenTypoGuardMax)
 	}
 	if !validSlackBotTokenPrefix(token) {
-		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-, xoxe.xoxb-, or xoxe-")
+		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb- or xoxe.xoxb-")
 	}
 	for i, b := range []byte(token) {
 		if b >= '!' && b <= '~' {
@@ -338,8 +338,7 @@ func validateSlackBotToken(token string) error {
 
 func validSlackBotTokenPrefix(token string) bool {
 	return strings.HasPrefix(token, "xoxb-") ||
-		strings.HasPrefix(token, "xoxe.xoxb-") ||
-		strings.HasPrefix(token, "xoxe-")
+		strings.HasPrefix(token, "xoxe.xoxb-")
 }
 
 // missingOAuthEnvVars returns the env-var names with empty values, in
