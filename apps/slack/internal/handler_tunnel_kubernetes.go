@@ -117,5 +117,8 @@ func kubernetesNameWithSlug(prefix, slug string) string {
 	hash := hex.EncodeToString(sum[:kubernetesNameHashLen/2])
 	maxSlugLen := kubernetesNameMaxLen - len(prefix) - 1 - len(hash)
 	base := strings.TrimRight(slug[:maxSlugLen], "-")
+	if base == "" {
+		return prefix + hash
+	}
 	return prefix + base + "-" + hash
 }

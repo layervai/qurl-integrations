@@ -792,6 +792,34 @@ func TestTunnelInstallModalRejectsEmptyPayloadIdentity(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallModalRejectsDifferentSubmitterWithRetryCopy(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, "U_other_admin", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"Only the admin who opened this modal", "Run /qurl tunnel install again"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("modal response = %s, want %q", w.Body.String(), want)
+		}
+	}
+}
+
 func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -897,6 +925,35 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 	}
 	if !strings.Contains(w.Body.String(), "modal expired") {
 		t.Fatalf("modal response = %s, want stale modal rejection", w.Body.String())
+	}
+}
+
+func TestTunnelInstallModalRejectsFutureSubmissionBeforeMintingKey(t *testing.T) {
+	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
+	freezeTunnelBootstrapNow(t, now)
+
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: now.Add(tunnelBootstrapSkew + time.Minute).Unix(),
+	}
+	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "modal expired") {
+		t.Fatalf("modal response = %s, want future modal rejection", w.Body.String())
 	}
 }
 
@@ -1415,6 +1472,17 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions contain overlong name %q:\n%s", forbidden, got)
 		}
+	}
+}
+
+func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {
+	t.Parallel()
+	got := kubernetesNameWithSlug("qurl-tunnel-", strings.Repeat("-", 80))
+	if strings.Contains(got, "--") {
+		t.Fatalf("name = %q, want no doubled hyphen when trimmed base is empty", got)
+	}
+	if len(got) > kubernetesNameMaxLen {
+		t.Fatalf("name length = %d for %q, want <= %d", len(got), got, kubernetesNameMaxLen)
 	}
 }
 

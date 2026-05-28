@@ -70,9 +70,10 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		return
 	}
 	// The timestamp is minted and checked by Slack app pods. Platform clock
-	// sync should keep drift tiny; a large positive skew is fail-closed as an
-	// expired modal instead of minting a fresh bootstrap key from stale state.
-	if meta.CreatedAtUnix <= 0 || tunnelBootstrapNow().Sub(time.Unix(meta.CreatedAtUnix, 0)) > tunnelInstallModalTTL {
+	// sync should keep drift tiny; stale modals and far-future timestamps both
+	// fail closed instead of minting a fresh bootstrap key from stale state.
+	modalAge := tunnelBootstrapNow().Sub(time.Unix(meta.CreatedAtUnix, 0))
+	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix)
 		respondTunnelInstallModalError(w, "This modal expired. Run /qurl tunnel install again.")
 		return
@@ -84,7 +85,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it.")
+		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl tunnel install again to start a new setup.")
 		return
 	}
 	if h.cfg.AdminStore == nil {

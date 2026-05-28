@@ -250,8 +250,9 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		"user_id", userID,
 		"trigger_id", triggerID,
 	)
+	triggerReceivedAt := tunnelBootstrapNow()
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.openTunnelInstallWizard(ctx, log, teamID, channelID, userID, triggerID, values.Get(fieldResponseURL))
+		h.openTunnelInstallWizard(ctx, log, teamID, channelID, userID, triggerID, values.Get(fieldResponseURL), triggerReceivedAt)
 	}) {
 		respondSlack(w, ackBusy)
 		return
@@ -262,7 +263,12 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	respondSlack(w, "Opening guided tunnel setup…")
 }
 
-func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string) {
+func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
+	triggerElapsed := tunnelBootstrapNow().Sub(triggerReceivedAt)
+	if triggerElapsed < 0 {
+		triggerElapsed = 0
+	}
+	log = log.With("slack_trigger_elapsed_ms", triggerElapsed.Milliseconds())
 	// adminGateBudget + slackTriggerOpenViewBudget intentionally fit inside
 	// Slack's roughly three-second trigger_id window. The admin store is the
 	// dominant tail-latency risk before views.open; expiry is converted into a

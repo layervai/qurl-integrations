@@ -213,7 +213,7 @@ func TestSlackOpenViewFuncRefusesRedirects(t *testing.T) {
 	}
 }
 
-func TestSlackOpenViewFuncClosesOversizedResponseWithoutDraining(t *testing.T) {
+func TestSlackOpenViewFuncDrainsAndClosesOversizedResponse(t *testing.T) {
 	t.Parallel()
 	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", 8192))}
 	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -228,8 +228,8 @@ func TestSlackOpenViewFuncClosesOversizedResponseWithoutDraining(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
-	if body.sawEOF.Load() {
-		t.Fatal("oversized response body was drained to EOF")
+	if !body.sawEOF.Load() {
+		t.Fatal("oversized response body was not drained to EOF")
 	}
 	if !body.closed.Load() {
 		t.Fatal("oversized response body was not closed")
