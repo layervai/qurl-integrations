@@ -42,7 +42,7 @@ const (
 	stateFutureSkew            = 30 * time.Second
 	slackOAuthTimeout          = 10 * time.Second
 	persistTimeout             = 15 * time.Second
-	slackOAuthBodyLimit        = 8 << 10
+	slackOAuthBodyLimit        = 16 << 10
 	slackInstallFlow           = "slack-install"
 	botScopeCommands           = "commands"
 	botScopeViewsWrite         = "views:write"
@@ -87,7 +87,8 @@ type Config struct {
 	Now            func() time.Time
 	OAuthAccessURL string
 	// OnTokenStored is called after a workspace bot token is persisted. The
-	// main package uses it to evict any same-process views.open token cache.
+	// main package uses it to evict the same-process views.open token cache;
+	// sibling pods rely on the short workspace-token TTL to observe reinstalls.
 	OnTokenStored func(teamID string)
 }
 
@@ -145,6 +146,7 @@ func (c *Config) Validate() error {
 	if missing := missingRequiredScopes(scopes); len(missing) > 0 {
 		return fmt.Errorf("bot scopes missing required scope(s): %s", strings.Join(missing, ","))
 	}
+	c.BotScopes = scopes
 	return nil
 }
 
@@ -308,7 +310,7 @@ func authorizeURL(cfg *Config, state string) string {
 	u := *slackAuthorizeBaseURL
 	q := u.Query()
 	q.Set("client_id", strings.TrimSpace(cfg.ClientID))
-	q.Set("scope", strings.Join(NormalizeScopes(cfg.BotScopes), ","))
+	q.Set("scope", strings.Join(cfg.BotScopes, ","))
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
@@ -324,11 +326,7 @@ func mustParseSlackAuthorizeURL() *url.URL {
 }
 
 func callbackURL(baseURL string) string {
-	u, err := url.JoinPath(strings.TrimRight(baseURL, "/"), CallbackPath)
-	if err != nil {
-		return strings.TrimRight(baseURL, "/") + CallbackPath
-	}
-	return u
+	return strings.TrimRight(baseURL, "/") + CallbackPath
 }
 
 type statePayload struct {
@@ -399,6 +397,8 @@ func signState(secret []byte, body string) string {
 }
 
 func setStateCookie(w http.ResponseWriter, state string, now time.Time) {
+	// A second install tab intentionally clobbers the first tab's cookie; the
+	// first callback then fails CSRF instead of completing an older state.
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookieName,
 		Value:    state,

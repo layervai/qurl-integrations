@@ -499,6 +499,7 @@ func (c *workspaceSlackTokenLookupCache) finish(
 			expiresAt: at.Add(positiveTTL),
 		}
 		delete(c.negative, teamID)
+		delete(c.fallbackWarned, teamID)
 	}
 	if cacheNegative && negativeTTL > 0 && canCache {
 		c.negative[teamID] = at.Add(negativeTTL)
@@ -560,6 +561,7 @@ func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {
 	for teamID, expiresAt := range c.negative {
 		if !at.Before(expiresAt) {
 			delete(c.negative, teamID)
+			delete(c.fallbackWarned, teamID)
 		}
 	}
 	c.lastSweep = at

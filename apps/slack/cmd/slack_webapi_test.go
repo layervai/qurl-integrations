@@ -373,6 +373,10 @@ func TestWorkspaceSlackTokenLookupCacheSweepsExpiredEntries(t *testing.T) {
 			"T_negative_fresh":   at.Add(time.Minute),
 		},
 		inFlight: map[string]*workspaceSlackTokenLookupCall{},
+		fallbackWarned: map[string]struct{}{
+			"T_negative_expired": {},
+			"T_negative_fresh":   {},
+		},
 	}
 
 	start := cache.getOrStart("T_new", time.Minute, at)
@@ -390,6 +394,12 @@ func TestWorkspaceSlackTokenLookupCacheSweepsExpiredEntries(t *testing.T) {
 	}
 	if _, ok := cache.negative["T_negative_fresh"]; !ok {
 		t.Fatal("fresh negative cache entry should remain")
+	}
+	if _, ok := cache.fallbackWarned["T_negative_expired"]; ok {
+		t.Fatal("expired negative cache entry should clear fallback warning state")
+	}
+	if _, ok := cache.fallbackWarned["T_negative_fresh"]; !ok {
+		t.Fatal("fresh negative cache entry should keep fallback warning state")
 	}
 }
 

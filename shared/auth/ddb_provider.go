@@ -462,7 +462,7 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: UpdateItem: %w", err)
 	}
-	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata",
+	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
 		"workspace_id", workspaceID,
 		"installed_by", install.InstalledBy,
 		"bot_user_id", install.BotUserID,
