@@ -14,7 +14,19 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
+
+type fakeSlackTokenProvider struct {
+	token string
+	err   error
+	team  string
+}
+
+func (f *fakeSlackTokenProvider) SlackBotToken(_ context.Context, teamID string) (string, error) {
+	f.team = teamID
+	return f.token, f.err
+}
 
 func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	t.Parallel()
@@ -72,6 +84,47 @@ func TestSlackOpenViewFuncDefaultsUserAgent(t *testing.T) {
 	}
 	if gotUA != defaultSlackOpenViewUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", gotUA, defaultSlackOpenViewUserAgent)
+	}
+}
+
+func TestSlackOpenViewFuncUsesWorkspaceStoredToken(t *testing.T) {
+	t.Parallel()
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	provider := &fakeSlackTokenProvider{token: "xoxb-stored"}
+	err := newSlackOpenViewFuncWithResolver(func(ctx context.Context, teamID string) (string, error) {
+		return provider.SlackBotToken(ctx, teamID)
+	}, "qurl-slack/test", srv.URL, nil)(context.Background(), "T_stored", "trigger_test", []byte(`{"type":"modal"}`))
+	if err != nil {
+		t.Fatalf("views.open: %v", err)
+	}
+	if provider.team != "T_stored" {
+		t.Fatalf("team lookup = %q, want T_stored", provider.team)
+	}
+	if gotAuth != "Bearer xoxb-stored" {
+		t.Fatalf("Authorization = %q, want stored token", gotAuth)
+	}
+}
+
+func TestSlackOpenViewFuncFallsBackToGlobalToken(t *testing.T) {
+	t.Parallel()
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	provider := &fakeSlackTokenProvider{err: auth.ErrSlackBotTokenNotConfigured}
+	err := newSlackOpenViewFuncForWorkspace(provider, "xoxb-fallback", "qurl-slack/test", srv.URL, nil)(context.Background(), "T_legacy", "trigger_test", []byte(`{"type":"modal"}`))
+	if err != nil {
+		t.Fatalf("views.open: %v", err)
+	}
+	if gotAuth != "Bearer xoxb-fallback" {
+		t.Fatalf("Authorization = %q, want fallback token", gotAuth)
 	}
 }
 

@@ -132,15 +132,19 @@ func run() error {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
+	slackInstallCfg, slackInstallOK, err := buildSlackInstallConfig(ddbProvider)
+	if err != nil {
+		return fmt.Errorf("Slack install OAuth config: %w", err)
+	}
 	var openView internal.OpenViewFunc
 	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
 		return err
 	}
-	if err := requireSlackBotTokenForAdminStore(slackBotToken, adminStore != nil); err != nil {
+	if err := requireSlackModalTokenSource(slackBotToken, adminStore != nil, slackInstallOK); err != nil {
 		return err
 	}
-	if slackBotToken != "" {
-		openView = slackOpenViewFunc(slackBotToken, userAgent)
+	if slackBotToken != "" || slackInstallOK {
+		openView = slackOpenViewFuncForWorkspace(ddbProvider, slackBotToken, userAgent)
 	} else {
 		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")
 	}
@@ -190,6 +194,10 @@ func run() error {
 	// the internal handler stays unchanged.
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/", handler)
+	if slackInstallOK {
+		registerSlackInstallRoutes(rootMux, slackInstallCfg)
+		slog.Info("registered Slack install OAuth routes")
+	}
 	// Route the callback's fire-and-forget goroutines through handler.wg
 	// so they fall inside the same shutdown drain budget as the
 	// slash-command async workers.
@@ -339,11 +347,11 @@ func validateSlackBotTokenShape(token string) error {
 	return nil
 }
 
-func requireSlackBotTokenForAdminStore(token string, adminStoreConfigured bool) error {
-	if !adminStoreConfigured || strings.TrimSpace(token) != "" {
+func requireSlackModalTokenSource(token string, adminStoreConfigured, slackInstallConfigured bool) error {
+	if !adminStoreConfigured || strings.TrimSpace(token) != "" || slackInstallConfigured {
 		return nil
 	}
-	return errors.New("SLACK_BOT_TOKEN is required when Slack admin/tunnel storage is configured; guided tunnel setup uses Slack views.open")
+	return errors.New("Slack modal token source is required when Slack admin/tunnel storage is configured; set SLACK_BOT_TOKEN or configure Slack install OAuth")
 }
 
 func validSlackBotTokenPrefix(token string) bool {

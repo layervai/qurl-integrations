@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
@@ -35,11 +36,44 @@ func slackOpenViewFunc(token, userAgent string) func(context.Context, string, st
 	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL)
 }
 
+func slackOpenViewFuncForWorkspace(provider interface {
+	SlackBotToken(context.Context, string) (string, error)
+}, fallbackToken, userAgent string) internal.OpenViewFunc {
+	return newSlackOpenViewFuncForWorkspace(provider, fallbackToken, userAgent, slackViewsOpenURL, nil)
+}
+
+func newSlackOpenViewFuncForWorkspace(provider interface {
+	SlackBotToken(context.Context, string) (string, error)
+}, fallbackToken, userAgent, viewsOpenURL string, httpClient *http.Client) internal.OpenViewFunc {
+	fallbackToken = strings.TrimSpace(fallbackToken)
+	return newSlackOpenViewFuncWithResolver(func(ctx context.Context, teamID string) (string, error) {
+		if provider != nil {
+			token, err := provider.SlackBotToken(ctx, teamID)
+			if err == nil {
+				return token, nil
+			}
+			if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) || strings.TrimSpace(fallbackToken) == "" {
+				return "", err
+			}
+		}
+		if fallbackToken == "" {
+			return "", auth.ErrSlackBotTokenNotConfigured
+		}
+		return fallbackToken, nil
+	}, userAgent, viewsOpenURL, httpClient)
+}
+
 func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
 }
 
 func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+	return newSlackOpenViewFuncWithResolver(func(context.Context, string) (string, error) {
+		return token, nil
+	}, userAgent, viewsOpenURL, httpClient)
+}
+
+func newSlackOpenViewFuncWithResolver(resolveToken func(context.Context, string) (string, error), userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
@@ -47,14 +81,15 @@ func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpC
 	if userAgent == "" {
 		userAgent = defaultSlackOpenViewUserAgent
 	}
-	// The teamID parameter is intentionally part of the Config.OpenView seam
-	// so production wiring can move from this single-token deployment shape to
-	// per-team OAuth token lookup without changing the handler contract. The
-	// workspace install row written by internal/oauth is the future lookup
-	// authority for this token.
-	// TODO(slack-oauth): look up the workspace bot token by teamID once the
-	// per-workspace OAuth token store is the only production path.
-	return func(ctx context.Context, _ string, triggerID string, viewJSON []byte) error {
+	return func(ctx context.Context, teamID string, triggerID string, viewJSON []byte) error {
+		token, err := resolveToken(ctx, teamID)
+		if err != nil {
+			return fmt.Errorf("views.open token lookup: %w", err)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return errors.New("views.open token lookup returned empty token")
+		}
 		viewJSON = bytes.TrimSpace(viewJSON)
 		// json.Valid accepts arrays and scalars; views.open requires a view
 		// object, so reject non-object roots before sending the request.

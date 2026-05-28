@@ -1,9 +1,9 @@
 // Package auth — DDB-backed Provider for per-workspace API keys.
 //
-// DDBProvider stores per-workspace qURL API keys in the `workspace_state`
-// DynamoDB table, with the key column encrypted at the field level. The
-// PK (`team_id`) stays plaintext so GetItem can dispatch on it; only
-// `qurl_api_key` is wrapped in ciphertext.
+// DDBProvider stores per-workspace qURL API keys and Slack bot tokens in the
+// `workspace_state` DynamoDB table, with secret columns encrypted at the field
+// level. The PK (`team_id`) stays plaintext so GetItem can dispatch on it;
+// `qurl_api_key` and `slack_bot_token` are wrapped in ciphertext.
 //
 // Encryption strategy (envelope encryption via AWS KMS):
 //
@@ -63,6 +63,12 @@ const (
 	attrConfiguredBy = "configured_by"
 	attrConfiguredAt = "configured_at"
 	attrUpdatedAt    = "updated_at"
+
+	attrSlackBotToken       = "slack_bot_token"
+	attrSlackBotTokenDK     = "slack_bot_token_dk"
+	attrSlackBotInstalledBy = "slack_bot_installed_by"
+	attrSlackBotInstalledAt = "slack_bot_installed_at"
+	attrSlackBotUpdatedAt   = "slack_bot_updated_at"
 )
 
 // Env var names — operator-set via the Fargate task definition (the
@@ -83,6 +89,10 @@ const (
 // catches this distinctly so the bot can prompt the user to visit
 // /oauth/qurl/start rather than rendering a generic "auth failed" error.
 var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin must complete /oauth/qurl/start")
+
+// ErrSlackBotTokenNotConfigured is returned when the Slack app installation
+// flow has not yet stored a workspace bot token.
+var ErrSlackBotTokenNotConfigured = errors.New("slack bot token not configured — workspace must install the Slack app")
 
 // DynamoDBClient is the slice of *dynamodb.Client the provider actually
 // uses. Exposed as an interface so tests can inject a fake without
@@ -236,13 +246,13 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
 	}
-	if len(out.Item) == 0 {
+	if out == nil || len(out.Item) == 0 {
 		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
 
 	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
-		return "", errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key")
+		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q missing qurl_api_key: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
 	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(wrappedKey.Value) == 0 {
@@ -325,14 +335,16 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 			configuredAt = prev.Value
 		}
 	}
-	item := map[string]ddbtypes.AttributeValue{
-		attrTeamID:       &ddbtypes.AttributeValueMemberS{Value: workspaceID},
-		attrQURLAPIKey:   &ddbtypes.AttributeValueMemberB{Value: ct},
-		attrDataKeyCT:    &ddbtypes.AttributeValueMemberB{Value: wrapped},
-		attrConfiguredBy: &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-		attrUpdatedAt:    &ddbtypes.AttributeValueMemberS{Value: now},
-		attrConfiguredAt: &ddbtypes.AttributeValueMemberS{Value: configuredAt},
+	item := map[string]ddbtypes.AttributeValue{}
+	if overwriting {
+		item = cloneDDBItem(existing.Item)
 	}
+	item[attrTeamID] = &ddbtypes.AttributeValueMemberS{Value: workspaceID}
+	item[attrQURLAPIKey] = &ddbtypes.AttributeValueMemberB{Value: ct}
+	item[attrDataKeyCT] = &ddbtypes.AttributeValueMemberB{Value: wrapped}
+	item[attrConfiguredBy] = &ddbtypes.AttributeValueMemberS{Value: configuredBy}
+	item[attrUpdatedAt] = &ddbtypes.AttributeValueMemberS{Value: now}
+	item[attrConfiguredAt] = &ddbtypes.AttributeValueMemberS{Value: configuredAt}
 
 	if _, err := p.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(p.TableName),
@@ -341,11 +353,109 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: PutItem: %w", err)
 	}
 	if overwriting {
-		slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace row",
+		slog.Warn("DDBProvider.SetAPIKey updated existing workspace row",
 			"workspace_id", workspaceID,
 			"configured_by", configuredBy)
 	}
 	return nil
+}
+
+// SlackBotToken looks up the Slack bot token produced by Slack app
+// installation. It may exist before the qURL API key because customer
+// onboarding installs the Slack app first, then runs /qurl setup.
+func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (string, error) {
+	if workspaceID == "" {
+		return "", errors.New("DDBProvider.SlackBotToken: workspaceID is empty")
+	}
+	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: GetItem: %w", err)
+	}
+	if out == nil || len(out.Item) == 0 {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
+	}
+	ctBlob, ok := out.Item[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(ctBlob.Value) == 0 {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
+	}
+	wrappedKey, ok := out.Item[attrSlackBotTokenDK].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(wrappedKey.Value) == 0 {
+		return "", errors.New("DDBProvider.SlackBotToken: stored item missing or has wrong type for slack_bot_token_dk")
+	}
+	pt, err := p.Encryptor.Open(ctx, ctBlob.Value, wrappedKey.Value, []byte(workspaceID))
+	if err != nil {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: decrypt: %w", err)
+	}
+	if len(pt) == 0 {
+		return "", errors.New("DDBProvider.SlackBotToken: decrypted plaintext is empty")
+	}
+	return string(pt), nil
+}
+
+// SetSlackBotToken upserts the Slack app installation's bot token without
+// disturbing any qURL API key already stored for the same workspace.
+func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID, botToken, installedBy string) error {
+	if workspaceID == "" {
+		return errors.New("DDBProvider.SetSlackBotToken: workspaceID is empty")
+	}
+	if botToken == "" {
+		return errors.New("DDBProvider.SetSlackBotToken: botToken is empty")
+	}
+	ct, wrapped, err := p.Encryptor.Seal(ctx, []byte(botToken), []byte(workspaceID))
+	if err != nil {
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: encrypt: %w", err)
+	}
+	existing, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: pre-flight GetItem: %w", err)
+	}
+	overwriting := existing != nil && len(existing.Item) > 0
+	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	installedAt := now
+	item := map[string]ddbtypes.AttributeValue{}
+	if overwriting {
+		item = cloneDDBItem(existing.Item)
+		if prev, ok := existing.Item[attrSlackBotInstalledAt].(*ddbtypes.AttributeValueMemberS); ok && prev.Value != "" {
+			installedAt = prev.Value
+		}
+	}
+	item[attrTeamID] = &ddbtypes.AttributeValueMemberS{Value: workspaceID}
+	item[attrSlackBotToken] = &ddbtypes.AttributeValueMemberB{Value: ct}
+	item[attrSlackBotTokenDK] = &ddbtypes.AttributeValueMemberB{Value: wrapped}
+	item[attrSlackBotInstalledBy] = &ddbtypes.AttributeValueMemberS{Value: installedBy}
+	item[attrSlackBotInstalledAt] = &ddbtypes.AttributeValueMemberS{Value: installedAt}
+	item[attrSlackBotUpdatedAt] = &ddbtypes.AttributeValueMemberS{Value: now}
+
+	if _, err := p.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(p.TableName),
+		Item:      item,
+	}); err != nil {
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: PutItem: %w", err)
+	}
+	if overwriting {
+		slog.Warn("DDBProvider.SetSlackBotToken updated existing workspace row",
+			"workspace_id", workspaceID,
+			"installed_by", installedBy)
+	}
+	return nil
+}
+
+func cloneDDBItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.AttributeValue {
+	out := make(map[string]ddbtypes.AttributeValue, len(item))
+	for k, v := range item {
+		out[k] = v
+	}
+	return out
 }
 
 // DeleteAPIKey removes the per-workspace row. Used by the uninstall /

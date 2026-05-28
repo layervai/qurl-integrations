@@ -88,26 +88,28 @@ func TestValidateSlackBotToken(t *testing.T) {
 	}
 }
 
-func TestRequireSlackBotTokenForAdminStore(t *testing.T) {
+func TestRequireSlackModalTokenSource(t *testing.T) {
 	t.Parallel()
 	validToken := "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMin-len("xoxb-"))
 	cases := []struct {
-		name                 string
-		token                string
-		adminStoreConfigured bool
-		wantErr              bool
+		name                   string
+		token                  string
+		adminStoreConfigured   bool
+		slackInstallConfigured bool
+		wantErr                bool
 	}{
 		{name: "sandbox without admin storage can omit token"},
-		{name: "admin storage requires token", adminStoreConfigured: true, wantErr: true},
+		{name: "admin storage requires a token source", adminStoreConfigured: true, wantErr: true},
 		{name: "admin storage rejects whitespace token", token: " \t", adminStoreConfigured: true, wantErr: true},
-		{name: "admin storage accepts token", token: validToken, adminStoreConfigured: true},
+		{name: "admin storage accepts global token", token: validToken, adminStoreConfigured: true},
+		{name: "admin storage accepts Slack install OAuth", adminStoreConfigured: true, slackInstallConfigured: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := requireSlackBotTokenForAdminStore(tc.token, tc.adminStoreConfigured)
+			err := requireSlackModalTokenSource(tc.token, tc.adminStoreConfigured, tc.slackInstallConfigured)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("requireSlackBotTokenForAdminStore(%q, %v) err=%v, wantErr=%v", tc.token, tc.adminStoreConfigured, err, tc.wantErr)
+				t.Fatalf("requireSlackModalTokenSource(%q, %v, %v) err=%v, wantErr=%v", tc.token, tc.adminStoreConfigured, tc.slackInstallConfigured, err, tc.wantErr)
 			}
 		})
 	}

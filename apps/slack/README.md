@@ -2,6 +2,12 @@
 
 Slack bot for creating and managing qURLs via slash commands, with per-workspace OAuth setup.
 
+Customer onboarding is install-first:
+
+1. Install the qURL Slack app from `/slack/install`.
+2. Run `/qurl setup` in Slack.
+3. Use `/qurl tunnel install` or `/qurl get`.
+
 ## Features
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
@@ -9,7 +15,7 @@ Slack bot for creating and managing qURLs via slash commands, with per-workspace
 - `/qurl get $shortcut` — Mint a qURL for a channel shortcut
 - `/qurl set-alias $shortcut <url|resource-id|$tunnel-slug>` — Bind a channel shortcut (admin-only)
 - `/qurl unset-alias $shortcut` — Remove a channel shortcut binding (admin-only)
-- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; requires `SLACK_BOT_TOKEN` with `views:write` when admin/tunnel storage is configured)
+- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install)
 - `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
 - `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
@@ -26,13 +32,19 @@ by the current bot deployment.
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
-- **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal using
-  `SLACK_BOT_TOKEN`, letting an admin choose the tunnel slug,
+- **Slack app install:** `/slack/install` runs Slack OAuth v2 for the app's
+  bot scopes (`commands` and `views:write` by default), then stores the
+  workspace bot token encrypted in `workspace_state`. Customers do not provide
+  a bot token manually; `SLACK_BOT_TOKEN` is only a legacy/manual fallback for
+  sandbox or one-workspace deploys.
+- **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal using the
+  workspace bot token, letting an admin choose the tunnel slug,
   optional channel shortcut, local port, and target environment
   (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl tunnel install <slug>` (or
   `$slug`) remains available for CLI-style admins. The packaged Slack bot
-  entrypoint requires `SLACK_BOT_TOKEN` whenever admin/tunnel storage is
-  configured, so sandbox deployments do not silently lose guided setup. Both
+  entrypoint requires either Slack install OAuth or `SLACK_BOT_TOKEN` whenever
+  admin/tunnel storage is configured, so sandbox deployments do not silently
+  lose guided setup. Both
   paths use the workspace API key to find-or-create a tunnel resource scoped to the
   connected qURL account, bind `$<slug>` or the `alias:` shortcut override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
@@ -59,6 +71,8 @@ by the current bot deployment.
   - `POST /slack/commands` — Slash command handler (ack-then-async)
   - `POST /slack/events` — Event subscriptions (link unfurling planned)
   - `POST /slack/interactions` — Interactive components and modals
+  - `GET /slack/install` — Begin Slack app installation
+  - `GET /slack/oauth/callback` — Slack OAuth redirect target; stores bot token
   - `GET /oauth/qurl/start` — Begin OAuth flow (state token required)
   - `GET /oauth/qurl/callback` — Auth0 redirect target; mints + persists key
   - `GET /health` — ALB target-group health probe
@@ -74,7 +88,8 @@ go test -race -count=1 ./apps/slack/...
 WORKSPACE_STATE_TABLE=workspace-state-dev \
 WORKSPACE_STATE_KMS_KEY_ARN=arn:aws:kms:us-east-1:...:key/... \
 SLACK_SIGNING_SECRET=... \
-SLACK_BOT_TOKEN=xoxb-... \
+SLACK_CLIENT_ID=... \
+SLACK_CLIENT_SECRET=... \
 QURL_ENDPOINT=https://api.layerv.xyz \
 AUTH0_DOMAIN=layerv.us.auth0.com \
 AUTH0_CLIENT_ID=... \
@@ -94,10 +109,14 @@ docker buildx build --platform linux/arm64 \
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
-| `SLACK_BOT_TOKEN` | Admin/tunnel | Slack bot token used for `views.open` so `/qurl tunnel install` can show the guided installer. Required whenever `QURL_WORKSPACE_MAPPINGS_TABLE` and `QURL_CHANNEL_POLICIES_TABLE` are configured, including sandbox deployments with tunnel/admin storage. Requires the Slack app to grant `views:write`. Accepts `xoxb-` and `xoxe.xoxb-` bot-token shapes. |
+| `SLACK_CLIENT_ID` | Slack install | Slack app client ID for `/slack/install`. Required with `SLACK_CLIENT_SECRET` to support customer self-install. |
+| `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/slack/oauth/callback` to exchange Slack's OAuth code for a workspace bot token. |
+| `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install CSRF state signing. Must be ≥32 bytes. If empty, `OAUTH_STATE_SECRET` is reused. |
+| `SLACK_INSTALL_BOT_SCOPES` | No | Comma- or space-separated Slack bot scopes requested by `/slack/install`. Defaults to `commands,views:write`. |
+| `SLACK_BOT_TOKEN` | Legacy fallback | Single-workspace bot token used for `views.open` only when a stored workspace token is absent. Admin/tunnel deployments require either Slack install OAuth or this fallback. Accepts `xoxb-` and `xoxe.xoxb-` bot-token shapes. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
-| `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt the workspace API key column |
+| `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt the workspace API key and Slack bot token columns |
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the bot |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
@@ -110,6 +129,10 @@ docker buildx build --platform linux/arm64 \
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
 unconditionally required at startup — the bot needs DDB+KMS for
 per-workspace key lookups even on `/qurl get`/`/qurl list`.
+
+The `Slack install` group is required for low-friction customer onboarding.
+Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
+fallback, but customers cannot self-install the bot.
 
 The `OAuth` group is required only when the bot needs to serve the
 `/oauth/qurl/{start,callback}` surface. Boots without these vars still

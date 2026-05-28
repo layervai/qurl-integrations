@@ -204,8 +204,8 @@ func TestDDBProviderAPIKey(t *testing.T) {
 		}
 		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
 		_, err := p.APIKey(context.Background(), testTeamID)
-		if err == nil {
-			t.Fatal("want error, got nil")
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
 		}
 	})
 }
@@ -304,6 +304,123 @@ func TestDDBProviderSetAPIKeyPreservesConfiguredAt(t *testing.T) {
 	wantUpdated := rotatedAt.Format(time.RFC3339)
 	if v, ok := item[attrUpdatedAt].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantUpdated {
 		t.Errorf("updated_at must move to rotation time: got %v want %q", item[attrUpdatedAt], wantUpdated)
+	}
+}
+
+func TestDDBProviderSetAPIKeyPreservesSlackBotToken(t *testing.T) {
+	ddb := &fakeDDBClient{
+		getOutput: &dynamodb.GetItemOutput{
+			Item: map[string]ddbtypes.AttributeValue{
+				attrTeamID:              &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+				attrSlackBotToken:       &ddbtypes.AttributeValueMemberB{Value: []byte("xoxb-existing")},
+				attrSlackBotTokenDK:     &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+				attrSlackBotInstalledAt: &ddbtypes.AttributeValueMemberS{Value: "2026-05-01T00:00:00Z"},
+			},
+		},
+	}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return time.Unix(1800000000, 0).UTC() },
+	}
+	if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_new", "U_ADMIN"); err != nil {
+		t.Fatalf("SetAPIKey: %v", err)
+	}
+	item := ddb.putInput.Item
+	if v, ok := item[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != "xoxb-existing" {
+		t.Errorf("slack_bot_token must be preserved: got %v", item[attrSlackBotToken])
+	}
+	if v, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != "lv_live_new" {
+		t.Errorf("qurl_api_key wrong: got %v", item[attrQURLAPIKey])
+	}
+}
+
+func TestDDBProviderSlackBotToken(t *testing.T) {
+	t.Run("happy path", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{
+				Item: map[string]ddbtypes.AttributeValue{
+					attrTeamID:          &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+					attrSlackBotToken:   &ddbtypes.AttributeValueMemberB{Value: []byte("xoxb-installed")},
+					attrSlackBotTokenDK: &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+				},
+			},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		got, err := p.SlackBotToken(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("SlackBotToken: %v", err)
+		}
+		if got != "xoxb-installed" {
+			t.Fatalf("got %q want xoxb-installed", got)
+		}
+	})
+
+	t.Run("not installed", func(t *testing.T) {
+		ddb := &fakeDDBClient{getOutput: &dynamodb.GetItemOutput{}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		_, err := p.SlackBotToken(context.Background(), testTeamID)
+		if !errors.Is(err, ErrSlackBotTokenNotConfigured) {
+			t.Fatalf("want ErrSlackBotTokenNotConfigured, got %v", err)
+		}
+	})
+}
+
+func TestDDBProviderSetSlackBotToken(t *testing.T) {
+	ddb := &fakeDDBClient{}
+	fixedNow := time.Unix(1700000000, 0).UTC()
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return fixedNow },
+	}
+	if err := p.SetSlackBotToken(context.Background(), testTeamID, "xoxb-installed", "U_INSTALLER"); err != nil {
+		t.Fatalf("SetSlackBotToken: %v", err)
+	}
+	item := ddb.putInput.Item
+	if v, ok := item[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != "xoxb-installed" {
+		t.Errorf("slack_bot_token wrong: got %v", item[attrSlackBotToken])
+	}
+	if v, ok := item[attrSlackBotTokenDK].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != passthroughWrappedKey {
+		t.Errorf("slack_bot_token_dk wrong: got %v", item[attrSlackBotTokenDK])
+	}
+	if v, ok := item[attrSlackBotInstalledBy].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "U_INSTALLER" {
+		t.Errorf("slack_bot_installed_by wrong: got %v", item[attrSlackBotInstalledBy])
+	}
+	wantTS := fixedNow.Format(time.RFC3339)
+	if v, ok := item[attrSlackBotInstalledAt].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantTS {
+		t.Errorf("slack_bot_installed_at wrong: got %v want %q", item[attrSlackBotInstalledAt], wantTS)
+	}
+}
+
+func TestDDBProviderSetSlackBotTokenPreservesAPIKey(t *testing.T) {
+	ddb := &fakeDDBClient{
+		getOutput: &dynamodb.GetItemOutput{
+			Item: map[string]ddbtypes.AttributeValue{
+				attrTeamID:       &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+				attrQURLAPIKey:   &ddbtypes.AttributeValueMemberB{Value: []byte("lv_live_existing")},
+				attrDataKeyCT:    &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+				attrConfiguredAt: &ddbtypes.AttributeValueMemberS{Value: "2026-05-01T00:00:00Z"},
+			},
+		},
+	}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return time.Unix(1800000000, 0).UTC() },
+	}
+	if err := p.SetSlackBotToken(context.Background(), testTeamID, "xoxb-new", "U_INSTALLER"); err != nil {
+		t.Fatalf("SetSlackBotToken: %v", err)
+	}
+	item := ddb.putInput.Item
+	if v, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != "lv_live_existing" {
+		t.Errorf("qurl_api_key must be preserved: got %v", item[attrQURLAPIKey])
+	}
+	if v, ok := item[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != "xoxb-new" {
+		t.Errorf("slack_bot_token wrong: got %v", item[attrSlackBotToken])
 	}
 }
 
