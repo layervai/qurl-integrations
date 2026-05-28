@@ -350,6 +350,39 @@ func TestCallbackRejectsSlackResponseMissingTeamID(t *testing.T) {
 	}
 }
 
+func TestCallbackRejectsSlackResponseMissingAuthedUserID(t *testing.T) {
+	store := &fakeTokenStore{}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":               true,
+			testAccessTokenKey: testWorkspaceToken,
+			"team": map[string]string{
+				"id": testWorkspaceID,
+			},
+		})
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	if store.workspaceID != "" {
+		t.Fatalf("store should not be called without authed user id, got %q", store.workspaceID)
+	}
+}
+
 func TestCallbackSurfacesTokenStoreFailure(t *testing.T) {
 	store := &fakeTokenStore{err: errors.New("ddb down")}
 	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
@@ -363,6 +396,9 @@ func TestCallbackSurfacesTokenStoreFailure(t *testing.T) {
 			testAccessTokenKey: testWorkspaceToken,
 			"team": map[string]string{
 				"id": testWorkspaceID,
+			},
+			"authed_user": map[string]string{
+				"id": "U_INSTALLER",
 			},
 		})
 	}))
@@ -433,5 +469,14 @@ func TestCallbackDoesNotLeakSlackHTTPErrorBody(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "xoxb-should-not-leak") {
 		t.Fatal("callback response leaked Slack OAuth error body")
+	}
+}
+
+func TestSafeSlackOAuthErrorCode(t *testing.T) {
+	if got := safeSlackOAuthErrorCode(" invalid_scope "); got != "invalid_scope" {
+		t.Fatalf("allowlisted error = %q, want invalid_scope", got)
+	}
+	if got := safeSlackOAuthErrorCode("bad\nvalue"); got != slackOAuthErrorUnknown {
+		t.Fatalf("unexpected error = %q, want %s", got, slackOAuthErrorUnknown)
 	}
 }

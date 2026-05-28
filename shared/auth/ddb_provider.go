@@ -355,6 +355,8 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 	now := p.nowOrDefault().UTC().Format(time.RFC3339)
 	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
 		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
+	// TODO(#265): UpdateItem closes the DDB row clobber race, but a losing
+	// concurrent qurl-service mint can still leave an orphaned upstream key.
 	out, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{

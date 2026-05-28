@@ -543,9 +543,6 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 		slog.Warn("Slack install routes NOT registered — required env vars unset", "missing", missing)
 		return slackinstall.Config{}, false, nil
 	}
-	if err := validateSlackBaseOrigin(baseURL); err != nil {
-		return slackinstall.Config{}, false, err
-	}
 
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
@@ -558,9 +555,6 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 		StateSecret:  []byte(stateSecret),
 		BotScopes:    scopes,
 		TokenStore:   provider,
-	}
-	if err := cfg.Validate(); err != nil {
-		return slackinstall.Config{}, false, err
 	}
 	return cfg, true, nil
 }
@@ -578,16 +572,6 @@ func missingSlackInstallEnvVars(values map[string]string) []string {
 		}
 	}
 	return missing
-}
-
-func validateSlackBaseOrigin(baseURL string) error {
-	if !strings.HasPrefix(baseURL, "https://") {
-		return fmt.Errorf("SLACK_BASE_URL must be https:// (got %q)", baseURL)
-	}
-	if u, err := url.Parse(baseURL); err != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return fmt.Errorf("SLACK_BASE_URL must be a bare https:// origin with no path/query/userinfo (got %q)", baseURL)
-	}
-	return nil
 }
 
 // adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore

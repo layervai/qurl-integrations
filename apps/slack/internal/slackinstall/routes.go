@@ -44,6 +44,7 @@ const (
 	slackInstallFlow           = "slack-install"
 	botScopeCommands           = "commands"
 	botScopeViewsWrite         = "views:write"
+	slackOAuthErrorUnknown     = "unrecognized"
 )
 
 var successTemplate = template.Must(template.New("slack-install-success").Parse(`<!DOCTYPE html>
@@ -68,6 +69,8 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 </div>
 </body>
 </html>`))
+
+var slackAuthorizeBaseURL = mustParseSlackAuthorizeURL()
 
 // Config holds the Slack app OAuth installation settings.
 type Config struct {
@@ -118,8 +121,11 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.SlackBaseURL) == "" {
 		return errors.New("slack base URL is required")
 	}
-	if !strings.HasPrefix(c.SlackBaseURL, "https://") {
-		return fmt.Errorf("slack base URL must be https:// (got %q)", c.SlackBaseURL)
+	baseURL, err := url.Parse(strings.TrimSpace(c.SlackBaseURL))
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" ||
+		strings.TrimRight(baseURL.Path, "/") != "" || baseURL.RawQuery != "" ||
+		baseURL.Fragment != "" || baseURL.User != nil {
+		return fmt.Errorf("slack base URL must be a bare https:// origin with no path/query/userinfo (got %q)", c.SlackBaseURL)
 	}
 	if len(c.StateSecret) < stateMinSecretBytes {
 		return fmt.Errorf("state secret must be at least %d bytes", stateMinSecretBytes)
@@ -211,7 +217,7 @@ func Callback(cfg *Config) http.HandlerFunc {
 			return
 		}
 		if errParam := r.URL.Query().Get("error"); errParam != "" {
-			logSlackInstallCallbackError(len(errParam))
+			logSlackInstallCallbackError(safeSlackOAuthErrorCode(errParam), len(errParam))
 			clearStateCookie(w)
 			http.Error(w, "Slack install was not completed", http.StatusBadRequest)
 			return
@@ -251,6 +257,12 @@ func Callback(cfg *Config) http.HandlerFunc {
 		}
 		enterpriseID := strings.TrimSpace(resp.Enterprise.ID)
 		installedBy := strings.TrimSpace(resp.AuthedUser.ID)
+		if installedBy == "" {
+			logSlackInstallMissingAuthedUser(teamID != "")
+			clearStateCookie(w)
+			http.Error(w, "Slack workspace install did not include an installer id", http.StatusBadGateway)
+			return
+		}
 		persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 		defer persistCancel()
 		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, teamID, &auth.SlackBotTokenInstall{
@@ -277,7 +289,7 @@ func Callback(cfg *Config) http.HandlerFunc {
 }
 
 func authorizeURL(cfg *Config, state string) string {
-	u, _ := url.Parse(slackAuthorizeURL)
+	u := *slackAuthorizeBaseURL
 	q := u.Query()
 	q.Set("client_id", strings.TrimSpace(cfg.ClientID))
 	q.Set("scope", strings.Join(NormalizeScopes(cfg.BotScopes), ","))
@@ -285,6 +297,14 @@ func authorizeURL(cfg *Config, state string) string {
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func mustParseSlackAuthorizeURL() *url.URL {
+	u, err := url.Parse(slackAuthorizeURL)
+	if err != nil {
+		panic("slackinstall: invalid Slack authorize URL constant: " + err.Error())
+	}
+	return u
 }
 
 func callbackURL(baseURL string) string {
@@ -484,12 +504,32 @@ func NormalizeScopes(scopes []string) []string {
 	return out
 }
 
-func logSlackInstallCallbackError(errorLen int) {
-	slog.Warn("Slack install callback returned error", "error_len", errorLen) // #nosec G706 -- only a length is logged; no request string reaches the attribute.
+func safeSlackOAuthErrorCode(raw string) string {
+	code := strings.TrimSpace(raw)
+	switch code {
+	case "access_denied",
+		"bad_redirect_uri",
+		"invalid_client_id",
+		"invalid_redirect_uri",
+		"invalid_scope",
+		"invalid_state",
+		"invalid_team_for_non_distributed_app":
+		return code
+	default:
+		return slackOAuthErrorUnknown
+	}
+}
+
+func logSlackInstallCallbackError(errorCode string, errorLen int) {
+	slog.Warn("Slack install callback returned error", "error", errorCode, "error_len", errorLen) // #nosec G706 -- error is allowlisted by safeSlackOAuthErrorCode before logging.
 }
 
 func logSlackInstallMissingTeamID(appIDPresent bool) {
 	slog.Error("Slack install token exchange missing team id", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
+}
+
+func logSlackInstallMissingAuthedUser(teamIDPresent bool) {
+	slog.Error("Slack install token exchange missing authed user id", "team_id_present", teamIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
 }
 
 func logSlackInstallPersistFailed(err error, teamIDPresent, installedByPresent bool) {

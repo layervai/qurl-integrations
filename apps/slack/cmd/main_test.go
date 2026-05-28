@@ -537,12 +537,15 @@ func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	}
 }
 
-func TestBuildSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
+func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 	env := validSlackInstallEnv()
 	env["SLACK_BASE_URL"] = "http://slack-bot.example"
 	applySlackInstallEnv(t, env)
-	_, ok, err := buildSlackInstallConfig(newFakeProvider())
-	if ok || err == nil || !strings.Contains(err.Error(), "https://") {
-		t.Fatalf("ok=%v err=%v, want https error", ok, err)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want config to defer validation to route registration", ok, err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("Validate err=%v, want https error", err)
 	}
 }
