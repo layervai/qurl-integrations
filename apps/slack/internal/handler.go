@@ -833,7 +833,7 @@ func (h *Handler) helpMessage() string {
 		// advertise it there — matches how the admin verbs below
 		// render conditionally.
 		lines = append(lines,
-			"• Re-running `/qurl setup` is owner-only — added admins (via `/qurl admin add`) can use the other admin verbs but cannot rotate the qURL credential",
+			"• Re-running `/qurl setup` is owner-only — added admins (via `/qurl admin add`) can use the other admin verbs but cannot reconnect this workspace's qURL account",
 		)
 	}
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {

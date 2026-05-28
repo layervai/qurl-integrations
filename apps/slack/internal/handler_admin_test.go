@@ -1106,6 +1106,27 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
+	t.Run("CheckAdmin error: fail-closed, no setup URL minted", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Workspace is bound, but the owner-gate's CheckAdmin read
+		// fails (transient DDB). The gate is security-relevant, so it
+		// must fail CLOSED: surface the upstream-error reply and do NOT
+		// fall through to mint a setup URL. Mirrors
+		// TestHandleAdminRevoke_CheckAdminError for the admin verbs.
+		ts.seedAdmin(t)
+		ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, owner)
+		if strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("CheckAdmin error: setup URL was minted (must fail closed): %q", got)
+		}
+		if !strings.Contains(got, "could not verify workspace ownership") {
+			t.Errorf("CheckAdmin error: reply missing the upstream-error surface, got: %q", got)
+		}
+	})
+
 	t.Run("added admin (not owner) reruns setup: refused", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		// seedAdmin binds owner=UOWNER001 and seeds UADMIN001 on the

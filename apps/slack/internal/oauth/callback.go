@@ -359,13 +359,17 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 // key and never overwrites an existing admin's stored credential.
 //
 // AdminStore=nil is the sandbox / no-DDB path — log and skip.
-// qurlSub=="" means the verifier failed; we still refuse the bind
-// (the Auth0 identity check is a security gate at OAuth time even
-// though qurlSub is no longer persisted in workspace_mappings —
-// without it, anyone with workspace OAuth-flow access could complete
-// /setup without proving qURL service identity). Render a 500 —
-// half-installing (API key minted, admin verbs broken) is the
-// worst-of-both-worlds state.
+// qurlSub is the output of the upstream id_token verifier (VerifySub,
+// logged on failure earlier in the callback), not the gate itself.
+// qurlSub=="" therefore means that verification silently failed — we
+// have no proof the OAuth flow originated from a legit Auth0 session,
+// so we refuse the bind here rather than half-install. The Auth0
+// identity check stays a security gate at OAuth time even though
+// qurlSub is no longer persisted in workspace_mappings; without it,
+// anyone with workspace OAuth-flow access could complete /setup
+// without proving qURL service identity. Render a 500 — half-
+// installing (API key minted, admin verbs broken) is the worst-of-
+// both-worlds state.
 //
 // `verified.UserID` is the Slack user ID of the /setup invoker
 // (HMAC-verified through the OAuth state token). That value becomes
