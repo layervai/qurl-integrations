@@ -1960,6 +1960,7 @@ func TestValidateBootstrapAPIKeyForShell(t *testing.T) {
 		{name: "backtick rejected", key: "abc`def", wantErr: true},
 		{name: "newline rejected", key: "abc\ndef", wantErr: true},
 		{name: "del rejected", key: "abc\x7fdef", wantErr: true},
+		{name: "non ascii rejected", key: "abcédef", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

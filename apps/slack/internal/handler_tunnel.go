@@ -27,7 +27,9 @@ const (
 	tunnelBootstrapCleanupTimeout = 5 * time.Second
 	// Slack response_url values are valid for roughly 30 minutes; keep modal
 	// submissions inside that window so async install errors can still reach
-	// the admin after Slack accepts the view submission.
+	// the admin after Slack accepts the view submission. This is intentionally
+	// shorter than tunnelBootstrapTTL so any submitted modal still leaves setup
+	// headroom after the one-time bootstrap key is minted.
 	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
 	// ack now happens before views.open; this bound leaves room for the admin
@@ -423,6 +425,10 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
 	if !h.postResponse(log, responseURL, msg) {
+		// This second post is best-effort too: if Slack never accepts either
+		// response_url call, the admin may see neither the install nor the
+		// revoke notice. The key is still revoked because delivery was not
+		// confirmed, and the structured logs retain the resource/key IDs.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(log, c, key, "response_url_delivery_failed")
 		h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. Run `/qurl tunnel install` again.")
@@ -761,9 +767,9 @@ func humanDurationCeilMinutes(d time.Duration) string {
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {
 	// shellSingleQuote safely quotes arbitrary text. This check is an
-	// additional output-surface guard: qurl-service bootstrap keys should be
-	// printable single-line tokens, and refusing quote/control bytes keeps the
-	// rendered install snippet easy for operators to inspect. A dollar sign is
+	// additional output-surface guard: qurl-service bootstrap keys must be
+	// printable single-line ASCII tokens. ASCII keeps ${#QURL_BOOTSTRAP_KEY}
+	// and head -c byte counts aligned across shells/locales. A dollar sign is
 	// safe because POSIX single quotes prevent shell expansion in Docker paths;
 	// the prompt-based heredoc renderers also read a fixed byte count from
 	// stdin, and the substituted bytes are not reparsed by the shell.
@@ -771,7 +777,7 @@ func validateBootstrapAPIKeyForShell(apiKey string) error {
 		return errors.New("empty api key")
 	}
 	for _, r := range apiKey {
-		if r == '\'' || r == '`' || r < 0x20 || r == 0x7f {
+		if r == '\'' || r == '`' || r < 0x20 || r > 0x7e {
 			return errors.New("api key contains unsupported characters")
 		}
 	}
