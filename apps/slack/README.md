@@ -36,6 +36,10 @@ by the current bot deployment.
   connected qURL account, bind `$<slug>` or the `alias:` shortcut override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
   key. When `alias:` is omitted, the slug doubles as the channel shortcut.
+  Retrying the install within the modal's 25-minute validity window reuses
+  the same bootstrap-key idempotency bucket. Retrying after that window can
+  mint a new key, so operators should run the newest Slack install block and
+  discard older bootstrap-key messages.
   The Slack response hides the internal resource id and renders output
   tailored to the selected environment. Docker and Docker Compose receive
   guarded pasteable shell blocks that write `qurl-proxy.yaml`, create a

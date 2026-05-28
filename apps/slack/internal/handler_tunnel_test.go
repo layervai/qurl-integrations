@@ -54,6 +54,7 @@ const (
 
 func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
 	t.Helper()
+	// Mutates package-level time state; do not call from t.Parallel tests.
 	previous := tunnelBootstrapNow
 	tunnelBootstrapNow = func() time.Time { return now }
 	t.Cleanup(func() { tunnelBootstrapNow = previous })
@@ -518,7 +519,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl tunnel install`", "Guided tunnel setup", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	for _, want := range []string{"/qurl tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}

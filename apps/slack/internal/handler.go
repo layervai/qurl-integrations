@@ -774,11 +774,15 @@ func (h *Handler) helpMessage() string {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
 				"• `/qurl tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
+				"  Guided setup is enabled in this workspace; use bare `/qurl tunnel install` to choose a target environment.",
 				"• `/qurl tunnel install <slug> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<slug>` in this channel",
 				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
-			lines = append(lines, "• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)")
+			lines = append(lines,
+				"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+				"  Guided setup is not enabled in this deployment; use the typed installer form.",
+			)
 		}
 	}
 	if h.aliasStore != nil {

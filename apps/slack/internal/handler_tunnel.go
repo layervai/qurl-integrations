@@ -700,7 +700,7 @@ func renderBootstrapKeyPromptShell() string {
     exit 1
   fi
   printf 'Paste qURL bootstrap key (input hidden): ' >&2
-  STTY_STATE="$(stty -g 2>/dev/null || true)"
+  STTY_STATE="$(stty -g 2>/dev/null | tr -d '[:space:]' || true)"
   if [ -n "$STTY_STATE" ]; then
     stty -echo
     trap 'if [ -n "$STTY_STATE" ]; then stty "$STTY_STATE" 2>/dev/null || true; fi' INT TERM EXIT
