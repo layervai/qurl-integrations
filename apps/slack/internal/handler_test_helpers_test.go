@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Common keys for the qurl-service response envelope. Lifted to
@@ -47,6 +49,27 @@ func writeResourceFixtureWithTarget(t *testing.T, w http.ResponseWriter, resourc
 			testKeyResourceID: resourceID,
 			"alias":           alias,
 			"target_url":      target,
+		},
+	}
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+}
+
+// writeTunnelResourceFixture writes the by-alias resource envelope for
+// a TUNNEL resource: no target_url, carries a slug + active status.
+// Used by the aliases tests to exercise the alias→slug rendering branch
+// (formatAliasLine prefers the slug over the opaque resource_id).
+func writeTunnelResourceFixture(t *testing.T, w http.ResponseWriter, resourceID, alias, slug string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	body := map[string]any{
+		testKeyData: map[string]any{
+			testKeyResourceID: resourceID,
+			"alias":           alias,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       slug,
+			testKeyStatus:     client.StatusActive,
 		},
 	}
 	if err := json.NewEncoder(w).Encode(body); err != nil {

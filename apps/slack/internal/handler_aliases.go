@@ -86,7 +86,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` to add one.")
+		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl set-alias $<alias> <url-or-$slug>` to add one.")
 		return
 	}
 
@@ -126,7 +126,7 @@ loop:
 			// Fill un-dispatched tail with id-only fallbacks.
 			for j := i; j < len(entries); j++ {
 				e := &entries[j]
-				lines[j] = formatAliasLine(e.Alias, "", e.ResourceID)
+				lines[j] = formatAliasLine(e.Alias, "", "", e.ResourceID)
 			}
 			break loop
 		}
@@ -137,16 +137,21 @@ loop:
 			e := &entries[idx]
 			alias := e.Alias
 			target := ""
+			slug := ""
 			if e.ResourceID != "" && e.Alias != "" {
 				// GetResourceByAlias is the customer-facing path that
-				// returns Alias + TargetURL. The Store row may carry
-				// alias=="" (legacy shape) — fall back to id-only in
-				// that case rather than swallowing a 404.
+				// returns the full Resource (Alias, TargetURL, Slug, …).
+				// The Store row may carry alias=="" (legacy shape) — fall
+				// back to id-only in that case rather than swallowing a
+				// 404. Tunnel resources have no TargetURL but carry a
+				// Slug, which [formatAliasLine] surfaces in place of the
+				// resource_id.
 				if r, rerr := c.GetResourceByAlias(ctx, e.Alias); rerr == nil {
 					if r.Alias != "" {
 						alias = r.Alias
 					}
 					target = r.TargetURL
+					slug = r.Slug
 				} else if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 					// Distinct log from the 404/5xx branch so operators
 					// can tell "request was cut short by SIGTERM /
@@ -157,22 +162,35 @@ loop:
 					log.Debug("aliases: resource fetch failed in fanout", "error", rerr, "resource_id", e.ResourceID)
 				}
 			}
-			lines[idx] = formatAliasLine(alias, target, e.ResourceID)
+			lines[idx] = formatAliasLine(alias, target, slug, e.ResourceID)
 		}(i)
 	}
 	wg.Wait()
 	return lines
 }
 
-// formatAliasLine renders one row of the /qurl aliases listing. The
-// target is optional — when the per-row resource fetch fails we fall
-// back to "id only" rather than dropping the entry.
-func formatAliasLine(alias, target, resourceID string) string {
+// formatAliasLine renders one row of the /qurl aliases listing.
+// Right-hand side precedence, most to least specific:
+//
+//   - target_url (URL/transit resource):   • `$<alias>` → <url>
+//   - slug (tunnel resource, no target):   • `$<alias>` → `$<slug>`
+//   - resource_id (fetch failed / legacy): • `$<alias>` → `<r_id>`
+//   - bare alias (nothing resolved):       • `$<alias>`
+//
+// Tunnel-backed aliases have no target_url, so the slug is shown
+// instead of the opaque resource_id — it's the same `$<slug>` token
+// `/qurl list` renders and `/qurl get` accepts. resource_id remains the
+// last-resort fallback (a failed per-row fetch leaves slug empty), so
+// the user still sees one line per entry.
+func formatAliasLine(alias, target, slug, resourceID string) string {
 	if alias == "" {
 		alias = "(no alias)"
 	}
 	if target != "" {
 		return fmt.Sprintf("• `$%s` → %s", alias, target)
+	}
+	if slug != "" {
+		return fmt.Sprintf("• `$%s` → `$%s`", alias, slug)
 	}
 	if resourceID != "" {
 		return fmt.Sprintf("• `$%s` → `%s`", alias, resourceID)

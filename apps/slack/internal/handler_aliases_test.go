@@ -33,6 +33,30 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHandleAliases_TunnelAliasShowsSlug fences the alias→slug rendering
+// for tunnel-backed aliases: a tunnel resource has no target_url, so the
+// row shows the tunnel's `$<slug>` (the same token /qurl list renders
+// and /qurl get accepts) instead of the opaque resource_id.
+func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": "r_bastion01",
+	})
+	ts.addCustomer("GET", "/v1/resources/by-alias/bastion", func(w http.ResponseWriter, _ *http.Request) {
+		writeTunnelResourceFixture(t, w, "r_bastion01", "bastion", "ops-bastion")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$bastion` → `$ops-bastion`") {
+		t.Errorf("aliases reply missing alias→slug mapping: %q", async)
+	}
+	if strings.Contains(async, "r_bastion01") {
+		t.Errorf("aliases reply leaked opaque resource_id instead of slug: %q", async)
+	}
+}
+
 // TestHandleAliases_MultiAliasChannelDisplaysAllBindings fences the
 // post-pivot multi-binding behavior: a channel with three
 // alias_bindings emits a PolicyEntry per binding, and `/qurl

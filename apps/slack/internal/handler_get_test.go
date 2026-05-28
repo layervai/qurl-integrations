@@ -716,8 +716,8 @@ func TestHandleGet_DollarSlugAdminBypassesAllowedSet(t *testing.T) {
 // admin asymmetry resolution: a workspace admin can mint `$r_<id>`
 // without the resource being in the current channel's allow-set,
 // matching `/qurl list`'s unfiltered admin view. Without this
-// bypass, the list footer's copy-paste promise ("Copy any `$token`
-// and run `/qurl get $token`") breaks for admins on cross-channel
+// bypass, the list footer's copy-paste promise ("Copy any `$slug`
+// and run `/qurl get $slug`") breaks for admins on cross-channel
 // resources.
 func TestHandleGet_DollarResourceIDAdminBypassesAllowedSet(t *testing.T) {
 	ts := newAdminTestServers(t)

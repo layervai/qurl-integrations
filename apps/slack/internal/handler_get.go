@@ -221,10 +221,10 @@ type getWorkArgs struct {
 }
 
 // getWork runs the inner resolve→rate-limit→mint pipeline for the
-// URL form (`/qurl get <url>`), the alias form (`/qurl get $name`),
-// and the resource-ID form (`/qurl get $r_<id>`). Returns the
-// rendered reply text (without leading `:warning:`) on success, or a
-// [*userError] whose msg routes to the user.
+// URL form (`/qurl get <url>`), the token form (`/qurl get $alias` or
+// `/qurl get $slug`), and the resource-ID form (`/qurl get $r_<id>`).
+// Returns the rendered reply text (without leading `:warning:`) on
+// success, or a [*userError] whose msg routes to the user.
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
 	target := args.cmd.Target
