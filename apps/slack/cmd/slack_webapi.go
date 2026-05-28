@@ -127,7 +127,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 	if out.Error == "" {
 		out.Error = "not_ok"
 	}
-	return slackOpenViewAPIError(out.Error)
+	return slackOpenViewAPIError(out.Error, header.Get("Retry-After"))
 }
 
 func slackOpenViewBodySnippet(raw []byte) string {
@@ -139,6 +139,9 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		return bodySnippet
 	}
 	cut := maxSnippetBytes
+	// len(bodySnippet) > maxSnippetBytes above guarantees bodySnippet[cut]
+	// exists; if that byte is a UTF-8 continuation byte, rewind to the rune
+	// start before slicing.
 	for cut > 0 && !utf8.RuneStart(bodySnippet[cut]) {
 		cut--
 	}
@@ -158,12 +161,12 @@ func printableLogSnippet(s string) string {
 	}, s)
 }
 
-func slackOpenViewAPIError(code string) error {
+func slackOpenViewAPIError(code, retryAfter string) error {
 	switch code {
 	case "invalid_trigger", "trigger_expired":
 		return fmt.Errorf("%w: %s", internal.ErrSlackTriggerExpired, code)
 	case "ratelimited":
-		return internal.ErrSlackRateLimited
+		return internal.NewSlackRateLimitError(retryAfter)
 	default:
 		return fmt.Errorf("views.open: %s", code)
 	}

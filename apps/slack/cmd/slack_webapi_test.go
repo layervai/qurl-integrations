@@ -67,19 +67,23 @@ func TestSlackOpenViewFuncSurfacesSlackError(t *testing.T) {
 func TestSlackOpenViewFuncSurfacesRateLimit(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name    string
-		handler http.HandlerFunc
+		name           string
+		handler        http.HandlerFunc
+		wantRetryAfter string
 	}{
 		{
-			name: "http 429",
+			name:           "http 429",
+			wantRetryAfter: "2",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Retry-After", "2")
 				w.WriteHeader(http.StatusTooManyRequests)
 			},
 		},
 		{
-			name: "json ratelimited",
+			name:           "json ratelimited",
+			wantRetryAfter: "3",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "3")
 				_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
 			},
 		},
@@ -93,6 +97,9 @@ func TestSlackOpenViewFuncSurfacesRateLimit(t *testing.T) {
 			err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 			if !errors.Is(err, internal.ErrSlackRateLimited) {
 				t.Fatalf("error = %v, want rate-limited sentinel", err)
+			}
+			if got := internal.SlackRateLimitRetryAfter(err); got != tc.wantRetryAfter {
+				t.Fatalf("Retry-After = %q, want %q", got, tc.wantRetryAfter)
 			}
 		})
 	}

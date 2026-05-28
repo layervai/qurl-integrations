@@ -93,6 +93,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"fsGroupChangePolicy: OnRootMismatch",
 		"securityContext:",
 		"name: qurl-tunnel",
+		"value: '" + testTunnelSlug + "'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
 		"runAsNonRoot: true",

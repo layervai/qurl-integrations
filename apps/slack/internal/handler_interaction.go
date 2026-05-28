@@ -182,6 +182,9 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 
 	webRef := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockWebRef, tunnelInstallActionWebRef))
 	if envRaw != "" && envMsg == "" {
+		// Web-ref grammar depends on the selected environment. If Slack ever
+		// sends an invalid environment value, show that primary field error
+		// first instead of guessing which web-ref grammar to apply.
 		if msg := tunnelWebRefValidationMessage(env, webRef); msg != "" {
 			fieldErrors[tunnelInstallBlockWebRef] = msg
 		}

@@ -80,7 +80,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, yamlSingleQuoted(image), args.Slug, names.agentPVC, names.secret, names.configMap)
+      name: %s`, yamlSingleQuoted(image), yamlSingleQuoted(args.Slug), names.agentPVC, names.secret, names.configMap)
 
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then add the sidecar/securityContext/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",

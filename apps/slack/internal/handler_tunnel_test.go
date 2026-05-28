@@ -699,7 +699,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"secretName: qurl-tunnel-" + testTunnelSlug,
 		"defaultMode: 0440",
 		"QURL_TUNNEL_SLUG",
-		"value: " + testTunnelSlug,
+		"value: '" + testTunnelSlug + "'",
 		testTunnelModalKey,
 		testTunnelLocalPort9090Line,
 		testTunnelImageRef,

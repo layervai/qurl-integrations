@@ -30,6 +30,19 @@ if [ "$WEB_CONTAINER" = "YOUR_WEB_CONTAINER_NAME" ] || [ -z "$WEB_CONTAINER" ]; 
   echo "Set WEB_CONTAINER to the Docker container name or ID for your local HTTP server." >&2
   exit 1
 fi
+case "$WEB_CONTAINER" in
+  [A-Za-z0-9]*) ;;
+  *)
+    echo "WEB_CONTAINER must start with a letter or number." >&2
+    exit 1
+    ;;
+esac
+case "$WEB_CONTAINER" in
+  *[!A-Za-z0-9_.-]*)
+    echo "WEB_CONTAINER may contain only letters, numbers, dots, underscores, and hyphens." >&2
+    exit 1
+    ;;
+esac
 
 QURL_TUNNEL_SLUG=%s
 TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"
