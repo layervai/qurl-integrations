@@ -59,32 +59,58 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != renderTunnelConfigYAML(args) {
 		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, renderTunnelConfigYAML(args))
 	}
+	patchMarker := "Pod spec additions:\n"
+	patchSectionStart := strings.Index(got, patchMarker)
+	if patchSectionStart < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec additions:\n%s", got)
+	}
+	patchCodeStart := strings.Index(got[patchSectionStart:], "```\n")
+	if patchCodeStart < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec code block:\n%s", got)
+	}
+	patchCodeStart += patchSectionStart + len("```\n")
+	patchCodeEnd := strings.Index(got[patchCodeStart:], "\n```")
+	if patchCodeEnd < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec code block terminator:\n%s", got)
+	}
+	var podSpecFragment struct {
+		SecurityContext map[string]any `yaml:"securityContext"`
+		Containers      []struct {
+			Name            string         `yaml:"name"`
+			SecurityContext map[string]any `yaml:"securityContext"`
+		} `yaml:"containers"`
+	}
+	if err := yaml.Unmarshal([]byte(got[patchCodeStart:patchCodeStart+patchCodeEnd]), &podSpecFragment); err != nil {
+		t.Fatalf("PodSpec fragment YAML did not parse: %v", err)
+	}
+	if podSpecFragment.SecurityContext["fsGroup"] == nil || len(podSpecFragment.Containers) != 1 || podSpecFragment.Containers[0].Name != "qurl-tunnel" {
+		t.Fatalf("PodSpec fragment = %+v, want fsGroup and qurl-tunnel container", podSpecFragment)
+	}
 	for _, want := range []string{
-		"sidecar/initContainer/volumes block",
-		"The initContainer runs `chown -R`",
-		"no pod-level `securityContext` or `fsGroup` is set",
-		"initContainers:",
-		"name: qurl-agent-state-permissions",
-		"chown -R 65532:65532 /var/lib/layerv/agent",
+		"sidecar/securityContext/volumes block",
+		"Pod Security Admission `restricted`",
+		"fsGroup: 65532",
+		"fsGroupChangePolicy: OnRootMismatch",
 		"securityContext:",
-		"runAsUser: 0",
-		"allowPrivilegeEscalation: false",
 		"name: qurl-tunnel",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
-		"defaultMode: 0444",
-		"do not co-locate the sidecar with untrusted containers",
-		"`fsGroup: 65532`",
-		"`0440`",
+		"runAsNonRoot: true",
+		"allowPrivilegeEscalation: false",
+		"drop: [\"ALL\"]",
+		"type: RuntimeDefault",
+		"defaultMode: 0440",
+		"pre-provision qURL agent-state ownership separately",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
 		}
 	}
 	for _, forbidden := range []string{
-		"\nfsGroup:",
+		"initContainers:",
+		"runAsUser: 0",
 		"defaultMode: 0400",
-		"securityContext:\n  runAsUser",
+		"defaultMode: 0444",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)

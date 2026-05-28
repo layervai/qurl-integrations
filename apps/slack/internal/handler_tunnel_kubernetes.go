@@ -40,23 +40,21 @@ spec:
       storage: 1Gi
 QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), names.configMap, indentLines(renderTunnelConfigYAML(args), 4), names.agentPVC)
 
-	patch := fmt.Sprintf(`initContainers:
-  - name: qurl-agent-state-permissions
-    image: busybox:1.36
-    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/layerv/agent"]
-    securityContext:
-      runAsUser: 0
-      allowPrivilegeEscalation: false
-    volumeMounts:
-      - name: qurl-agent-state
-        mountPath: /var/lib/layerv/agent
+	patch := fmt.Sprintf(`securityContext:
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
 containers:
   - name: qurl-tunnel
     image: %s
     securityContext:
       runAsUser: 65532
       runAsGroup: 65532
+      runAsNonRoot: true
       allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
     env:
       - name: QURL_API_KEY_FILE
         value: /run/secrets/qurl-tunnel/api_key
@@ -79,18 +77,16 @@ volumes:
   - name: qurl-bootstrap
     secret:
       secretName: %s
-      defaultMode: 0444
+      defaultMode: 0440
   - name: qurl-proxy
     configMap:
       name: %s`, yamlSingleQuoted(image), args.Slug, names.agentPVC, names.secret, names.configMap)
 
 	intro := strings.Join([]string{
-		"Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",
+		"Run this once in the target namespace, then add the sidecar/securityContext/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.",
 		"- Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.",
-		"- The initContainer runs `chown -R` on the qURL agent-state PVC at pod start, so keep that PVC dedicated to qURL agent state instead of reusing an application volume with many files.",
-		"- The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership.",
-		"- The bootstrap Secret is mounted `0444` because Kubernetes Secret volumes are root-owned without a pod-level `fsGroup`; do not co-locate the sidecar with untrusted containers while that Secret exists.",
-		"- If your workload can safely use pod-level `fsGroup: 65532`, you may change the Secret `defaultMode` to `0440`.",
+		"- The fragment is compatible with Kubernetes Pod Security Admission `restricted`: no root initContainer, `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, and all capabilities dropped.",
+		"- The pod-level `fsGroup: 65532` lets the sidecar read the bootstrap Secret and write the qURL agent-state PVC. If your app cannot accept that fsGroup, pre-provision qURL agent-state ownership separately before merging the fragment.",
 		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
 	}, "\n")
 	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\nMerge this fragment into the target pod spec under the same indentation as the existing `containers` and `volumes` fields.\n\n" + slackCodeBlock(patch)

@@ -83,6 +83,8 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "bad environment", text: testTunnelInstallCmd + " env:prod", wantErr: true},
 		{name: "bad container ref", text: testTunnelInstallCmd + " container:../web", wantErr: true},
 		{name: "docker rejects service ref", text: testTunnelInstallCmd + " service:web", wantErr: true},
+		{name: "kubernetes rejects container ref", text: testTunnelInstallCmd + " env:kubernetes container:web", wantErr: true},
+		{name: "ecs rejects container ref", text: testTunnelInstallCmd + " env:ecs-fargate container:web", wantErr: true},
 		{name: "compose rejects dotted service", text: testTunnelInstallCmd + " service:web.1 env:compose", wantErr: true},
 		{name: "compose rejects dotted container ref", text: testTunnelInstallCmd + " env:compose container:web.1", wantErr: true},
 		{name: "compose rejects container ref", text: testTunnelInstallCmd + " env:compose container:web", wantErr: true},
@@ -684,13 +686,16 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
 		"Merge this fragment into the target pod spec",
-		"initContainers:",
-		"name: qurl-agent-state-permissions",
+		"fsGroup: 65532",
+		"fsGroupChangePolicy: OnRootMismatch",
 		"securityContext:",
 		"runAsUser: 65532",
+		"runAsNonRoot: true",
+		"drop: [\"ALL\"]",
+		"type: RuntimeDefault",
 		"claimName: qurl-agent-" + testTunnelSlug,
 		"secretName: qurl-tunnel-" + testTunnelSlug,
-		"defaultMode: 0444",
+		"defaultMode: 0440",
 		"QURL_TUNNEL_SLUG",
 		"value: " + testTunnelSlug,
 		testTunnelModalKey,
@@ -702,7 +707,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "\nfsGroup:"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
