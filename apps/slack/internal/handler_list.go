@@ -120,6 +120,13 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		// fail-closed path would surface "ask an admin to allow
 		// specific tunnels in *this channel*" — misleading,
 		// because by construction there's no channel.
+		//
+		// TODO(#531): page.HasMore is a master-list signal ("more
+		// resources of any type"), not "more tunnels". In a URL-heavy
+		// workspace with zero tunnels but >scan-limit resources, this
+		// branch fires and over-claims that allowed tunnels may sit
+		// past the page. The server-side type=tunnel filter in #531
+		// makes has_more tunnel-specific and removes the over-claim.
 		if !isAdmin && channelID != "" && page.HasMore {
 			log.Warn("list: non-admin filtered set is empty but master list has_more — allow-listed tunnels may sit past first page",
 				"team_id", teamID, "channel_id", channelID, "user_id", userID, "scan_limit", listResourcesScanLimit)
@@ -156,7 +163,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		if isAdmin {
 			body += fmt.Sprintf("\n_…more resources past the first %d-row scan — some tunnels may not be shown._", listResourcesScanLimit)
 		} else {
-			body += fmt.Sprintf("\n_Showing allow-listed tunnels from the first %d-row scan; others may sit past it. Ask an admin to allow more in this channel._", listResourcesScanLimit)
+			body += fmt.Sprintf("\n_Showing allow-listed tunnels from the first %d-row scan; additional allow-listed tunnels may sit past it. Ask an admin to allow more in this channel._", listResourcesScanLimit)
 		}
 	}
 	_ = h.postResponse(log, responseURL, body)

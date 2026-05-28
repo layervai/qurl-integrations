@@ -276,10 +276,12 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		{name: "dm:please rejected (not true/false)", text: "get $prod-db dm:please", wantSentnl: ErrInvalidFlag, wantSubstr: dmRejectSubstr},
 		// `once` is no longer a recognized flag — one-time use is the
 		// unconditional default for `/qurl get`, so the flag was removed.
-		// A stray `once:true` now reports the same "unknown flag" error
-		// as any other unrecognized key. Pins the removal so the flag
-		// can't be silently reintroduced.
-		{name: "once:true rejected as unknown flag", text: "get $prod-db once:true", wantSentnl: ErrInvalidFlag, wantSubstr: "unknown flag"},
+		// A stray `once:true` is rejected (strict-flag posture) but with
+		// a transitional hint rather than the generic "unknown flag", so
+		// users with saved `once:true` recipes learn it's now redundant.
+		// Pins both the removal and the friendly message.
+		{name: "once:true rejected with transitional hint", text: "get $prod-db once:true", wantSentnl: ErrInvalidFlag, wantSubstr: "no longer needed"},
+		{name: "once:false also rejected with hint", text: "get $prod-db once:false", wantSentnl: ErrInvalidFlag, wantSubstr: "no longer needed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

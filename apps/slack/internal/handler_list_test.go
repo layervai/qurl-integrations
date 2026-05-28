@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Shared fixtures used across the /qurl list test cases. Lifted to
@@ -532,5 +534,65 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	}
 	if alphaPos >= middlePos || middlePos >= zzzPos {
 		t.Errorf("rows not sorted by token: alpha=%d middle=%d zzz=%d in %q", alphaPos, middlePos, zzzPos, async)
+	}
+}
+
+// TestTunnelToken pins the slug → alias → resource_id precedence of the
+// `$<token>` shown for a tunnel row, directly (not just via the rendered
+// list output), so a future refactor that reorders the fallback chain
+// fails loudly. Intended posture: the slug wins even when a
+// resource-level alias is also set, because the slug is the stable
+// handle `/qurl tunnel install <slug>` binds for `/qurl get $<slug>`.
+func TestTunnelToken(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    client.Resource
+		want string
+	}{
+		{name: "slug wins over alias and resource_id", r: client.Resource{ResourceID: "r_one", Alias: "alias-one", Slug: "slug-one"}, want: "slug-one"},
+		{name: "alias used when no slug", r: client.Resource{ResourceID: "r_two", Alias: "alias-two"}, want: "alias-two"},
+		{name: "resource_id last resort when no slug or alias", r: client.Resource{ResourceID: "r_three"}, want: "r_three"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tunnelToken(&tc.r); got != tc.want {
+				t.Errorf("tunnelToken() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleList_NonAdminPaginationGapZeroTunnels pins the current
+// behavior of the non-admin pagination-gap branch when the scanned page
+// holds only URL/transit resources (zero tunnels) and reports has_more.
+// page.HasMore is a master-list signal, so the gap copy fires even
+// though no tunnels exist — see the TODO(#531) at the branch. This test
+// documents that bounded-but-imperfect behavior; the server-side
+// type=tunnel filter (#531) will flip the expectation to the plain
+// empty-state, at which point this test should be updated in lockstep.
+func TestHandleList_NonAdminPaginationGapZeroTunnels(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		// Page is all URL resources — filterTunnelResources drops them
+		// all, so the non-admin filtered set is empty with has_more=true.
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_url_aaaaaa", fAttrAlias: "u1", testKeyTargetURL: "https://a.example.com"},
+			{testKeyResourceID: "r_url_bbbbbb", fAttrAlias: "u2", testKeyTargetURL: "https://b.example.com"},
+		}, "cursor_xyz", true)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	// Current (pre-#531) behavior: pagination-gap copy fires.
+	if !strings.Contains(async, "past the first page") {
+		t.Errorf("async reply missing pagination-gap copy (current pre-#531 behavior): %q", async)
+	}
+	// Regardless, no URL resource leaks into the (empty) tunnel listing.
+	if strings.Contains(async, "a.example.com") || strings.Contains(async, "b.example.com") {
+		t.Errorf("URL resource leaked into tunnel list: %q", async)
 	}
 }

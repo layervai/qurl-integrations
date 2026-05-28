@@ -836,6 +836,13 @@ func applyFlag(cmd *Command, tok string) error {
 	case "reason":
 		cmd.Flags[key] = val
 		return nil
+	case "once":
+		// `once` was removed — one-time use is now the unconditional
+		// default for `/qurl get`. Still reject (strict-flag posture),
+		// but with a transitional hint instead of the generic
+		// "unknown flag", since some users have `once:true` in saved
+		// slash-command recipes and deserve to know it's now redundant.
+		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` link is one-time use by default", ErrInvalidFlag)
 	default:
 		return fmt.Errorf("%w: unknown flag %q", ErrInvalidFlag, key)
 	}
