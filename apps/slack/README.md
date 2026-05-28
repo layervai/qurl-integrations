@@ -40,8 +40,10 @@ by the current bot deployment.
   encryption posture as qURL API keys. `SLACK_BOT_TOKEN` is only a legacy
   single-workspace fallback; customers do not manually provide bot tokens, and
   production guided setup should use the per-workspace token captured by Slack
-  install OAuth. Org-level Enterprise Grid installs are not supported in this
-  flow; install qURL to each workspace that should use guided tunnel setup.
+  install OAuth. Enterprise Grid org-level installs are also supported: the
+  enterprise-scoped bot token is stored under the Slack `enterprise_id`, while
+  qURL API keys and admin state remain scoped to each invoking workspace's
+  `team_id`.
 - **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal with the
   bot token for the invoking workspace, letting an admin choose the tunnel
   slug, optional channel shortcut, local port, and target environment
@@ -148,8 +150,9 @@ For customer Slack installs, configure the Slack app with:
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
 - Bot scopes: at least `commands` and `views:write`
-- Installation mode: workspace-level installs; org-level Enterprise Grid
-  installs are rejected until enterprise-scoped tokens are supported
+- Installation mode: workspace-level installs or Enterprise Grid org-level
+  installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
+  workspace setup and admin checks still use workspace `team_id`.
 - Token posture: non-rotating bot tokens. The validator accepts `xoxe.xoxb-`
   shapes defensively, but qURL does not request or persist Slack refresh tokens
   yet, so rotation-enabled apps need refresh support before production use.
