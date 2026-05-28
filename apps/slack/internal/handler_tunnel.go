@@ -231,7 +231,15 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 
 func tunnelInstallWizardRequest(text string) bool {
 	matched, rest := slashVerb(strings.TrimSpace(text), "tunnel")
-	return matched && rest == "install"
+	if !matched {
+		return false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) != 1 || fields[0] != "install" {
+		return false
+	}
+	args, userMsg := parseTunnelInstall(text)
+	return args == nil && userMsg == tunnelInstallUsage()
 }
 
 func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Values) {
@@ -409,6 +417,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	if !h.postResponse(log, responseURL, msg) {
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(log, c, key, "response_url_delivery_failed")
+		h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. Run `/qurl tunnel install` again.")
 	}
 }
 
@@ -435,7 +444,11 @@ func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now t
 	// Bucket on the modal TTL window, not the API key TTL. The modal path passes
 	// the modal creation timestamp, so duplicate submissions for one still-valid
 	// modal cannot shift buckets just because the async worker runs later.
-	bucket := now.UTC().Unix() / int64(tunnelInstallModalTTL/time.Second)
+	windowSeconds := int64(tunnelInstallModalTTL / time.Second)
+	if windowSeconds <= 0 {
+		windowSeconds = 1
+	}
+	bucket := now.UTC().Unix() / windowSeconds
 	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%d", slug, bucket))
 }
 
@@ -636,6 +649,31 @@ if [ -z "$QURL_BOOTSTRAP_KEY" ]; then
   echo "Bootstrap key is required." >&2
   exit 1
 fi`
+}
+
+func renderBootstrapKeyFileInstallShell(targetPath string) string {
+	// Avoid passing the bootstrap key as a command argument: under some shells
+	// printf may be external, which would briefly expose the secret in argv.
+	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
+$SUDO sh -c 'set -eu
+umask 077
+head -c "$2" > "$1"
+chown 65532:65532 "$1"
+chmod 0400 "$1"
+' _ %s "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF
+$QURL_BOOTSTRAP_KEY
+QURL_BOOTSTRAP_KEY_EOF
+unset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN`, targetPath)
+}
+
+func renderBootstrapKeyPipeShell(command string) string {
+	// Stream exactly the key byte count from a here-doc so the trailing heredoc
+	// newline is not part of the secret and the key never appears in argv.
+	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
+head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | %s
+$QURL_BOOTSTRAP_KEY
+QURL_BOOTSTRAP_KEY_EOF
+unset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN`, command)
 }
 
 func tunnelBootstrapTTLLabel() string {

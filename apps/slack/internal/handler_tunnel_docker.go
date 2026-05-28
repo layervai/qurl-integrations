@@ -57,8 +57,7 @@ QURL_PROXY_YAML_EOF
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 %s
-printf '%%s' "$QURL_BOOTSTRAP_KEY" | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
-unset QURL_BOOTSTRAP_KEY
+%s
 
 if docker ps -a --format '{{.Names}}' | grep -Fxq "$TUNNEL_CONTAINER"; then
   docker rm -f "$TUNNEL_CONTAINER" >/dev/null
@@ -73,7 +72,7 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
-  %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), shellSingleQuote(image))
+  %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {

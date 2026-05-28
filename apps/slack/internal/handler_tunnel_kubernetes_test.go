@@ -21,7 +21,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	for _, want := range []string{
 		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
 		testTunnelKeyPromptLine,
-		`printf '%s' "$QURL_BOOTSTRAP_KEY" | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
+		`head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
 		"unset QURL_BOOTSTRAP_KEY",
 	} {
 		if !strings.Contains(got, want) {
@@ -116,8 +116,10 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
 		}
 	}
-	if strings.Contains(got, testTunnelAPIKey) {
-		t.Fatalf("Kubernetes instructions embedded bootstrap key instead of prompting:\n%s", got)
+	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Kubernetes instructions leaked %q:\n%s", forbidden, got)
+		}
 	}
 }
 

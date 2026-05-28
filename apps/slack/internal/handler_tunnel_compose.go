@@ -65,8 +65,7 @@ QURL_PROXY_YAML_EOF
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 %s
-printf '%%s' "$QURL_BOOTSTRAP_KEY" | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
-unset QURL_BOOTSTRAP_KEY
+%s
 
 # This heredoc is intentionally unquoted so it expands the validated variables
 # now and writes a static per-slug Compose fragment. Future compose commands
@@ -88,7 +87,7 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), yamlSingleQuoted(tunnelServiceName), yamlSingleQuoted(image))
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), yamlSingleQuoted(tunnelServiceName), yamlSingleQuoted(image))
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {

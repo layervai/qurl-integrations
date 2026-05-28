@@ -313,7 +313,7 @@ func validateSlackBotToken(token string) error {
 	// upper bound is intentionally generous; when set, this only catches obvious
 	// config mistakes such as truncated, whitespace, or control-byte tokens.
 	const slackBotTokenMinLen = 20
-	const slackBotTokenMaxLen = 512
+	const slackBotTokenMaxLen = 320
 	if len(token) < slackBotTokenMinLen {
 		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenMinLen)
 	}

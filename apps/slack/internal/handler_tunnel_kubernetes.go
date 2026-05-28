@@ -15,8 +15,7 @@ func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, image string) (
 
 QURL_BOOTSTRAP_SECRET=%s
 %s
-printf '%%s' "$QURL_BOOTSTRAP_KEY" | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
-unset QURL_BOOTSTRAP_KEY
+%s
 
 kubectl apply -f - <<'QURL_K8S_YAML_EOF'
 apiVersion: v1
@@ -36,7 +35,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), yamlSingleQuoted(names.configMap), indentLines(renderTunnelConfigYAML(args), 4), yamlSingleQuoted(names.agentPVC))
+QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyPipeShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), yamlSingleQuoted(names.configMap), indentLines(renderTunnelConfigYAML(args), 4), yamlSingleQuoted(names.agentPVC))
 
 	patch := fmt.Sprintf(`securityContext:
   fsGroup: 65532

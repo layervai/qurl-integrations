@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -39,11 +40,12 @@ const (
 	testForbiddenResourceLabel   = "Resource:"
 	testForbiddenSlackYAMLFence  = "```yaml"
 	testForbiddenSlackShellFence = "```sh"
+	testForbiddenBootstrapArgv   = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
 	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
 	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
 	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
-	testTunnelKeyInstallLine     = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
+	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}`
 )
 
 func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
@@ -390,7 +392,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl tunnel install`", "/qurl tunnel install <slug>`"} {
+	for _, want := range []string{"/qurl tunnel install`", "/qurl tunnel install <slug>", "env:docker|compose|ecs-fargate|kubernetes", "container:<name>|service:<name>|web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
@@ -1448,7 +1450,13 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		revokeHits++
 		w.WriteHeader(http.StatusNoContent)
 	})
-	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	t.Cleanup(responseURL.Close)
@@ -1465,6 +1473,9 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(responseBodies) != 2 || !strings.Contains(responseBodies[1], "bootstrap key was revoked") {
+		t.Fatalf("response_url bodies = %v, want original delivery plus revoked-key follow-up", responseBodies)
 	}
 }
 
