@@ -223,6 +223,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		testTunnelKeyHistoryNote,
 		"set -eu",
 		testTunnelAPIKey,
+		"Sidecar image: `" + testTunnelImageRef + "`.",
 		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
 		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
@@ -1113,6 +1114,26 @@ func TestParseTunnelInstallModalArgsRejectsDottedComposeService(t *testing.T) {
 	}
 }
 
+func TestParseTunnelInstallModalArgsRejectsWebRefForTaskAndPodEnvironments(t *testing.T) {
+	t.Parallel()
+	for _, env := range []tunnelInstallEnvironment{tunnelEnvECSFargate, tunnelEnvKubernetes} {
+		t.Run(string(env), func(t *testing.T) {
+			t.Parallel()
+			values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(env), "8080", "web")
+
+			args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+			if args != nil {
+				t.Fatalf("args = %+v, want nil", args)
+			}
+			got := fieldErrors[tunnelInstallBlockWebRef]
+			if !strings.Contains(got, "Leave blank") || !strings.Contains(got, "same task or pod") {
+				t.Fatalf("web_container error = %q, want ECS/Kubernetes blank-field guidance", got)
+			}
+		})
+	}
+}
+
 func TestParseTunnelInstallModalArgsRejectsEmptyPort(t *testing.T) {
 	t.Parallel()
 	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "", "")
@@ -1217,6 +1238,9 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 
 	if !strings.Contains(got, ":warning: Image: using the dev/sandbox fallback") || !strings.Contains(got, defaultTunnelImage) {
 		t.Fatalf("rendered install message missing fallback image warning:\n%s", got)
+	}
+	if !strings.Contains(got, "Sidecar image: `"+defaultTunnelImage+"`.") {
+		t.Fatalf("rendered install message missing sidecar image audit line:\n%s", got)
 	}
 	imageIdx := strings.Index(got, "Image: using the dev/sandbox fallback")
 	envIdx := strings.Index(got, "Target environment:")

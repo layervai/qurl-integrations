@@ -130,8 +130,8 @@ type TunnelInstallModalMetadata struct {
 
 // TunnelInstallModal renders the guided tunnel installer. The modal collects
 // only customer-facing choices: the stable slug, optional channel shortcut,
-// local service port, target environment, and an optional Docker container
-// name used to prefill the copy/paste Docker command.
+// local service port, target environment, and an optional Docker/Compose target
+// name used only by the Docker and Docker Compose renderers.
 func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	privateMeta, err := json.Marshal(meta)
 	if err != nil {
@@ -163,7 +163,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 				}, optionObj("Docker sidecar", string(tunnelEnvDocker)))),
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
-			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional. Docker container name or Compose service name; Compose names cannot include dots.", true,
+			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional for Docker and Docker Compose only. Leave blank for ECS/Fargate or Kubernetes.", true,
 				plainTextInput(tunnelInstallActionWebRef, "web", "")),
 		},
 	}

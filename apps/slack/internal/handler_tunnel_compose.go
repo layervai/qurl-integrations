@@ -70,9 +70,8 @@ $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 printf '%%s' "$QURL_BOOTSTRAP_KEY" | $SUDO install -m 0400 -o 65532 -g 65532 /dev/stdin "$SECRET_DIR/api_key"
 unset QURL_BOOTSTRAP_KEY
 
-# This heredoc is intentionally unquoted so it writes concrete values into
-# the per-slug Compose fragment; future docker compose commands should not need
-# the install script's temporary environment variables.
+# This heredoc is intentionally unquoted so it expands the validated variables
+# now and writes a static per-slug Compose fragment for future compose commands.
 cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
 services:
   %s:

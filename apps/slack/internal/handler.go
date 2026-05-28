@@ -770,9 +770,10 @@ func (h *Handler) helpMessage() string {
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {
-			lines = append(lines, "• `/qurl tunnel install` — Guided tunnel setup with Docker, Docker Compose, ECS/Fargate, and Kubernetes install output (admin only)")
+			lines = append(lines, "• `/qurl tunnel install` (guided) or `/qurl tunnel install <slug>` (typed) — Create a tunnel bootstrap key and bind `$<slug>` in this channel (admin only)")
+		} else {
+			lines = append(lines, "• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)")
 		}
-		lines = append(lines, "• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)")
 	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"

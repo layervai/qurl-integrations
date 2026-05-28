@@ -243,18 +243,27 @@ func tunnelWebRefValidationMessage(env tunnelInstallEnvironment, value string) s
 	if value == "" {
 		return ""
 	}
-	if env == tunnelEnvCompose {
+	switch env {
+	case tunnelEnvCompose:
 		if dockerComposeServicePattern.MatchString(value) {
 			return ""
 		}
 		return "Use a Docker Compose service name with letters, numbers, underscores, or hyphens. Dots are not allowed."
+	case tunnelEnvDocker:
+		if dockerContainerRefPattern.MatchString(value) {
+			return ""
+		}
+		return "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
+	case tunnelEnvECSFargate, tunnelEnvKubernetes:
+		return "Leave blank for ECS/Fargate and Kubernetes; those installs run the sidecar inside the same task or pod."
+	default:
+		return "Choose a target environment before setting a Docker service or container."
 	}
-	if dockerContainerRefPattern.MatchString(value) {
-		return ""
-	}
-	return "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
 }
 
+// tunnelWebRefKindValidationMessage protects the typed-command grammar. The
+// guided modal has a single optional web-ref field, so it validates via
+// tunnelWebRefValidationMessage after reading the selected environment.
 func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnelInstallWebRefKind) string {
 	if kind == tunnelWebRefKindNone {
 		return ""

@@ -215,6 +215,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 		string(tunnelEnvECSFargate),
 		string(tunnelEnvKubernetes),
 		"Local HTTP port",
+		"Leave blank for ECS/Fargate or Kubernetes",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal body missing %q", want)

@@ -281,7 +281,11 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	if triggerElapsed < 0 {
 		triggerElapsed = 0
 	}
-	log = log.With("slack_trigger_elapsed_ms", triggerElapsed.Milliseconds())
+	log = log.With(
+		"slack_trigger_elapsed_ms", triggerElapsed.Milliseconds(),
+		"slack_views_open_budget_ms", slackTriggerOpenViewBudget.Milliseconds(),
+		"admin_gate_budget_ms", adminGateBudget.Milliseconds(),
+	)
 	// adminGateBudget + slackTriggerOpenViewBudget intentionally fit inside
 	// Slack's roughly three-second trigger_id window. The admin store is the
 	// dominant tail-latency risk before views.open; expiry is converted into a
@@ -314,7 +318,11 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	openCtx, openCancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
 	defer openCancel()
 	if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
-		log.Error("tunnel install wizard views.open failed", "error", err, "slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired), "slack_rate_limited", errors.Is(err, ErrSlackRateLimited))
+		log.Error("tunnel install wizard views.open failed",
+			"error", err,
+			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+		)
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
 			h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
@@ -398,7 +406,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 
 func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
 	if key == nil || strings.TrimSpace(key.KeyID) == "" {
-		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "reason", reason)
+		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "event", "tunnel_bootstrap_cleanup_skipped", "reason", reason)
 		return
 	}
 	// Use a cleanup-owned context so a canceled install request cannot strand a
@@ -409,10 +417,10 @@ func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, k
 	ctx, cancel := context.WithTimeout(context.Background(), tunnelBootstrapCleanupTimeout)
 	defer cancel()
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
-		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "key_id", key.KeyID, "reason", reason)
+		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "event", "tunnel_bootstrap_cleanup_failed", "key_id", key.KeyID, "reason", reason)
 		return
 	}
-	log.Info("tunnel install: revoked bootstrap key after install failure", "key_id", key.KeyID, "reason", reason)
+	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
@@ -451,6 +459,7 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 
 type preparedTunnelInstallMessage struct {
 	imageNote        string
+	imageLine        string
 	environmentLabel string
 	instructions     string
 }
@@ -475,18 +484,20 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	}
 	return preparedTunnelInstallMessage{
 		imageNote:        imageNote,
+		imageLine:        fmt.Sprintf("Sidecar image: `%s`.", image),
 		environmentLabel: environmentLabel,
 		instructions:     instructions,
 	}, nil
 }
 
 func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) string {
-	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s%s\n\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s%s\n\n%s\nTarget environment: %s.\n\n%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
 		tunnelBootstrapExpiryLabel(key),
 		slackCodeBlock(key.APIKey),
 		p.imageNote,
+		p.imageLine,
 		p.environmentLabel,
 		p.instructions,
 		args.Alias,
@@ -707,6 +718,9 @@ func yamlSingleQuoted(s string) string {
 
 // ValidateTunnelImageRef checks the operator-provided image reference shown in
 // install snippets. Empty is valid and means the handler will use its fallback.
+// This is intentionally stricter than Docker's full reference grammar: the bot
+// controls the image source, and rejecting shell/YAML syntax-bearing bytes
+// keeps generated Slack install blocks inspectable and boring.
 func ValidateTunnelImageRef(image string) error {
 	if image == "" {
 		return nil
