@@ -133,10 +133,15 @@ type aliasArgs struct {
 // to propagate. (User-facing copy carries sentence punctuation that
 // ST1005 rejects on `error`-typed values.)
 //
-// Target validation is intentionally light: a `r_…` prefix routes
-// through the resource-id branch, otherwise the token must parse as a
-// URL with an http/https scheme. The deeper "is this an active
-// resource?" check is the persistence layer's job.
+// Target validation here is only well-formedness, not policy: a `r_…`
+// prefix routes through the resource-id branch, a `$slug` through the
+// tunnel-slug branch, and anything else must parse as an http/https
+// URL. The tunnels-only POLICY gate (rejecting URL and `r_…` targets)
+// lives in [Handler.handleSetAlias], not here — this parser still
+// accepts all three shapes so the handler can reject the unsupported
+// two with a specific message rather than a generic usage dump. The
+// deeper "is this an active resource?" check is the persistence layer's
+// job.
 func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg string) {
 	tokens := strings.Fields(text)
 	if wantTarget {
@@ -249,15 +254,14 @@ func requireAlias(tok string) (alias, userMsg string) {
 // code never mutates this — the test path is the only writer.
 var aliasSyncTimeout = 2500 * time.Millisecond
 
-// aliasPreamble is the shared prelude for both alias verbs after
-// argument parsing: pull team_id + channel_id off the form, verify
-// the AliasStore is wired, and set up the worker context. Returns
-// (ctx, cancel, teamID, channelID, ok); on !ok the helper has
-// already written the user-facing response and the caller must
-// return without dialing the store. cancel is always callable
-// (no-op when !ok) so caller-side `defer cancel()` is unconditional.
-func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
-	cancel = func() {}
+// aliasValidate is the shared validation prelude for both alias verbs
+// after argument parsing: pull team_id + channel_id off the form and
+// verify the AliasStore is wired. Returns (teamID, channelID, ok); on
+// !ok the helper has already written the user-facing response and the
+// caller must return without dialing the store. No worker context is
+// created here — the async set-alias path uses runAsync's own ctx, so
+// only the synchronous unset path needs the timeout ([aliasPreamble]).
+func (h *Handler) aliasValidate(w http.ResponseWriter, values url.Values, verb string) (teamID, channelID string, ok bool) {
 	teamID = strings.TrimSpace(values.Get(fieldTeamID))
 	channelID = strings.TrimSpace(values.Get(fieldChannelID))
 	if teamID == "" || channelID == "" {
@@ -278,8 +282,22 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
 		return
 	}
-	ctx, cancel = context.WithTimeout(h.baseCtx, aliasSyncTimeout)
 	ok = true
+	return
+}
+
+// aliasPreamble is [aliasValidate] plus a synchronous worker context
+// bounded by [aliasSyncTimeout]. Used by the synchronous unset-alias
+// verb. Returns (ctx, cancel, teamID, channelID, ok); on !ok the helper
+// has already written the response and cancel is a callable no-op so
+// caller-side `defer cancel()` is unconditional.
+func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
+	cancel = func() {}
+	teamID, channelID, ok = h.aliasValidate(w, values, verb)
+	if !ok {
+		return
+	}
+	ctx, cancel = context.WithTimeout(h.baseCtx, aliasSyncTimeout)
 	return
 }
 
@@ -322,11 +340,13 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	_, cancel, teamID, channelID, ok := h.aliasPreamble(w, values, "setalias")
+	// Slug target resolves through qurl-service before the DDB write, so
+	// it runs async on runAsync's own ctx — aliasValidate (no timer)
+	// rather than aliasPreamble.
+	teamID, channelID, ok := h.aliasValidate(w, values, "setalias")
 	if !ok {
 		return
 	}
-	cancel()
 	slug := strings.TrimPrefix(args.Target, "$")
 	h.runAsync(w, "setalias_slug", values, func(ctx context.Context, log *slog.Logger) {
 		msg := h.resolveAndBindTunnelSlugAlias(ctx, log, teamID, channelID, args.Alias, slug)

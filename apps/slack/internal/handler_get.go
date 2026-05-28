@@ -159,6 +159,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 		return
 	}
+	// Defensive: a successful parseGet always sets either cmd.Alias
+	// (alias/slug form) or cmd.Resource.Kind == ResourceTokenResourceID
+	// (resource-id form) — empty args and raw URLs already returned an
+	// error above. This guard only fires if a future parser change adds
+	// a form that populates neither; surface the usage hint rather than
+	// silently dispatching an unmintable command.
 	if cmd.Alias == "" && cmd.Resource.Kind != ResourceTokenResourceID {
 		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
 		return
@@ -280,9 +286,14 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: authErrorMessage(err)}
 	}
 
-	// Rate-limit gate only fires when an AdminStore is wired; URL-form
-	// on a no-DDB sandbox is unguarded (qurl-service's per-key quota is
-	// the only enforcer in that mode).
+	// Rate-limit gate. Both reachable arms above (alias-form via
+	// resolveTokenForGet, resource-id form via authorizeResourceIDForGet)
+	// already fail closed with errAdminStoreNotConfigured when AdminStore
+	// is nil, so this nil-check is defensive: by here AdminStore is
+	// guaranteed non-nil on every minting path. Kept (rather than calling
+	// CheckRateLimit unconditionally) so a future form that legitimately
+	// mints without an AdminStore can't silently skip the gate — it would
+	// fail the nil-check here instead.
 	if h.cfg.AdminStore != nil {
 		ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 		if err != nil {

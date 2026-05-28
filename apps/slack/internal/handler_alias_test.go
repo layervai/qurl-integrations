@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -48,6 +49,12 @@ type fakeAliasStore struct {
 	// the typed-conflict branches.
 	errBind   error
 	errUnbind error
+
+	// blockUnbind, when true, makes UnbindChannelAlias wait on ctx.Done()
+	// and return ctx.Err(). Fences the aliasSyncTimeout budget on the
+	// synchronous unset-alias path (a slow DDB delete must surface as a
+	// clear-failed reply, not block past Slack's ack window).
+	blockUnbind bool
 }
 
 func newFakeAliasStore() *fakeAliasStore {
@@ -77,7 +84,16 @@ func (f *fakeAliasStore) BindChannelAlias(_ context.Context, teamID, channelID, 
 	return nil
 }
 
-func (f *fakeAliasStore) UnbindChannelAlias(_ context.Context, teamID, channelID, aliasName string) error {
+func (f *fakeAliasStore) UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error {
+	// Read the block flag before taking the row lock so the timeout test
+	// doesn't have to coordinate with anything else holding f.mu.
+	f.mu.Lock()
+	block := f.blockUnbind
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.errUnbind != nil {
@@ -729,6 +745,31 @@ func TestUnsetAlias_StoreWriteError(t *testing.T) {
 	got := decodeSlackText(t, w.Body.Bytes())
 	if !strings.Contains(got, "Failed to clear alias") {
 		t.Errorf("response = %q, want clear-failed copy", got)
+	}
+}
+
+// TestUnsetAlias_SyncTimeoutExceeded fences the aliasSyncTimeout budget
+// on the synchronous unset-alias path: an UnbindChannelAlias that
+// doesn't return inside the budget must surface as a clear-failed reply
+// (ctx deadline exceeded) rather than block past Slack's 3-second ack
+// window. Shortens aliasSyncTimeout for the test so the suite doesn't
+// pay a 2.5s real-time tax. (set-alias has no sync path to fence — it
+// runs async via runAsync's own ctx.)
+func TestUnsetAlias_SyncTimeoutExceeded(t *testing.T) {
+	orig := aliasSyncTimeout
+	aliasSyncTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { aliasSyncTimeout = orig })
+
+	h, store := newAliasTestHandler(t)
+	store.blockUnbind = true
+
+	body, sign := aliasSlashRequest(t, "unsetalias $staging", testAliasTeamID, testAliasChannelID)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, "Failed to clear alias") {
+		t.Errorf("response = %q, want clear-failed copy (ctx deadline exceeded)", got)
 	}
 }
 

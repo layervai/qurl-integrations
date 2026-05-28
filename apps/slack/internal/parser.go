@@ -172,8 +172,9 @@ var ErrUnknownAdminAction = errors.New("unknown admin action")
 // isn't a thing, try `admin list` / `admin revoke` / …").
 var ErrMissingAdminAction = errors.New("missing admin action")
 
-// ErrMissingTarget is returned when `setalias` or `create` are invoked
-// without the trailing target/URL argument.
+// ErrMissingTarget is returned when `setalias` (missing its target) or
+// `admin revoke` (missing its `q_<id>` qurl_id) are invoked without the
+// trailing positional argument.
 var ErrMissingTarget = errors.New("missing target argument")
 
 // ErrURLNotSupportedGet is returned when `/qurl get` is handed a raw

@@ -831,7 +831,7 @@ func (h *Handler) helpMessage() string {
 		// set-alias/unset-alias names.
 		lines = append(lines,
 			"• `/qurl set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
-			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
+			"• `/qurl unset-alias $<alias>` — Remove a qURL shortcut in this channel (admin only)",
 		)
 	}
 	if h.cfg.AdminStore != nil {
