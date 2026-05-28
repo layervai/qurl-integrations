@@ -34,8 +34,13 @@ const (
 	// key for the operator to start the sidecar.
 	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
-	// ack now happens before views.open; this bound leaves room for the admin
-	// check while reducing false expiry on normal Slack Web API tail latency.
+	// ack now happens before views.open; the call budget below leaves room for
+	// the admin check while reducing false expiry on normal Slack Web API tail
+	// latency.
+	slackTriggerMaxAge = 3 * time.Second
+	// slackTriggerOpenViewBudget is the per-call cap inside slackTriggerMaxAge.
+	// Keep adminGateBudget + this value below slackTriggerMaxAge so guided setup
+	// has room for the admin re-check and the views.open RPC.
 	slackTriggerOpenViewBudget = 1500 * time.Millisecond
 	slackRetryAfterDisplayCap  = 5 * time.Minute
 	tunnelScopeAgent           = "qurl:agent"
@@ -56,7 +61,6 @@ var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
 // container refs allow them.
 var dockerContainerRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var dockerComposeServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
-var tunnelBootstrapNow = time.Now
 
 type tunnelInstallEnvironment string
 type tunnelInstallWebRefKind string
@@ -103,7 +107,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		Environment: tunnelEnvDocker,
 	}
 	if !tunnelSlugPattern.MatchString(args.Slug) {
-		return nil, "Tunnel slug must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
+		return nil, "qURL tunnel slug must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
 	}
 	for _, token := range fields[2:] {
 		if msg := parseTunnelInstallOption(args, token); msg != "" {
@@ -237,7 +241,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	setupStartedAt := tunnelBootstrapNow()
+	setupStartedAt := h.now()
 	h.runAsync(w, "tunnel_install", values, func(ctx context.Context, log *slog.Logger) {
 		h.processTunnelInstall(ctx, log, teamID, channelID, userID, values.Get(fieldResponseURL), args, setupStartedAt)
 	})
@@ -286,7 +290,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		"user_id", userID,
 		"trigger_id", triggerID,
 	)
-	triggerReceivedAt := tunnelBootstrapNow()
+	triggerReceivedAt := h.now()
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		h.openTunnelInstallWizard(ctx, log, teamID, channelID, userID, triggerID, values.Get(fieldResponseURL), triggerReceivedAt)
 	}) {
@@ -303,19 +307,27 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 }
 
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
-	triggerElapsed := tunnelBootstrapNow().Sub(triggerReceivedAt)
+	triggerElapsed := h.now().Sub(triggerReceivedAt)
 	if triggerElapsed < 0 {
 		triggerElapsed = 0
 	}
+	openBudget := slackTriggerOpenViewBudgetRemaining(triggerElapsed)
 	log = log.With(
 		"slack_trigger_elapsed_ms", triggerElapsed.Milliseconds(),
+		"slack_trigger_max_age_ms", slackTriggerMaxAge.Milliseconds(),
 		"slack_views_open_budget_ms", slackTriggerOpenViewBudget.Milliseconds(),
+		"slack_views_open_budget_remaining_ms", openBudget.Milliseconds(),
 		"admin_gate_budget_ms", adminGateBudget.Milliseconds(),
 	)
+	if openBudget <= 0 {
+		log.Warn("tunnel install wizard trigger expired before admin check")
+		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+		return
+	}
 	// adminGateBudget + slackTriggerOpenViewBudget intentionally fit inside
-	// Slack's roughly three-second trigger_id window. The admin store is the
-	// dominant tail-latency risk before views.open; expiry is converted into a
-	// retry prompt instead of leaving the admin with a silent modal miss.
+	// slackTriggerMaxAge. The admin store is the dominant tail-latency risk
+	// before views.open; expiry is converted into a retry prompt instead of
+	// wasting a Slack RPC or leaving the admin with a silent modal miss.
 	// startAsyncWorker already derives ctx from h.baseCtx, so shutdown cancels
 	// this check coherently with the rest of the async slash-command work.
 	adminCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
@@ -323,12 +335,12 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	cancel()
 	if err != nil {
 		log.Error("tunnel install wizard admin check failed", "error", err)
-		h.postErrorResponse(log, responseURL, "Could not verify admin status. Retry in a moment.", true)
+		_ = h.postErrorResponse(log, responseURL, "Could not verify admin status. Retry in a moment.", true)
 		return
 	}
 	if !isAdmin {
 		log.Warn("tunnel install wizard denied: non-admin")
-		h.postErrorResponse(log, responseURL, "This command is admin-only.", true)
+		_ = h.postErrorResponse(log, responseURL, "This command is admin-only.", true)
 		return
 	}
 	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
@@ -336,14 +348,24 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		ChannelID:     channelID,
 		UserID:        userID,
 		ResponseURL:   responseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: h.now().Unix(),
 	})
 	if err != nil {
 		log.Error("tunnel install wizard modal render failed", "error", err)
-		h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
+		_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		return
 	}
-	openCtx, openCancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
+	triggerElapsed = h.now().Sub(triggerReceivedAt)
+	if triggerElapsed < 0 {
+		triggerElapsed = 0
+	}
+	openBudget = slackTriggerOpenViewBudgetRemaining(triggerElapsed)
+	if openBudget <= 0 {
+		log.Warn("tunnel install wizard trigger expired before views.open", "slack_trigger_elapsed_ms", triggerElapsed.Milliseconds())
+		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+		return
+	}
+	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
 	defer openCancel()
 	if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
 		log.Error("tunnel install wizard views.open failed",
@@ -354,24 +376,38 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		)
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
-			h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
 		case errors.Is(err, context.DeadlineExceeded):
-			h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl tunnel install` again.", true)
+			_ = h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl tunnel install` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
-			h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
+			_ = h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
 		default:
-			h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
+			_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		}
 		return
 	}
-	h.deleteOriginalResponse(log, responseURL)
+	_ = h.deleteOriginalResponse(log, responseURL)
+}
+
+func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {
+	if triggerElapsed < 0 {
+		triggerElapsed = 0
+	}
+	remaining := slackTriggerMaxAge - triggerElapsed
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining > slackTriggerOpenViewBudget {
+		return slackTriggerOpenViewBudget
+	}
+	return remaining
 }
 
 func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, authErrorMessage(err))
 		return
 	}
 
@@ -383,7 +419,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	})
 	if err != nil {
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
-		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create or find the tunnel resource"))
+		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create or find the tunnel resource"))
 		return
 	}
 
@@ -395,14 +431,14 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resource.ResourceID)
 	if err != nil {
 		log.Error("tunnel install: channel shortcut bind failed", "error", err, "shortcut", args.Alias, "resource_id", resource.ResourceID)
-		h.postResponse(log, responseURL, aliasStatus)
+		_ = h.postResponse(log, responseURL, aliasStatus)
 		return
 	}
 
 	preparedMessage, err := h.prepareTunnelInstallMessage(args)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		h.postResponse(log, responseURL, "Tunnel setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.")
+		_ = h.postResponse(log, responseURL, "qURL tunnel setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.")
 		return
 	}
 
@@ -416,27 +452,27 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	})
 	if err != nil {
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to mint a tunnel bootstrap key"))
+		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to mint a tunnel bootstrap key"))
 		return
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "missing_plaintext")
-		h.postResponse(log, responseURL, "The qURL API did not return a bootstrap key. Please retry or contact support.")
+		_ = h.postResponse(log, responseURL, "The qURL API did not return a bootstrap key. Please retry or contact support.")
 		return
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "shell_validation_failed")
-		h.postResponse(log, responseURL, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
+		_ = h.postResponse(log, responseURL, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
 		return
 	}
 
-	msg, err := preparedMessage.render(args, key, aliasStatus)
+	msg, err := preparedMessage.render(args, key, aliasStatus, h.now())
 	if err != nil {
 		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
-		h.postResponse(log, responseURL, "Tunnel setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.")
+		_ = h.postResponse(log, responseURL, "qURL tunnel setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.")
 		return
 	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
@@ -565,7 +601,7 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	}, nil
 }
 
-func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
+func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string, now time.Time) (string, error) {
 	if key == nil {
 		return "", errors.New("bootstrap api key is missing")
 	}
@@ -577,12 +613,12 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 		return "", err
 	}
 	var b strings.Builder
-	b.WriteString("Tunnel `")
+	b.WriteString("qURL tunnel `")
 	b.WriteString(args.Slug)
 	b.WriteString("` is ready to install.\n")
 	b.WriteString(aliasStatus)
 	b.WriteString("\n\nBootstrap key ")
-	b.WriteString(tunnelBootstrapExpiryLabel(key))
+	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
 	b.WriteString(". The shell block below prompts for it; do not add the key to the shell text itself. Paste it only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n")
 	b.WriteString(keyBlock)
 	b.WriteString(p.imageNote)
@@ -607,7 +643,7 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 	if err != nil {
 		return "", err
 	}
-	return prepared.render(args, key, aliasStatus)
+	return prepared.render(args, key, aliasStatus, h.now())
 }
 
 func tunnelImageNote(usingDefaultImage bool) string {
@@ -761,9 +797,9 @@ func tunnelBootstrapTTLLabel() string {
 	return "expires in " + humanTunnelBootstrapTTL(tunnelBootstrapTTL)
 }
 
-func tunnelBootstrapExpiryLabel(key *client.APIKey) string {
+func tunnelBootstrapExpiryLabel(key *client.APIKey, now time.Time) string {
 	if key != nil && key.ExpiresAt != nil {
-		remaining := key.ExpiresAt.Sub(tunnelBootstrapNow())
+		remaining := key.ExpiresAt.Sub(now)
 		if remaining > 0 {
 			return "expires in " + humanDurationCeilMinutes(remaining)
 		}

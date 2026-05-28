@@ -151,13 +151,13 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelInstall,
-		blockKitFieldTitle:           plainTextObj("Install tunnel"),
+		blockKitFieldTitle:           plainTextObj("Install qURL tunnel"),
 		blockKitFieldSubmit:          plainTextObj("Generate"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			inputBlock(tunnelInstallBlockSlug, "Tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
+			inputBlock(tunnelInstallBlockSlug, "qURL tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
 			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
@@ -171,7 +171,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
 			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional for Linux Docker and Docker Compose only. Leave blank for ECS/Fargate or Kubernetes.", true,
-				plainTextInput(tunnelInstallActionWebRef, "blank unless using Docker or Compose", "")),
+				plainTextInput(tunnelInstallActionWebRef, "web", "")),
 		},
 	}
 	return json.Marshal(payload)
@@ -183,7 +183,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 func TunnelInstallErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("Tunnel setup"),
+		blockKitFieldTitle: plainTextObj("qURL tunnel setup"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),

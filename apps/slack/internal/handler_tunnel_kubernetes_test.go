@@ -1,9 +1,13 @@
 package internal
 
 import (
+	"bytes"
+	"context"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -132,6 +136,32 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 }
 
+func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
+	t.Parallel()
+	kubectl, err := exec.LookPath("kubectl")
+	if err != nil {
+		t.Skip("kubectl not on PATH")
+	}
+	got := mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvKubernetes,
+	}, testTunnelImageRef)
+	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
+	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-tunnel-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, kubectl, "apply", "--dry-run=client", "--validate=false", "-f", "-") //nolint:gosec // G204: kubectl path comes from exec.LookPath and no user input reaches argv.
+	cmd.Stdin = strings.NewReader(pod)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if bytes.Contains(out, []byte("couldn't get current server API group list")) {
+			t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
+		}
+		t.Fatalf("kubectl dry-run failed: %v\n%s\n--- pod ---\n%s", err, out, pod)
+	}
+}
+
 func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	t.Parallel()
 	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
@@ -183,6 +213,25 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 			t.Fatalf("Kubernetes instructions contain overlong name %q:\n%s", forbidden, got)
 		}
 	}
+}
+
+func kubernetesPodSpecFragmentFromInstructions(t *testing.T, got string) string {
+	t.Helper()
+	patchMarker := "Pod spec additions:\n"
+	patchSectionStart := strings.Index(got, patchMarker)
+	if patchSectionStart < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec additions:\n%s", got)
+	}
+	patchCodeStart := strings.Index(got[patchSectionStart:], "```\n")
+	if patchCodeStart < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec code block:\n%s", got)
+	}
+	patchCodeStart += patchSectionStart + len("```\n")
+	patchCodeEnd := strings.Index(got[patchCodeStart:], "\n```")
+	if patchCodeEnd < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec code block terminator:\n%s", got)
+	}
+	return got[patchCodeStart : patchCodeStart+patchCodeEnd]
 }
 
 func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {

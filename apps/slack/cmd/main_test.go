@@ -75,7 +75,7 @@ func TestValidateSlackBotToken(t *testing.T) {
 		{name: "long bot token", token: "xoxb-" + strings.Repeat("a", 250)},
 		{name: "maximum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMax-len("xoxb-"))},
 		{name: "one above typo-guard length", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMax-len("xoxb-")+1), wantErr: true},
-		{name: "token too long", token: "xoxb-" + strings.Repeat("a", 508), wantErr: true},
+		{name: "token too long", token: "xoxb-" + strings.Repeat("a", slackBotTokenTypoGuardMax-len("xoxb-")+100), wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

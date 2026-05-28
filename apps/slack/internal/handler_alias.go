@@ -309,7 +309,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 		slug := strings.TrimPrefix(args.Target, "$")
 		h.runAsync(w, "setalias_slug", values, func(ctx context.Context, log *slog.Logger) {
 			msg := h.resolveAndBindTunnelSlugAlias(ctx, log, teamID, channelID, args.Alias, slug)
-			h.postResponse(log, values.Get(fieldResponseURL), msg)
+			_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 		})
 		return
 	}

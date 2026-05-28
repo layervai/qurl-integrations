@@ -54,7 +54,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 
 	if h.cfg.AdminStore == nil {
 		log.Warn("aliases: AdminStore is nil; replying not-configured")
-		h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
+		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
 		return
 	}
 	if channelID == "" {
@@ -63,14 +63,14 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// future channel-less invocation). Fail closed rather than
 		// fan out a team-wide list — that's not the v1 surface.
 		log.Warn("aliases: empty channel_id; refusing team-wide list")
-		h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
+		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("aliases: API key lookup failed", "error", err)
-		h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
 		return
 	}
 
@@ -82,11 +82,11 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// same generic path because the operator-facing detail is in
 		// the slog line, not the wire reply.
 		log.Warn("aliases: GetChannelPolicy failed", "error", err, "team_id", teamID, "channel_id", channelID)
-		h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
+		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
 		return
 	}
 	if len(entries) == 0 {
-		h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` to add one.")
+		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` to add one.")
 		return
 	}
 
@@ -97,7 +97,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	sort.Strings(lines)
 
 	body := "*Aliases configured for this channel:*\n" + strings.Join(lines, "\n")
-	h.postResponse(log, responseURL, body)
+	_ = h.postResponse(log, responseURL, body)
 }
 
 // fanoutAliasRows renders the per-entry alias lines using a bounded

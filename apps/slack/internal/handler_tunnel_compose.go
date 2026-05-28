@@ -12,6 +12,9 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	}
 	tunnelServiceName := "qurl-tunnel-" + args.Slug
 	tunnelService := shellSingleQuote(tunnelServiceName)
+	// Quote the generated service key even though the current name shape does
+	// not require it. It keeps future slug/service-name widening local to the
+	// YAML quoting helper instead of this heredoc.
 	quotedTunnelServiceName, err := yamlSingleQuoted(tunnelServiceName)
 	if err != nil {
 		return "", err

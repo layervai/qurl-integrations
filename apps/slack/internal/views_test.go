@@ -207,7 +207,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 	}
 	body := string(raw)
 	for _, want := range []string{
-		"Tunnel slug",
+		"qURL tunnel slug",
 		"Channel shortcut",
 		"Target environment",
 		"Docker snippets assume a Linux host",
@@ -217,7 +217,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 		string(tunnelEnvKubernetes),
 		"Local HTTP port",
 		"Optional for Linux Docker and Docker Compose only",
-		"blank unless using Docker or Compose",
+		"\"text\":\"web\"",
 		"Leave blank for ECS/Fargate or Kubernetes",
 	} {
 		if !strings.Contains(body, want) {

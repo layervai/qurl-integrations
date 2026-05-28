@@ -52,12 +52,11 @@ const (
 	testTunnelECSAPIKeyNameLine  = `"name": "QURL_API_KEY"`
 )
 
-func freezeTunnelBootstrapNow(t *testing.T, now time.Time) {
+func freezeTunnelBootstrapNow(t *testing.T, h *Handler, now time.Time) {
 	t.Helper()
-	// Mutates package-level time state; do not call from t.Parallel tests.
-	previous := tunnelBootstrapNow
-	tunnelBootstrapNow = func() time.Time { return now }
-	t.Cleanup(func() { tunnelBootstrapNow = previous })
+	previous := h.now
+	h.now = func() time.Time { return now }
+	t.Cleanup(func() { h.now = previous })
 }
 
 func mustRenderDockerTunnelInstructions(t *testing.T, args *tunnelInstallArgs, image string) string {
@@ -309,8 +308,7 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 }
 
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -348,6 +346,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	})
 
 	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
@@ -381,7 +380,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
-		"Tunnel `" + testTunnelSlug + "` is ready to install.",
+		"qURL tunnel `" + testTunnelSlug + "` is ready to install.",
 		"qURL shortcut `$" + testTunnelSlug + "` is ready in this channel.",
 		"The shell block below prompts for it",
 		"Run this whole block on the Linux Docker host",
@@ -495,7 +494,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 		t.Fatalf("metadata = %+v, want team/channel/user/response_url", meta)
 	}
 	body := string(call.view)
-	for _, want := range []string{"Target channel", testTunnelChannelID, "Tunnel slug", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
+	for _, want := range []string{"Target channel", testTunnelChannelID, "qURL tunnel slug", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal missing %q:\n%s", want, body)
 		}
@@ -682,6 +681,14 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 	}
 }
 
+func TestSlackTriggerBudgetsFitWithinTriggerWindow(t *testing.T) {
+	t.Parallel()
+
+	if got := adminGateBudget + slackTriggerOpenViewBudget; got >= slackTriggerMaxAge {
+		t.Fatalf("admin + views.open budgets = %s, want below Slack trigger max age %s", got, slackTriggerMaxAge)
+	}
+}
+
 func TestTunnelInstallBareIgnoresInvalidRateLimitRetryAfter(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -715,6 +722,27 @@ func TestSlackRetryAfterLabelCapsLargeValues(t *testing.T) {
 	}
 	if got := slackRetryAfterLabel("61"); got != "1 minute 1 second" {
 		t.Fatalf("slackRetryAfterLabel(61) = %q, want friendly copy", got)
+	}
+}
+
+func TestTunnelInstallBareSkipsOpenViewWhenTriggerWindowAlreadySpent(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.now = func() time.Time { return fixedNow.Add(slackTriggerMaxAge + time.Millisecond) }
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
+		t.Fatal("OpenView should not be called after the trigger window is spent")
+		return nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	h.openTunnelInstallWizard(context.Background(), slog.Default(), testAdminTeamID, testTunnelChannelID, testAdminUserID, testSlackTriggerID, inv.responseU.URL, fixedNow)
+
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl tunnel install") {
+		t.Fatalf("async reply = %q, want trigger-expiry retry copy", async)
 	}
 }
 
@@ -805,8 +833,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 }
 
 func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 	modalCreatedAt := now.Add(-10 * time.Minute)
 
 	ts := newAdminTestServers(t)
@@ -844,6 +871,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	})
 
 	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
@@ -889,7 +917,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
-		"Tunnel `" + testTunnelSlug + "` is ready to install.",
+		"qURL tunnel `" + testTunnelSlug + "` is ready to install.",
 		"qURL shortcut `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
 		"The shell block below prompts for it",
@@ -939,7 +967,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 }
 
 func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
+	now := fixedNow
 	cases := []struct {
 		name string
 		env  tunnelInstallEnvironment
@@ -983,7 +1011,6 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			freezeTunnelBootstrapNow(t, now)
 			ts := newAdminTestServers(t)
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
@@ -1006,6 +1033,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			})
 
 			h := newAdminTestHandler(t, ts)
+			freezeTunnelBootstrapNow(t, h, now)
 			h.cfg.TunnelImage = testTunnelImageRef
 			h.SetAliasStore(h.cfg.AdminStore)
 			inv := newAdminSlashInvoker(t, h)
@@ -1044,7 +1072,7 @@ func TestTunnelInstallModalRejectsUnsafeWebRefBeforeMintingKey(t *testing.T) {
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: fixedNow.Unix(),
 	}, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "abc```def"))
 
 	w := httptest.NewRecorder()
@@ -1069,7 +1097,7 @@ func TestTunnelInstallModalRejectsEmptyPayloadIdentity(t *testing.T) {
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: fixedNow.Unix(),
 	}
 	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, "", "", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1095,7 +1123,7 @@ func TestTunnelInstallModalRejectsDifferentSubmitterWithRetryCopy(t *testing.T) 
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: fixedNow.Unix(),
 	}
 	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, "U_other_admin", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1124,7 +1152,7 @@ func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: fixedNow.Unix(),
 	}
 	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1149,7 +1177,7 @@ func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: fixedNow.Unix(),
 	}
 	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1176,7 +1204,7 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 		ChannelID:     testTunnelChannelID,
 		UserID:        nonAdminUserID,
 		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+		CreatedAtUnix: fixedNow.Unix(),
 	}
 	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1192,13 +1220,13 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 }
 
 func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
 	h.SetAliasStore(h.cfg.AdminStore)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
@@ -1221,13 +1249,13 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 }
 
 func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
 	h.SetAliasStore(h.cfg.AdminStore)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
@@ -1484,11 +1512,12 @@ func TestValidateChannelShortcutTokenUsesShortcutCopy(t *testing.T) {
 }
 
 func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 	expiresAt := now.Add(time.Hour)
 
-	got, err := NewHandler(Config{}).renderTunnelInstallMessage(&tunnelInstallArgs{
+	h := NewHandler(Config{})
+	freezeTunnelBootstrapNow(t, h, now)
+	got, err := h.renderTunnelInstallMessage(&tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
@@ -1856,19 +1885,32 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
-	}, tunnelBootstrapNow())
+	}, h.now())
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(responseBodies) == 0 || !strings.Contains(responseBodies[0], testTunnelAPIKey) {
+		t.Fatalf("first response_url body = %v, want original install body with bootstrap key", responseBodies)
 	}
 	if len(responseBodies) != 2 || !strings.Contains(responseBodies[1], "bootstrap key was revoked") || !strings.Contains(responseBodies[1], "discard it") {
 		t.Fatalf("response_url bodies = %v, want original delivery plus revoked-key discard follow-up", responseBodies)
 	}
 }
 
+func TestTunnelBootstrapIdempotencyKeyMatchesTypedAndModalPaths(t *testing.T) {
+	t.Parallel()
+
+	setupStartedAt := fixedNow
+	typedPathKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
+	modalPathKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
+	if typedPathKey == "" || typedPathKey != modalPathKey {
+		t.Fatalf("typed key = %q, modal key = %q, want same non-empty key for same setup start", typedPathKey, modalPathKey)
+	}
+}
+
 func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -1901,6 +1943,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	})
 
 	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
 	h.SetAliasStore(h.cfg.AdminStore)
 
 	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
@@ -1939,8 +1982,7 @@ func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
 }
 
 func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 
 	cases := []struct {
 		name string
@@ -1990,6 +2032,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			})
 
 			h := newAdminTestHandler(t, ts)
+			freezeTunnelBootstrapNow(t, h, now)
 			h.cfg.TunnelImage = testTunnelImageRef
 			h.SetAliasStore(h.cfg.AdminStore)
 
@@ -2130,22 +2173,20 @@ func TestHumanTunnelBootstrapTTL(t *testing.T) {
 }
 
 func TestTunnelBootstrapExpiryLabelFallsBackOnClockSkew(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 	expiresAt := now.Add(-time.Second)
 
-	got := tunnelBootstrapExpiryLabel(&client.APIKey{ExpiresAt: &expiresAt})
+	got := tunnelBootstrapExpiryLabel(&client.APIKey{ExpiresAt: &expiresAt}, now)
 	if got != "expires very soon" {
 		t.Fatalf("tunnelBootstrapExpiryLabel(skewed key) = %q, want near-expiry copy", got)
 	}
 }
 
 func TestTunnelBootstrapExpiryLabelShowsExpiredOutsideSkew(t *testing.T) {
-	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
-	freezeTunnelBootstrapNow(t, now)
+	now := fixedNow
 	expiresAt := now.Add(-tunnelBootstrapSkew - time.Second)
 
-	got := tunnelBootstrapExpiryLabel(&client.APIKey{ExpiresAt: &expiresAt})
+	got := tunnelBootstrapExpiryLabel(&client.APIKey{ExpiresAt: &expiresAt}, now)
 	if got != "is expired" {
 		t.Fatalf("tunnelBootstrapExpiryLabel(expired key) = %q, want expired", got)
 	}

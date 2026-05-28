@@ -71,7 +71,7 @@ const (
 	// Slack remains the token-validity authority; these bounds are only a local
 	// boot-time typo guard for obviously truncated or pasted-wrong values.
 	slackBotTokenTypoGuardMin = 30
-	slackBotTokenTypoGuardMax = 320
+	slackBotTokenTypoGuardMax = 1024
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.

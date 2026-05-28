@@ -87,13 +87,13 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("list: API key lookup failed", "error", err)
-		h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
 		return
 	}
 
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesPageLimit})
 	if err != nil {
-		h.postResponse(log, responseURL, ":warning: "+mapListResourcesError(log, teamID, err))
+		_ = h.postResponse(log, responseURL, ":warning: "+mapListResourcesError(log, teamID, err))
 		return
 	}
 
@@ -113,10 +113,10 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		if !isAdmin && channelID != "" && page.HasMore {
 			log.Warn("list: non-admin filtered set is empty but master list has_more — allow-listed resources may sit past first page",
 				"team_id", teamID, "channel_id", channelID, "user_id", userID, "page_limit", listResourcesPageLimit)
-			h.postResponse(log, responseURL, listResourcesNonAdminPaginationGapMessage)
+			_ = h.postResponse(log, responseURL, listResourcesNonAdminPaginationGapMessage)
 			return
 		}
-		h.postResponse(log, responseURL, listResourcesEmptyMessage)
+		_ = h.postResponse(log, responseURL, listResourcesEmptyMessage)
 		return
 	}
 
@@ -149,7 +149,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			body += fmt.Sprintf("\n_Showing allow-listed resources from the first %d-row scan; others may sit past it. Ask an admin to allow more in this channel, or narrow with `/qurl get $alias`._", listResourcesPageLimit)
 		}
 	}
-	h.postResponse(log, responseURL, body)
+	_ = h.postResponse(log, responseURL, body)
 }
 
 // scopeResourcesForUser narrows the master resource list to what the

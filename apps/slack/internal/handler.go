@@ -197,6 +197,8 @@ type Config struct {
 	// modal in response to a slash command. The teamID parameter is
 	// present so production can route through per-workspace OAuth bot
 	// tokens; the current cmd/main.go fallback uses one SLACK_BOT_TOKEN.
+	// TODO(slack-oauth): switch production wiring to per-workspace bot token
+	// lookup once OAuth installs are the only supported Slack deployment path.
 	// Tests inject a stub that records the call. Tunnel install uses this
 	// for guided setup; setalias-rebind can use the same seam for
 	// confirmation modals.

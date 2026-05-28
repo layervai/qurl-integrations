@@ -83,7 +83,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// The timestamp is minted and checked by Slack app pods. Platform clock
 	// sync should keep drift tiny; stale modals and far-future timestamps both
 	// fail closed instead of minting a fresh bootstrap key from stale state.
-	modalAge := tunnelBootstrapNow().Sub(time.Unix(meta.CreatedAtUnix, 0))
+	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
 		respondTunnelInstallModalError(w, "This modal expired. Run /qurl tunnel install again.")
@@ -246,7 +246,10 @@ func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 	view, err := TunnelInstallErrorModal(message)
 	if err != nil {
 		slog.Error("tunnel install modal error render failed", "error", err)
-		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "Tunnel setup failed. Contact support."})
+		// Last-ditch fallback: Slack may silently drop this field-level error if
+		// the current view no longer contains the slug block, but it still gives
+		// the original install modal a user-visible failure path.
+		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "qURL tunnel setup failed. Contact support."})
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
