@@ -209,8 +209,8 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
-		"Tunnel `" + testTunnelSlug + "` is ready.",
-		"Channel shortcut `$" + testTunnelSlug + "` is ready.",
+		"Tunnel `" + testTunnelSlug + "` is ready to install.",
+		"qURL shortcut `$" + testTunnelSlug + "` is ready in this channel.",
 		"Paste it only when prompted or into your secret manager",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
@@ -228,7 +228,8 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		testTunnelAgentDirFragment,
 		testTunnelImageRef,
 		"Bootstrap key expires in 1 hour.",
-		"delete this Slack message",
+		"Treat this ephemeral Slack message as a secret",
+		"Keep the qURL agent-state directory, volume, or PVC",
 		"/qurl get $" + testTunnelSlug,
 	} {
 		if !strings.Contains(async, want) {
@@ -612,8 +613,8 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
-		"Tunnel `" + testTunnelSlug + "` is ready.",
-		"Channel shortcut `$team-dash` is ready.",
+		"Tunnel `" + testTunnelSlug + "` is ready to install.",
+		"qURL shortcut `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
 		"Paste it only when prompted or into your secret manager",
 		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
@@ -1039,7 +1040,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "Channel shortcut `$prod-dashboard` is ready.")
+	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL shortcut `$prod-dashboard` is ready in this channel.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
@@ -1186,7 +1187,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 		t.Fatalf("first async reply = %q, want mint failure", first)
 	}
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "Channel shortcut `$"+testTunnelSlug+"` is ready.") {
+	if !strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "qURL shortcut `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("second async reply = %q, want successful remint against existing alias", second)
 	}
 	if apiKeyHits != 2 {
@@ -1211,7 +1212,7 @@ func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureTunnelAlias: %v", err)
 	}
-	if !strings.Contains(status, "Channel shortcut `$"+testTunnelSlug+"` is ready.") {
+	if !strings.Contains(status, "qURL shortcut `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("status = %q, want idempotent ready copy", status)
 	}
 }
@@ -1237,7 +1238,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"ECS injects the bootstrap secret as `QURL_API_KEY`",
 		"file-mounted secret runtimes use `QURL_API_KEY_FILE` instead",
 		"secret as `qurl-tunnel-" + testTunnelSlug + "`",
-		"delete this Slack message before continuing",
+		"treat this Slack message as secret until the sidecar connects",
 		testTunnelImageRef,
 		"Put qurl-proxy.yaml on an EFS access point",
 		testTunnelLocalPort9090Line,
@@ -1636,7 +1637,7 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "Channel shortcut") || !strings.Contains(async, "already used") {
+	if !strings.Contains(async, "qURL shortcut") || !strings.Contains(async, "already used") {
 		t.Fatalf("async reply = %q, want already-bound refusal", async)
 	}
 	if apiKeyHits != 0 {

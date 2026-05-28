@@ -407,9 +407,9 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 	}
 	if found {
 		if existing == resourceID {
-			return fmt.Sprintf("Channel shortcut `$%s` is ready.", alias), nil
+			return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
 		}
-		return fmt.Sprintf("Channel shortcut `$%s` is already used. Run `/qurl unset-alias $%s` first, or choose `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
+		return fmt.Sprintf("qURL shortcut `$%s` is already used in this channel. Run `/qurl unset-alias $%s` first, or choose `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
@@ -418,12 +418,12 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 			// conflict to the admin.
 			existing, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 			if lookupErr == nil && found && existing == resourceID {
-				return fmt.Sprintf("Channel shortcut `$%s` is ready.", alias), nil
+				return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
 			}
 		}
 		return ":warning: failed to bind the channel shortcut; no bootstrap key was minted.", err
 	}
-	return fmt.Sprintf("Channel shortcut `$%s` is ready.", alias), nil
+	return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
 }
 
 func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
@@ -445,7 +445,7 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 		imageNote = "\n\n" + imageNote
 	}
 
-	return fmt.Sprintf("Tunnel `%s` is ready.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s\n\nTarget environment: %s.\n\n%s%s\n\nAfter the sidecar connects, delete this Slack message and remove the mounted bootstrap key from the runtime.\n\nThen users can run `/qurl get $%s`.",
+	return fmt.Sprintf("Tunnel `%s` is ready to install.\n%s\n\nBootstrap key %s. Paste it only when prompted or into your secret manager; do not paste it into a shell command.\n\n%s\n\nTarget environment: %s.\n\n%s%s\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\nThen users can run `/qurl get $%s`.",
 		args.Slug,
 		aliasStatus,
 		tunnelBootstrapExpiryLabel(key),

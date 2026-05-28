@@ -49,7 +49,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, _ *client.APIKe
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
 	}, " ")
 	return intro + "\n\n" +
-		"1. Store the bootstrap key shown above in AWS Secrets Manager, then delete this Slack message before continuing.\n\n" +
+		"1. Store the bootstrap key shown above in AWS Secrets Manager, then treat this Slack message as secret until the sidecar connects.\n\n" +
 		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
 		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
 		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects the bootstrap secret as `QURL_API_KEY`; file-mounted secret runtimes use `QURL_API_KEY_FILE` instead:\n\n" +
