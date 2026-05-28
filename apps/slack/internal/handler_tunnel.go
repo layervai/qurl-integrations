@@ -643,6 +643,8 @@ func humanTunnelBootstrapDuration(d time.Duration) string {
 	if d < time.Minute {
 		return "under 1 minute"
 	}
+	// Ceil to the next minute so near-boundary keys never display as
+	// "0 minutes" or understate the operator's remaining setup window.
 	minutesTotal := int((d + time.Minute - time.Nanosecond) / time.Minute)
 	hours := minutesTotal / 60
 	minutes := minutesTotal % 60

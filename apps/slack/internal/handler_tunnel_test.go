@@ -127,6 +127,7 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 	}{
 		{text: testTunnelWizardCmd, want: true},
 		{text: " " + testTunnelWizardCmd + " ", want: true},
+		{text: "tunnel  install", want: true},
 		{text: testTunnelInstallVerb, want: false},
 		{text: testTunnelInstallCmd, want: false},
 		{text: "tunnel", want: false},
@@ -1076,6 +1077,23 @@ func TestParseTunnelInstallModalArgsSkipsWebRefValidationWhenEnvironmentMissing(
 	}
 	if fieldErrors[tunnelInstallBlockWebRef] != "" {
 		t.Fatalf("field errors = %+v, want web container validation deferred until environment is known", fieldErrors)
+	}
+}
+
+func TestParseTunnelInstallModalArgsSkipsWebRefValidationWhenEnvironmentInvalid(t *testing.T) {
+	t.Parallel()
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, "bogus", "8080", "../bad")
+
+	args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+	if args != nil {
+		t.Fatalf("args = %+v, want nil", args)
+	}
+	if fieldErrors[tunnelInstallBlockEnvironment] == "" {
+		t.Fatalf("field errors = %+v, want target environment error", fieldErrors)
+	}
+	if fieldErrors[tunnelInstallBlockWebRef] != "" {
+		t.Fatalf("field errors = %+v, want web container validation deferred until environment is valid", fieldErrors)
 	}
 }
 

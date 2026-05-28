@@ -113,8 +113,11 @@ const (
 	// defaultMaxConcurrentAsync caps in-flight goroutines. A Slack-side
 	// flood (replay storm, runaway integration) drops with ackBusy past
 	// this threshold rather than unbounded-spawning until the task OOMs.
-	// 50 is generous for steady-state — the target customer (50 active
-	// users) won't sustain >1 click/sec across the whole workspace.
+	// Guided tunnel setup acks before its async admin check to preserve
+	// Slack's trigger_id window, so keep this high enough that admin-check
+	// retries cannot starve normal async replies. 50 is generous for
+	// steady-state — the target customer (50 active users) won't sustain
+	// >1 click/sec across the whole workspace.
 	defaultMaxConcurrentAsync = 50
 
 	// asyncWorkTimeout caps how long a single async job may run. Slack's

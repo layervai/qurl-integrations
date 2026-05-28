@@ -190,14 +190,6 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	return out, ""
 }
 
-// validateAliasToken checks that `tok` is `$<alias>` and returns the alias
-// without the sigil. Mirrors the grammar in the broader parser
-// (apps/slack/internal/parser.go on #228) so a future consolidation is a
-// textual no-op.
-func validateAliasToken(tok string) (alias, reason string) {
-	return validateAliasTokenForNoun(tok, "Alias")
-}
-
 func validateChannelShortcutToken(tok string) (alias, reason string) {
 	return validateAliasTokenForNoun(tok, "Shortcut")
 }
@@ -226,7 +218,7 @@ func validateAliasTokenForNoun(tok, noun string) (alias, reason string) {
 // slash-command responses. See [parseAliasArgs] for the rationale on plain
 // strings vs error.
 func requireAlias(tok string) (alias, userMsg string) {
-	alias, reason := validateAliasToken(tok)
+	alias, reason := validateAliasTokenForNoun(tok, "Alias")
 	if reason != "" {
 		return "", reason + "\n\n" + aliasUsage
 	}
