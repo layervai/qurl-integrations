@@ -38,7 +38,8 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 	// TODO(slack-oauth): look up the workspace bot token by teamID once the
 	// per-workspace OAuth token store is the only production path.
 	return func(ctx context.Context, _ string, triggerID string, viewJSON []byte) error {
-		if !json.Valid(viewJSON) {
+		viewJSON = bytes.TrimSpace(viewJSON)
+		if !json.Valid(viewJSON) || !bytes.HasPrefix(viewJSON, []byte("{")) {
 			return errors.New("views.open: invalid view JSON")
 		}
 		body, err := json.Marshal(struct {
@@ -96,7 +97,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 400 {
-		bodySnippet := strings.TrimSpace(string(raw))
+		bodySnippet := slackOpenViewBodySnippet(raw)
 		if bodySnippet == "" {
 			return fmt.Errorf("views.open returned HTTP %d", statusCode)
 		}
@@ -117,6 +118,15 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		out.Error = "not_ok"
 	}
 	return slackOpenViewAPIError(out.Error)
+}
+
+func slackOpenViewBodySnippet(raw []byte) string {
+	const maxSnippetBytes = 200
+	bodySnippet := strings.TrimSpace(string(raw))
+	if len(bodySnippet) <= maxSnippetBytes {
+		return bodySnippet
+	}
+	return bodySnippet[:maxSnippetBytes] + "..."
 }
 
 func slackOpenViewAPIError(code string) error {

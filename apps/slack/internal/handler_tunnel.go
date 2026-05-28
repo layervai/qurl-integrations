@@ -20,10 +20,11 @@ const (
 	// Production deploys should set QURL_TUNNEL_IMAGE to an immutable
 	// release tag or digest. The floating fallback is for dev/sandbox
 	// onboarding where the latest sidecar build is intentional.
-	defaultTunnelImage     = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
-	defaultTunnelLocalPort = 8080
-	tunnelBootstrapTTL     = "1h"
-	tunnelBootstrapSkew    = 2 * time.Minute
+	defaultTunnelImage            = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
+	defaultTunnelLocalPort        = 8080
+	tunnelBootstrapTTL            = "1h"
+	tunnelBootstrapSkew           = 2 * time.Minute
+	tunnelBootstrapCleanupTimeout = 5 * time.Second
 	// Slack response_url values are valid for roughly 30 minutes; keep modal
 	// submissions inside that window so async install errors can still reach
 	// the admin after Slack accepts the view submission.
@@ -107,7 +108,13 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 				return nil, msg + "\n\n" + tunnelInstallUsage()
 			}
 			args.Environment = env
-		case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "service:"), strings.HasPrefix(token, "web_container:"):
+		case strings.HasPrefix(token, "service:"):
+			_, value, _ := strings.Cut(token, ":")
+			if !dockerComposeServicePattern.MatchString(value) {
+				return nil, "service must use letters, numbers, underscores, or hyphens.\n\n" + tunnelInstallUsage()
+			}
+			args.WebContainer = value
+		case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "web_container:"):
 			_, value, _ := strings.Cut(token, ":")
 			if !dockerContainerRefPattern.MatchString(value) {
 				return nil, "container/service/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
@@ -124,12 +131,12 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 }
 
 func tunnelInstallUsage() string {
-	return "Usage:\n• `/qurl tunnel install` for guided setup\n• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|ecs-fargate|kubernetes] [container:<name>|web_container:<name>]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
+	return "Usage:\n• `/qurl tunnel install` for guided setup\n• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|compose|ecs-fargate|kubernetes] [container:<name>|service:<name>|web_container:<name>]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
 }
 
 func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg string) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", string(tunnelEnvDocker), "docker-vm":
+	case "", string(tunnelEnvDocker):
 		return tunnelEnvDocker, ""
 	case string(tunnelEnvCompose), "compose":
 		return tunnelEnvCompose, ""
@@ -138,7 +145,7 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 	case string(tunnelEnvKubernetes):
 		return tunnelEnvKubernetes, ""
 	default:
-		return "", "env must be one of docker, docker-compose, ecs-fargate, or kubernetes"
+		return "", "env must be one of docker, docker-compose, compose, ecs-fargate, or kubernetes"
 	}
 }
 
@@ -271,8 +278,8 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		return
 	}
-	openCtx, cancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
-	defer cancel()
+	openCtx, openCancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
+	defer openCancel()
 	if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
 		log.Error("tunnel install wizard views.open failed", "error", err, "slack_rate_limited", errors.Is(err, ErrSlackRateLimited))
 		switch {
@@ -328,19 +335,22 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 	if key.APIKey == "" {
-		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID)
+		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "missing_plaintext")
 		h.postResponse(log, responseURL, "The qURL API did not return a bootstrap key. Please retry or contact support.")
 		return
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
-		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "shell_validation_failed")
 		h.postResponse(log, responseURL, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
 		return
 	}
 
 	msg, err := h.renderTunnelInstallMessage(args, key, aliasStatus)
 	if err != nil {
-		log.Error("tunnel install: render failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+		log.Error("tunnel install: render failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		revokeBootstrapKeyAfterInstallFailure(log, c, key, "render_failed")
 		h.postResponse(log, responseURL, "Tunnel setup succeeded, but Slack could not render the install instructions. Please retry or contact support.")
 		return
 	}
@@ -348,6 +358,20 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	if !h.postResponse(log, responseURL, msg) {
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 	}
+}
+
+func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+	if key == nil || strings.TrimSpace(key.KeyID) == "" {
+		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "reason", reason)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tunnelBootstrapCleanupTimeout)
+	defer cancel()
+	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
+		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "key_id", key.KeyID, "reason", reason)
+		return
+	}
+	log.Info("tunnel install: revoked bootstrap key after install failure", "key_id", key.KeyID, "reason", reason)
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
@@ -371,6 +395,9 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
+			// A concurrent retry may have created the same binding after our
+			// optimistic read. Confirm that benign race before surfacing a
+			// conflict to the admin.
 			existing, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 			if lookupErr == nil && found && existing == resourceID {
 				return fmt.Sprintf("Channel shortcut `$%s` is ready.", alias), nil

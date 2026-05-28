@@ -62,7 +62,6 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: 9090},
 		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
 		{name: "docker environment", text: testTunnelInstallCmd + " env:docker", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
-		{name: "old docker vm spelling", text: testTunnelInstallCmd + " env:docker-vm", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
 		{name: "environment", text: testTunnelInstallCmd + " env:ecs-fargate", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvECSFargate},
 		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:web_1", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWeb: "web_1"},
 		{name: "container ref", text: testTunnelInstallCmd + " container:web_1-2", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWeb: "web_1-2"},
@@ -72,6 +71,7 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "double sigil slug", text: "tunnel install $$prod", wantErr: true},
 		{name: "verb boundary", text: "tunnelhats install prod", wantErr: true},
 		{name: "bad port", text: testTunnelInstallCmd + " port:70000", wantErr: true},
+		{name: "old docker vm spelling rejected", text: testTunnelInstallCmd + " env:docker-vm", wantErr: true},
 		{name: "bad environment", text: testTunnelInstallCmd + " env:prod", wantErr: true},
 		{name: "bad container ref", text: testTunnelInstallCmd + " container:../web", wantErr: true},
 		{name: "compose rejects dotted service", text: testTunnelInstallCmd + " service:web.1 env:compose", wantErr: true},
@@ -988,6 +988,7 @@ func TestValidateTunnelImageRefRejectsBackticks(t *testing.T) {
 func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID: testTunnelResourceID,
@@ -1004,6 +1005,10 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
@@ -1011,6 +1016,46 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 
 	if !strings.Contains(async, "did not return a bootstrap key") {
 		t.Fatalf("async reply = %q, want missing-plaintext copy", async)
+	}
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+}
+
+func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     "lv_live_bad'quote",
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "unexpected format") {
+		t.Fatalf("async reply = %q, want shell-validation copy", async)
+	}
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
 }
 
