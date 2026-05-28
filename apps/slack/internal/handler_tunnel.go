@@ -480,7 +480,7 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 		if existing == resourceID {
 			return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
 		}
-		return fmt.Sprintf("qURL shortcut `$%s` is already used in this channel. Run `/qurl unset-alias $%s` first, or in the typed install command pass `alias:$other-name`.", alias, alias), slackdata.ErrAliasAlreadyBound
+		return fmt.Sprintf("qURL shortcut `$%s` is already used in this channel. Run `/qurl unset-alias $%s` first, or pick a different shortcut.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {

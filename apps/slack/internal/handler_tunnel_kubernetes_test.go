@@ -89,6 +89,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"Pod Security Admission `restricted`",
 		"fsGroup: 65532",
 		"fsGroupChangePolicy: OnRootMismatch",
+		"WARNING: pod-level fsGroup applies to every volume in this pod",
 		"securityContext:",
 		"name: qurl-tunnel",
 		"value: '" + testTunnelSlug + "'",

@@ -24,6 +24,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
 		`--network "container:${WEB_CONTAINER}"`,
+		"Re-running this install briefly restarts the tunnel container",
 		"restart the tunnel after replacing or recreating the web container",
 		testTunnelDockerLine,
 		testTunnelAgentDirFragment,
