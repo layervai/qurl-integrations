@@ -537,6 +537,38 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	}
 }
 
+// TestHandleList_SortTiebreakerOnTokenCollision exercises the
+// resource_id tiebreaker directly: two tunnels yield the SAME
+// tunnelToken (`$dup`) — one via its slug, one via a resource-level
+// alias with no slug — so the comparator falls through to comparing
+// resource_id. The row with the lexicographically-smaller resource_id
+// must sort first, deterministically, rather than inheriting unstable
+// upstream order. Descriptions disambiguate the two identical tokens.
+func TestHandleList_SortTiebreakerOnTokenCollision(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		// Returned in reverse resource_id order; both render `$dup`.
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_bbb_dup", fAttrAlias: "dup", testKeyType: client.ResourceTypeTunnel, testKeyDescription: "beta-desc"},
+			{testKeyResourceID: "r_aaa_dup", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dup", testKeyDescription: "alpha-desc"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	// Tiebreaker: r_aaa_dup < r_bbb_dup, so alpha-desc renders first.
+	alphaPos := strings.Index(async, "alpha-desc")
+	betaPos := strings.Index(async, "beta-desc")
+	if alphaPos < 0 || betaPos < 0 {
+		t.Fatalf("missing colliding-token rows: %q", async)
+	}
+	if alphaPos >= betaPos {
+		t.Errorf("tiebreaker not applied: expected alpha-desc (r_aaa) before beta-desc (r_bbb): %q", async)
+	}
+}
+
 // TestTunnelToken pins the slug → alias → resource_id precedence of the
 // `$<token>` shown for a tunnel row, directly (not just via the rendered
 // list output), so a future refactor that reorders the fallback chain
