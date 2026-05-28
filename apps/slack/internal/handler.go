@@ -760,16 +760,14 @@ func (h *Handler) helpMessage() string {
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl get <url>` — Get a qURL for a URL",
-		"• `/qurl get $name` — Get a qURL for a name your Slack admin has configured in this channel",
+		"• `/qurl get <url|$slug>` — Mint a one-time qURL for a URL or a `$slug` your Slack admin has configured in this channel",
 	}
 	if h.cfg.PostDM != nil {
-		lines = append(lines, "• `/qurl get <url|$name> dm:true` — DM the link to you instead of posting it in-channel")
+		lines = append(lines, "• `/qurl get <url|$slug> dm:true` — DM the link to you instead of posting it in-channel")
 	}
 	lines = append(lines,
-		"• `/qurl get <url|$name> once:true` — Get a single-use qURL; the link burns on first redemption",
-		"• `/qurl get <url|$name> reason:\"…\"` — Annotate the audit log with a reason",
-		"• `/qurl list` — Show your 5 most recent qURLs",
+		"• `/qurl get <url|$slug> reason:\"…\"` — Same, annotating the audit log with a reason",
+		"• `/qurl list` — List the tunnels available in this workspace",
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
@@ -795,7 +793,7 @@ func (h *Handler) helpMessage() string {
 		// on "shortcut" even though the admin verbs retain their
 		// historical set-alias/unset-alias names.
 		lines = append(lines,
-			"• `/qurl set-alias $<shortcut> <url-or-resource-id-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
+			"• `/qurl set-alias $<shortcut> <url-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
 			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
 			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
 		)

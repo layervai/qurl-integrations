@@ -160,7 +160,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if cmd.Alias == "" && cmd.Target == "" && cmd.Resource.Kind != ResourceTokenResourceID {
-		respondSlack(w, ":warning: Usage: `/qurl get <url>` to mint for a URL, or `/qurl get $name` to mint for a name your Slack admin has configured here.")
+		respondSlack(w, ":warning: Usage: `/qurl get <url>` to mint for a URL, or `/qurl get $slug` to mint for a tunnel or shortcut your Slack admin has configured here.")
 		return
 	}
 
@@ -245,8 +245,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 
 	input := client.CreateInput{
-		Reason:         args.cmd.Reason(),
-		OneTimeUse:     args.cmd.Once(),
+		Reason: args.cmd.Reason(),
+		// One-time use is the default and only mode for `/qurl get` —
+		// every minted link burns on first redemption. There is no
+		// `once` flag; the behavior is unconditional.
+		OneTimeUse:     true,
 		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
@@ -302,10 +305,10 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	message := ":link: *qURL ready:* " + out.QURLLink
-	if args.cmd.Once() {
-		message += " (one-time use)"
-	}
+	// Every `/qurl get` link is one-time use (see OneTimeUse above), so
+	// the suffix is unconditional — it sets the expectation that the
+	// link burns on first redemption.
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use)"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}

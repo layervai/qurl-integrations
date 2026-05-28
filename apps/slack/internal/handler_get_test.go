@@ -322,11 +322,12 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 }
 
-// TestHandleGet_OnceTrueDMTrue fences that the (one-time use) suffix
-// rides into the DM payload (not the channel reply) when once: and
-// dm: stack. Guards against a future refactor that reorders the
-// suffix-append and DM-dispatch branches in getWork.
-func TestHandleGet_OnceTrueDMTrue(t *testing.T) {
+// TestHandleGet_DMRidesOneTimeSuffix fences that the (one-time use)
+// suffix rides into the DM payload (not the channel reply) on dm:true.
+// One-time use is the unconditional default for `/qurl get`, so the
+// suffix is always present; this guards against a future refactor that
+// reorders the suffix-append and DM-dispatch branches in getWork.
+func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
@@ -341,7 +342,7 @@ func TestHandleGet_OnceTrueDMTrue(t *testing.T) {
 	}
 	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("get $prod-db once:true dm:true", testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 
 	if !strings.HasSuffix(strings.TrimSpace(dmText), "(one-time use)") {
 		t.Errorf("DM payload missing one-time-use suffix: %q", dmText)
@@ -446,38 +447,12 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_OnceTrue fences `one_time_use: true` on the
-// wire body and the `(one-time use)` suffix on the async reply.
-func TestCreateInputJSON_OnceTrue(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	var capturedBody []byte
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		capturedBody = b
-		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $prod-db once:true", testAdminTeamID, testAdminUserID)
-
-	var parsed map[string]any
-	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
-		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
-	}
-	if got, _ := parsed["one_time_use"].(bool); !got {
-		t.Errorf("one_time_use = %v, want true", parsed["one_time_use"])
-	}
-	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
-		t.Errorf("async reply missing one-time-use suffix: %q", async)
-	}
-}
-
-// TestCreateInputJSON_OnceAbsent fences `omitempty` — without the
-// flag, `one_time_use` is absent from the body and the suffix is
-// absent from the reply.
-func TestCreateInputJSON_OnceAbsent(t *testing.T) {
+// TestCreateInputJSON_OneTimeDefault fences that one-time use is the
+// unconditional default for `/qurl get`: with no flag at all, the wire
+// body carries `one_time_use: true` and the async reply carries the
+// `(one-time use)` suffix. There is no `once` flag — every `/qurl get`
+// link burns on first redemption.
+func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
@@ -495,42 +470,11 @@ func TestCreateInputJSON_OnceAbsent(t *testing.T) {
 	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
 		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
 	}
-	if _, ok := parsed["one_time_use"]; ok {
-		t.Errorf("one_time_use present on default mint body (omitempty must drop the false zero): %v", parsed)
+	if got, _ := parsed["one_time_use"].(bool); !got {
+		t.Errorf("one_time_use = %v, want true (one-time use is the unconditional default)", parsed["one_time_use"])
 	}
-	if strings.Contains(async, "(one-time use)") {
-		t.Errorf("async reply carries one-time-use suffix without the flag: %q", async)
-	}
-}
-
-// TestCreateInputJSON_OnceFalse fences the explicit-false branch:
-// `once:false` is accepted by the parser (Flags["once"]="false"),
-// `Once()` returns false via EqualFold, and `omitempty` drops the
-// zero from the body. Distinct from [TestCreateInputJSON_OnceAbsent]
-// because that test never populates the flag at all.
-func TestCreateInputJSON_OnceFalse(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	var capturedBody []byte
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		capturedBody = b
-		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $prod-db once:false", testAdminTeamID, testAdminUserID)
-
-	var parsed map[string]any
-	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
-		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
-	}
-	if _, ok := parsed["one_time_use"]; ok {
-		t.Errorf("one_time_use present on once:false mint body (omitempty must drop the false zero): %v", parsed)
-	}
-	if strings.Contains(async, "(one-time use)") {
-		t.Errorf("async reply carries one-time-use suffix on once:false: %q", async)
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
+		t.Errorf("async reply missing one-time-use suffix: %q", async)
 	}
 }
 
