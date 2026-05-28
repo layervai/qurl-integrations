@@ -550,17 +550,25 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 		return "", err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Tunnel `%s` is ready to install.\n", args.Slug)
+	b.WriteString("Tunnel `")
+	b.WriteString(args.Slug)
+	b.WriteString("` is ready to install.\n")
 	b.WriteString(aliasStatus)
-	fmt.Fprintf(&b, "\n\nBootstrap key %s. The shell block below prompts for it; do not add the key to the shell text itself. Paste it only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n", tunnelBootstrapExpiryLabel(key))
+	b.WriteString("\n\nBootstrap key ")
+	b.WriteString(tunnelBootstrapExpiryLabel(key))
+	b.WriteString(". The shell block below prompts for it; do not add the key to the shell text itself. Paste it only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n")
 	b.WriteString(keyBlock)
 	b.WriteString(p.imageNote)
 	b.WriteString("\n\n")
 	b.WriteString(p.imageLine)
-	fmt.Fprintf(&b, "\nTarget environment: %s.\n\n", p.environmentLabel)
+	b.WriteString("\nTarget environment: ")
+	b.WriteString(p.environmentLabel)
+	b.WriteString(".\n\n")
 	b.WriteString(p.instructions)
 	b.WriteString("\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
-	fmt.Fprintf(&b, "Then users can run `/qurl get $%s`.", args.Alias)
+	b.WriteString("Then users can run `/qurl get $")
+	b.WriteString(args.Alias)
+	b.WriteString("`.")
 	return b.String(), nil
 }
 
