@@ -62,7 +62,7 @@ func TestHandleList_AdminSeesAllTunnels(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "qURL Tunnels") {
+	if !strings.Contains(async, "Protected Tunnel Resources") {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	if !strings.Contains(async, "`$prod-db`") {
@@ -71,8 +71,36 @@ func TestHandleList_AdminSeesAllTunnels(t *testing.T) {
 	if !strings.Contains(async, "`$stage-db`") {
 		t.Errorf("async reply missing stage-db row: %q", async)
 	}
-	if !strings.Contains(async, "/qurl get $slug") {
+	if !strings.Contains(async, "/qurl get") {
 		t.Errorf("async reply missing copy-paste hint: %q", async)
+	}
+}
+
+// TestHandleList_ShowsBoundAliases fences the slug + bound-alias
+// rendering: a tunnel with several channel `$alias` shortcuts shows the
+// slug as the token and the OTHER aliases as "(also …)", sorted, with
+// the slug-binding itself excluded (the install flow binds `$<slug>` as
+// a channel alias, so it must not be repeated).
+func TestHandleList_ShowsBoundAliases(t *testing.T) {
+	const resID = "r_kktest01"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"kktest":          resID, // the install-bound slug alias
+		"kevin-dashboard": resID,
+		"ops":             resID,
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack tunnel install for kktest"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$kktest` (also `$kevin-dashboard`, `$ops`) → Slack tunnel install for kktest") {
+		t.Errorf("async reply missing slug + bound-aliases row: %q", async)
 	}
 }
 

@@ -162,13 +162,17 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		}
 		return resources[i].ResourceID < resources[j].ResourceID
 	})
+	// Map each tunnel's resource_id to its channel-bound `$alias`
+	// shortcuts so each row can show them next to the slug. Best-effort
+	// — a fetch failure renders slug-only.
+	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
 	lines := make([]string, 0, len(resources))
 	for i := range resources {
-		lines = append(lines, formatTunnelListLine(&resources[i]))
+		lines = append(lines, formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID]))
 	}
 
-	body := "*qURL Tunnels:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Copy any `$slug` and run `/qurl get $slug` to mint a one-time qURL link._"
+	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") +
+		"\n\n_Copy any `$slug` or `$alias` and run `/qurl get` on it to mint a one-time qURL link._"
 	if page.HasMore {
 		// has_more here means the workspace has more resources than the
 		// single scan page — there may be additional tunnels we didn't
@@ -310,23 +314,63 @@ func tunnelToken(r *client.Resource) string {
 // formatTunnelListLine renders one tunnel resource as a single text
 // line in /qurl list output:
 //
-//   - No description:   • `$<slug>`
-//   - With description: • `$<slug>` → <description>
+//   - Slug only:           • `$<slug>`
+//   - With bound aliases:  • `$<slug>` (also `$<alias>`, `$<alias2>`)
+//   - With description:    • `$<slug>` → <description>
 //
-// The token is [tunnelToken] (slug-first; never the opaque r_<id> in
-// the common case). The token-in-backticks shape lets Slack render it
-// as inline code (easy click-to-copy) while keeping the line
-// plaintext-greppable. There is no `(tunnel)` label or `[slug:...]`
-// fragment — the whole list is tunnels and the token IS the slug, so
-// both would be redundant noise. The arrow joins the slug to its
-// human-readable description when one is set; an undescribed tunnel
-// renders just the token.
-func formatTunnelListLine(r *client.Resource) string {
-	line := "• `$" + tunnelToken(r) + "`"
+// The primary token is [tunnelToken] (slug-first; never the opaque
+// r_<id> in the common case). `boundAliases` are the channel `$alias`
+// shortcuts that resolve to this tunnel in `/qurl get` — a tunnel can
+// have several. They render as "(also …)" so the user sees every name
+// that works, EXCLUDING the primary token itself (the install flow
+// binds `$<slug>` as a channel alias, so the slug would otherwise
+// appear twice). The token-in-backticks shape lets Slack render each as
+// inline code. There is no `(tunnel)` label or `[slug:...]` fragment —
+// the whole list is tunnels and the token IS the slug. The arrow joins
+// to the human-readable description when one is set.
+func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
+	token := tunnelToken(r)
+	line := "• `$" + token + "`"
+	extras := make([]string, 0, len(boundAliases))
+	for _, a := range boundAliases {
+		if a != token {
+			extras = append(extras, "`$"+a+"`")
+		}
+	}
+	if len(extras) > 0 {
+		line += " (also " + strings.Join(extras, ", ") + ")"
+	}
 	if r.Description != "" {
 		line += " → " + r.Description
 	}
 	return line
+}
+
+// channelAliasesByResourceID builds resource_id → sorted channel-bound
+// `$alias` shortcuts from the channel's policy entries, so /qurl list
+// can show every alias that resolves to each tunnel. Best-effort:
+// AdminStore-nil, empty channel, or a fetch failure yields nil (rows
+// render slug-only) — the listing must still render.
+func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
+	if h.cfg.AdminStore == nil || channelID == "" {
+		return nil
+	}
+	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
+	if err != nil {
+		log.Debug("list: channel-policy fetch for alias display failed — rendering slug-only",
+			"error", err, "team_id", teamID, "channel_id", channelID)
+		return nil
+	}
+	out := make(map[string][]string)
+	for i := range entries {
+		if entries[i].Alias != "" && entries[i].ResourceID != "" {
+			out[entries[i].ResourceID] = append(out[entries[i].ResourceID], entries[i].Alias)
+		}
+	}
+	for id := range out {
+		sort.Strings(out[id])
+	}
+	return out
 }
 
 // mapListResourcesError surfaces a friendly user-facing error for
