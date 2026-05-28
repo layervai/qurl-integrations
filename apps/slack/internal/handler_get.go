@@ -166,7 +166,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	// a form that populates neither; surface the usage hint rather than
 	// silently dispatching an unmintable command.
 	if cmd.Alias == "" && cmd.Resource.Kind != ResourceTokenResourceID {
-		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
+		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`, or a `$r_<id>` from `/qurl list`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
 		return
 	}
 

@@ -361,6 +361,13 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 // `r_<id>` — the success copy deliberately echoes the `$slug` the admin
 // typed (the noun `/qurl list` shows) rather than the internal
 // resource_id.
+//
+// TOCTOU note: the slug→resource_id resolve and the DDB bind are two
+// steps; if the tunnel is deleted upstream between them, the binding
+// lands pointing at a dead resource. That's acceptable — a stale
+// binding is caught at mint time (`/qurl get` re-validates the resource
+// against qurl-service), so the worst case is a deferred, well-handled
+// error rather than a silent success.
 func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) string {
 	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 	if err != nil {
@@ -388,9 +395,10 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	}
 	// Admin-verb audit trail: log the bound (alias, slug, resource_id)
 	// triple on success so post-incident reconstruction doesn't depend
-	// on re-querying the DDB table. All four fields are opaque/validated
-	// (slug + alias upstream; resource_id is a server-minted `r_<id>`
-	// with no embeddable credentials), so no redaction is needed.
+	// on re-querying the DDB table. Every logged field is opaque or
+	// validated (team/channel/alias/slug upstream; resource_id is a
+	// server-minted `r_<id>` with no embeddable credentials), so no
+	// redaction is needed.
 	logAliasBound(teamID, channelID, alias, slug, resourceID)
 	return fmt.Sprintf("Alias `$%s` now points to tunnel `$%s` in this channel.", alias, slug)
 }

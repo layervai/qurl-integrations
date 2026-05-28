@@ -104,6 +104,43 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 	}
 }
 
+// TestFormatTunnelListLine fences the per-row rendering contract
+// directly so the slug-only and slug+description (no-alias) shapes are
+// pinned independently of the combined end-to-end TestHandleList_*
+// tests. In particular it locks the self-binding exclusion: the
+// install-flow binds `$<slug>` as a channel alias, and that name must
+// NOT re-appear in the "(also …)" extras.
+func TestFormatTunnelListLine(t *testing.T) {
+	tunnel := func(slug, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_" + slug,
+			Type:        client.ResourceTypeTunnel,
+			Slug:        slug,
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		want         string
+	}{
+		{name: "slug only, no aliases, no description", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "• `$prod-db`"},
+		{name: "slug + description, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` → Prod database"},
+		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{"grafana"}, want: "• `$prod-db` (also `$grafana`)"},
+		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, "grafana"}, want: "• `$prod-db` (also `$grafana`) → Prod database"},
+		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatTunnelListLine(tc.resource, tc.boundAliases); got != tc.want {
+				t.Errorf("formatTunnelListLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestHandleList_NonAdminFiltersToChannelPolicy fences the non-admin
 // path: only tunnels allowed in the current channel are visible.
 func TestHandleList_NonAdminFiltersToChannelPolicy(t *testing.T) {
