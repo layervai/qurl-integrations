@@ -171,9 +171,9 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 func TestTunnelInstallModal_Shape(t *testing.T) {
 	t.Parallel()
 	raw, err := TunnelInstallModal(TunnelInstallModalMetadata{
-		TeamID:      "T_test",
+		TeamID:      testAdminTeamID,
 		ChannelID:   testTunnelChannelID,
-		UserID:      "U_test",
+		UserID:      testAdminUserID,
 		ResponseURL: "https://hooks.slack.com/services/test",
 	})
 	if err != nil {
@@ -202,7 +202,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 	if err := json.Unmarshal([]byte(pm), &meta); err != nil {
 		t.Fatalf("private_metadata JSON: %v", err)
 	}
-	if meta.TeamID != "T_test" || meta.ChannelID != testTunnelChannelID || meta.UserID != "U_test" || meta.ResponseURL == "" {
+	if meta.TeamID != testAdminTeamID || meta.ChannelID != testTunnelChannelID || meta.UserID != testAdminUserID || meta.ResponseURL == "" {
 		t.Errorf("metadata = %+v, want team/channel/user/response_url", meta)
 	}
 	body := string(raw)
@@ -219,6 +219,20 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal body missing %q", want)
 		}
+	}
+}
+
+func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
+	t.Parallel()
+	_, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   "https://hooks.slack.com/actions/" + strings.Repeat("x", slackPrivateMetadataMaxBytes),
+		CreatedAtUnix: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private_metadata exceeds Slack limit") {
+		t.Fatalf("TunnelInstallModal err = %v, want private_metadata size error", err)
 	}
 }
 

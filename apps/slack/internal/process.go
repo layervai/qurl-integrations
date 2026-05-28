@@ -148,9 +148,8 @@ func sanitizeAPIError(err error, prefix string) string {
 }
 
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.
-// Errors are logged, never re-raised — the user will retry the command
-// if the follow-up never arrives, which is preferable to retrying our
-// own POST and risking a duplicate-message storm at Slack.
+// Errors are logged, never retried. The bool tells sensitive callers whether
+// they should add extra audit context after a failed delivery.
 //
 // Validates scheme+host before dialing so a malformed (or attacker-
 // controlled, in the event of a signature-gate bypass) URL can't make
@@ -163,15 +162,15 @@ func sanitizeAPIError(err error, prefix string) string {
 // responseURLTimeout lets the follow-up land before Fargate's hard
 // kill while still bounding the goroutine's lifetime.
 // handler.Wait()/WaitTimeout in main blocks process exit.
-func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
+func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool {
 	if responseURL == "" {
 		log.Warn("missing response_url — async result has nowhere to go")
-		return
+		return false
 	}
 	target, err := h.validateResponseURLFn(responseURL)
 	if err != nil {
 		log.Warn("invalid response_url — refusing to dial", "error", err)
-		return
+		return false
 	}
 
 	body, err := json.Marshal(map[string]string{
@@ -182,7 +181,7 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 		// json.Marshal of a map[string]string can't fail in practice; log
 		// and bail rather than POSTing a half-baked body.
 		log.Error("marshal response_url payload failed", "error", err)
-		return
+		return false
 	}
 
 	deliverCtx, cancel := context.WithTimeout(context.Background(), responseURLTimeout)
@@ -198,14 +197,14 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	req, err := http.NewRequestWithContext(deliverCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("build response_url request failed", "error", err)
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.responseURLClient.Do(req)
 	if err != nil {
 		log.Error("response_url POST failed", "error", err)
-		return
+		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -222,7 +221,9 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	}
 	if resp.StatusCode >= 400 {
 		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
+		return false
 	}
+	return true
 }
 
 // validateResponseURL fences the response_url POST destination to

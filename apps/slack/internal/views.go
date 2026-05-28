@@ -31,6 +31,7 @@ const (
 	blockKitFieldTitle           = "title"
 	blockKitFieldType            = "type"
 	blockKitTypeModal            = "modal"
+	slackPrivateMetadataMaxBytes = 3000
 )
 
 const (
@@ -128,6 +129,9 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal private_metadata: %w", err)
 	}
+	if len(privateMeta) > slackPrivateMetadataMaxBytes {
+		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
+	}
 	defaultPort := strconv.Itoa(defaultTunnelLocalPort)
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
@@ -170,6 +174,14 @@ func TunnelInstallErrorModal(message string) []byte {
 		},
 	}
 	return mustMarshalStaticJSON(payload)
+}
+
+func mustMarshalStaticJSON(v any) []byte {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		panic("marshal static Slack install JSON: " + err.Error())
+	}
+	return b
 }
 
 // escapeMrkdwnCode neutralizes the characters that can break out of

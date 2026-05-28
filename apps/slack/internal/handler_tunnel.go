@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -39,6 +38,13 @@ const (
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+
+// Docker does not publish a tight practical length limit for container names;
+// keep Slack input bounded so an accidental paste cannot dominate the rendered
+// install snippets. Compose service names reject dots even though raw Docker
+// container refs allow them.
+var dockerContainerRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var dockerComposeServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 var tunnelBootstrapNow = time.Now
 
 type tunnelInstallEnvironment string
@@ -118,7 +124,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 }
 
 func tunnelInstallUsage() string {
-	return "Usage: `/qurl tunnel install` for guided setup, or `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|ecs-fargate|kubernetes] [container:<name>|web_container:<name>]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
+	return "Usage:\n• `/qurl tunnel install` for guided setup\n• `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker|docker-compose|ecs-fargate|kubernetes] [container:<name>|web_container:<name>]`\nExample: `/qurl tunnel install prod-dashboard port:8080`"
 }
 
 func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg string) {
@@ -153,12 +159,13 @@ func (e tunnelInstallEnvironment) label() string {
 
 // handleTunnel routes `/qurl tunnel install` and `/qurl tunnel install <slug>`.
 func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
-	if tunnelInstallWizardRequest(values.Get(fieldText)) {
+	text := strings.TrimSpace(values.Get(fieldText))
+	if tunnelInstallWizardRequest(text) {
 		h.handleTunnelInstallWizard(w, values)
 		return
 	}
 
-	args, userMsg := parseTunnelInstall(values.Get(fieldText))
+	args, userMsg := parseTunnelInstall(text)
 	if userMsg != "" {
 		respondSlack(w, userMsg)
 		return
@@ -187,7 +194,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 }
 
 func tunnelInstallWizardRequest(text string) bool {
-	matched, rest := slashVerb(strings.TrimSpace(text), "tunnel")
+	matched, rest := slashVerb(text, "tunnel")
 	return matched && rest == "install"
 }
 
@@ -331,7 +338,9 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
-	h.postResponse(log, responseURL, msg)
+	if !h.postResponse(log, responseURL, msg) {
+		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+	}
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
@@ -555,56 +564,6 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 	return intro + "\n\n" + slackCodeBlock(compose) + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file."
 }
 
-func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
-	containerJSON := renderECSSidecarContainerJSON(args, image)
-	secretName := "qurl-tunnel-" + args.Slug
-	// processTunnelInstall validates the plaintext key before rendering; the
-	// separate fences keep each ECS artifact independently copyable in Slack.
-	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves, and replace `<region>` / `<account-id>` in the JSON placeholders before registering the task definition. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.\n\n" +
-		"1. Store this bootstrap key in AWS Secrets Manager, then delete this Slack message:\n\n" +
-		slackCodeBlock(key.APIKey) + "\n\n" +
-		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
-		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
-		"3. Add this sidecar container to the same task definition as the target container:\n\n" +
-		slackCodeBlock(containerJSON) + "\n\n" +
-		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the tunnel connected, delete the bootstrap secret."
-}
-
-func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string {
-	container := ecsContainerDefinition{
-		Name:      "qurl-tunnel",
-		Image:     image,
-		Essential: true,
-		Environment: []ecsEnvironmentVar{
-			{Name: "QURL_TUNNEL_SLUG", Value: args.Slug},
-		},
-		Secrets: []ecsSecret{
-			{Name: tunnelEnvAPIKey, ValueFrom: "arn:aws:secretsmanager:<region>:<account-id>:secret:qurl-tunnel-" + args.Slug},
-		},
-		MountPoints: []ecsMountPoint{
-			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},
-			{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
-		},
-		LogConfiguration: ecsLogConfiguration{
-			LogDriver: "awslogs",
-			Options: map[string]string{
-				"awslogs-group":         "/ecs/qurl-tunnel",
-				"awslogs-region":        "<region>",
-				"awslogs-stream-prefix": "qurl",
-			},
-		},
-	}
-	return string(mustMarshalStaticJSON(container))
-}
-
-func mustMarshalStaticJSON(v any) []byte {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		panic("marshal static Slack install JSON: " + err.Error())
-	}
-	return b
-}
-
 func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
 	objects := fmt.Sprintf(`kubectl apply -f - <<'QURL_K8S_YAML_EOF'
 apiVersion: v1
@@ -698,27 +657,28 @@ func humanTunnelBootstrapTTL(ttl string) string {
 }
 
 func humanTunnelBootstrapDuration(d time.Duration) string {
-	d = d.Truncate(time.Minute)
 	if d < time.Minute {
 		return "less than 1 minute"
 	}
-	hours := int(d / time.Hour)
-	minutes := int((d % time.Hour) / time.Minute)
+	minutesTotal := int((d + time.Minute - time.Nanosecond) / time.Minute)
+	hours := minutesTotal / 60
+	minutes := minutesTotal % 60
+	hourUnit := "hours"
+	if hours == 1 {
+		hourUnit = "hour"
+	}
+	minuteUnit := "minutes"
+	if minutes == 1 {
+		minuteUnit = "minute"
+	}
 	switch {
 	case hours > 0 && minutes > 0:
-		return pluralizeDuration(hours, "hour") + " " + pluralizeDuration(minutes, "minute")
+		return fmt.Sprintf("%d %s %d %s", hours, hourUnit, minutes, minuteUnit)
 	case hours > 0:
-		return pluralizeDuration(hours, "hour")
+		return fmt.Sprintf("%d %s", hours, hourUnit)
 	default:
-		return pluralizeDuration(minutes, "minute")
+		return fmt.Sprintf("%d %s", minutes, minuteUnit)
 	}
-}
-
-func pluralizeDuration(n int, unit string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, unit)
-	}
-	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {

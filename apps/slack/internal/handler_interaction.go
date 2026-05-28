@@ -8,17 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
-
-// Docker does not publish a tight practical length limit for container names;
-// keep Slack modal input bounded so an accidental paste cannot dominate the
-// rendered install snippet.
-var dockerContainerRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-var dockerComposeServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // handleInteraction routes Slack interaction POSTs (button clicks,
 // modal submissions) to the right inner handler. Unknown interactions

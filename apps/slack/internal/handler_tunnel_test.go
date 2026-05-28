@@ -28,6 +28,8 @@ const (
 	testTunnelAPIKey      = "lv_live_test_bootstrap"
 	testTunnelAPIKeyID    = "key_tunnel_bootstrap"
 	testSlackResponseURL  = "https://hooks.slack.test/response"
+	testTunnelDockerLine  = `TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`
+	testTunnelModalKey    = "lv_live_modal_bootstrap"
 )
 
 const (
@@ -111,7 +113,7 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 		want bool
 	}{
 		{text: testTunnelWizardCmd, want: true},
-		{text: " " + testTunnelWizardCmd + " ", want: true},
+		{text: " " + testTunnelWizardCmd + " ", want: false},
 		{text: testTunnelInstallVerb, want: false},
 		{text: testTunnelInstallCmd, want: false},
 		{text: "tunnel", want: false},
@@ -208,7 +210,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"QURL_TUNNEL_SLUG=" + testTunnelSlug,
 		"local_port: 9090",
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
-		`TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`,
+		testTunnelDockerLine,
 		`docker rm -f "$TUNNEL_CONTAINER"`,
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelAgentDirFragment,
@@ -483,7 +485,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		}
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "lv_live_modal_bootstrap",
+			testKeyAPIKey:     testTunnelModalKey,
 			"name":            "Slack tunnel bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
@@ -557,7 +559,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"defaultMode: 0400",
 		"QURL_TUNNEL_SLUG",
 		"value: " + testTunnelSlug,
-		"lv_live_modal_bootstrap",
+		testTunnelModalKey,
 		"local_port: 9090",
 		testTunnelImageRef,
 		"/qurl get $team-dash",
@@ -577,6 +579,90 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	}
 	if !found || gotRID != testTunnelResourceID {
 		t.Fatalf("alias lookup = (%q, %v), want (%s, true)", gotRID, found, testTunnelResourceID)
+	}
+}
+
+func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
+	now := time.Date(2026, 5, 27, 4, 30, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		env  tunnelInstallEnvironment
+		web  string
+		want []string
+	}{
+		{
+			name: "docker",
+			env:  tunnelEnvDocker,
+			web:  "web.1",
+			want: []string{
+				"Target environment: Docker sidecar.",
+				"WEB_CONTAINER='web.1'",
+				testTunnelDockerLine,
+				"docker logs -f qurl-tunnel-" + testTunnelSlug,
+			},
+		},
+		{
+			name: "compose",
+			env:  tunnelEnvCompose,
+			web:  "web_1",
+			want: []string{
+				"Target environment: Docker Compose.",
+				"WEB_SERVICE='web_1'",
+				"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
+				"qurl-tunnel-" + testTunnelSlug + ":",
+				"docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			freezeTunnelBootstrapNow(t, now)
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyResourceID: testTunnelResourceID,
+					testKeyType:       client.ResourceTypeTunnel,
+					testKeySlug:       testTunnelSlug,
+					testKeyStatus:     client.StatusActive,
+				})
+			})
+			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyKeyID:      testTunnelAPIKeyID,
+					testKeyAPIKey:     testTunnelModalKey,
+					testKeyStatus:     client.StatusActive,
+					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+					testKeyTunnelSlug: testTunnelSlug,
+					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+				})
+			})
+
+			h := newAdminTestHandler(t, ts)
+			h.cfg.TunnelImage = testTunnelImageRef
+			h.SetAliasStore(h.cfg.AdminStore)
+			inv := newAdminSlashInvoker(t, h)
+			meta := TunnelInstallModalMetadata{
+				TeamID:        testAdminTeamID,
+				ChannelID:     testTunnelChannelID,
+				UserID:        testAdminUserID,
+				ResponseURL:   inv.responseU.URL,
+				CreatedAtUnix: now.Unix(),
+			}
+			body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tc.env), "9090", tc.web))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+			}
+			async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+			for _, want := range tc.want {
+				if !strings.Contains(async, want) {
+					t.Fatalf("async reply missing %q:\n%s", want, async)
+				}
+			}
+		})
 	}
 }
 
@@ -929,11 +1015,13 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 
 	for _, want := range []string{
 		"ECS/Fargate task-definition checklist",
-		"same task definition",
+		"non-essential sidecar container",
+		"Fargate's awsvpc network mode",
 		"replace `<region>` / `<account-id>`",
 		"127.0.0.1:9090",
 		"AWS Secrets Manager",
 		"secret as `qurl-tunnel-" + testTunnelSlug + "`",
+		"delete this Slack message before continuing",
 		testTunnelImageRef,
 		"Put qurl-proxy.yaml on an EFS access point",
 		"local_port: 9090",
@@ -955,6 +1043,22 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 6 {
 		t.Fatalf("ECS instructions rendered %d code fences, want 6 for three independently copyable artifacts:\n%s", gotFenceCount, got)
+	}
+
+	var container ecsContainerDefinition
+	if err := json.Unmarshal([]byte(renderECSSidecarContainerJSON(&tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvECSFargate,
+	}, testTunnelImageRef)), &container); err != nil {
+		t.Fatalf("ECS sidecar JSON did not parse: %v", err)
+	}
+	if container.Essential {
+		t.Fatal("ECS sidecar Essential = true, want false so the tunnel does not take down the app task")
+	}
+	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
+		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
 	}
 }
 
@@ -1079,7 +1183,7 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 		"WEB_CONTAINER='web.1_2-3'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
 		`--network "container:${WEB_CONTAINER}"`,
-		`TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`,
+		testTunnelDockerLine,
 		testTunnelAgentDirFragment,
 		"local_port: 9090",
 		testTunnelAPIKey,
@@ -1267,7 +1371,7 @@ func TestHumanTunnelBootstrapTTL(t *testing.T) {
 		{ttl: "24h", want: "24 hours"},
 		{ttl: "30m", want: "30 minutes"},
 		{ttl: "75m", want: "1 hour 15 minutes"},
-		{ttl: "90s", want: "1 minute"},
+		{ttl: "90s", want: "2 minutes"},
 		{ttl: "later", want: "the requested later"},
 	}
 	for _, tc := range cases {
