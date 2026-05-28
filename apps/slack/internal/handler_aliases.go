@@ -195,5 +195,11 @@ func formatAliasLine(alias, target, slug, resourceID string) string {
 	if resourceID != "" {
 		return fmt.Sprintf("• `$%s` → `%s`", alias, resourceID)
 	}
+	// Bare token, nothing resolved. Only reachable with an empty
+	// resourceID — and fanoutAliasRows only fetches (and thus only
+	// reaches this formatter at all) when ResourceID != "", so a real
+	// PolicyEntry row never lands here. This is the defensive escape
+	// hatch for a synthetic/empty entry, kept so the listing still
+	// renders one line per entry rather than dropping it.
 	return fmt.Sprintf("• `$%s`", alias)
 }

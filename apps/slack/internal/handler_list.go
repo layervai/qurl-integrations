@@ -31,10 +31,13 @@ import (
 // caveat in [Handler.processListResources].
 const listResourcesScanLimit = 100
 
-// listTunnelsEmptyMessage is the friendly empty-state copy. Points the
-// user at `/qurl tunnel install <slug>` — the way tunnels are created —
-// so a workspace with no tunnels yet knows what to do next.
+// listTunnelsEmptyMessage / listTunnelsEmptyMessageNonAdmin are the
+// friendly empty-state copy, branched on admin status. `/qurl tunnel
+// install` is admin-only, so admins are told to run it directly while
+// non-admins are routed to ask an admin — telling a non-admin to run a
+// command they can't would dead-end them.
 const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. Set one up with `/qurl tunnel install <slug>` first."
+const listTunnelsEmptyMessageNonAdmin = ":mag: No tunnels found in this workspace. Ask a Slack admin to set one up with `/qurl tunnel install <slug>`."
 
 // listTunnelsNonAdminPaginationGapMessage is the user-facing copy
 // for the case where a non-admin's filtered set is empty AND the
@@ -133,17 +136,31 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			_ = h.postResponse(log, responseURL, listTunnelsNonAdminPaginationGapMessage)
 			return
 		}
-		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
+		// `/qurl tunnel install` is admin-only, so route non-admins to
+		// ask an admin rather than dead-ending them on a command they
+		// can't run.
+		emptyMsg := listTunnelsEmptyMessage
+		if !isAdmin {
+			emptyMsg = listTunnelsEmptyMessageNonAdmin
+		}
+		_ = h.postResponse(log, responseURL, emptyMsg)
 		return
 	}
 
 	// Stable order for two-call idempotency at the Slack ephemeral
 	// surface — the server's pagination cursor implies an order but
 	// not a stable one across re-queries. Sort by the displayed token
-	// (the same slug→alias→resource_id precedence the rows render)
-	// BEFORE formatting.
+	// (the same slug→alias→resource_id precedence the rows render),
+	// with resource_id as a tiebreaker so two rows sharing a token
+	// (e.g. a slug == another row's alias) order deterministically
+	// rather than inheriting the unstable upstream order. BEFORE
+	// formatting.
 	sort.SliceStable(resources, func(i, j int) bool {
-		return tunnelToken(&resources[i]) < tunnelToken(&resources[j])
+		ti, tj := tunnelToken(&resources[i]), tunnelToken(&resources[j])
+		if ti != tj {
+			return ti < tj
+		}
+		return resources[i].ResourceID < resources[j].ResourceID
 	})
 	lines := make([]string, 0, len(resources))
 	for i := range resources {
