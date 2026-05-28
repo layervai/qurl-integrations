@@ -135,6 +135,8 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "compose rejects slash service", text: testTunnelInstallCmd + " service:web/bad env:compose", wantErr: true},
 		{name: "compose rejects dotted container ref", text: testTunnelInstallCmd + " env:compose container:web.1", wantErr: true},
 		{name: "compose rejects container ref", text: testTunnelInstallCmd + " env:compose container:web", wantErr: true},
+		{name: "empty alias option", text: testTunnelInstallCmd + " alias:", wantErr: true},
+		{name: "empty alias after sigil", text: testTunnelInstallCmd + " alias:$", wantErr: true},
 		{name: "alias rejects semicolon", text: testTunnelInstallCmd + " alias:$bad;rm", wantErr: true},
 		{name: "slug rejects shell metacharacter", text: "tunnel install prod;bad", wantErr: true},
 		{name: "slug rejects command substitution", text: "tunnel install prod$(whoami)", wantErr: true},
@@ -167,6 +169,76 @@ func TestParseTunnelInstall(t *testing.T) {
 				t.Errorf("web container = %q, want %q", got.WebRef, tc.wantWebRef)
 			}
 		})
+	}
+}
+
+func FuzzParseTunnelInstall(f *testing.F) {
+	for _, seed := range []string{
+		testTunnelInstallCmd,
+		testTunnelInstallCmd + " port:9090 alias:$dash env:docker container:web",
+		testTunnelInstallCmd + " env:compose service:web",
+		testTunnelInstallCmd + " alias:$",
+		"tunnel install prod$(whoami)",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if len(s) > 512 {
+			return
+		}
+		_, _ = parseTunnelInstall(s)
+	})
+}
+
+func TestTunnelWebRefKindValidationMessageMatrix(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		env     tunnelInstallEnvironment
+		kind    tunnelInstallWebRefKind
+		wantErr bool
+	}{
+		{name: "docker none", env: tunnelEnvDocker, kind: tunnelWebRefKindNone},
+		{name: "docker container", env: tunnelEnvDocker, kind: tunnelWebRefKindContainer},
+		{name: "docker service", env: tunnelEnvDocker, kind: tunnelWebRefKindService, wantErr: true},
+		{name: "compose none", env: tunnelEnvCompose, kind: tunnelWebRefKindNone},
+		{name: "compose service", env: tunnelEnvCompose, kind: tunnelWebRefKindService},
+		{name: "compose container", env: tunnelEnvCompose, kind: tunnelWebRefKindContainer, wantErr: true},
+		{name: "compose shorthand service", env: tunnelEnvComposeAlt, kind: tunnelWebRefKindService},
+		{name: "ecs container", env: tunnelEnvECSFargate, kind: tunnelWebRefKindContainer, wantErr: true},
+		{name: "kubernetes container", env: tunnelEnvKubernetes, kind: tunnelWebRefKindContainer, wantErr: true},
+		{name: "unknown container", env: tunnelInstallEnvironment("other"), kind: tunnelWebRefKindContainer, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := tunnelWebRefKindValidationMessage(tc.env, tc.kind)
+			if (msg != "") != tc.wantErr {
+				t.Fatalf("tunnelWebRefKindValidationMessage(%q, %q) = %q, wantErr=%v", tc.env, tc.kind, msg, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestInteractionStateLogValuesAllowlistsKnownNonSecretBlocks(t *testing.T) {
+	t.Parallel()
+	got := interactionStateLogValues(map[string]map[string]interactionStateValue{
+		tunnelInstallBlockSlug: {
+			tunnelInstallActionSlug: {Value: testTunnelSlug},
+			"unexpected_action":     {Value: "should-not-log"},
+		},
+		"future_secret_block": {
+			"secret_input": {Value: "lv_live_should_not_log"},
+		},
+	})
+	if got[tunnelInstallBlockSlug][tunnelInstallActionSlug] != testTunnelSlug {
+		t.Fatalf("known state value missing from log values: %#v", got)
+	}
+	if _, ok := got[tunnelInstallBlockSlug]["unexpected_action"]; ok {
+		t.Fatalf("unexpected known-block action logged: %#v", got)
+	}
+	if _, ok := got["future_secret_block"]; ok {
+		t.Fatalf("unknown future block logged: %#v", got)
 	}
 }
 
@@ -1367,6 +1439,34 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 	}
 	if strings.Contains(got, testForbiddenResourceLabel) || strings.Contains(got, testTunnelResourceID) {
 		t.Fatalf("rendered install message leaked resource details:\n%s", got)
+	}
+}
+
+func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
+	t.Parallel()
+	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
+
+	_, err := NewHandler(Config{}).renderTunnelInstallMessage(&tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL shortcut `$prod-dashboard` is ready in this channel.")
+	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
+		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
+	}
+}
+
+func TestYAMLSingleQuotedRejectsControlsAndNewlines(t *testing.T) {
+	t.Parallel()
+	cases := []string{"bad\nvalue", "bad\rvalue", "bad\x00value", "bad\x7fvalue"}
+	for _, input := range cases {
+		t.Run(fmt.Sprintf("%q", input), func(t *testing.T) {
+			t.Parallel()
+			if got, err := yamlSingleQuoted(input); err == nil {
+				t.Fatalf("yamlSingleQuoted(%q) = %q, want error", input, got)
+			}
+		})
 	}
 }
 

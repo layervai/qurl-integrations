@@ -64,11 +64,15 @@ func TestValidateSlackBotToken(t *testing.T) {
 		{name: "user token", token: "xoxp-test-token", wantErr: true},
 		{name: "app token", token: "xapp-test-token", wantErr: true},
 		{name: "placeholder bot token", token: "xoxb-", wantErr: true},
+		{name: "minimum length bot token", token: "xoxb-" + strings.Repeat("a", 15)},
+		{name: "one below minimum length", token: "xoxb-" + strings.Repeat("a", 14), wantErr: true},
 		{name: "token with whitespace", token: "xoxb-test-token\r", wantErr: true},
 		{name: "token with non-ascii", token: "xoxb-test-tokené", wantErr: true},
 		{name: "token with underscore", token: "xoxb-" + strings.Repeat("a", 20) + "_ok"},
 		{name: "token with dot", token: "xoxb-" + strings.Repeat("a", 20) + ".ok"},
 		{name: "long bot token", token: "xoxb-" + strings.Repeat("a", 250)},
+		{name: "maximum length bot token", token: "xoxb-" + strings.Repeat("a", 315)},
+		{name: "one above maximum length", token: "xoxb-" + strings.Repeat("a", 316), wantErr: true},
 		{name: "token too long", token: "xoxb-" + strings.Repeat("a", 508), wantErr: true},
 	}
 	for _, tc := range cases {

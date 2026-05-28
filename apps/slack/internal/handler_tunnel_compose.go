@@ -12,6 +12,14 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	}
 	tunnelServiceName := "qurl-tunnel-" + args.Slug
 	tunnelService := shellSingleQuote(tunnelServiceName)
+	quotedTunnelServiceName, err := yamlSingleQuoted(tunnelServiceName)
+	if err != nil {
+		return "", err
+	}
+	quotedImage, err := yamlSingleQuoted(image)
+	if err != nil {
+		return "", err
+	}
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
 	// expand WEB_SERVICE, QURL_TUNNEL_SLUG, AGENT_STATE_DIR, and SECRET_DIR
 	// into the generated file. Keep dockerComposeServicePattern narrow: it
@@ -87,7 +95,7 @@ services:
       QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), yamlSingleQuoted(tunnelServiceName), yamlSingleQuoted(image))
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), webService, shellSingleQuote(args.Slug), tunnelService, renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {

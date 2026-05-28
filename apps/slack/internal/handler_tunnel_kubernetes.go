@@ -10,6 +10,26 @@ import (
 
 func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	names := kubernetesTunnelObjectNames(args.Slug)
+	quotedConfigMap, err := yamlSingleQuoted(names.configMap)
+	if err != nil {
+		return "", err
+	}
+	quotedAgentPVC, err := yamlSingleQuoted(names.agentPVC)
+	if err != nil {
+		return "", err
+	}
+	quotedImage, err := yamlSingleQuoted(image)
+	if err != nil {
+		return "", err
+	}
+	quotedSlug, err := yamlSingleQuoted(args.Slug)
+	if err != nil {
+		return "", err
+	}
+	quotedSecret, err := yamlSingleQuoted(names.secret)
+	if err != nil {
+		return "", err
+	}
 	objects := fmt.Sprintf(`set -eu
 %s
 
@@ -35,7 +55,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyPipeShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), yamlSingleQuoted(names.configMap), indentLines(renderTunnelConfigYAML(args), 4), yamlSingleQuoted(names.agentPVC))
+QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyPipeShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), quotedConfigMap, indentLines(renderTunnelConfigYAML(args), 4), quotedAgentPVC)
 
 	patch := fmt.Sprintf(`securityContext:
   fsGroup: 65532
@@ -77,7 +97,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, yamlSingleQuoted(image), yamlSingleQuoted(args.Slug), yamlSingleQuoted(names.agentPVC), yamlSingleQuoted(names.secret), yamlSingleQuoted(names.configMap))
+      name: %s`, quotedImage, quotedSlug, quotedAgentPVC, quotedSecret, quotedConfigMap)
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {

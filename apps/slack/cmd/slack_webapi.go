@@ -29,14 +29,18 @@ const slackViewsOpenResponseBodyLimit = 64 * 1024
 const slackOpenViewMaxErrorSnippetBytes = 200
 
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {
-	return slackOpenViewFuncWithURL(token, userAgent, slackViewsOpenURL)
+	return newSlackOpenViewFunc(token, userAgent, slackViewsOpenURL, nil)
 }
 
 func slackOpenViewFuncWithURL(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
-	return slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL, defaultSlackViewsOpenClient())
+	return newSlackOpenViewFunc(token, userAgent, viewsOpenURL, nil)
 }
 
 func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+	return newSlackOpenViewFunc(token, userAgent, viewsOpenURL, httpClient)
+}
+
+func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
@@ -133,6 +137,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 	if out.OK {
 		return nil
 	}
+	out.Error = slackOpenViewAPIErrorCode(out.Error)
 	if out.Error == "" {
 		out.Error = "not_ok"
 	}
@@ -145,14 +150,11 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		return bodySnippet
 	}
 	cut := slackOpenViewMaxErrorSnippetBytes
-	// len(bodySnippet) > slackOpenViewMaxErrorSnippetBytes above guarantees bodySnippet[cut]
-	// exists; if that byte is a UTF-8 continuation byte, rewind to the rune
-	// start before slicing.
-	for cut > 0 && !utf8.RuneStart(bodySnippet[cut]) {
+	for cut > 0 && !utf8.ValidString(bodySnippet[:cut]) {
 		cut--
 	}
 	if cut == 0 {
-		return bodySnippet[:slackOpenViewMaxErrorSnippetBytes] + "..."
+		return "..."
 	}
 	return bodySnippet[:cut] + "..."
 }
@@ -168,6 +170,10 @@ func printableLogSnippet(s string) string {
 			return r
 		}
 	}, s)
+}
+
+func slackOpenViewAPIErrorCode(code string) string {
+	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
 }
 
 func slackOpenViewAPIError(code, retryAfter string) error {

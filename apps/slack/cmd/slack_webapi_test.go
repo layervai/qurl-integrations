@@ -20,6 +20,7 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	t.Parallel()
 	var gotAuth string
 	var gotUA string
+	var gotContentType string
 	var gotBody struct {
 		TriggerID string          `json:"trigger_id"`
 		View      json.RawMessage `json:"view"`
@@ -27,6 +28,7 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotUA = r.Header.Get("User-Agent")
+		gotContentType = r.Header.Get("Content-Type")
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
@@ -43,6 +45,9 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	}
 	if gotUA != "qurl-slack/test" {
 		t.Fatalf("User-Agent = %q, want qurl-slack/test", gotUA)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", gotContentType)
 	}
 	if gotBody.TriggerID != "trigger_test" {
 		t.Fatalf("trigger_id = %q, want trigger_test", gotBody.TriggerID)
@@ -109,9 +114,16 @@ func TestSlackOpenViewFuncSurfacesRateLimit(t *testing.T) {
 func TestSlackOpenViewFuncRejectsInvalidViewJSON(t *testing.T) {
 	t.Parallel()
 
-	err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", []byte(`not-json`))
-	if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
-		t.Fatalf("error = %v, want invalid view JSON", err)
+	for _, raw := range [][]byte{
+		nil,
+		[]byte(``),
+		[]byte(`   `),
+		[]byte(`not-json`),
+	} {
+		err := slackOpenViewFuncWithURL("xoxb-test", "", "https://slack.invalid/views.open")(context.Background(), "T_test", "trigger_test", raw)
+		if err == nil || !strings.Contains(err.Error(), "invalid view JSON") {
+			t.Fatalf("input %q error = %v, want invalid view JSON", raw, err)
+		}
 	}
 }
 
@@ -157,6 +169,19 @@ func TestSlackOpenViewFuncSurfacesRedirectAsHTTPError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "response JSON") {
 		t.Fatalf("error = %v, want redirect handled before JSON parse", err)
+	}
+}
+
+func TestSlackOpenViewFuncSurfacesEmptyRedirectBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || err.Error() != "views.open returned HTTP 307" {
+		t.Fatalf("error = %v, want bare HTTP 307", err)
 	}
 }
 
@@ -265,6 +290,35 @@ func TestSlackOpenViewFuncSurfacesEmptyResponseBody(t *testing.T) {
 	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
 	if err == nil || !strings.Contains(err.Error(), "empty response body") {
 		t.Fatalf("error = %v, want empty response body", err)
+	}
+}
+
+func TestSlackOpenViewFuncSurfacesNotOKFallback(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "not_ok") {
+		t.Fatalf("error = %v, want not_ok fallback", err)
+	}
+}
+
+func TestSlackOpenViewFuncMakesSlackErrorCodePrintable(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{\"ok\":false,\"error\":\"bad\\ncode\"}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", srv.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "bad code") {
+		t.Fatalf("error = %v, want printable Slack error code", err)
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("error = %q, want newline normalized", err.Error())
 	}
 }
 
@@ -399,6 +453,21 @@ func TestSlackOpenViewFuncReadsAndClosesSuccessfulResponse(t *testing.T) {
 	}
 	if !body.closed.Load() {
 		t.Fatal("successful response body was not closed")
+	}
+}
+
+func TestSlackOpenViewFuncPropagatesContextCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		cancel()
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+
+	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(ctx, "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
 

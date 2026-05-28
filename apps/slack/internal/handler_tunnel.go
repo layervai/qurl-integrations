@@ -57,8 +57,11 @@ type tunnelInstallEnvironment string
 type tunnelInstallWebRefKind string
 
 const (
-	tunnelEnvDocker     tunnelInstallEnvironment = "docker"
-	tunnelEnvCompose    tunnelInstallEnvironment = "docker-compose"
+	tunnelEnvDocker  tunnelInstallEnvironment = "docker"
+	tunnelEnvCompose tunnelInstallEnvironment = "docker-compose"
+	// Input-only shorthand. parseTunnelEnvironment normalizes env:compose to
+	// tunnelEnvCompose; the typed constant stays for exhaustive defensive
+	// switches that may receive direct test or seam values.
 	tunnelEnvComposeAlt tunnelInstallEnvironment = "compose"
 	tunnelEnvECSFargate tunnelInstallEnvironment = "ecs-fargate"
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
@@ -175,7 +178,7 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 	case string(tunnelEnvKubernetes):
 		return tunnelEnvKubernetes, ""
 	default:
-		return "", "env must be one of docker, docker-compose, ecs-fargate, or kubernetes; compose is accepted as shorthand for docker-compose"
+		return "", "env must be one of docker, docker-compose, ecs-fargate, or kubernetes; compose is accepted as shorthand for docker-compose."
 	}
 }
 
@@ -520,6 +523,12 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 }
 
 func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
+	if key == nil {
+		return "", errors.New("bootstrap api key is missing")
+	}
+	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
+		return "", err
+	}
 	keyBlock, err := slackCodeBlock(key.APIKey)
 	if err != nil {
 		return "", err
@@ -782,11 +791,13 @@ func indentLines(s string, spaces int) string {
 	return strings.Join(lines, "\n")
 }
 
-func yamlSingleQuoted(s string) string {
-	// Renders a pre-validated single-line scalar for generated snippets. This
-	// is not a general YAML encoder; callers must reject controls/newlines and
-	// other syntax-bearing characters before reaching this helper.
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+func yamlSingleQuoted(s string) (string, error) {
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+			return "", errors.New("yaml scalar contains control characters or newlines")
+		}
+	}
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'", nil
 }
 
 // ValidateTunnelImageRef checks the operator-provided image reference shown in

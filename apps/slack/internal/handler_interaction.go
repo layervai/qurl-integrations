@@ -328,27 +328,57 @@ func (v interactionStateValue) text() string {
 	return ""
 }
 
+var interactionStateLogAllowlist = map[string]map[string]struct{}{
+	tunnelInstallBlockSlug: {
+		tunnelInstallActionSlug: {},
+	},
+	tunnelInstallBlockShortcut: {
+		tunnelInstallActionShortcut: {},
+	},
+	tunnelInstallBlockEnvironment: {
+		tunnelInstallActionEnvironment: {},
+	},
+	tunnelInstallBlockLocalPort: {
+		tunnelInstallActionLocalPort: {},
+	},
+	tunnelInstallBlockWebRef: {
+		tunnelInstallActionWebRef: {},
+	},
+}
+
+func interactionStateLogValues(values map[string]map[string]interactionStateValue) map[string]map[string]string {
+	logValues := make(map[string]map[string]string, len(values))
+	for blockID, actions := range values {
+		allowedActions, ok := interactionStateLogAllowlist[blockID]
+		if !ok {
+			continue
+		}
+		inner := make(map[string]string, len(actions))
+		for actionID, v := range actions {
+			if _, ok := allowedActions[actionID]; !ok {
+				continue
+			}
+			inner[actionID] = v.text()
+		}
+		if len(inner) > 0 {
+			logValues[blockID] = inner
+		}
+	}
+	return logValues
+}
+
 type interactionSelectedOption struct {
 	Value string `json:"value"`
 }
 
 // LogValue implements [slog.LogValuer] so a `slog` call that takes
 // the payload as a value (`slog.Info("interaction", "payload", p)`)
-// emits a stable group shape. Today no fields need redacting (the
-// bootstrap-code modal that did is gone); a future secret-bearing
-// block should add a block-id allowlist consulted here before
-// emitting state.values.
+// emits a stable group shape. State values are emitted only for known
+// non-secret tunnel-install blocks; future secret-bearing blocks are redacted
+// by default unless explicitly added to interactionStateLogAllowlist.
 func (p *interactionPayload) LogValue() slog.Value {
 	if p == nil {
 		return slog.AnyValue(nil)
-	}
-	values := make(map[string]map[string]string, len(p.View.State.Values))
-	for blockID, actions := range p.View.State.Values {
-		inner := make(map[string]string, len(actions))
-		for actionID, v := range actions {
-			inner[actionID] = v.text()
-		}
-		values[blockID] = inner
 	}
 	return slog.GroupValue(
 		slog.String("type", p.Type),
@@ -357,7 +387,7 @@ func (p *interactionPayload) LogValue() slog.Value {
 		slog.String("trigger_id", p.TriggerID),
 		slog.String("view_id", p.View.ID),
 		slog.String("callback_id", p.View.CallbackID),
-		slog.Any("state_values", values),
+		slog.Any("state_values", interactionStateLogValues(p.View.State.Values)),
 	)
 }
 
