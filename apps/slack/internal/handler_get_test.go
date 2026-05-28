@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // writeCreateFixture writes a POST /v1/qurls success envelope.
@@ -80,6 +82,13 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
+	})
+	// On an alias-binding miss, getWork falls back to a tunnel-slug
+	// lookup (GET /v1/resources?slug=…). `$missing` is neither a binding
+	// nor a live tunnel slug, so the resources listing returns empty and
+	// the user sees the "not configured for this channel" copy.
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -611,6 +620,95 @@ func TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin(t *testing.T) {
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite resource-id not-in-allow-set (hits = %d)", mintHits.Load())
+	}
+}
+
+// addTunnelSlugResource registers a GET /v1/resources handler that
+// resolves testTunnelSlug → testResourceIDFix as an active tunnel — the
+// upstream half of the `/qurl get $<slug>` slug-fallback path.
+func addTunnelSlugResource(t *testing.T, ts *adminTestServers) {
+	t.Helper()
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: testResourceIDFix,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+}
+
+// TestHandleGet_DollarSlugAllowedSetNonAdmin fences the list→get
+// round-trip for a tunnel that reaches a non-admin's /qurl list via
+// allowed_resource_ids only — no alias_binding in this channel (e.g. a
+// tunnel installed in another channel, then granted here). /qurl list
+// renders `$<slug>`; pasting it into /qurl get must mint. The token
+// misses the alias-binding lookup, falls back to slug resolution, and
+// the resolved resource_id passes the channel allow-set gate.
+func TestHandleGet_DollarSlugAllowedSetNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{testResourceIDFix})
+	addTunnelSlugResource(t, ts)
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/by-slug", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/by-slug") {
+		t.Errorf("slug round-trip failed — async reply missing link: %q", async)
+	}
+}
+
+// TestHandleGet_DollarSlugNotAllowedNonAdmin fences the slug-fallback
+// authorization gate: a non-admin pasting a tunnel slug whose resource
+// isn't in the channel allow-set sees the slug-worded "not allowed"
+// copy (NOT the resolved r_<id>, which they never saw) and never
+// reaches the mint.
+func TestHandleGet_DollarSlugNotAllowedNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	addTunnelSlugResource(t, ts)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$"+testTunnelSlug+"` is not allowed in this channel") {
+		t.Errorf("async reply missing slug-worded not-allowed copy: %q", async)
+	}
+	if strings.Contains(async, testResourceIDFix) {
+		t.Errorf("resolved resource_id leaked in not-allowed message: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached despite slug not in allow-set (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_DollarSlugAdminBypassesAllowedSet fences the admin
+// round-trip: a workspace admin sees every tunnel in /qurl list
+// (unfiltered) and can mint its `$<slug>` even with no alias_binding
+// and no allow-set entry in the current channel.
+func TestHandleGet_DollarSlugAdminBypassesAllowedSet(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	addTunnelSlugResource(t, ts)
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/admin-slug", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/admin-slug") {
+		t.Errorf("admin slug round-trip failed: %q", async)
 	}
 }
 
