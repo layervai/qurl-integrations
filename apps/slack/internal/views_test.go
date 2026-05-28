@@ -210,7 +210,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 		"Tunnel slug",
 		"Channel shortcut",
 		"Target environment",
-		string(tunnelEnvDockerVM),
+		string(tunnelEnvDocker),
 		string(tunnelEnvCompose),
 		string(tunnelEnvECSFargate),
 		string(tunnelEnvKubernetes),

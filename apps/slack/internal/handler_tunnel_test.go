@@ -59,6 +59,8 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "slug with alias sigil", text: "tunnel install $" + testTunnelSlug, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
 		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: 9090},
 		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
+		{name: "docker environment", text: testTunnelInstallCmd + " env:docker", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
+		{name: "old docker vm spelling", text: testTunnelInstallCmd + " env:docker-vm", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
 		{name: "environment", text: testTunnelInstallCmd + " env:ecs-fargate", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvECSFargate},
 		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:web_1", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWeb: "web_1"},
 		{name: "container ref", text: testTunnelInstallCmd + " container:web_1-2", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWeb: "web_1-2"},
@@ -90,7 +92,7 @@ func TestParseTunnelInstall(t *testing.T) {
 			}
 			wantEnv := tc.wantEnv
 			if wantEnv == "" {
-				wantEnv = tunnelEnvDockerVM
+				wantEnv = tunnelEnvDocker
 			}
 			if got.Environment != wantEnv {
 				t.Errorf("environment = %q, want %q", got.Environment, wantEnv)
@@ -590,7 +592,7 @@ func TestTunnelInstallModalRejectsUnsafeWebContainerBeforeMintingKey(t *testing.
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: tunnelBootstrapNow().Unix(),
-	}, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDockerVM), "8080", "abc```def"))
+	}, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "abc```def"))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -616,7 +618,7 @@ func TestTunnelInstallModalRejectsEmptyPayloadIdentity(t *testing.T) {
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: tunnelBootstrapNow().Unix(),
 	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, "", "", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDockerVM), "8080", ""))
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, "", "", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -643,7 +645,7 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: tunnelBootstrapNow().Unix(),
 	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDockerVM), "8080", ""))
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -672,7 +674,7 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: now.Add(-tunnelInstallModalTTL - time.Minute).Unix(),
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDockerVM), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -697,7 +699,7 @@ func TestTunnelInstallModalRejectsMissingCreatedAtBeforeMintingKey(t *testing.T)
 		UserID:      testAdminUserID,
 		ResponseURL: testSlackResponseURL,
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDockerVM), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -712,7 +714,7 @@ func TestTunnelInstallModalRejectsMissingCreatedAtBeforeMintingKey(t *testing.T)
 
 func TestParseTunnelInstallModalArgsRejectsMissingEnvironment(t *testing.T) {
 	t.Parallel()
-	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDockerVM), "8080", "")
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", "")
 	delete(values, tunnelInstallBlockEnvironment)
 
 	args, fieldErrors := parseTunnelInstallModalArgs(values)
@@ -740,6 +742,20 @@ func TestParseTunnelInstallModalArgsRejectsDottedComposeService(t *testing.T) {
 	}
 }
 
+func TestParseTunnelInstallModalArgsDefaultsEmptyPort(t *testing.T) {
+	t.Parallel()
+	values := tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "", "")
+
+	args, fieldErrors := parseTunnelInstallModalArgs(values)
+
+	if len(fieldErrors) != 0 {
+		t.Fatalf("field errors = %+v, want none", fieldErrors)
+	}
+	if args == nil || args.LocalPort != defaultTunnelLocalPort {
+		t.Fatalf("args = %+v, want default local port %d", args, defaultTunnelLocalPort)
+	}
+}
+
 func TestParseTunnelInstallModalArgsPreservesAliasValidationReason(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -753,7 +769,7 @@ func TestParseTunnelInstallModalArgsPreservesAliasValidationReason(t *testing.T)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			values := tunnelInstallModalValues(testTunnelSlug, tc.shortcut, string(tunnelEnvDockerVM), "8080", "")
+			values := tunnelInstallModalValues(testTunnelSlug, tc.shortcut, string(tunnelEnvDocker), "8080", "")
 
 			args, fieldErrors := parseTunnelInstallModalArgs(values)
 
@@ -777,7 +793,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDockerVM,
+		Environment: tunnelEnvDocker,
 	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "Channel shortcut `$prod-dashboard` is ready.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
@@ -937,6 +953,9 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
 	}
+	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 6 {
+		t.Fatalf("ECS instructions rendered %d code fences, want 6 for three independently copyable artifacts:\n%s", gotFenceCount, got)
+	}
 }
 
 func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
@@ -1052,7 +1071,7 @@ func TestRenderDockerTunnelInstructionsUsesWebContainer(t *testing.T) {
 		Slug:         testTunnelSlug,
 		Alias:        testTunnelSlug,
 		LocalPort:    9090,
-		Environment:  tunnelEnvDockerVM,
+		Environment:  tunnelEnvDocker,
 		WebContainer: "web.1_2-3",
 	}, &client.APIKey{APIKey: testTunnelAPIKey}, testTunnelImageRef)
 

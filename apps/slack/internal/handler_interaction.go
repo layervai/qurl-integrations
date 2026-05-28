@@ -148,17 +148,21 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 		shortcutRaw = "$" + shortcutRaw
 	}
 	if shortcutRaw != "" {
-		var aliasMsg string
-		alias, aliasMsg = requireAlias(shortcutRaw)
-		if aliasMsg != "" {
-			fieldErrors[tunnelInstallBlockShortcut] = tunnelInstallModalAliasError(aliasMsg)
+		var aliasReason string
+		alias, aliasReason = requireAliasReason(shortcutRaw)
+		if aliasReason != "" {
+			fieldErrors[tunnelInstallBlockShortcut] = aliasReason
 		}
 	}
 
 	portRaw := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort))
-	port, err := strconv.Atoi(portRaw)
-	if err != nil || port < 1 || port > 65535 {
-		fieldErrors[tunnelInstallBlockLocalPort] = "Use a TCP port from 1 to 65535."
+	port := defaultTunnelLocalPort
+	if portRaw != "" {
+		var err error
+		port, err = strconv.Atoi(portRaw)
+		if err != nil || port < 1 || port > 65535 {
+			fieldErrors[tunnelInstallBlockLocalPort] = "Use a TCP port from 1 to 65535."
+		}
 	}
 
 	envRaw := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockEnvironment, tunnelInstallActionEnvironment))
@@ -220,14 +224,6 @@ func tunnelWebContainerValidationMessage(env tunnelInstallEnvironment, value str
 		return ""
 	}
 	return "Use a Docker container name or ID with letters, numbers, dots, underscores, or hyphens."
-}
-
-func tunnelInstallModalAliasError(aliasMsg string) string {
-	msg, _, _ := strings.Cut(aliasMsg, "\n\n")
-	if strings.TrimSpace(msg) == "" {
-		return "Use lowercase letters, numbers, and hyphens. The $ prefix is optional here."
-	}
-	return msg
 }
 
 // interactionPayload is the subset of Slack's view_submission

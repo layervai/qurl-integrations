@@ -15,6 +15,9 @@ import (
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
+
+// Handler callers use a tighter Slack trigger_id budget; this client timeout
+// is only a final guard for future callers that forget to pass a deadline.
 const slackViewsOpenTimeout = 2 * time.Second
 
 func slackOpenViewFunc(token, userAgent string) func(context.Context, string, string, []byte) error {

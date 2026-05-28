@@ -44,7 +44,7 @@ var tunnelBootstrapNow = time.Now
 type tunnelInstallEnvironment string
 
 const (
-	tunnelEnvDockerVM   tunnelInstallEnvironment = "docker-vm"
+	tunnelEnvDocker     tunnelInstallEnvironment = "docker"
 	tunnelEnvCompose    tunnelInstallEnvironment = "docker-compose"
 	tunnelEnvECSFargate tunnelInstallEnvironment = "ecs-fargate"
 	tunnelEnvKubernetes tunnelInstallEnvironment = "kubernetes"
@@ -56,37 +56,6 @@ type tunnelInstallArgs struct {
 	LocalPort    int
 	Environment  tunnelInstallEnvironment
 	WebContainer string
-}
-
-type ecsContainerDefinition struct {
-	Name             string              `json:"name"`
-	Image            string              `json:"image"`
-	Essential        bool                `json:"essential"`
-	Environment      []ecsEnvironmentVar `json:"environment"`
-	Secrets          []ecsSecret         `json:"secrets"`
-	MountPoints      []ecsMountPoint     `json:"mountPoints"`
-	LogConfiguration ecsLogConfiguration `json:"logConfiguration"`
-}
-
-type ecsEnvironmentVar struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
-type ecsSecret struct {
-	Name      string `json:"name"`
-	ValueFrom string `json:"valueFrom"`
-}
-
-type ecsMountPoint struct {
-	SourceVolume  string `json:"sourceVolume"`
-	ContainerPath string `json:"containerPath"`
-	ReadOnly      bool   `json:"readOnly"`
-}
-
-type ecsLogConfiguration struct {
-	LogDriver string            `json:"logDriver"`
-	Options   map[string]string `json:"options"`
 }
 
 func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
@@ -103,7 +72,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		Slug:        slug,
 		Alias:       slug,
 		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDockerVM,
+		Environment: tunnelEnvDocker,
 	}
 	if !tunnelSlugPattern.MatchString(args.Slug) {
 		return nil, "Tunnel slug must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
@@ -154,8 +123,8 @@ func tunnelInstallUsage() string {
 
 func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg string) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", string(tunnelEnvDockerVM), "docker":
-		return tunnelEnvDockerVM, ""
+	case "", string(tunnelEnvDocker), "docker-vm":
+		return tunnelEnvDocker, ""
 	case string(tunnelEnvCompose), "compose":
 		return tunnelEnvCompose, ""
 	case string(tunnelEnvECSFargate):
@@ -169,7 +138,7 @@ func parseTunnelEnvironment(raw string) (env tunnelInstallEnvironment, userMsg s
 
 func (e tunnelInstallEnvironment) label() string {
 	switch e {
-	case tunnelEnvDockerVM:
+	case tunnelEnvDocker:
 		return "Docker sidecar"
 	case tunnelEnvCompose:
 		return "Docker Compose"
@@ -437,7 +406,7 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, key *
 		return renderKubernetesTunnelInstructions(args, key, image), nil
 	case tunnelEnvCompose:
 		return renderDockerComposeTunnelInstructions(args, key, image), nil
-	case tunnelEnvDockerVM:
+	case tunnelEnvDocker:
 		return renderDockerTunnelInstructions(args, key, image), nil
 	default:
 		return "", fmt.Errorf("unreachable tunnel install environment: %s", args.Environment)
@@ -589,21 +558,16 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) string {
 	containerJSON := renderECSSidecarContainerJSON(args, image)
 	secretName := "qurl-tunnel-" + args.Slug
-	// validateBootstrapAPIKeyForShell keeps this plaintext token single-line
-	// and printable; slackCodeBlock rejects nested fences before Slack sees it.
-	body := fmt.Sprintf(`1. Store this bootstrap key in AWS Secrets Manager, then delete this Slack message:
-%s
-
-2. Put qurl-proxy.yaml on an EFS access point mounted into the task:
-%s
-
-3. Add this sidecar container to the same task definition as the target container:
-%s
-
-4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config.
-Do not share qurl-agent-state across concurrently running sidecars.`, key.APIKey, renderTunnelConfigYAML(args), containerJSON)
-
-	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves, and replace `<region>` / `<account-id>` in the JSON placeholders before registering the task definition. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. After the task logs show the tunnel connected, delete the bootstrap secret.\n\n" + slackCodeBlock(body)
+	// processTunnelInstall validates the plaintext key before rendering; the
+	// separate fences keep each ECS artifact independently copyable in Slack.
+	return "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `" + secretName + "` so the task definition's `valueFrom` ARN resolves, and replace `<region>` / `<account-id>` in the JSON placeholders before registering the task definition. The sidecar must share the target container's network namespace, so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service.\n\n" +
+		"1. Store this bootstrap key in AWS Secrets Manager, then delete this Slack message:\n\n" +
+		slackCodeBlock(key.APIKey) + "\n\n" +
+		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
+		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
+		"3. Add this sidecar container to the same task definition as the target container:\n\n" +
+		slackCodeBlock(containerJSON) + "\n\n" +
+		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the tunnel connected, delete the bootstrap secret."
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) string {

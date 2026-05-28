@@ -129,10 +129,10 @@ func run() error {
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	var openView func(context.Context, string, string, []byte) error
+	if err := validateSlackBotToken(slackBotToken); err != nil {
+		return err
+	}
 	if slackBotToken != "" {
-		if err := validateSlackBotToken(slackBotToken); err != nil {
-			return err
-		}
 		openView = slackOpenViewFunc(slackBotToken, userAgent)
 	} else {
 		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")

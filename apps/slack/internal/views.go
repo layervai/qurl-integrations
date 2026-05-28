@@ -143,11 +143,11 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
 			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output.", false,
 				staticSelect(tunnelInstallActionEnvironment, []map[string]any{
-					optionObj("Docker sidecar", string(tunnelEnvDockerVM)),
+					optionObj("Docker sidecar", string(tunnelEnvDocker)),
 					optionObj("Docker Compose", string(tunnelEnvCompose)),
 					optionObj("AWS ECS/Fargate task", string(tunnelEnvECSFargate)),
 					optionObj("Kubernetes pod", string(tunnelEnvKubernetes)),
-				}, optionObj("Docker sidecar", string(tunnelEnvDockerVM)))),
+				}, optionObj("Docker sidecar", string(tunnelEnvDocker)))),
 			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
 				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
 			inputBlock(tunnelInstallBlockWebContainer, "Docker service/container", "Optional. Docker container name or Compose service name; Compose names cannot include dots.", true,
