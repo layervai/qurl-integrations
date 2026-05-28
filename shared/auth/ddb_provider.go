@@ -36,6 +36,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -63,6 +65,16 @@ const (
 	attrConfiguredBy = "configured_by"
 	attrConfiguredAt = "configured_at"
 	attrUpdatedAt    = "updated_at"
+
+	attrSlackBotToken       = "slack_bot_token"
+	attrSlackBotTokenDK     = "slack_bot_token_dk"
+	attrSlackBotInstalledBy = "slack_bot_installed_by"
+	attrSlackBotInstalledAt = "slack_bot_installed_at"
+	attrSlackBotUpdatedAt   = "slack_bot_updated_at"
+	attrSlackBotUserID      = "slack_bot_user_id"
+	attrSlackAppID          = "slack_app_id"
+	attrSlackEnterpriseID   = "slack_enterprise_id"
+	attrSlackBotScopes      = "slack_bot_scopes"
 )
 
 // Env var names — operator-set via the Fargate task definition (the
@@ -84,12 +96,19 @@ const (
 // /oauth/qurl/start rather than rendering a generic "auth failed" error.
 var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin must complete /oauth/qurl/start")
 
+// ErrSlackBotTokenNotConfigured is returned when a workspace has not completed
+// the Slack app OAuth install/reinstall path that grants a per-workspace bot
+// token. The Slack handler catches this distinctly from decrypt/transport
+// failures so old installs can be pointed at the reinstall path.
+var ErrSlackBotTokenNotConfigured = errors.New("workspace Slack bot token not configured — admin must reinstall the Slack app")
+
 // DynamoDBClient is the slice of *dynamodb.Client the provider actually
 // uses. Exposed as an interface so tests can inject a fake without
 // spinning up localstack.
 type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
@@ -118,6 +137,19 @@ type DDBProvider struct {
 	// updated_at assertions without poking package-global state. Defaults
 	// to time.Now.
 	Now func() time.Time
+}
+
+// SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
+// after a customer installs or reauthorizes the Slack app. BotToken is stored
+// encrypted; the remaining fields are operational metadata for audits and
+// support triage.
+type SlackBotTokenInstall struct {
+	BotToken     string
+	InstalledBy  string
+	BotUserID    string
+	AppID        string
+	EnterpriseID string
+	Scopes       []string
 }
 
 // nowOrDefault is the safe clock accessor — NewDDBProvider always sets
@@ -242,7 +274,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 
 	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
-		return "", errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key")
+		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
 	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(wrappedKey.Value) == 0 {
@@ -263,9 +295,52 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	return string(pt), nil
 }
 
-// SetAPIKey upserts the per-workspace API key. The configuredBy field
+// SlackBotToken looks up the per-workspace Slack bot token captured during
+// Slack app OAuth installation. Missing token attributes are treated as a
+// reinstall-needed state instead of row corruption because older workspace rows
+// legitimately predate Slack bot-token persistence.
+func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (string, error) {
+	if workspaceID == "" {
+		return "", errors.New("DDBProvider.SlackBotToken: workspaceID is empty")
+	}
+	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: GetItem: %w", err)
+	}
+	if len(out.Item) == 0 {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
+	}
+
+	// Rows can exist before a Slack app install because /qurl setup writes the
+	// qURL API key first. Missing Slack columns are expected in that state.
+	ctBlob, ok := out.Item[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(ctBlob.Value) == 0 {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
+	}
+	wrappedKey, ok := out.Item[attrSlackBotTokenDK].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(wrappedKey.Value) == 0 {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: workspace %q: %w", workspaceID, ErrSlackBotTokenNotConfigured)
+	}
+
+	pt, err := p.Encryptor.Open(ctx, ctBlob.Value, wrappedKey.Value, []byte(workspaceID))
+	if err != nil {
+		return "", fmt.Errorf("DDBProvider.SlackBotToken: decrypt: %w", err)
+	}
+	if len(pt) == 0 {
+		return "", errors.New("DDBProvider.SlackBotToken: decrypted plaintext is empty")
+	}
+	return string(pt), nil
+}
+
+// SetAPIKey upserts the per-workspace qURL API key. The configuredBy field
 // is informational (the Slack user_id of the admin who completed
-// /oauth/qurl/callback) and is persisted plaintext.
+// /oauth/qurl/callback) and is persisted plaintext. UpdateItem is used instead
+// of PutItem so Slack app install metadata in the same row is preserved.
 func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetAPIKey: workspaceID is empty")
@@ -279,73 +354,140 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
 	}
 
-	// Pre-flight GetItem serves two purposes on this rare path:
-	//   1. Preserve the original configured_at on key rotation — otherwise
-	//      every rotation would overwrite the first-install timestamp and
-	//      the audit trail loses the install date.
-	//   2. Emit a warn line on overwrite so operator dashboards can
-	//      distinguish first-installs from rotation churn.
-	// The install path is invoked once per workspace, so doubling the RTT
-	// here is a non-issue. A transient transport error here is fail-fast:
-	// without the pre-flight read we'd silently destroy configured_at on
-	// rotation, which is the exact failure mode this branch exists to
-	// prevent. The caller retries via /qurl setup.
-	//
-	// Race acknowledged: read-modify-write is TOCTOU under concurrent
-	// /qurl setup completions for the same workspace. Two simultaneous
-	// installers can both see "no row," both encrypt fresh keys, and
-	// race on PutItem. The losing PutItem clobbers the winner: loser's
-	// configured_at overwrites winner's, AND the winner's qurl-service
-	// key is now orphaned in qurl-service (the existing fire-and-forget
-	// revoke covers only the persist-failure case, not the "lost the
-	// PutItem race" case — the winner's persist returned success even
-	// though the row was immediately overwritten). Collision requires
-	// two parallel admins clicking the /qurl setup link within ~the
-	// DDB write latency, on the *same* workspace — extremely rare by
-	// construction. Tracked at #265: switch to PutItem +
-	// ReturnValues=ALL_OLD (or UpdateItem with
-	// `if_not_exists(configured_at, :now)`) for an atomic close. When
-	// that lands, mintAndPersist should also revoke on conflict so the
-	// orphan window closes end-to-end.
-	existing, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
+		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
+	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
+	// window and preserves Slack install metadata, but the upstream qurl-service
+	// mint still happens before this write. If concurrent admins mint different
+	// keys, the earlier key can still be overwritten here and left orphaned
+	// upstream because there is no losing-write signal to trigger a revoke.
+	out, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
+		UpdateExpression: aws.String(updateExpr),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":key": &ddbtypes.AttributeValueMemberB{Value: ct},
+			":dk":  &ddbtypes.AttributeValueMemberB{Value: wrapped},
+			":by":  &ddbtypes.AttributeValueMemberS{Value: configuredBy},
+			":now": &ddbtypes.AttributeValueMemberS{Value: now},
+		},
+		ReturnValues: ddbtypes.ReturnValueUpdatedOld,
 	})
 	if err != nil {
-		return fmt.Errorf("DDBProvider.SetAPIKey: pre-flight GetItem: %w", err)
+		return fmt.Errorf("DDBProvider.SetAPIKey: UpdateItem: %w", err)
 	}
-	overwriting := existing != nil && len(existing.Item) > 0
-
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
-	configuredAt := now
-	if overwriting {
-		if prev, ok := existing.Item[attrConfiguredAt].(*ddbtypes.AttributeValueMemberS); ok && prev.Value != "" {
-			configuredAt = prev.Value
+	if out != nil {
+		if _, rotated := out.Attributes[attrQURLAPIKey]; rotated {
+			slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace API key",
+				"workspace_id", workspaceID,
+				"configured_by", configuredBy)
 		}
 	}
-	item := map[string]ddbtypes.AttributeValue{
-		attrTeamID:       &ddbtypes.AttributeValueMemberS{Value: workspaceID},
-		attrQURLAPIKey:   &ddbtypes.AttributeValueMemberB{Value: ct},
-		attrDataKeyCT:    &ddbtypes.AttributeValueMemberB{Value: wrapped},
-		attrConfiguredBy: &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-		attrUpdatedAt:    &ddbtypes.AttributeValueMemberS{Value: now},
-		attrConfiguredAt: &ddbtypes.AttributeValueMemberS{Value: configuredAt},
+	return nil
+}
+
+// SetSlackBotToken upserts the encrypted Slack bot token captured during Slack
+// app install or reinstall. It intentionally updates only Slack-specific
+// attributes so the qURL API key columns survive app reauthorization.
+func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, install *SlackBotTokenInstall) error {
+	if workspaceID == "" {
+		return errors.New("DDBProvider.SetSlackBotToken: workspaceID is empty")
+	}
+	if install == nil {
+		return errors.New("DDBProvider.SetSlackBotToken: install is nil")
+	}
+	botToken := strings.TrimSpace(install.BotToken)
+	if botToken == "" {
+		return errors.New("DDBProvider.SetSlackBotToken: bot token is empty")
+	}
+	if err := ValidateSlackBotTokenShape(botToken); err != nil {
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: invalid bot token: %w", err)
 	}
 
-	if _, err := p.Client.PutItem(ctx, &dynamodb.PutItemInput{
+	ct, wrapped, err := p.Encryptor.Seal(ctx, []byte(botToken), []byte(workspaceID))
+	if err != nil {
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: encrypt: %w", err)
+	}
+	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+
+	setParts := []string{
+		attrSlackBotToken + " = :token",
+		attrSlackBotTokenDK + " = :dk",
+		attrSlackBotUpdatedAt + " = :now",
+		attrSlackBotInstalledAt + " = if_not_exists(" + attrSlackBotInstalledAt + ", :now)",
+	}
+	values := map[string]ddbtypes.AttributeValue{
+		":token": &ddbtypes.AttributeValueMemberB{Value: ct},
+		":dk":    &ddbtypes.AttributeValueMemberB{Value: wrapped},
+		":now":   &ddbtypes.AttributeValueMemberS{Value: now},
+	}
+	var removeParts []string
+	setStringAttr := func(attr, token, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			removeParts = append(removeParts, attr)
+			return
+		}
+		setParts = append(setParts, attr+" = "+token)
+		values[token] = &ddbtypes.AttributeValueMemberS{Value: value}
+	}
+	setStringAttr(attrSlackBotInstalledBy, ":installed_by", install.InstalledBy)
+	setStringAttr(attrSlackBotUserID, ":bot_user_id", install.BotUserID)
+	setStringAttr(attrSlackAppID, ":app_id", install.AppID)
+	setStringAttr(attrSlackEnterpriseID, ":enterprise_id", install.EnterpriseID)
+
+	scopes := normalizedStringSet(install.Scopes)
+	if len(scopes) > 0 {
+		setParts = append(setParts, attrSlackBotScopes+" = :scopes")
+		values[":scopes"] = &ddbtypes.AttributeValueMemberSS{Value: scopes}
+	} else {
+		removeParts = append(removeParts, attrSlackBotScopes)
+	}
+
+	expr := "SET " + strings.Join(setParts, ", ")
+	if len(removeParts) > 0 {
+		expr += " REMOVE " + strings.Join(removeParts, ", ")
+	}
+
+	if _, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
-		Item:      item,
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+		UpdateExpression:          aws.String(expr),
+		ExpressionAttributeValues: values,
 	}); err != nil {
-		return fmt.Errorf("DDBProvider.SetAPIKey: PutItem: %w", err)
+		return fmt.Errorf("DDBProvider.SetSlackBotToken: UpdateItem: %w", err)
 	}
-	if overwriting {
-		slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace row",
-			"workspace_id", workspaceID,
-			"configured_by", configuredBy)
-	}
+	slog.Info("DDBProvider.SetSlackBotToken stored Slack app bot token metadata", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
+		"workspace_id", workspaceID,
+		"installed_by", install.InstalledBy,
+		"bot_user_id", install.BotUserID,
+		"app_id", install.AppID,
+		"enterprise_id", install.EnterpriseID,
+		"scope_count", len(scopes))
 	return nil
+}
+
+func normalizedStringSet(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DeleteAPIKey removes the per-workspace row. Used by the uninstall /
