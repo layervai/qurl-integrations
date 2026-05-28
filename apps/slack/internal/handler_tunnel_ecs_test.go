@@ -37,6 +37,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		`"name": "QURL_TUNNEL_SLUG"`,
 		`"value": "` + testTunnelSlug + `"`,
 		testTunnelECSAPIKeyNameLine,
+		`secret:qurl-tunnel-` + testTunnelSlug + `-<suffix>`,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
 	} {
@@ -48,6 +49,9 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
+	}
+	if strings.Contains(got, `\u003c`) || strings.Contains(got, `\u003e`) {
+		t.Fatalf("ECS instructions escaped placeholder angle brackets:\n%s", got)
 	}
 	if gotFenceCount := strings.Count(got, "```"); gotFenceCount != 4 {
 		t.Fatalf("ECS instructions rendered %d code fences, want 4 for two independently copyable artifacts:\n%s", gotFenceCount, got)

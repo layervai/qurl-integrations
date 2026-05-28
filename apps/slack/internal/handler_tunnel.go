@@ -79,7 +79,9 @@ type tunnelInstallArgs struct {
 	LocalPort   int
 	Environment tunnelInstallEnvironment
 	WebRef      string
-	WebRefKind  tunnelInstallWebRefKind
+	// WebRefKind is parse-time grammar metadata for cross-field validation.
+	// Renderers intentionally consume only WebRef after validation succeeds.
+	WebRefKind tunnelInstallWebRefKind
 }
 
 func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
@@ -436,7 +438,9 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "response_url_delivery_failed")
-		h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl tunnel install` again.")
+		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl tunnel install` again.") {
+			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
+		}
 	}
 }
 
@@ -477,7 +481,7 @@ func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now t
 	if windowSeconds <= 0 {
 		windowSeconds = 1
 	}
-	bucket := now.UTC().Unix() / windowSeconds
+	bucket := now.Unix() / windowSeconds
 	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%d", slug, bucket))
 }
 
@@ -709,6 +713,8 @@ fi`
 func renderBootstrapKeyFileInstallShell(targetPath string) string {
 	// Avoid passing the bootstrap key as a command argument: under some shells
 	// printf may be external, which would briefly expose the secret in argv.
+	// Keep this aligned with validateBootstrapAPIKeyForShell: the key is streamed
+	// through an unquoted heredoc, so that validator owns heredoc-expansion safety.
 	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
 $SUDO sh -c 'set -eu
 umask 077
@@ -726,6 +732,8 @@ func renderBootstrapKeyPipeShell(command string) string {
 	// newline is not part of the secret and the key never appears in argv.
 	// This heredoc-with-pipe form is intentionally limited to Linux /bin/sh
 	// implementations used in our install targets: bash, dash, and BusyBox ash.
+	// Keep this aligned with validateBootstrapAPIKeyForShell: the key is streamed
+	// through an unquoted heredoc, so that validator owns heredoc-expansion safety.
 	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
 head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | %s
 $QURL_BOOTSTRAP_KEY

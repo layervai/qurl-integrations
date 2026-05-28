@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -104,9 +105,12 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 			},
 		},
 	}
-	b, err := json.MarshalIndent(container, "", "  ")
-	if err != nil {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(container); err != nil {
 		return "", fmt.Errorf("marshal ECS sidecar JSON: %w", err)
 	}
-	return string(b), nil
+	return strings.TrimSuffix(b.String(), "\n"), nil
 }
