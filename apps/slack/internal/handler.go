@@ -652,12 +652,12 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	case text == "setup":
 		h.handleSetup(w, values)
 	case slashSubcommand(text, "create"):
-		// `/qurl create` is deprecated — its URL-form behavior is
-		// folded into `/qurl get <url>`, and the alias form was never
-		// promoted to a user-facing command. Surface a deprecation
-		// hint instead of an "unknown subcommand" so existing users
-		// hitting muscle memory get a direct redirect.
-		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <url>` instead.")
+		// `/qurl create` is deprecated. It minted for an arbitrary URL,
+		// which Slack no longer does — `/qurl get` mints for a tunnel
+		// `$slug` or a channel `$alias`. Surface a deprecation hint
+		// instead of an "unknown subcommand" so existing users hitting
+		// muscle memory get a direct redirect to the new shape.
+		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$slug|$alias>` instead — run `/qurl list` to see your tunnels.")
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
