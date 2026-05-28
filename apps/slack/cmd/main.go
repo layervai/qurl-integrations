@@ -70,7 +70,7 @@ const (
 	maxHeaderBytes = 8 << 10 // 8 KiB
 	// Slack remains the token-validity authority; these bounds are only a local
 	// boot-time typo guard for obviously truncated or pasted-wrong values.
-	slackBotTokenMinLen = 20
+	slackBotTokenMinLen = 50
 	slackBotTokenMaxLen = 320
 )
 

@@ -1512,7 +1512,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 
 func TestYAMLSingleQuotedRejectsControlsAndNewlines(t *testing.T) {
 	t.Parallel()
-	cases := []string{"bad\nvalue", "bad\rvalue", "bad\x00value", "bad\x7fvalue"}
+	cases := []string{"bad\nvalue", "bad\rvalue", "bad\x00value", "bad\x7fvalue", "bad\u2028value", "badévalue"}
 	for _, input := range cases {
 		t.Run(fmt.Sprintf("%q", input), func(t *testing.T) {
 			t.Parallel()

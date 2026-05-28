@@ -196,6 +196,9 @@ func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) b
 	if h.postResponseBody(log, responseURL, body) {
 		return true
 	}
+	// Retry only delete_original: a stale "Working on it" ack is uniquely
+	// confusing after a modal opens, while ordinary async replies are safer as
+	// single-attempt deliveries with explicit failure logging.
 	log.Warn("response_url delete_original failed; retrying once")
 	return h.postResponseBody(log, responseURL, body)
 }

@@ -432,7 +432,8 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
 		// revoke notice. The key is still revoked because delivery was not
-		// confirmed, and the structured logs retain the resource/key IDs.
+		// confirmed, and the structured logs retain the resource/key IDs for
+		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "response_url_delivery_failed")
 		h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl tunnel install` again.")
@@ -678,10 +679,12 @@ func renderBootstrapKeyPromptShell() string {
   STTY_STATE="$(stty -g 2>/dev/null || true)"
   if [ -n "$STTY_STATE" ]; then
     stty -echo
+    trap 'if [ -n "$STTY_STATE" ]; then stty "$STTY_STATE" 2>/dev/null || true; fi' INT TERM EXIT
   fi
   if ! IFS= read -r QURL_BOOTSTRAP_KEY; then
     if [ -n "$STTY_STATE" ]; then
       stty "$STTY_STATE"
+      trap - INT TERM EXIT
     fi
     printf '\n' >&2
     echo "Bootstrap key is required." >&2
@@ -689,6 +692,7 @@ func renderBootstrapKeyPromptShell() string {
   fi
   if [ -n "$STTY_STATE" ]; then
     stty "$STTY_STATE"
+    trap - INT TERM EXIT
   fi
   printf '\n' >&2
 fi
@@ -820,8 +824,8 @@ func indentLines(s string, spaces int) string {
 
 func yamlSingleQuoted(s string) (string, error) {
 	for _, r := range s {
-		if r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
-			return "", errors.New("yaml scalar contains control characters or newlines")
+		if r == '\n' || r == '\r' || r < 0x20 || r > 0x7e {
+			return "", errors.New("yaml scalar contains non-ascii, control characters, or newlines")
 		}
 	}
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'", nil

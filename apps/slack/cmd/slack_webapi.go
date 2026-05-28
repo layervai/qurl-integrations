@@ -17,10 +17,11 @@ import (
 const slackViewsOpenURL = "https://slack.com/api/views.open"
 const defaultSlackOpenViewUserAgent = "qurl-slack/unknown"
 
-// slackViewsOpenTimeout is the HTTP-client upper bound for every views.open
-// request made by this client. Callers can still pass a tighter context; the
-// tunnel install handler does that with slackTriggerOpenViewBudget so it stays
-// inside Slack's short trigger_id window.
+// slackViewsOpenTimeout is the HTTP-client fallback upper bound for every
+// views.open request made by this client. Callers can still pass a tighter
+// context; the tunnel install handler does that with slackTriggerOpenViewBudget
+// so the caller context, not this client timeout, is the primary deadline for
+// Slack's short trigger_id window.
 const slackViewsOpenTimeout = 2 * time.Second
 
 // Slack echoes the opened view in successful views.open responses. Keep the
