@@ -57,6 +57,51 @@ func TestSlackOpenViewFuncPostsViewsOpenPayload(t *testing.T) {
 	}
 }
 
+func TestSlackOpenViewFuncUsesWorkspaceTokenLookup(t *testing.T) {
+	t.Parallel()
+	var gotTeam string
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	openView := newSlackOpenViewFuncWithTokenLookup(func(_ context.Context, teamID string) (string, error) {
+		gotTeam = teamID
+		return "xoxb-workspace-token", nil
+	}, "qurl-slack/test", srv.URL, nil)
+	if err := openView(context.Background(), "T_lookup", "trigger_test", []byte(`{"type":"modal"}`)); err != nil {
+		t.Fatalf("views.open: %v", err)
+	}
+	if gotTeam != "T_lookup" {
+		t.Fatalf("lookup teamID = %q, want T_lookup", gotTeam)
+	}
+	if gotAuth != "Bearer xoxb-workspace-token" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+}
+
+func TestSlackOpenViewFuncLookupErrorSkipsRequest(t *testing.T) {
+	t.Parallel()
+	var called atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called.Store(true)
+	}))
+	t.Cleanup(srv.Close)
+
+	openView := newSlackOpenViewFuncWithTokenLookup(func(context.Context, string) (string, error) {
+		return "", errors.New("missing workspace token")
+	}, "qurl-slack/test", srv.URL, nil)
+	err := openView(context.Background(), "T_missing", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "token lookup") {
+		t.Fatalf("error = %v, want token lookup error", err)
+	}
+	if called.Load() {
+		t.Fatal("views.open request should not be sent when token lookup fails")
+	}
+}
+
 func TestSlackOpenViewFuncDefaultsUserAgent(t *testing.T) {
 	t.Parallel()
 	var gotUA string

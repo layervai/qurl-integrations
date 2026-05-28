@@ -40,6 +40,14 @@ func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Co
 }
 
 func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+	return newSlackOpenViewFuncWithTokenLookup(func(context.Context, string) (string, error) {
+		return token, nil
+	}, userAgent, viewsOpenURL, httpClient)
+}
+
+type slackOpenViewTokenLookup func(ctx context.Context, teamID string) (string, error)
+
+func newSlackOpenViewFuncWithTokenLookup(lookup slackOpenViewTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
@@ -47,14 +55,18 @@ func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpC
 	if userAgent == "" {
 		userAgent = defaultSlackOpenViewUserAgent
 	}
-	// The teamID parameter is intentionally part of the Config.OpenView seam
-	// so production wiring can move from this single-token deployment shape to
-	// per-team OAuth token lookup without changing the handler contract. The
-	// workspace install row written by internal/oauth is the future lookup
-	// authority for this token.
-	// TODO(slack-oauth): look up the workspace bot token by teamID once the
-	// per-workspace OAuth token store is the only production path.
-	return func(ctx context.Context, _ string, triggerID string, viewJSON []byte) error {
+	// The teamID parameter lets production select the bot token Slack issued
+	// for the workspace that invoked the slash command. Tests and single-
+	// workspace development still use the static-token wrapper above.
+	return func(ctx context.Context, teamID string, triggerID string, viewJSON []byte) error {
+		token, err := lookup(ctx, teamID)
+		if err != nil {
+			return fmt.Errorf("views.open token lookup: %w", err)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return errors.New("views.open token lookup: empty token")
+		}
 		viewJSON = bytes.TrimSpace(viewJSON)
 		// json.Valid accepts arrays and scalars; views.open requires a view
 		// object, so reject non-object roots before sending the request.

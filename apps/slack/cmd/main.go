@@ -23,6 +23,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackinstall"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -132,14 +133,14 @@ func run() error {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
-	var openView internal.OpenViewFunc
 	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
 		return err
 	}
+	openView := slackOpenViewFuncWithWorkspaceTokens(ddbProvider, slackBotToken, userAgent)
 	if slackBotToken != "" {
-		openView = slackOpenViewFunc(slackBotToken, userAgent)
+		slog.Info("Slack views.open wired with per-workspace token lookup and legacy SLACK_BOT_TOKEN fallback")
 	} else {
-		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")
+		slog.Info("Slack views.open wired with per-workspace token lookup")
 	}
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
@@ -216,6 +217,14 @@ func run() error {
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
+	slackInstallCfg, ok, err := buildSlackInstallConfig(ddbProvider)
+	if err != nil {
+		return fmt.Errorf("Slack install config: %w", err)
+	}
+	if ok {
+		slackinstall.RegisterRoutes(rootMux, slackInstallCfg)
+		slog.Info("registered /oauth/slack/{install,callback} routes")
+	}
 
 	srv := &http.Server{
 		// Addr intentionally omitted: srv.Serve(ln) ignores it, and we
@@ -293,6 +302,19 @@ func run() error {
 	}
 	slog.Info("server stopped cleanly")
 	return nil
+}
+
+func slackOpenViewFuncWithWorkspaceTokens(provider *auth.DDBProvider, fallbackToken, userAgent string) internal.OpenViewFunc {
+	return newSlackOpenViewFuncWithTokenLookup(func(ctx context.Context, teamID string) (string, error) {
+		token, err := provider.SlackBotToken(ctx, teamID)
+		if err == nil {
+			return token, nil
+		}
+		if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) && fallbackToken != "" {
+			return fallbackToken, nil
+		}
+		return "", err
+	}, userAgent, slackViewsOpenURL, nil)
 }
 
 // minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.
@@ -490,6 +512,85 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
+}
+
+const (
+	envSlackClientID           = "SLACK_CLIENT_ID"
+	envSlackClientSecret       = "SLACK_CLIENT_SECRET"
+	envSlackInstallStateSecret = "SLACK_INSTALL_STATE_SECRET"
+	envSlackBotScopes          = "SLACK_BOT_SCOPES"
+)
+
+func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, bool, error) {
+	clientID := strings.TrimSpace(os.Getenv(envSlackClientID))
+	clientSecret := strings.TrimSpace(os.Getenv(envSlackClientSecret))
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("SLACK_BASE_URL")), "/")
+	stateSecret := os.Getenv(envSlackInstallStateSecret)
+	if stateSecret == "" {
+		stateSecret = os.Getenv("OAUTH_STATE_SECRET")
+	}
+
+	missing := missingSlackInstallEnvVars(map[string]string{
+		envSlackClientID:      clientID,
+		envSlackClientSecret:  clientSecret,
+		"SLACK_BASE_URL":      baseURL,
+		"SLACK_INSTALL_STATE": stateSecret,
+	})
+	if len(missing) > 0 {
+		slog.Warn("Slack install routes NOT registered — required env vars unset", "missing", missing)
+		return slackinstall.Config{}, false, nil
+	}
+	if err := validateSlackBaseOrigin(baseURL); err != nil {
+		return slackinstall.Config{}, false, err
+	}
+
+	scopes := slackinstall.DefaultBotScopes()
+	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
+		scopes = splitScopeEnv(raw)
+	}
+	cfg := slackinstall.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		SlackBaseURL: baseURL,
+		StateSecret:  []byte(stateSecret),
+		BotScopes:    scopes,
+		TokenStore:   provider,
+	}
+	if err := cfg.Validate(); err != nil {
+		return slackinstall.Config{}, false, err
+	}
+	return cfg, true, nil
+}
+
+func missingSlackInstallEnvVars(values map[string]string) []string {
+	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", "SLACK_INSTALL_STATE"}
+	var missing []string
+	for _, k := range keys {
+		if values[k] == "" {
+			if k == "SLACK_INSTALL_STATE" {
+				missing = append(missing, envSlackInstallStateSecret+" (or OAUTH_STATE_SECRET)")
+				continue
+			}
+			missing = append(missing, k)
+		}
+	}
+	return missing
+}
+
+func validateSlackBaseOrigin(baseURL string) error {
+	if !strings.HasPrefix(baseURL, "https://") {
+		return fmt.Errorf("SLACK_BASE_URL must be https:// (got %q)", baseURL)
+	}
+	if u, err := url.Parse(baseURL); err != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("SLACK_BASE_URL must be a bare https:// origin with no path/query/userinfo (got %q)", baseURL)
+	}
+	return nil
+}
+
+func splitScopeEnv(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	})
 }
 
 // adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore

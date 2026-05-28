@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -373,6 +374,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
 			"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
 			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
 		)
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
@@ -381,6 +383,8 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 			_ = h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl tunnel install` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
 			_ = h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
+		case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
+			_ = h.postErrorResponse(log, responseURL, "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to reinstall qURL for Slack, then run `/qurl tunnel install` again.", true)
 		default:
 			_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		}
