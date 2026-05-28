@@ -351,6 +351,14 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 // can show every alias that resolves to each tunnel. Best-effort:
 // AdminStore-nil, empty channel, or a fetch failure yields nil (rows
 // render slug-only) — the listing must still render.
+//
+// TODO(perf): on the non-admin path this is the second GetItem against
+// the same channel_policies (teamID, channelID) row in one /qurl list —
+// scopeResourcesForUser → AllowedResourceIDsForChannel already read it
+// to compute the allow-set, and this read is purely cosmetic. /qurl list
+// is the tunnel-discovery surface now, so folding the alias map out of
+// that first read (e.g. a method that returns both the allow-set and the
+// alias_bindings it scanned) would halve the per-list DDB reads.
 func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
 	if h.cfg.AdminStore == nil || channelID == "" {
 		return nil

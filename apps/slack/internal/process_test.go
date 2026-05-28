@@ -153,7 +153,7 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 // response_url is parameterized so a test can wire it at the recorder
 // it controls. team_id is parameterized so per-test idempotency-key
 // fixtures stay distinct; channel_id / user_id are pinned to
-// [getURLCommandTestChannelID] / [getURLCommandTestUserID] so
+// [getTokenCommandTestChannelID] / [getTokenCommandTestUserID] so
 // assertions that re-derive the expected IdempotencyKey from
 // `(team, channel, user, trigger)` reference the same constants the
 // body carries — a typo on one side would otherwise fail the test for
@@ -161,8 +161,8 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 // channel, so a test that mints with a non-default channel would also
 // have to reseed.
 const (
-	getURLCommandTestChannelID = "C123"
-	getURLCommandTestUserID    = "U_test"
+	getTokenCommandTestChannelID = "C123"
+	getTokenCommandTestUserID    = "U_test"
 
 	// getTestAlias is the channel alias the infra tests mint through.
 	// getTestResourceID is its bound resource_id — the mint then lands
@@ -177,8 +177,8 @@ func getTokenCommandBody(teamID, triggerID, responseURL string) string {
 		fieldCommand:     {testSlashCmd},
 		fieldText:        {"get $" + getTestAlias},
 		fieldTeamID:      {teamID},
-		fieldChannelID:   {getURLCommandTestChannelID},
-		fieldUserID:      {getURLCommandTestUserID},
+		fieldChannelID:   {getTokenCommandTestChannelID},
+		fieldUserID:      {getTokenCommandTestUserID},
 		fieldTriggerID:   {triggerID},
 		fieldResponseURL: {responseURL},
 	}.Encode()
@@ -187,7 +187,7 @@ func getTokenCommandBody(teamID, triggerID, responseURL string) string {
 // seedGetAliasBinding wires an AdminStore onto h (a fakeDDB-backed
 // slackdata.Store) and seeds a single channel alias binding
 // ([getTestAlias] → [getTestResourceID]) on (teamID,
-// [getURLCommandTestChannelID]) so the token-form `/qurl get` issued
+// [getTokenCommandTestChannelID]) so the token-form `/qurl get` issued
 // by [getTokenCommandBody] resolves via LookupChannelAlias and mints
 // against the resource-scoped endpoint. Used by the async-infra tests
 // in this file, which construct their *Handler with a bespoke Config
@@ -199,7 +199,7 @@ func seedGetAliasBinding(t *testing.T, h *Handler, teamID string) {
 	names := defaultTestTableNames()
 	ddb := newFakeDDB(t, names, nil)
 	ddb.seedItem(t, names.channelPolicy, seedChannelPolicyAliasBindings(
-		teamID, getURLCommandTestChannelID, map[string]string{getTestAlias: getTestResourceID},
+		teamID, getTokenCommandTestChannelID, map[string]string{getTestAlias: getTestResourceID},
 	))
 	h.cfg.AdminStore = newStoreFromFake(t, ddb, names, nil)
 }
@@ -334,7 +334,7 @@ func TestHandle_AsyncGetSurfacesIdempotencyKey(t *testing.T) {
 	if got == "" {
 		t.Fatal("upstream saw no Idempotency-Key header")
 	}
-	want := IdempotencyKey("T999", getURLCommandTestChannelID, getURLCommandTestUserID, "trig-dedup")
+	want := IdempotencyKey("T999", getTokenCommandTestChannelID, getTokenCommandTestUserID, "trig-dedup")
 	if got != want {
 		t.Errorf("Idempotency-Key = %q, want %q", got, want)
 	}

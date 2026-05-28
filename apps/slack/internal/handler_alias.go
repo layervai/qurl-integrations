@@ -354,23 +354,23 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	})
 }
 
+// resolveAndBindTunnelSlugAlias resolves a tunnel `$slug` to its
+// resource_id, binds `alias`→resource_id on (teamID, channelID), and
+// renders the admin-facing result. set-alias is the only caller and the
+// only target form is a slug, so the bind always carries an opaque
+// `r_<id>` — the success copy deliberately echoes the `$slug` the admin
+// typed (the noun `/qurl list` shows) rather than the internal
+// resource_id.
 func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) string {
 	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 	if err != nil {
-		log.Error("setalias tunnel slug target resolution failed", "error", err, "alias", alias)
+		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
 			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl tunnel install %s` first, then retry this alias.", slug, slug)
 		}
 		return sanitizeAPIError(err, "Failed to resolve tunnel slug")
 	}
-	msg, err := h.bindAliasTarget(ctx, teamID, channelID, alias, resourceID)
-	if err != nil {
-		log.Error("setalias write failed", "error", err, "alias", alias)
-	}
-	return msg
-}
 
-func (h *Handler) bindAliasTarget(ctx context.Context, teamID, channelID, alias, target string) (string, error) {
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
 	// on alias_bindings.#a with attribute_not_exists. A second alias
 	// name on the same channel succeeds (different map key); a
@@ -378,30 +378,30 @@ func (h *Handler) bindAliasTarget(ctx context.Context, teamID, channelID, alias,
 	// rendered as a refusal. The refusal copy names only the alias
 	// (not its bound target) to keep the info-disclosure surface
 	// narrow — claude-bot review #5 on the prior single-alias version.
-	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, target)
+	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unset-alias $%s` first, or pick a different alias.", alias, alias), nil
+		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unset-alias $%s` first, or pick a different alias.", alias, alias)
 	}
 	if err != nil {
-		return "Failed to update alias. Please try again.", err
+		log.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return "Failed to update alias. Please try again."
 	}
-	// Admin-verb audit trail: log the bound (alias, target) pair on
-	// success so post-incident reconstruction doesn't depend on
-	// re-querying the DDB table at the time of the question. team/channel/alias
-	// are validated upstream; target is redacted (userinfo + raw query
-	// stripped) so credentials embedded by a setting admin don't
-	// land in operator-visible logs where the readership is wider
-	// than the writer's admin scope.
-	logAliasBound(teamID, channelID, alias, target)
-	return fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", alias, target), nil
+	// Admin-verb audit trail: log the bound (alias, slug, resource_id)
+	// triple on success so post-incident reconstruction doesn't depend
+	// on re-querying the DDB table. All four fields are opaque/validated
+	// (slug + alias upstream; resource_id is a server-minted `r_<id>`
+	// with no embeddable credentials), so no redaction is needed.
+	logAliasBound(teamID, channelID, alias, slug, resourceID)
+	return fmt.Sprintf("Alias `$%s` now points to tunnel `$%s` in this channel.", alias, slug)
 }
 
-func logAliasBound(teamID, channelID, alias, target string) {
+func logAliasBound(teamID, channelID, alias, slug, resourceID string) {
 	slog.LogAttrs(context.Background(), slog.LevelInfo, "alias bound",
 		slog.String("team_id", teamID),
 		slog.String("channel_id", channelID),
 		slog.String("alias", alias),
-		slog.String("target", redactURLForLog(target)),
+		slog.String("slug", slug),
+		slog.String("resource_id", resourceID),
 	)
 }
 
@@ -426,29 +426,6 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 		}
 	}
 	return "", errTunnelSlugNotFound
-}
-
-// redactURLForLog strips userinfo (e.g. `user:token@`) and any raw
-// query string from a setalias target before it lands in operator
-// logs. The success-copy path still shows the verbatim target to the
-// admin who set it, but the audit-log readership is typically wider
-// than the manifest-gated admin pool and shouldn't see embedded
-// credentials. Non-URL targets (`r_…` resource ids, or anything that
-// fails to re-parse) are returned unchanged — the parser has already
-// fenced backticks and non-printable runes upstream.
-func redactURLForLog(target string) string {
-	if strings.HasPrefix(target, resourceIDPrefix) {
-		return target
-	}
-	u, err := url.Parse(target)
-	if err != nil {
-		return target
-	}
-	redacted := *u
-	redacted.User = nil
-	redacted.RawQuery = ""
-	redacted.Fragment = ""
-	return redacted.String()
 }
 
 // handleUnsetAlias routes `/qurl unset-alias $<alias>`.

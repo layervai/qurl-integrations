@@ -357,9 +357,15 @@ func TestSetAlias_HyphenatedHappyTunnelSlug(t *testing.T) {
 	if ack != ackWorkingOnIt {
 		t.Fatalf("ack = %q, want async working copy", ack)
 	}
-	if !strings.Contains(async, testTunnelResourceID) {
-		t.Errorf("async response = %q, want resolved resource id", async)
+	// Success copy echoes the slug the admin typed, not the opaque
+	// resolved resource_id.
+	if !strings.Contains(async, "$"+testTunnelSlug) {
+		t.Errorf("async response = %q, want the typed slug $%s", async, testTunnelSlug)
 	}
+	if strings.Contains(async, testTunnelResourceID) {
+		t.Errorf("async response = %q leaked the opaque resource_id", async)
+	}
+	// The binding still stores the resolved resource_id.
 	b := store.bindings(testAliasTeamID, testAliasChannelID)
 	if b[testAliasName] != testTunnelResourceID {
 		t.Errorf("stored bindings = %v, want {%q: %s}", b, testAliasName, testTunnelResourceID)
@@ -394,8 +400,12 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	if ack != ackWorkingOnIt {
 		t.Fatalf("ack = %q, want async working copy", ack)
 	}
-	if !strings.Contains(async, testTunnelResourceID) {
-		t.Errorf("async response = %q, want resolved resource id", async)
+	// Success copy echoes the typed slug, not the opaque resource_id.
+	if !strings.Contains(async, "$"+testTunnelSlug) {
+		t.Errorf("async response = %q, want the typed slug $%s", async, testTunnelSlug)
+	}
+	if strings.Contains(async, testTunnelResourceID) {
+		t.Errorf("async response = %q leaked the opaque resource_id", async)
 	}
 	if gotQuery.Get("slug") != testTunnelSlug {
 		t.Errorf("upstream query = %v, want slug=%q", gotQuery, testTunnelSlug)
@@ -585,35 +595,6 @@ func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	// Store must not have been dialed in either branch.
 	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
 		t.Errorf("missing-id guard should have short-circuited before store dial, got bindings=%v", b)
-	}
-}
-
-// TestRedactURLForLog fences the audit-log redaction contract:
-// userinfo (credentials embedded by a setting admin) and raw query
-// strings (often carry tokens/keys) are stripped before the target
-// lands in operator-visible logs. r_… resource ids and unparseable
-// strings pass through unchanged.
-func TestRedactURLForLog(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "plain https", input: "https://example.com/path", want: "https://example.com/path"},
-		{name: "userinfo stripped", input: "https://user:token@example.com/path", want: "https://example.com/path"},
-		{name: "raw query stripped", input: "https://example.com/path?key=secret", want: "https://example.com/path"},
-		{name: "fragment stripped", input: "https://example.com/path#section", want: "https://example.com/path"},
-		{name: "userinfo + query stripped", input: "https://u:p@example.com/path?k=v", want: "https://example.com/path"},
-		{name: "resource id passthrough", input: "r_abc123", want: "r_abc123"},
-		{name: "unparseable passthrough", input: "::not-a-url", want: "::not-a-url"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := redactURLForLog(tc.input)
-			if got != tc.want {
-				t.Errorf("redactURLForLog(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
 	}
 }
 
