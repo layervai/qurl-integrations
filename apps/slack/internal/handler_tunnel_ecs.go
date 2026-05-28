@@ -47,7 +47,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, key *client.API
 		slackCodeBlock(key.APIKey) + "\n\n" +
 		"2. Put qurl-proxy.yaml on an EFS access point mounted into the task:\n\n" +
 		slackCodeBlock(renderTunnelConfigYAML(args)) + "\n\n" +
-		"3. Add this non-essential sidecar container to the same task definition as the target container:\n\n" +
+		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects the bootstrap secret as `QURL_API_KEY`; file-mounted secret runtimes use `QURL_API_KEY_FILE` instead:\n\n" +
 		slackCodeBlock(containerJSON) + "\n\n" +
 		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the tunnel connected, delete the bootstrap secret."
 }

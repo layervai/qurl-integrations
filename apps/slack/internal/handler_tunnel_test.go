@@ -421,11 +421,11 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 	openViewStarted := make(chan struct{})
-	releaseOpenView := make(chan struct{})
-	defer close(releaseOpenView)
+	allowOpenViewReturn := make(chan struct{})
+	defer close(allowOpenViewReturn)
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
 		close(openViewStarted)
-		<-releaseOpenView
+		<-allowOpenViewReturn
 		return nil
 	}
 
@@ -452,7 +452,7 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 		if !strings.Contains(got.ack, "Opening guided tunnel setup") {
 			t.Fatalf("ack = %q, want immediate guided setup copy", got.ack)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("slash-command ack waited for views.open to finish")
 	}
 }
@@ -551,12 +551,13 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"name: qurl-proxy-" + testTunnelSlug,
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
+		"initContainers:",
+		"name: qurl-agent-state-permissions",
 		"securityContext:",
 		"runAsUser: 65532",
-		"fsGroup: 65532",
 		"claimName: qurl-agent-" + testTunnelSlug,
 		"secretName: qurl-tunnel-" + testTunnelSlug,
-		"defaultMode: 0400",
+		"defaultMode: 0444",
 		"QURL_TUNNEL_SLUG",
 		"value: " + testTunnelSlug,
 		testTunnelModalKey,
@@ -568,7 +569,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "fsGroup: 65532"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1020,6 +1021,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"replace `<region>` / `<account-id>`",
 		"127.0.0.1:9090",
 		"AWS Secrets Manager",
+		"ECS injects the bootstrap secret as `QURL_API_KEY`",
+		"file-mounted secret runtimes use `QURL_API_KEY_FILE` instead",
 		"secret as `qurl-tunnel-" + testTunnelSlug + "`",
 		"delete this Slack message before continuing",
 		testTunnelImageRef,
@@ -1102,14 +1105,30 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, renderTunnelConfigYAML(args))
 	}
 	for _, want := range []string{
+		"sidecar/initContainer/volumes block",
+		"no pod-level `securityContext` or `fsGroup` is set",
+		"initContainers:",
+		"name: qurl-agent-state-permissions",
+		"chown -R 65532:65532 /var/lib/layerv/agent",
 		"securityContext:",
+		"runAsUser: 0",
+		"allowPrivilegeEscalation: false",
+		"name: qurl-tunnel",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
-		"fsGroup: 65532",
-		"defaultMode: 0400",
+		"defaultMode: 0444",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"\nfsGroup:",
+		"defaultMode: 0400",
+		"securityContext:\n  runAsUser",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
 		}
 	}
 }

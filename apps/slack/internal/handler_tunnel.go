@@ -174,7 +174,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if h.aliasStore == nil {
-		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Channel shortcut storage is not configured on this Slack bot deployment. Contact the operator.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -235,10 +235,16 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		respondSlack(w, ackBusy)
 		return
 	}
+	// Acknowledge before the async admin check so Slack's short trigger_id
+	// window is preserved for views.open. Denials and open failures are sent
+	// back through response_url by openTunnelInstallWizard.
 	respondSlack(w, "Opening guided tunnel setup…")
 }
 
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string) {
+	// adminGateBudget + slackTriggerOpenViewBudget intentionally fit inside
+	// Slack's roughly three-second trigger_id window; expiry is converted into
+	// a retry prompt instead of leaving the admin with a silent modal miss.
 	adminCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
 	cancel()
@@ -593,13 +599,23 @@ spec:
       storage: 1Gi
 QURL_K8S_YAML_EOF`, args.Slug, yamlSingleQuoted(key.APIKey), args.Slug, indentLines(renderTunnelConfigYAML(args), 4), args.Slug)
 
-	patch := fmt.Sprintf(`securityContext:
-  runAsUser: 65532
-  runAsGroup: 65532
-  fsGroup: 65532
+	patch := fmt.Sprintf(`initContainers:
+  - name: qurl-agent-state-permissions
+    image: busybox:1.36
+    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/layerv/agent"]
+    securityContext:
+      runAsUser: 0
+      allowPrivilegeEscalation: false
+    volumeMounts:
+      - name: qurl-agent-state
+        mountPath: /var/lib/layerv/agent
 containers:
   - name: qurl-tunnel
     image: %s
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
+      allowPrivilegeEscalation: false
     env:
       - name: QURL_API_KEY_FILE
         value: /run/secrets/qurl-tunnel/api_key
@@ -622,12 +638,12 @@ volumes:
   - name: qurl-bootstrap
     secret:
       secretName: qurl-tunnel-%s
-      defaultMode: 0400
+      defaultMode: 0444
   - name: qurl-proxy
     configMap:
       name: qurl-proxy-%s`, yamlSingleQuoted(image), args.Slug, args.Slug, args.Slug, args.Slug)
 
-	return "Run this once in the target namespace, then add the sidecar/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC. After the pod logs show the tunnel connected, delete the bootstrap Secret.\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
+	return "Run this once in the target namespace, then add the sidecar/initContainer/volumes block to the same pod spec as the target container so `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the local service. Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC. The initContainer only prepares the qURL agent-state PVC; no pod-level `securityContext` or `fsGroup` is set, so existing app containers and volumes keep their ownership. After the pod logs show the tunnel connected, delete the bootstrap Secret.\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\n\n" + slackCodeBlock(patch)
 }
 
 func tunnelBootstrapTTLLabel() string {
