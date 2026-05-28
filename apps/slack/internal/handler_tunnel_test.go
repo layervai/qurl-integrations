@@ -259,6 +259,25 @@ func TestInteractionStateLogValuesAllowlistsKnownNonSecretBlocks(t *testing.T) {
 	}
 }
 
+func TestInteractionStateLogAllowlistCoversParsedTunnelInstallBlocks(t *testing.T) {
+	t.Parallel()
+	for blockID, actionID := range map[string]string{
+		tunnelInstallBlockSlug:        tunnelInstallActionSlug,
+		tunnelInstallBlockShortcut:    tunnelInstallActionShortcut,
+		tunnelInstallBlockEnvironment: tunnelInstallActionEnvironment,
+		tunnelInstallBlockLocalPort:   tunnelInstallActionLocalPort,
+		tunnelInstallBlockWebRef:      tunnelInstallActionWebRef,
+	} {
+		actions, ok := interactionStateLogAllowlist[blockID]
+		if !ok {
+			t.Fatalf("interactionStateLogAllowlist missing block %q parsed by parseTunnelInstallModalArgs", blockID)
+		}
+		if _, ok := actions[actionID]; !ok {
+			t.Fatalf("interactionStateLogAllowlist[%q] missing action %q parsed by parseTunnelInstallModalArgs", blockID, actionID)
+		}
+	}
+}
+
 func TestTunnelInstallWizardRequest(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -2001,6 +2020,7 @@ func TestHumanTunnelBootstrapTTL(t *testing.T) {
 		{ttl: "1h", want: "1 hour"},
 		{ttl: "24h", want: "24 hours"},
 		{ttl: "30m", want: "30 minutes"},
+		{ttl: "59m30s", want: "1 hour"},
 		{ttl: "75m", want: "1 hour 15 minutes"},
 		{ttl: "90s", want: "2 minutes"},
 		{ttl: "later", want: "the requested later"},

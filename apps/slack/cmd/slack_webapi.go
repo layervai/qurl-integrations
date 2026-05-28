@@ -145,6 +145,8 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		return bodySnippet
 	}
 	cut := 0
+	// Walk rune starts so the bounded log snippet never slices through a
+	// multibyte UTF-8 sequence.
 	for i := range bodySnippet {
 		if i > slackOpenViewMaxErrorSnippetBytes {
 			break
