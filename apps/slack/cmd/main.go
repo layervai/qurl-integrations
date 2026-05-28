@@ -17,12 +17,14 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackinstall"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -68,10 +70,12 @@ const (
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
 	// the per-connection memory an attacker can force pre-handler.
 	maxHeaderBytes = 8 << 10 // 8 KiB
-	// Slack remains the token-validity authority; these bounds are only a local
-	// boot-time typo guard for obviously truncated or pasted-wrong values.
-	slackBotTokenTypoGuardMin = 30
-	slackBotTokenTypoGuardMax = 1024
+	// Keep reinstall propagation short while avoiding DDB/KMS on every modal
+	// open. Negative caching is deliberately shorter because it can extend the
+	// legacy SLACK_BOT_TOKEN fallback window after a customer reinstalls.
+	slackWorkspaceTokenCacheTTL         = 30 * time.Second
+	slackWorkspaceTokenNegativeCacheTTL = 10 * time.Second
+	slackWorkspaceTokenCacheSweepEvery  = time.Minute
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -132,22 +136,12 @@ func run() error {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
-	slackInstallCfg, slackInstallOK, err := buildSlackInstallConfig(ddbProvider)
-	if err != nil {
-		return fmt.Errorf("Slack install OAuth config: %w", err)
+	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
+		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
 	}
-	var openView internal.OpenViewFunc
-	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
-		return err
-	}
-	if err := requireSlackModalTokenSource(slackBotToken, adminStore != nil, slackInstallOK); err != nil {
-		return err
-	}
-	if slackBotToken != "" || slackInstallOK {
-		openView = slackOpenViewFuncForWorkspace(ddbProvider, slackBotToken, userAgent)
-	} else {
-		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")
-	}
+	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
+	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
+	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -194,10 +188,6 @@ func run() error {
 	// the internal handler stays unchanged.
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/", handler)
-	if slackInstallOK {
-		registerSlackInstallRoutes(rootMux, slackInstallCfg)
-		slog.Info("registered Slack install OAuth routes")
-	}
 	// Route the callback's fire-and-forget goroutines through handler.wg
 	// so they fall inside the same shutdown drain budget as the
 	// slash-command async workers.
@@ -227,6 +217,17 @@ func run() error {
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
+	slackInstallCfg, ok, err := buildSlackInstallConfig(ddbProvider)
+	if err != nil {
+		return fmt.Errorf("slack install config: %w", err)
+	}
+	if ok {
+		slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
+		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
+			return fmt.Errorf("slack install routes: %w", err)
+		}
+		slog.Info("registered /oauth/slack/{install,callback} routes")
+	}
 
 	srv := &http.Server{
 		// Addr intentionally omitted: srv.Serve(ln) ignores it, and we
@@ -306,6 +307,261 @@ func run() error {
 	return nil
 }
 
+type slackBotTokenProvider interface {
+	SlackBotToken(ctx context.Context, workspaceID string) (string, error)
+}
+
+type cachedSlackBotToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+type workspaceSlackTokenLookupResult struct {
+	token string
+	err   error
+}
+
+type workspaceSlackTokenLookupCall struct {
+	done chan struct{}
+	workspaceSlackTokenLookupResult
+}
+
+type workspaceSlackTokenLookupStart struct {
+	token       string
+	positiveHit bool
+	negativeHit bool
+	call        *workspaceSlackTokenLookupCall
+	owner       bool
+	generation  uint64
+}
+
+type workspaceSlackTokenLookupCache struct {
+	mu             sync.Mutex
+	positive       map[string]cachedSlackBotToken
+	negative       map[string]time.Time
+	inFlight       map[string]*workspaceSlackTokenLookupCall
+	generation     map[string]uint64
+	fallbackWarned map[string]struct{}
+	lastSweep      time.Time
+}
+
+func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) (lookup slackOpenViewTokenLookup, purge func(string)) {
+	if now == nil {
+		now = time.Now
+	}
+	cache := &workspaceSlackTokenLookupCache{
+		positive:       map[string]cachedSlackBotToken{},
+		negative:       map[string]time.Time{},
+		inFlight:       map[string]*workspaceSlackTokenLookupCall{},
+		generation:     map[string]uint64{},
+		fallbackWarned: map[string]struct{}{},
+	}
+	return func(ctx context.Context, teamID string) (string, error) {
+		teamID = strings.TrimSpace(teamID)
+		if teamID != "" {
+			start := cache.getOrStart(teamID, ttl, now())
+			switch {
+			case start.positiveHit:
+				return start.token, nil
+			case start.negativeHit && fallbackToken != "":
+				cache.warnLegacySlackBotTokenFallback(teamID)
+				return fallbackToken, nil
+			case start.negativeHit:
+				return "", auth.ErrSlackBotTokenNotConfigured
+			case !start.owner:
+				select {
+				case <-start.call.done:
+					return start.call.token, start.call.err
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+			}
+			return fetchAndFinishWorkspaceSlackToken(ctx, provider, cache, start.call, teamID, fallbackToken, ttl, now, start.generation)
+		}
+
+		token, _, _, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
+		return token, err
+	}, cache.purge
+}
+
+func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvider, teamID, fallbackToken string) (token string, cachePositive, cacheNegative bool, err error) {
+	token, err = provider.SlackBotToken(ctx, teamID)
+	if err == nil {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return "", false, false, errors.New("workspace Slack bot token is empty")
+		}
+		if err := auth.ValidateSlackBotTokenShape(token); err != nil {
+			// Do not cache malformed-token errors; once the workspace row is
+			// repaired, the next lookup should observe the fix immediately.
+			return "", false, false, fmt.Errorf("workspace Slack bot token: %w", err)
+		}
+		return token, true, false, nil
+	}
+	// The legacy fallback is only for workspaces that have not installed the
+	// Slack app yet. Other DDB/KMS failures should stay visible to operators.
+	if errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+		if fallbackToken != "" {
+			return fallbackToken, false, true, nil
+		}
+		return "", false, true, err
+	}
+	return "", false, false, err
+}
+
+func fetchAndFinishWorkspaceSlackToken(
+	ctx context.Context,
+	provider slackBotTokenProvider,
+	cache *workspaceSlackTokenLookupCache,
+	call *workspaceSlackTokenLookupCall,
+	teamID string,
+	fallbackToken string,
+	ttl time.Duration,
+	now func() time.Time,
+	generation uint64,
+) (token string, err error) {
+	var cachePositive bool
+	var cacheNegative bool
+	result := workspaceSlackTokenLookupResult{}
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				result = workspaceSlackTokenLookupResult{err: errors.New("workspace Slack bot token lookup panicked")}
+				cache.finish(teamID, call, result, false, false, ttl, 0, now(), generation)
+			}
+			panic(rec)
+		}
+	}()
+	token, cachePositive, cacheNegative, err = fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
+	result = workspaceSlackTokenLookupResult{token: token, err: err}
+	if cacheNegative && err == nil && fallbackToken != "" {
+		cache.warnLegacySlackBotTokenFallback(teamID)
+	}
+	cache.finish(teamID, call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now(), generation)
+	finished = true
+	return token, err
+}
+
+func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Duration, at time.Time) workspaceSlackTokenLookupStart {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweepExpiredLocked(at)
+	generation := c.generation[teamID]
+	if ttl > 0 {
+		cached, ok := c.positive[teamID]
+		if ok && at.Before(cached.expiresAt) {
+			return workspaceSlackTokenLookupStart{token: cached.token, positiveHit: true}
+		}
+		if ok {
+			delete(c.positive, teamID)
+		}
+	}
+
+	expiresAt, ok := c.negative[teamID]
+	if ok && at.Before(expiresAt) {
+		return workspaceSlackTokenLookupStart{negativeHit: true}
+	}
+	if ok {
+		delete(c.negative, teamID)
+	}
+
+	if call, ok := c.inFlight[teamID]; ok {
+		return workspaceSlackTokenLookupStart{call: call}
+	}
+	call := &workspaceSlackTokenLookupCall{done: make(chan struct{})}
+	c.inFlight[teamID] = call
+	return workspaceSlackTokenLookupStart{call: call, owner: true, generation: generation}
+}
+
+func (c *workspaceSlackTokenLookupCache) finish(
+	teamID string,
+	call *workspaceSlackTokenLookupCall,
+	result workspaceSlackTokenLookupResult,
+	cachePositive bool,
+	cacheNegative bool,
+	positiveTTL time.Duration,
+	negativeTTL time.Duration,
+	at time.Time,
+	generation uint64,
+) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	canCache := generation == c.generation[teamID]
+	if cachePositive && positiveTTL > 0 && canCache {
+		c.positive[teamID] = cachedSlackBotToken{
+			token:     result.token,
+			expiresAt: at.Add(positiveTTL),
+		}
+		delete(c.negative, teamID)
+		delete(c.fallbackWarned, teamID)
+	}
+	if cacheNegative && negativeTTL > 0 && canCache {
+		c.negative[teamID] = at.Add(negativeTTL)
+	}
+	call.workspaceSlackTokenLookupResult = result
+	if c.inFlight[teamID] == call {
+		delete(c.inFlight, teamID)
+	}
+	close(call.done)
+}
+
+func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.positive, teamID)
+	delete(c.negative, teamID)
+	delete(c.inFlight, teamID)
+	delete(c.fallbackWarned, teamID)
+	c.generation[teamID]++
+}
+
+func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID string) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" || !c.markLegacySlackBotTokenFallbackWarned(teamID) {
+		return
+	}
+	slog.Warn("legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token", "team_id", teamID) // #nosec G706 -- Slack team IDs are structured slog attributes; JSON handlers escape control bytes.
+}
+
+func (c *workspaceSlackTokenLookupCache) markLegacySlackBotTokenFallbackWarned(teamID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fallbackWarned == nil {
+		c.fallbackWarned = map[string]struct{}{}
+	}
+	if _, ok := c.fallbackWarned[teamID]; ok {
+		return false
+	}
+	c.fallbackWarned[teamID] = struct{}{}
+	return true
+}
+
+func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {
+	if !c.lastSweep.IsZero() && at.Sub(c.lastSweep) < slackWorkspaceTokenCacheSweepEvery {
+		return
+	}
+	// The sweep is intentionally minute-gated: it is O(workspaces seen by this
+	// process), but the current customer cardinality keeps that below the Slack
+	// trigger budget while avoiding a background janitor goroutine.
+	for teamID, cached := range c.positive {
+		if !at.Before(cached.expiresAt) {
+			delete(c.positive, teamID)
+		}
+	}
+	for teamID, expiresAt := range c.negative {
+		if !at.Before(expiresAt) {
+			delete(c.negative, teamID)
+			delete(c.fallbackWarned, teamID)
+		}
+	}
+	c.lastSweep = at
+}
+
 // minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.
 // Sourced from oauth.StateMinSecret so the constant is single-sourced
 // and a future bump on the verify side propagates here automatically.
@@ -317,46 +573,6 @@ const minStateSecretBytes = oauth.StateMinSecret
 // calls oauth.NewJWKSVerifier directly via this seam.
 var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.IDTokenVerifier, error) {
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
-}
-
-func validateSlackBotTokenShape(token string) error {
-	if token == "" {
-		return nil
-	}
-	// Keep this as a light local shape check. Slack token formats have changed
-	// over time, and the Slack API remains the authority on token validity. The
-	// upper bound is intentionally generous; when set, this only catches obvious
-	// config mistakes such as truncated tokens or bytes outside visible ASCII.
-	// Keep the lower bound loose: this boot-time check is only a local typo
-	// guard, while Slack's auth response remains the validity oracle.
-	if len(token) < slackBotTokenTypoGuardMin {
-		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenTypoGuardMin)
-	}
-	if len(token) > slackBotTokenTypoGuardMax {
-		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenTypoGuardMax)
-	}
-	if !validSlackBotTokenPrefix(token) {
-		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb- or xoxe.xoxb-")
-	}
-	for i, b := range []byte(token) {
-		if b >= '!' && b <= '~' {
-			continue
-		}
-		return fmt.Errorf("SLACK_BOT_TOKEN contains invalid characters near byte %d", i)
-	}
-	return nil
-}
-
-func requireSlackModalTokenSource(token string, adminStoreConfigured, slackInstallConfigured bool) error {
-	if !adminStoreConfigured || strings.TrimSpace(token) != "" || slackInstallConfigured {
-		return nil
-	}
-	return errors.New("Slack modal token source is required when Slack admin/tunnel storage is configured; set SLACK_BOT_TOKEN or configure Slack install OAuth")
-}
-
-func validSlackBotTokenPrefix(token string) bool {
-	return strings.HasPrefix(token, "xoxb-") ||
-		strings.HasPrefix(token, "xoxe.xoxb-")
 }
 
 // missingOAuthEnvVars returns the env-var names with empty values, in
@@ -508,6 +724,67 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
+}
+
+const (
+	envSlackClientID                    = "SLACK_CLIENT_ID"
+	envSlackClientSecret                = "SLACK_CLIENT_SECRET"
+	envSlackInstallStateSecret          = "SLACK_INSTALL_STATE_SECRET"
+	envSlackBotScopes                   = "SLACK_BOT_SCOPES"
+	displayKeySlackInstallStateFallback = "SLACK_INSTALL_STATE"
+)
+
+func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, bool, error) {
+	clientID := strings.TrimSpace(os.Getenv(envSlackClientID))
+	clientSecret := strings.TrimSpace(os.Getenv(envSlackClientSecret))
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("SLACK_BASE_URL")), "/")
+	stateSecret := os.Getenv(envSlackInstallStateSecret)
+	if stateSecret == "" {
+		stateSecret = os.Getenv("OAUTH_STATE_SECRET")
+	}
+
+	missing := missingSlackInstallEnvVars(map[string]string{
+		envSlackClientID:                    clientID,
+		envSlackClientSecret:                clientSecret,
+		"SLACK_BASE_URL":                    baseURL,
+		displayKeySlackInstallStateFallback: stateSecret,
+	})
+	if len(missing) > 0 {
+		slog.Warn("Slack install routes NOT registered — required env vars unset", "missing", missing)
+		return slackinstall.Config{}, false, nil
+	}
+
+	scopes := slackinstall.DefaultBotScopes()
+	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
+		scopes = slackinstall.NormalizeScopes([]string{raw})
+	}
+	cfg := slackinstall.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		SlackBaseURL: baseURL,
+		StateSecret:  []byte(stateSecret),
+		BotScopes:    scopes,
+		TokenStore:   provider,
+	}
+	if err := cfg.Validate(); err != nil {
+		return slackinstall.Config{}, false, err
+	}
+	return cfg, true, nil
+}
+
+func missingSlackInstallEnvVars(values map[string]string) []string {
+	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", displayKeySlackInstallStateFallback}
+	var missing []string
+	for _, k := range keys {
+		if values[k] == "" {
+			if k == displayKeySlackInstallStateFallback {
+				missing = append(missing, envSlackInstallStateSecret+" (or OAUTH_STATE_SECRET)")
+				continue
+			}
+			missing = append(missing, k)
+		}
+	}
+	return missing
 }
 
 // adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore

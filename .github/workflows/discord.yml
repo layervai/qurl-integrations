@@ -70,46 +70,6 @@ jobs:
         working-directory: apps/discord
         run: docker build -t discord-bot-test .
 
-  # Pages on post-merge CI failures via Slack #all-layerv so a stale-
-  # merge-ref bug (or any other class of regression that slipped past
-  # PR-time CI) surfaces immediately, instead of staying silent behind
-  # a `trigger-deploy: skipped` like #202 did.
-  #
-  # Routes through SLACK_WEBHOOK_URL repo secret — the team already
-  # uses Slack for prod alerting and has no GitHub-issue alerting
-  # attached, so an issue would have been silent. Webhook posts to
-  # #all-layerv (the channel the secret is bound to).
-  notify-on-main-failure:
-    needs: [build-and-test, docker-check]
-    if: failure() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify #all-layerv on Slack
-        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
-        with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            {
-              "text": ":rotating_light: discord CI failed on main \u2014 `${{ github.sha }}`",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*:rotating_light: discord CI regression on main*\n`build-and-test` and/or `docker-check` failed after merge. `trigger-deploy` is *skipped* \u2192 no new image in ECR; sandbox bot is on the prior image; `promote-bot-discord-to-prod.yml` will refuse at the sandbox-status-check gate. Open a hotfix PR against this SHA. See <https://github.com/${{ github.repository }}/pull/204|#204> for the pattern."
-                  }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Commit*\n`${{ github.sha }}`" },
-                    { "type": "mrkdwn", "text": "*Run*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.run_id }}>" }
-                  ]
-                }
-              ]
-            }
-
   trigger-deploy:
     needs: [build-and-test, docker-check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
