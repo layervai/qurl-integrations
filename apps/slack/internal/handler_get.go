@@ -183,7 +183,7 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		// Channel-scope guard; see [Handler.processAliases] for the
 		// full rationale (single source of truth).
 		log.Warn("get: empty channel_id; refusing channel-less invocation")
-		h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
+		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
 
@@ -201,14 +201,14 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		// don't leak internals.
 		var ue *userError
 		if errors.As(err, &ue) {
-			h.postResponse(log, responseURL, ":warning: "+ue.msg)
+			_ = h.postResponse(log, responseURL, ":warning: "+ue.msg)
 			return
 		}
 		log.Error("get: unexpected non-userError leaked through getWork", "error", err)
-		h.postResponse(log, responseURL, ":warning: "+commonGetMintFailedMessage)
+		_ = h.postResponse(log, responseURL, ":warning: "+commonGetMintFailedMessage)
 		return
 	}
-	h.postResponse(log, responseURL, text)
+	_ = h.postResponse(log, responseURL, text)
 }
 
 // getWorkArgs bundles the closure inputs for [Handler.getWork].

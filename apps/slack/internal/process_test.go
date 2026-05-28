@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +20,31 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
+
+type testRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type trackingResponseBody struct {
+	reader *strings.Reader
+	sawEOF atomic.Bool
+	closed atomic.Bool
+}
+
+func (b *trackingResponseBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.sawEOF.Store(true)
+	}
+	return n, err
+}
+
+func (b *trackingResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
 
 // responseURLRecorder is an httptest.Server that captures every
 // response_url POST it receives. Tests use it to assert the body the
@@ -50,6 +77,67 @@ func newResponseURLRecorder(t *testing.T) *responseURLRecorder {
 	t.Cleanup(srv.Close)
 	rec.URL = srv.URL
 	return rec
+}
+
+func TestPostResponseBodyDrainsOversizedErrorBody(t *testing.T) {
+	t.Parallel()
+	body := &trackingResponseBody{reader: strings.NewReader(strings.Repeat("x", 4097))}
+	h := &Handler{
+		responseURLClient: &http.Client{Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		})},
+		validateResponseURLFn: url.Parse,
+	}
+
+	ok := h.postResponseBody(slog.New(slog.NewTextHandler(io.Discard, nil)), "http://slack.test/response", []byte(`{"text":"test"}`))
+
+	if ok {
+		t.Fatal("postResponseBody returned true for HTTP 400")
+	}
+	if !body.sawEOF.Load() {
+		t.Fatal("oversized response_url body was not drained to EOF")
+	}
+	if !body.closed.Load() {
+		t.Fatal("oversized response_url body was not closed")
+	}
+}
+
+func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"slack temporarily unavailable"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := &Handler{
+		baseCtx:               baseCtx,
+		responseURLClient:     srv.Client(),
+		validateResponseURLFn: url.Parse,
+	}
+
+	start := time.Now()
+	ok := h.deleteOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL)
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatal("deleteOriginalResponse returned true for HTTP 500")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("response_url hits = %d, want 1 because canceled baseCtx skips retry", got)
+	}
+	if elapsed >= deleteOriginalRetryDelay/2 {
+		t.Fatalf("deleteOriginalResponse took %s with canceled baseCtx; retry sleep was not skipped", elapsed)
+	}
 }
 
 // getURLCommandBody builds a /slack/commands form payload for a
@@ -621,15 +709,31 @@ func TestSanitizeAPIError(t *testing.T) {
 	}
 }
 
+func newContextBlockingQURLServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.CloseClientConnections()
+		srv.Close()
+	})
+	return srv
+}
+
 // TestHandle_AsyncWorkObservesBaseContextCancellation fences the
 // shutdown-cancellation contract: when h.baseCtx is canceled, an
 // in-flight worker exits promptly rather than blocking shutdown.
 func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
-	// Block forever so cancellation is the only exit.
-	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	t.Cleanup(qurlSrv.Close)
+	// Block until request cancellation; test cleanup also has an explicit
+	// release so httptest.Server.Close cannot hang if the transport delays
+	// propagating cancellation to r.Context().
+	qurlSrv := newContextBlockingQURLServer(t)
 
 	t.Setenv("QURL_API_KEY", "test-key")
 
@@ -677,10 +781,7 @@ func TestHandle_OrphanAckPreventionOnBaseContextCancel(t *testing.T) {
 	// processCreate then sanitizes and calls postResponse. If
 	// postResponse used the worker ctx, that POST would fail too
 	// (orphan ack); with a fresh context it should succeed.
-	qurlSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	t.Cleanup(qurlSrv.Close)
+	qurlSrv := newContextBlockingQURLServer(t)
 
 	t.Setenv("QURL_API_KEY", "test-key")
 

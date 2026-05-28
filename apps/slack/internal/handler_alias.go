@@ -94,10 +94,14 @@ const (
 // the user but trips ST1005 if we wrap in `error`, and (c) the
 // dispatcher needs the literal string anyway.
 const (
+	reasonAliasMissing   = "Missing alias."
+	reasonAliasNoSigil   = "Alias must start with `$` (e.g. `$staging`)."
+	reasonAliasEmptyName = "Missing alias name after `$`."
+
 	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`). Tunnel slugs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
-	msgAliasMissing       = "Missing alias.\n\n" + aliasUsage
-	msgAliasNoSigil       = "Alias must start with `$` (e.g. `$staging`).\n\n" + aliasUsage
-	msgAliasEmptyName     = "Missing alias name after `$`.\n\n" + aliasUsage
+	msgAliasMissing       = reasonAliasMissing + "\n\n" + aliasUsage
+	msgAliasNoSigil       = reasonAliasNoSigil + "\n\n" + aliasUsage
+	msgAliasEmptyName     = reasonAliasEmptyName + "\n\n" + aliasUsage
 )
 
 // aliasArgs is the parsed shape of a `/qurl setalias $a <target>` or
@@ -186,29 +190,37 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	return out, ""
 }
 
-// requireAlias checks that `tok` is `$<alias>` and returns the alias
-// without the sigil. Mirrors the grammar in the broader parser
-// (apps/slack/internal/parser.go on #228) so a future consolidation
-// is a textual no-op.
-//
-// Returns (alias, "") on success and ("", userCopy) on rejection.
-// See [parseAliasArgs] for the rationale on plain strings vs error.
-func requireAlias(tok string) (alias, userMsg string) {
+func validateChannelShortcutToken(tok string) (alias, reason string) {
+	return validateAliasTokenForNoun(tok, "Channel shortcut", "channel shortcut")
+}
+
+func validateAliasTokenForNoun(tok, noun, nounLower string) (alias, reason string) {
 	if tok == "" {
-		return "", msgAliasMissing
+		return "", fmt.Sprintf("Missing %s.", nounLower)
 	}
 	if !strings.HasPrefix(tok, "$") {
-		return "", msgAliasNoSigil
+		return "", noun + " must start with `$` (e.g. `$staging`)."
 	}
 	alias = strings.TrimPrefix(tok, "$")
 	if alias == "" {
-		return "", msgAliasEmptyName
+		return "", fmt.Sprintf("Missing %s name after `$`.", nounLower)
 	}
 	if len(alias) > aliasMaxLen {
-		return "", fmt.Sprintf("Alias `$%s` is longer than %d characters.\n\n%s", alias, aliasMaxLen, aliasUsage)
+		return "", fmt.Sprintf("%s `$%s` is longer than %d characters.", noun, alias, aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "", fmt.Sprintf("Alias `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).\n\n%s", alias, aliasUsage)
+		return "", fmt.Sprintf("%s `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).", noun, alias)
+	}
+	return alias, ""
+}
+
+// requireAlias checks that `tok` is `$<alias>` and returns copy suitable for
+// slash-command responses. See [parseAliasArgs] for the rationale on plain
+// strings vs error.
+func requireAlias(tok string) (alias, userMsg string) {
+	alias, reason := validateAliasTokenForNoun(tok, "Alias", "alias")
+	if reason != "" {
+		return "", reason + "\n\n" + aliasUsage
 	}
 	return alias, ""
 }
@@ -297,7 +309,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 		slug := strings.TrimPrefix(args.Target, "$")
 		h.runAsync(w, "setalias_slug", values, func(ctx context.Context, log *slog.Logger) {
 			msg := h.resolveAndBindTunnelSlugAlias(ctx, log, teamID, channelID, args.Alias, slug)
-			h.postResponse(log, values.Get(fieldResponseURL), msg)
+			_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 		})
 		return
 	}

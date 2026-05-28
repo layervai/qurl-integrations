@@ -99,6 +99,9 @@ var ErrCreateResourceTunnelRejectsTargetURL = errors.New("create resource: type=
 // ErrCreateAPIKeyNilInput is returned by CreateAPIKey when input is nil.
 var ErrCreateAPIKeyNilInput = errors.New("create api key: input is nil")
 
+// ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
+var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
+
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
 var ErrUpdateResourceEmptyID = errors.New("update resource: resource_id is empty")
@@ -865,6 +868,20 @@ func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*A
 		return nil, err
 	}
 	return &out, nil
+}
+
+// RevokeAPIKey revokes a qURL API key by key_id.
+func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return ErrRevokeAPIKeyEmptyID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/api-keys/"+url.PathEscape(keyID), http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	_, err = c.do(req, nil, "DELETE /v1/api-keys/:key_id")
+	return err
 }
 
 // UpdateResource updates a resource's mutable properties (alias, description,

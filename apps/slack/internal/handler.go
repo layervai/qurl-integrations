@@ -26,6 +26,56 @@ const (
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. A workspace admin can run `/qurl setup` to connect it."
 )
 
+// ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
+// trigger_id expiry distinctly from auth, network, and Slack API failures.
+var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
+
+// ErrSlackRateLimited lets Config.OpenView surface Slack views.open rate
+// limiting distinctly so the slash-command follow-up can give the operator a
+// retry-shaped action instead of a generic setup failure.
+var ErrSlackRateLimited = errors.New("slack views.open rate limited")
+
+// SlackRateLimitError preserves Slack's Retry-After hint while still matching
+// [ErrSlackRateLimited] through errors.Is. OpenView implementations return it
+// when Slack includes a concrete retry delay.
+type SlackRateLimitError struct {
+	RetryAfter string
+}
+
+func (e *SlackRateLimitError) Error() string {
+	if e == nil || e.RetryAfter == "" {
+		return ErrSlackRateLimited.Error()
+	}
+	return fmt.Sprintf("%s: retry_after=%s", ErrSlackRateLimited, e.RetryAfter)
+}
+
+func (e *SlackRateLimitError) Unwrap() error {
+	return ErrSlackRateLimited
+}
+
+// NewSlackRateLimitError wraps a non-empty Retry-After header; empty headers
+// fall back to the sentinel so callers do not need separate branching.
+func NewSlackRateLimitError(retryAfter string) error {
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		return ErrSlackRateLimited
+	}
+	return &SlackRateLimitError{RetryAfter: retryAfter}
+}
+
+// OpenViewFunc posts a Slack modal through `views.open`.
+type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
+
+// SlackRateLimitRetryAfter returns Slack's Retry-After hint from err when the
+// OpenView implementation preserved one with [NewSlackRateLimitError].
+func SlackRateLimitRetryAfter(err error) string {
+	var rateLimitErr *SlackRateLimitError
+	if errors.As(err, &rateLimitErr) && rateLimitErr != nil {
+		return rateLimitErr.RetryAfter
+	}
+	return ""
+}
+
 // authErrorMessage maps an APIKey-lookup error to the right user-facing
 // reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
 // /qurl setup yet" path — surface a useful next-action instead of the
@@ -63,8 +113,11 @@ const (
 	// defaultMaxConcurrentAsync caps in-flight goroutines. A Slack-side
 	// flood (replay storm, runaway integration) drops with ackBusy past
 	// this threshold rather than unbounded-spawning until the task OOMs.
-	// 50 is generous for steady-state — the target customer (50 active
-	// users) won't sustain >1 click/sec across the whole workspace.
+	// Guided tunnel setup acks before its async admin check to preserve
+	// Slack's trigger_id window, so keep this high enough that admin-check
+	// retries cannot starve normal async replies. 50 is generous for
+	// steady-state — the target customer (50 active users) won't sustain
+	// >1 click/sec across the whole workspace.
 	defaultMaxConcurrentAsync = 50
 
 	// asyncWorkTimeout caps how long a single async job may run. Slack's
@@ -141,11 +194,15 @@ type Config struct {
 	AdminStore *slackdata.Store
 
 	// OpenView posts a `views.open` Slack web API call to display a
-	// modal in response to a slash command. Production wires this in
-	// cmd/main.go using the workspace bot token; tests inject a stub
-	// that records the call. The setalias-rebind confirm modal is
-	// the only consumer today.
-	OpenView func(ctx context.Context, triggerID string, viewJSON []byte) error
+	// modal in response to a slash command. The teamID parameter is
+	// present so production can route through per-workspace OAuth bot
+	// tokens; the current cmd/main.go fallback uses one SLACK_BOT_TOKEN.
+	// TODO(slack-oauth): switch production wiring to per-workspace bot token
+	// lookup once OAuth installs are the only supported Slack deployment path.
+	// Tests inject a stub that records the call. Tunnel install uses this
+	// for guided setup; setalias-rebind can use the same seam for
+	// confirmation modals.
+	OpenView OpenViewFunc
 
 	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
 	// on `/qurl get`. Production wires this in cmd/main.go; tests
@@ -155,7 +212,9 @@ type Config struct {
 	PostDM func(ctx context.Context, slackUserID, text string) error
 
 	// TunnelImage is the Docker image shown by `/qurl tunnel install`.
-	// Empty falls back to the public client image with the `latest` tag.
+	// Empty falls back to the public client image with the `latest` tag for
+	// dev/sandbox installs; production deploys should set an immutable tag or
+	// digest so Slack never instructs customers to run a floating image.
 	TunnelImage string
 }
 
@@ -714,21 +773,31 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
-		lines = append(lines,
-			"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
-		)
+		if h.cfg.OpenView != nil {
+			lines = append(lines,
+				"• `/qurl tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
+				"  Guided setup is enabled in this workspace; use bare `/qurl tunnel install` to choose a target environment.",
+				"• `/qurl tunnel install <slug> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<slug>` in this channel",
+				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
+			)
+		} else {
+			lines = append(lines,
+				"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+				"  Guided setup is not enabled in this deployment; use the typed installer form.",
+			)
+		}
 	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"
 		// on a sandbox deploy without an aliasStore; mirror the
 		// PostDM gates above so help doesn't advertise verbs whose
-		// reply tells the user they can't be used. These are admin
-		// verbs — the internal "alias" terminology is fine here
-		// because the audience for these lines is admins.
+		// reply tells the user they can't be used. Keep user-facing copy
+		// on "shortcut" even though the admin verbs retain their
+		// historical set-alias/unset-alias names.
 		lines = append(lines,
-			"• `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>` — Configure an alias in this channel (admin only)",
-			"• `/qurl unset-alias $<alias>` — Remove a configured alias in this channel (admin only)",
-			"• `/qurl aliases` — List the aliases configured in this channel",
+			"• `/qurl set-alias $<shortcut> <url-or-resource-id-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
+			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
+			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
 		)
 	}
 	if h.cfg.AdminStore != nil {

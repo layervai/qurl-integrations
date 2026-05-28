@@ -1380,6 +1380,55 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	}
 }
 
+func TestRevokeAPIKey(t *testing.T) {
+	var gotMethod string
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if err := c.RevokeAPIKey(context.Background(), "key_tunnel_bootstrap"); err != nil {
+		t.Fatalf("RevokeAPIKey: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/v1/api-keys/key_tunnel_bootstrap" {
+		t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_tunnel_bootstrap", gotMethod, gotPath)
+	}
+}
+
+func TestRevokeAPIKeyReturnsAPIErrorOnFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/api-keys/key_missing" {
+			t.Fatalf("request = %s %s, want DELETE /v1/api-keys/key_missing", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404,"detail":"key already gone"}}`))
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	err := c.RevokeAPIKey(context.Background(), "key_missing")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("RevokeAPIKey error = %v, want APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Detail != "key already gone" {
+		t.Fatalf("APIError = %+v, want 404 key already gone", apiErr)
+	}
+}
+
+func TestRevokeAPIKeyRejectsEmptyID(t *testing.T) {
+	c := testClient("https://qurl.invalid", "test-key")
+	if err := c.RevokeAPIKey(context.Background(), " \t "); !errors.Is(err, ErrRevokeAPIKeyEmptyID) {
+		t.Fatalf("RevokeAPIKey empty id error = %v, want ErrRevokeAPIKeyEmptyID", err)
+	}
+}
+
 // TestCreateResourceAccessPolicyRoundTrip pins the AccessPolicy decoding
 // path — if the server schema renames a subfield (ip_allowlist →
 // ip_allow, etc.) the round-trip would silently drop it without this

@@ -68,6 +68,10 @@ const (
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
 	// the per-connection memory an attacker can force pre-handler.
 	maxHeaderBytes = 8 << 10 // 8 KiB
+	// Slack remains the token-validity authority; these bounds are only a local
+	// boot-time typo guard for obviously truncated or pasted-wrong values.
+	slackBotTokenTypoGuardMin = 30
+	slackBotTokenTypoGuardMax = 1024
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -127,6 +131,16 @@ func run() error {
 	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
 		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
 	}
+	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
+	var openView internal.OpenViewFunc
+	if err := validateSlackBotTokenShape(slackBotToken); err != nil {
+		return err
+	}
+	if slackBotToken != "" {
+		openView = slackOpenViewFunc(slackBotToken, userAgent)
+	} else {
+		slog.Info("Slack views.open disabled", "reason", "slack_bot_token_unset")
+	}
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -143,6 +157,7 @@ func run() error {
 		BaseContext:        signalCtx,
 		MaxConcurrentAsync: maxConcurrentAsync,
 		AdminStore:         adminStore,
+		OpenView:           openView,
 		TunnelImage:        tunnelImage,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -291,6 +306,39 @@ const minStateSecretBytes = oauth.StateMinSecret
 // calls oauth.NewJWKSVerifier directly via this seam.
 var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.IDTokenVerifier, error) {
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
+}
+
+func validateSlackBotTokenShape(token string) error {
+	if token == "" {
+		return nil
+	}
+	// Keep this as a light local shape check. Slack token formats have changed
+	// over time, and the Slack API remains the authority on token validity. The
+	// upper bound is intentionally generous; when set, this only catches obvious
+	// config mistakes such as truncated tokens or bytes outside visible ASCII.
+	// Keep the lower bound loose: this boot-time check is only a local typo
+	// guard, while Slack's auth response remains the validity oracle.
+	if len(token) < slackBotTokenTypoGuardMin {
+		return fmt.Errorf("SLACK_BOT_TOKEN is shorter than %d characters", slackBotTokenTypoGuardMin)
+	}
+	if len(token) > slackBotTokenTypoGuardMax {
+		return fmt.Errorf("SLACK_BOT_TOKEN is longer than %d characters", slackBotTokenTypoGuardMax)
+	}
+	if !validSlackBotTokenPrefix(token) {
+		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb- or xoxe.xoxb-")
+	}
+	for i, b := range []byte(token) {
+		if b >= '!' && b <= '~' {
+			continue
+		}
+		return fmt.Errorf("SLACK_BOT_TOKEN contains invalid characters near byte %d", i)
+	}
+	return nil
+}
+
+func validSlackBotTokenPrefix(token string) bool {
+	return strings.HasPrefix(token, "xoxb-") ||
+		strings.HasPrefix(token, "xoxe.xoxb-")
 }
 
 // missingOAuthEnvVars returns the env-var names with empty values, in
