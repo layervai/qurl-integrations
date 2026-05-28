@@ -48,6 +48,8 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 	// per-workspace OAuth token store is the only production path.
 	return func(ctx context.Context, _ string, triggerID string, viewJSON []byte) error {
 		viewJSON = bytes.TrimSpace(viewJSON)
+		// json.Valid accepts arrays and scalars; views.open requires a view
+		// object, so reject non-object roots before sending the request.
 		if !json.Valid(viewJSON) || !bytes.HasPrefix(viewJSON, []byte("{")) {
 			return errors.New("views.open: invalid view JSON")
 		}
@@ -82,10 +84,10 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 			return fmt.Errorf("views.open response read: %w", err)
 		}
 		if len(raw) > slackViewsOpenResponseBodyLimit {
-			// LimitReader consumes only the first limit+1 bytes from the
-			// original body. Drain the remainder before Close so a keep-alive
-			// transport can still reuse the connection after an oversized
-			// response.
+			// LimitReader has already consumed limit+1 bytes from the original
+			// body. Drain any bytes after that point before Close so a
+			// keep-alive transport can still reuse the connection after an
+			// oversized response.
 			_, _ = io.Copy(io.Discard, resp.Body)
 			return fmt.Errorf("views.open response exceeded %d bytes", slackViewsOpenResponseBodyLimit)
 		}

@@ -33,6 +33,7 @@ const (
 	// ack now happens before views.open; this tighter bound preserves enough of
 	// the trigger window for one admin check plus the Slack Web API call.
 	slackTriggerOpenViewBudget = time.Second
+	slackRetryAfterDisplayCap  = 5 * time.Minute
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
@@ -426,7 +427,9 @@ func revokeBootstrapKeyAfterInstallFailure(log *slog.Logger, c *client.Client, k
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
 	// Hourly bucket matches the one-hour bootstrap key TTL: retries inside
 	// the same setup window replay safely, while a later install gets a fresh
-	// key instead of replaying an expired plaintext secret.
+	// key instead of replaying an expired plaintext secret. A retry that
+	// straddles an hour boundary can mint a fresh key; the 25-minute modal TTL
+	// keeps that duplicate-key window bounded.
 	bucket := now.UTC().Format("2006010215")
 	return IdempotencyKey(teamID, channelID, userID, "tunnel-bootstrap:"+slug+":"+bucket)
 }
@@ -538,8 +541,8 @@ func slackRetryAfterLabel(raw string) string {
 		// shape as untrusted display text and fall back to generic retry copy.
 		return ""
 	}
-	if seconds > 5*60 {
-		return "at least 5 minutes"
+	if time.Duration(seconds)*time.Second > slackRetryAfterDisplayCap {
+		return "at least " + humanTunnelBootstrapDuration(slackRetryAfterDisplayCap)
 	}
 	if seconds >= 60 {
 		minutes := seconds / 60

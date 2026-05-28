@@ -688,7 +688,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"name: 'qurl-proxy-" + testTunnelSlug + "'",
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
-		"Merge this fragment into the target pod spec",
+		"Append the `qurl-tunnel` container under your existing `containers:` list",
 		"fsGroup: 65532",
 		"fsGroupChangePolicy: OnRootMismatch",
 		"securityContext:",
@@ -1514,7 +1514,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"Target environment: Kubernetes.",
 				"kubectl apply -f -",
 				"Pod spec additions:",
-				"Merge this fragment into the target pod spec",
+				"Do not duplicate existing YAML keys.",
 			},
 		},
 	}

@@ -89,7 +89,7 @@ volumes:
 		"- The pod-level `fsGroup: 65532` lets the sidecar read the bootstrap Secret and write the qURL agent-state PVC. If your app cannot accept that fsGroup, pre-provision qURL agent-state ownership separately before merging the fragment.",
 		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
 	}, "\n")
-	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\nMerge this fragment into the target pod spec under the same indentation as the existing `containers` and `volumes` fields.\n\n" + slackCodeBlock(patch)
+	return intro + "\n\n" + slackCodeBlock(objects) + "\n\nPod spec additions:\nAppend the `qurl-tunnel` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + slackCodeBlock(patch)
 }
 
 type kubernetesTunnelNames struct {
