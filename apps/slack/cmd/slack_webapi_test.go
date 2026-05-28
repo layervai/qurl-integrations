@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
@@ -141,4 +143,74 @@ func TestSlackOpenViewFuncSurfacesOversizedResponse(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
 		t.Fatalf("error = %v, want oversized response", err)
 	}
+}
+
+func TestSlackOpenViewFuncRefusesRedirects(t *testing.T) {
+	t.Parallel()
+	var redirected atomic.Bool
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Store(true)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(redirectTarget.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	err := slackOpenViewFuncWithURL("xoxb-test", "", redirector.URL)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil {
+		t.Fatal("views.open followed redirect and returned nil error")
+	}
+	if redirected.Load() {
+		t.Fatal("views.open followed redirect target")
+	}
+}
+
+func TestSlackOpenViewFuncDrainsOversizedResponse(t *testing.T) {
+	t.Parallel()
+	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", 8192))}
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+
+	err := slackOpenViewFuncWithHTTPClient("xoxb-test", "", "https://slack.test/views.open", httpClient)(context.Background(), "T_test", "trigger_test", []byte(`{"type":"modal"}`))
+	if err == nil || !strings.Contains(err.Error(), "exceeded 4096 bytes") {
+		t.Fatalf("error = %v, want oversized response", err)
+	}
+	if !body.sawEOF.Load() {
+		t.Fatal("oversized response body was not drained to EOF")
+	}
+	if !body.closed.Load() {
+		t.Fatal("oversized response body was not closed")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type trackingReadCloser struct {
+	reader *strings.Reader
+	sawEOF atomic.Bool
+	closed atomic.Bool
+}
+
+func (b *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.sawEOF.Store(true)
+	}
+	return n, err
+}
+
+func (b *trackingReadCloser) Close() error {
+	b.closed.Store(true)
+	return nil
 }

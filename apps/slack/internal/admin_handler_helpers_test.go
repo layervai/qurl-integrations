@@ -203,11 +203,22 @@ func (a *adminSlashInvoker) invokeAdminAsync(text, teamID, userID string) (syncS
 // to the text field. Tests assert on text directly.
 func parseSlackText(t *testing.T, body []byte) string {
 	t.Helper()
-	var got map[string]string
+	var got map[string]any
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal reply: %v body=%s", err, body)
 	}
-	return got["text"]
+	text, _ := got["text"].(string)
+	return text
+}
+
+func parseSlackReplyBool(t *testing.T, body []byte, field string) bool {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, body)
+	}
+	value, _ := got[field].(bool)
+	return value
 }
 
 // workspaceMappingHasAdmin returns true iff the workspace_mappings

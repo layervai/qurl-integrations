@@ -308,7 +308,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 		t.Fatalf("metadata = %+v, want team/channel/user/response_url", meta)
 	}
 	body := string(call.view)
-	for _, want := range []string{"Tunnel slug", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
+	for _, want := range []string{"Target channel", testTunnelChannelID, "Tunnel slug", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal missing %q:\n%s", want, body)
 		}
@@ -383,9 +383,13 @@ func TestTunnelInstallBareReportsOpenViewFailure(t *testing.T) {
 	if !strings.Contains(ack, "Opening guided tunnel setup") {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
-	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	asyncBody := inv.captured.waitForBody(t, 2*time.Second)
+	async := parseSlackText(t, asyncBody)
 	if !strings.Contains(async, "Could not open guided tunnel setup") {
 		t.Fatalf("async reply = %q, want OpenView failure copy", async)
+	}
+	if got := parseSlackReplyBool(t, asyncBody, "replace_original"); !got {
+		t.Fatalf("replace_original = %v, want true for guided setup failure", got)
 	}
 }
 
@@ -411,6 +415,31 @@ func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl tunnel install") {
 		t.Fatalf("async reply = %q, want trigger-expiry retry copy", async)
+	}
+}
+
+func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error {
+		return NewSlackRateLimitError("2")
+	}
+
+	inv := newAdminSlashInvoker(t, h)
+	status, ack := inv.invokeAdmin("tunnel install", testAdminTeamID, testAdminUserID)
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "Opening guided tunnel setup") {
+		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "Wait 2 seconds") || !strings.Contains(async, "/qurl tunnel install") {
+		t.Fatalf("async reply = %q, want retry-after guidance", async)
 	}
 }
 
@@ -718,6 +747,58 @@ func TestTunnelInstallModalRejectsEmptyPayloadIdentity(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.AdminStore = nil
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+	}
+	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Admin features are not configured") {
+		t.Fatalf("modal response = %s, want admin-store configuration rejection", w.Body.String())
+	}
+}
+
+func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: tunnelBootstrapNow().Unix(),
+	}
+	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Channel shortcut storage is not configured") {
+		t.Fatalf("modal response = %s, want channel-shortcut store rejection", w.Body.String())
+	}
+}
+
 func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -886,7 +967,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
 
-	if !strings.Contains(got, "Image: using the dev/sandbox fallback") {
+	if !strings.Contains(got, "Image: using the dev/sandbox fallback") || !strings.Contains(got, defaultTunnelImage) {
 		t.Fatalf("rendered install message missing fallback image warning:\n%s", got)
 	}
 	if strings.Contains(got, testForbiddenResourceLabel) || strings.Contains(got, testTunnelResourceID) {

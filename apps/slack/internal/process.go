@@ -163,16 +163,6 @@ func sanitizeAPIError(err error, prefix string) string {
 // kill while still bounding the goroutine's lifetime.
 // handler.Wait()/WaitTimeout in main blocks process exit.
 func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool {
-	if responseURL == "" {
-		log.Warn("missing response_url — async result has nowhere to go")
-		return false
-	}
-	target, err := h.validateResponseURLFn(responseURL)
-	if err != nil {
-		log.Warn("invalid response_url — refusing to dial", "error", err)
-		return false
-	}
-
 	body, err := json.Marshal(map[string]string{
 		respFieldResponseType: respTypeEphemeral,
 		respFieldText:         text,
@@ -181,6 +171,28 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool 
 		// json.Marshal of a map[string]string can't fail in practice; log
 		// and bail rather than POSTing a half-baked body.
 		log.Error("marshal response_url payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
+func (h *Handler) postErrorResponse(log *slog.Logger, responseURL, message string, replaceOriginal bool) bool {
+	body, err := ErrorResponse(message, replaceOriginal)
+	if err != nil {
+		log.Error("marshal response_url error payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
+func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []byte) bool {
+	if responseURL == "" {
+		log.Warn("missing response_url — async result has nowhere to go")
+		return false
+	}
+	target, err := h.validateResponseURLFn(responseURL)
+	if err != nil {
+		log.Warn("invalid response_url — refusing to dial", "error", err)
 		return false
 	}
 

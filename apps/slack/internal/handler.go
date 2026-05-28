@@ -35,6 +35,44 @@ var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
 // retry-shaped action instead of a generic setup failure.
 var ErrSlackRateLimited = errors.New("slack views.open rate limited")
 
+// SlackRateLimitError preserves Slack's Retry-After hint while still matching
+// [ErrSlackRateLimited] through errors.Is. OpenView implementations return it
+// when Slack includes a concrete retry delay.
+type SlackRateLimitError struct {
+	RetryAfter string
+}
+
+func (e *SlackRateLimitError) Error() string {
+	if e == nil || e.RetryAfter == "" {
+		return ErrSlackRateLimited.Error()
+	}
+	return ErrSlackRateLimited.Error() + ": retry_after=" + e.RetryAfter
+}
+
+func (e *SlackRateLimitError) Unwrap() error {
+	return ErrSlackRateLimited
+}
+
+// NewSlackRateLimitError wraps a non-empty Retry-After header; empty headers
+// fall back to the sentinel so callers do not need separate branching.
+func NewSlackRateLimitError(retryAfter string) error {
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		return ErrSlackRateLimited
+	}
+	return &SlackRateLimitError{RetryAfter: retryAfter}
+}
+
+// SlackRateLimitRetryAfter returns Slack's Retry-After hint from err when the
+// OpenView implementation preserved one with [NewSlackRateLimitError].
+func SlackRateLimitRetryAfter(err error) string {
+	var rateLimitErr *SlackRateLimitError
+	if errors.As(err, &rateLimitErr) && rateLimitErr != nil {
+		return rateLimitErr.RetryAfter
+	}
+	return ""
+}
+
 // authErrorMessage maps an APIKey-lookup error to the right user-facing
 // reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
 // /qurl setup yet" path — surface a useful next-action instead of the

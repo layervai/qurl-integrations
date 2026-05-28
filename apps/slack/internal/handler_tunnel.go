@@ -243,19 +243,20 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string) {
 	// adminGateBudget + slackTriggerOpenViewBudget intentionally fit inside
-	// Slack's roughly three-second trigger_id window; expiry is converted into
-	// a retry prompt instead of leaving the admin with a silent modal miss.
+	// Slack's roughly three-second trigger_id window. The admin store is the
+	// dominant tail-latency risk before views.open; expiry is converted into a
+	// retry prompt instead of leaving the admin with a silent modal miss.
 	adminCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
 	cancel()
 	if err != nil {
 		log.Error("tunnel install wizard admin check failed", "error", err)
-		h.postResponse(log, responseURL, "Could not verify admin status. Retry in a moment.")
+		h.postErrorResponse(log, responseURL, "Could not verify admin status. Retry in a moment.", true)
 		return
 	}
 	if !isAdmin {
 		log.Warn("tunnel install wizard denied: non-admin")
-		h.postResponse(log, responseURL, "This command is admin-only.")
+		h.postErrorResponse(log, responseURL, "This command is admin-only.", true)
 		return
 	}
 	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
@@ -267,7 +268,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	})
 	if err != nil {
 		log.Error("tunnel install wizard modal render failed", "error", err)
-		h.postResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.")
+		h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		return
 	}
 	openCtx, cancel := context.WithTimeout(ctx, slackTriggerOpenViewBudget)
@@ -276,11 +277,11 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		log.Error("tunnel install wizard views.open failed", "error", err, "slack_rate_limited", errors.Is(err, ErrSlackRateLimited))
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
-			h.postResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.")
+			h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
-			h.postResponse(log, responseURL, "Slack rate-limited guided tunnel setup. Wait a moment, then run `/qurl tunnel install` again.")
+			h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
 		default:
-			h.postResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.")
+			h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		}
 		return
 	}
@@ -410,7 +411,30 @@ func tunnelImageNote(usingDefaultImage bool) string {
 	if !usingDefaultImage {
 		return ""
 	}
-	return "Image: using the dev/sandbox fallback. Set `QURL_TUNNEL_IMAGE` to an immutable tag or digest before production rollout."
+	return "Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_TUNNEL_IMAGE` to an immutable tag or digest before production rollout."
+}
+
+func tunnelInstallRateLimitMessage(err error) string {
+	retryAfter := slackRetryAfterLabel(SlackRateLimitRetryAfter(err))
+	if retryAfter == "" {
+		return "Slack rate-limited guided tunnel setup. Wait a moment, then run `/qurl tunnel install` again."
+	}
+	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl tunnel install` again."
+}
+
+func slackRetryAfterLabel(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return "until " + raw
+	}
+	if seconds == 1 {
+		return "1 second"
+	}
+	return fmt.Sprintf("%d seconds", seconds)
 }
 
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, key *client.APIKey, image string) (string, error) {
@@ -701,7 +725,8 @@ func validateBootstrapAPIKeyForShell(apiKey string) error {
 	// shellSingleQuote safely quotes arbitrary text. This check is an
 	// additional output-surface guard: qurl-service bootstrap keys should be
 	// printable single-line tokens, and refusing quote/control bytes keeps the
-	// rendered install snippet easy for operators to inspect.
+	// rendered install snippet easy for operators to inspect. A dollar sign is
+	// safe here because POSIX single quotes prevent shell expansion.
 	if apiKey == "" {
 		return errors.New("empty api key")
 	}

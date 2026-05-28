@@ -31,6 +31,9 @@ const (
 	blockKitFieldTitle           = "title"
 	blockKitFieldType            = "type"
 	blockKitTypeModal            = "modal"
+	// Slack caps private_metadata at 3000 bytes. Today's tunnel metadata is
+	// small; this guard is mainly defense against future field additions or a
+	// pathological response_url making modal submission fail only after open.
 	slackPrivateMetadataMaxBytes = 3000
 )
 
@@ -141,6 +144,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
+			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
 			inputBlock(tunnelInstallBlockSlug, "Tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
 			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
@@ -174,6 +178,26 @@ func TunnelInstallErrorModal(message string) []byte {
 		},
 	}
 	return mustMarshalStaticJSON(payload)
+}
+
+func slackChannelMention(channelID string) string {
+	var b strings.Builder
+	for _, r := range channelID {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_':
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "the channel where setup started"
+	}
+	return "<#" + b.String() + ">"
 }
 
 func mustMarshalStaticJSON(v any) []byte {

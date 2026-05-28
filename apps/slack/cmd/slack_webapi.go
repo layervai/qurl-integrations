@@ -25,12 +25,12 @@ func slackOpenViewFunc(token, userAgent string) func(context.Context, string, st
 }
 
 func slackOpenViewFuncWithURL(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
-	return slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL, &http.Client{Timeout: slackViewsOpenTimeout})
+	return slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL, defaultSlackViewsOpenClient())
 }
 
 func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: slackViewsOpenTimeout}
+		httpClient = defaultSlackViewsOpenClient()
 	}
 	// The teamID parameter is intentionally part of the Config.OpenView seam
 	// so production wiring can move from this single-token deployment shape to
@@ -75,19 +75,25 @@ func slackOpenViewFuncWithHTTPClient(token, userAgent, viewsOpenURL string, http
 			return fmt.Errorf("views.open response read: %w", err)
 		}
 		if len(raw) > bodyCap {
+			_, _ = io.Copy(io.Discard, resp.Body)
 			return fmt.Errorf("views.open response exceeded %d bytes", bodyCap)
 		}
 		return slackOpenViewResponseError(resp.StatusCode, resp.Header, raw)
 	}
 }
 
+func defaultSlackViewsOpenClient() *http.Client {
+	return &http.Client{
+		Timeout: slackViewsOpenTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) error {
 	if statusCode == http.StatusTooManyRequests {
-		retryAfter := strings.TrimSpace(header.Get("Retry-After"))
-		if retryAfter == "" {
-			return internal.ErrSlackRateLimited
-		}
-		return fmt.Errorf("%w: retry_after=%s", internal.ErrSlackRateLimited, retryAfter)
+		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 400 {
 		bodySnippet := strings.TrimSpace(string(raw))
