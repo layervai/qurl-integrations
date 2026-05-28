@@ -655,12 +655,16 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 	}
 }
 
-func renderTunnelConfigYAML(args *tunnelInstallArgs) string {
+func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
+	quotedSlug, err := yamlSingleQuoted(args.Slug)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`routes:
   - name: %s
     type: http
     local_ip: 127.0.0.1
-    local_port: %d`, args.Slug, args.LocalPort)
+    local_port: %d`, quotedSlug, args.LocalPort), nil
 }
 
 func renderPortablePipefailShell() string {

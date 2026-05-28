@@ -49,7 +49,11 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		return "", err
 	}
 	secretName := "qurl-tunnel-" + args.Slug
-	configBlock, err := slackCodeBlock(renderTunnelConfigYAML(args))
+	configYAML, err := renderTunnelConfigYAML(args)
+	if err != nil {
+		return "", err
+	}
+	configBlock, err := slackCodeBlock(configYAML)
 	if err != nil {
 		return "", err
 	}

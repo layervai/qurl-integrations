@@ -9,6 +9,10 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 	if args.WebRef != "" {
 		webContainer = shellSingleQuote(args.WebRef)
 	}
+	configYAML, err := renderTunnelConfigYAML(args)
+	if err != nil {
+		return "", err
+	}
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -72,7 +76,7 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
-  %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), renderTunnelConfigYAML(args), renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
+  %s`, renderPortablePipefailShell(), webContainer, shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {

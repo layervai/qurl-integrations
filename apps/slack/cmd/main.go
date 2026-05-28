@@ -329,8 +329,9 @@ func validateSlackBotToken(token string) error {
 	if !strings.HasPrefix(token, "xoxb-") {
 		return errors.New("SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-")
 	}
-	for i, r := range token {
-		if r >= '!' && r <= '~' {
+	for i := 0; i < len(token); i++ {
+		b := token[i]
+		if b >= '!' && b <= '~' {
 			continue
 		}
 		return fmt.Errorf("SLACK_BOT_TOKEN contains invalid characters near byte %d", i)

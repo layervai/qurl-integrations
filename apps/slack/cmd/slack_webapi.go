@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 )
@@ -149,13 +150,14 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		return bodySnippet
 	}
 	cut := 0
-	// Walk rune starts so the bounded log snippet never slices through a
-	// multibyte UTF-8 sequence.
-	for i := range bodySnippet {
-		if i > slackOpenViewMaxErrorSnippetBytes {
+	// Count complete runes so the bounded log snippet uses as much of the byte
+	// budget as possible without slicing through a multibyte UTF-8 sequence.
+	for _, r := range bodySnippet {
+		next := cut + utf8.RuneLen(r)
+		if next > slackOpenViewMaxErrorSnippetBytes {
 			break
 		}
-		cut = i
+		cut = next
 	}
 	if cut == 0 {
 		// Unreachable with the current 200-byte cap, but keep a defined fallback

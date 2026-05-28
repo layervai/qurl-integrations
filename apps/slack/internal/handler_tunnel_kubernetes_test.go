@@ -54,8 +54,12 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	if err := yaml.Unmarshal([]byte(docs[0]), &configMap); err != nil {
 		t.Fatalf("ConfigMap YAML did not parse: %v", err)
 	}
-	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != renderTunnelConfigYAML(args) {
-		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, renderTunnelConfigYAML(args))
+	wantConfig, err := renderTunnelConfigYAML(args)
+	if err != nil {
+		t.Fatalf("renderTunnelConfigYAML() err = %v", err)
+	}
+	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != wantConfig {
+		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, wantConfig)
 	}
 	patchMarker := "Pod spec additions:\n"
 	patchSectionStart := strings.Index(got, patchMarker)
