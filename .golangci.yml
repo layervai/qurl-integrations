@@ -131,3 +131,11 @@ linters:
           - gocyclo
           - dupl
         path: _test\.go
+      # G706's taint pass currently cannot prove Slack's signed interaction
+      # envelope plus slog's structured escaping make these modal identifiers
+      # safe as attributes. Keep the exclusion pinned to the modal handler
+      # rather than disabling log-injection analysis repo-wide.
+      - linters:
+          - gosec
+        path: apps/slack/internal/handler_interaction\.go
+        text: "G706: Log injection via taint analysis"
