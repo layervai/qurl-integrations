@@ -85,49 +85,56 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		return nil, "Tunnel slug must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
 	}
 	for _, token := range fields[2:] {
-		switch {
-		case strings.HasPrefix(token, "port:"):
-			port, err := strconv.Atoi(strings.TrimPrefix(token, "port:"))
-			if err != nil || port < 1 || port > 65535 {
-				return nil, "port must be a TCP port from 1 to 65535.\n\n" + tunnelInstallUsage()
-			}
-			args.LocalPort = port
-		case strings.HasPrefix(token, "alias:"):
-			aliasToken := strings.TrimPrefix(token, "alias:")
-			if aliasToken != "" && !strings.HasPrefix(aliasToken, "$") {
-				aliasToken = "$" + aliasToken
-			}
-			alias, msg := requireAlias(aliasToken)
-			if msg != "" {
-				return nil, msg
-			}
-			args.Alias = alias
-		case strings.HasPrefix(token, "env:"):
-			env, msg := parseTunnelEnvironment(strings.TrimPrefix(token, "env:"))
-			if msg != "" {
-				return nil, msg + "\n\n" + tunnelInstallUsage()
-			}
-			args.Environment = env
-		case strings.HasPrefix(token, "service:"):
-			_, value, _ := strings.Cut(token, ":")
-			if !dockerComposeServicePattern.MatchString(value) {
-				return nil, "service must use letters, numbers, underscores, or hyphens.\n\n" + tunnelInstallUsage()
-			}
-			args.WebContainer = value
-		case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "web_container:"):
-			_, value, _ := strings.Cut(token, ":")
-			if !dockerContainerRefPattern.MatchString(value) {
-				return nil, "container/service/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
-			}
-			args.WebContainer = value
-		default:
-			return nil, tunnelInstallUsage()
+		if msg := parseTunnelInstallOption(args, token); msg != "" {
+			return nil, msg
 		}
 	}
 	if msg := tunnelWebContainerValidationMessage(args.Environment, args.WebContainer); msg != "" {
 		return nil, msg + "\n\n" + tunnelInstallUsage()
 	}
 	return args, ""
+}
+
+func parseTunnelInstallOption(args *tunnelInstallArgs, token string) string {
+	switch {
+	case strings.HasPrefix(token, "port:"):
+		port, err := strconv.Atoi(strings.TrimPrefix(token, "port:"))
+		if err != nil || port < 1 || port > 65535 {
+			return "port must be a TCP port from 1 to 65535.\n\n" + tunnelInstallUsage()
+		}
+		args.LocalPort = port
+	case strings.HasPrefix(token, "alias:"):
+		aliasToken := strings.TrimPrefix(token, "alias:")
+		if aliasToken != "" && !strings.HasPrefix(aliasToken, "$") {
+			aliasToken = "$" + aliasToken
+		}
+		alias, msg := requireAlias(aliasToken)
+		if msg != "" {
+			return msg
+		}
+		args.Alias = alias
+	case strings.HasPrefix(token, "env:"):
+		env, msg := parseTunnelEnvironment(strings.TrimPrefix(token, "env:"))
+		if msg != "" {
+			return msg + "\n\n" + tunnelInstallUsage()
+		}
+		args.Environment = env
+	case strings.HasPrefix(token, "service:"):
+		_, value, _ := strings.Cut(token, ":")
+		if !dockerComposeServicePattern.MatchString(value) {
+			return "service must use letters, numbers, underscores, or hyphens.\n\n" + tunnelInstallUsage()
+		}
+		args.WebContainer = value
+	case strings.HasPrefix(token, "container:"), strings.HasPrefix(token, "web_container:"):
+		_, value, _ := strings.Cut(token, ":")
+		if !dockerContainerRefPattern.MatchString(value) {
+			return "container/service/web_container must use letters, numbers, dots, underscores, or hyphens.\n\n" + tunnelInstallUsage()
+		}
+		args.WebContainer = value
+	default:
+		return tunnelInstallUsage()
+	}
+	return ""
 }
 
 func tunnelInstallUsage() string {
