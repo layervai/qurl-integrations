@@ -18,7 +18,7 @@ import (
 //
 // `/qurl list` is tunnel-only and renders the slug as the `$<token>`,
 // so the fixtures below are tunnel resources (testKeyType:
-// resourceTypeTunnel) carrying a slug.
+// client.ResourceTypeTunnel) carrying a slug.
 const (
 	testListAliasProdDB = "prod-db"
 	testListAliasSecret = "secret"
@@ -54,8 +54,8 @@ func TestHandleList_AdminSeesAllTunnels(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: testListResIDProdDB, testKeyType: resourceTypeTunnel, testKeySlug: testListAliasProdDB},
-			{testKeyResourceID: "r_stage_db_bb", testKeyType: resourceTypeTunnel, testKeySlug: "stage-db"},
+			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
+			{testKeyResourceID: "r_stage_db_bb", testKeyType: client.ResourceTypeTunnel, testKeySlug: "stage-db"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -84,8 +84,8 @@ func TestHandleList_NonAdminFiltersToChannelPolicy(t *testing.T) {
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testListResIDProdDB})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: testListResIDProdDB, testKeyType: resourceTypeTunnel, testKeySlug: testListAliasProdDB},
-			{testKeyResourceID: "r_secret_xx", testKeyType: resourceTypeTunnel, testKeySlug: testListAliasSecret},
+			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
+			{testKeyResourceID: "r_secret_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasSecret},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -117,8 +117,8 @@ func TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAliasBinding(t *testing
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_allow_only1"})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_allow_only1", testKeyType: resourceTypeTunnel, testKeySlug: "allow-only-tun"},
-			{testKeyResourceID: "r_secret_xx", testKeyType: resourceTypeTunnel, testKeySlug: testListAliasSecret},
+			{testKeyResourceID: "r_allow_only1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "allow-only-tun"},
+			{testKeyResourceID: "r_secret_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasSecret},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -159,9 +159,9 @@ func TestHandleList_NonAdminUnionsAllowedSetAndAliasBindings(t *testing.T) {
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_allow_set_a", testKeyType: resourceTypeTunnel, testKeySlug: "allowset-tun"},
-			{testKeyResourceID: "r_alias_only_b", testKeyType: resourceTypeTunnel, testKeySlug: "aliasonly-tun"},
-			{testKeyResourceID: "r_neither_xx", testKeyType: resourceTypeTunnel, testKeySlug: "neither-tun"},
+			{testKeyResourceID: "r_allow_set_a", testKeyType: client.ResourceTypeTunnel, testKeySlug: "allowset-tun"},
+			{testKeyResourceID: "r_alias_only_b", testKeyType: client.ResourceTypeTunnel, testKeySlug: "aliasonly-tun"},
+			{testKeyResourceID: "r_neither_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "neither-tun"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -188,7 +188,7 @@ func TestHandleList_NonAdminEmptyChannelFailsClose(t *testing.T) {
 	ts.seedNonAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_leaked_xx", testKeyType: resourceTypeTunnel, testKeySlug: "leaked-tun"},
+			{testKeyResourceID: "r_leaked_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "leaked-tun"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -212,7 +212,7 @@ func TestHandleList_NonAdminPaginationGap(t *testing.T) {
 	// fires.
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_unallowed_x", testKeyType: resourceTypeTunnel, testKeySlug: "unallowed-tun"},
+			{testKeyResourceID: "r_unallowed_x", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unallowed-tun"},
 		}, "cursor_xyz", true)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -233,7 +233,7 @@ func TestHandleList_NonAdminEmptyChannelWithHasMoreShowsDefault(t *testing.T) {
 	ts.seedNonAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_leaked_xx", testKeyType: resourceTypeTunnel, testKeySlug: "leaked-tun"},
+			{testKeyResourceID: "r_leaked_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "leaked-tun"},
 		}, "cursor_xyz", true)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -278,7 +278,7 @@ func TestHandleList_URLResourcesFiltered(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_tun_aaaaaa", testKeyType: resourceTypeTunnel, testKeySlug: "alpha-tunnel"},
+			{testKeyResourceID: "r_tun_aaaaaa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "alpha-tunnel"},
 			{testKeyResourceID: "r_url_btarg1", fAttrAlias: "burl", testKeyTargetURL: "https://b.example.com"},
 			{testKeyResourceID: "r_url_stray1", testKeyTargetURL: "https://c.example.com", testKeySlug: "stray-slug"},
 		}, "", false)
@@ -310,7 +310,7 @@ func TestHandleList_TunnelSlugIsToken(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_tunnel_slg", fAttrAlias: "dash-alias", testKeyType: resourceTypeTunnel, testKeySlug: "prod-dashboard"},
+			{testKeyResourceID: "r_tunnel_slg", fAttrAlias: "dash-alias", testKeyType: client.ResourceTypeTunnel, testKeySlug: "prod-dashboard"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -345,7 +345,7 @@ func TestHandleList_TunnelAliasFallbackWhenNoSlug(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_tunnel_aaa", fAttrAlias: "tun", testKeyType: resourceTypeTunnel},
+			{testKeyResourceID: "r_tunnel_aaa", fAttrAlias: "tun", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -369,7 +369,7 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_tunnel_noa", testKeyType: resourceTypeTunnel},
+			{testKeyResourceID: "r_tunnel_noa", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -395,8 +395,8 @@ func TestHandleList_TunnelWithDescription(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_tun_desc1", testKeyType: resourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "ops jump host"},
-			{testKeyResourceID: "r_tun_nodes", testKeyType: resourceTypeTunnel, testKeySlug: "no-desc-tun"},
+			{testKeyResourceID: "r_tun_desc1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "ops jump host"},
+			{testKeyResourceID: "r_tun_nodes", testKeyType: client.ResourceTypeTunnel, testKeySlug: "no-desc-tun"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -421,7 +421,7 @@ func TestHandleList_HasMoreFooter(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_one_aa", testKeyType: resourceTypeTunnel, testKeySlug: "one-tun"},
+			{testKeyResourceID: "r_one_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
 		}, "cursor_xyz", true)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -446,7 +446,7 @@ func TestHandleList_NonAdminPartialPageHasMoreFooter(t *testing.T) {
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "one", []string{"r_one_xxxxxx"})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_one_xxxxxx", testKeyType: resourceTypeTunnel, testKeySlug: "one-tun"},
+			{testKeyResourceID: "r_one_xxxxxx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
 		}, "cursor_xyz", true)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -470,7 +470,7 @@ func TestHandleList_AdminStoreNilTreatedAsNonAdmin(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_master_xx", testKeyType: resourceTypeTunnel, testKeySlug: "master-tun"},
+			{testKeyResourceID: "r_master_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "master-tun"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -515,9 +515,9 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 		// Server returns in non-alphabetical order; the handler must
 		// sort. The slug-less row sorts by its resource_id.
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_zzz_aaaaa", testKeyType: resourceTypeTunnel},
-			{testKeyResourceID: "r_aaa_xxxxx", testKeyType: resourceTypeTunnel, testKeySlug: testListAliasAlpha},
-			{testKeyResourceID: "r_mmm_yyyyy", testKeyType: resourceTypeTunnel, testKeySlug: "middle"},
+			{testKeyResourceID: "r_zzz_aaaaa", testKeyType: client.ResourceTypeTunnel},
+			{testKeyResourceID: "r_aaa_xxxxx", testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasAlpha},
+			{testKeyResourceID: "r_mmm_yyyyy", testKeyType: client.ResourceTypeTunnel, testKeySlug: "middle"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)

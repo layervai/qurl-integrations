@@ -49,13 +49,6 @@ const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. Set o
 // nudges toward an admin escalation path.
 const listTunnelsNonAdminPaginationGapMessage = ":mag: No allowed tunnels on the first page of this workspace's listing. Tunnels allowed in this channel may exist past the first page — ask an admin to allow specific tunnels in this channel, or check `/qurl aliases` to see if a specific alias is set."
 
-// resourceTypeTunnel is the wire-level discriminator for tunnel
-// resources. Lifted to a constant so the list renderer keys on the
-// upstream type rather than guessing from empty `target_url` — a
-// non-tunnel resource with a transient empty target (data glitch,
-// partially-populated row) must NOT be silently re-labeled "(tunnel)".
-const resourceTypeTunnel = "tunnel"
-
 // handleListResources implements `/qurl list`. It lists the workspace's
 // tunnel resources (type=tunnel only — URL/transit resources are
 // filtered out) so each line is a copy-paste-ready `$<slug>` token the
@@ -171,13 +164,13 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 
 // filterTunnelResources returns only the tunnel-type resources from the
 // fetched page. `/qurl list` is tunnel-scoped; URL/transit resources are
-// dropped. Keys on r.Type == [resourceTypeTunnel] (the upstream
+// dropped. Keys on r.Type == [client.ResourceTypeTunnel] (the upstream
 // discriminator), NOT on an empty target_url, so a non-tunnel row with a
 // transient empty target isn't mis-included.
 func filterTunnelResources(resources []client.Resource) []client.Resource {
 	out := make([]client.Resource, 0, len(resources))
 	for i := range resources {
-		if resources[i].Type == resourceTypeTunnel {
+		if resources[i].Type == client.ResourceTypeTunnel {
 			out = append(out, resources[i])
 		}
 	}
