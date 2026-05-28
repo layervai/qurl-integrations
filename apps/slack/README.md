@@ -148,4 +148,6 @@ After adding `views:write` or moving to per-workspace token storage, existing
 customer workspaces must reinstall or reauthorize the Slack app so Slack issues
 a bot token with the new scope. New installs through `/oauth/slack/install`
 store that token automatically, and guided `/qurl tunnel install` will use it
-for `views.open`.
+for `views.open`. If Slack tells a customer guided tunnel setup needs the latest
+qURL Slack app install, send them through this reinstall link and confirm the app
+grants `views:write`.

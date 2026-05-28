@@ -34,19 +34,19 @@ const (
 	// CallbackPath receives Slack's OAuth redirect after app installation.
 	CallbackPath = "/oauth/slack/callback"
 
-	defaultSlackOAuthAccessURL = "https://slack.com/api/oauth.v2.access"
-	slackAuthorizeURL          = "https://slack.com/oauth/v2/authorize"
-	stateCookieName            = "__Host-qurl-slack-install-state"
-	stateTTL                   = 10 * time.Minute
-	stateMinSecretBytes        = slackoauth.StateMinSecret
-	stateFutureSkew            = 30 * time.Second
-	slackOAuthTimeout          = 10 * time.Second
-	persistTimeout             = 15 * time.Second
-	slackOAuthBodyLimit        = 16 << 10
-	slackInstallFlow           = "slack-install"
-	botScopeCommands           = "commands"
-	botScopeViewsWrite         = "views:write"
-	slackOAuthErrorUnknown     = "unrecognized"
+	defaultSlackOAuthAccessURL  = "https://slack.com/api/oauth.v2.access"
+	slackAuthorizeURL           = "https://slack.com/oauth/v2/authorize"
+	stateCookieName             = "__Host-qurl-slack-install-state"
+	stateTTL                    = 10 * time.Minute
+	stateMinSecretBytes         = slackoauth.StateMinSecret
+	stateFutureSkew             = 30 * time.Second
+	slackOAuthTimeout           = 10 * time.Second
+	persistTimeout              = 15 * time.Second
+	slackOAuthBodyLimit         = 16 << 10
+	slackInstallFlow            = "slack-install"
+	botScopeCommands            = "commands"
+	botScopeViewsWrite          = "views:write"
+	slackOAuthErrorUnrecognized = "unrecognized"
 )
 
 var successTemplate = template.Must(template.New("slack-install-success").Parse(`<!DOCTYPE html>
@@ -299,11 +299,10 @@ func Callback(cfg *Config) http.HandlerFunc {
 			fail("Slack install could not be stored", http.StatusInternalServerError)
 			return
 		}
+		clearStateCookie(w)
 		if cfg.OnTokenStored != nil {
 			cfg.OnTokenStored(teamID)
 		}
-
-		clearStateCookie(w)
 		slog.Info("Slack app install stored workspace bot token", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
 			"team_id", teamID, "installed_by", installedBy,
 			"bot_user_id", resp.BotUserID, "app_id", resp.AppID,
@@ -482,6 +481,7 @@ func exchangeCode(ctx context.Context, cfg *Config, code string) (*oauthAccessRe
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if len(raw) > slackOAuthBodyLimit {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("response exceeded %d bytes", slackOAuthBodyLimit)
 	}
 	if resp.StatusCode >= 300 {
@@ -541,7 +541,7 @@ func safeSlackOAuthErrorCode(raw string) string {
 		"invalid_team_for_non_distributed_app":
 		return code
 	default:
-		return slackOAuthErrorUnknown
+		return slackOAuthErrorUnrecognized
 	}
 }
 

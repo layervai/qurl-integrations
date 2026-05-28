@@ -676,10 +676,10 @@ func TestSafeSlackOAuthErrorCode(t *testing.T) {
 			t.Fatalf("allowlisted error = %q, want %q", got, code)
 		}
 	}
-	if got := safeSlackOAuthErrorCode("bad\nvalue"); got != slackOAuthErrorUnknown {
-		t.Fatalf("unexpected error = %q, want %s", got, slackOAuthErrorUnknown)
+	if got := safeSlackOAuthErrorCode("bad\nvalue"); got != slackOAuthErrorUnrecognized {
+		t.Fatalf("unexpected error = %q, want %s", got, slackOAuthErrorUnrecognized)
 	}
-	if got := safeSlackOAuthErrorCode("not_authed"); got != slackOAuthErrorUnknown {
-		t.Fatalf("unexpected Slack API error = %q, want %s", got, slackOAuthErrorUnknown)
+	if got := safeSlackOAuthErrorCode("not_authed"); got != slackOAuthErrorUnrecognized {
+		t.Fatalf("unexpected Slack API error = %q, want %s", got, slackOAuthErrorUnrecognized)
 	}
 }

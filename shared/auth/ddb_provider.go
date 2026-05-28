@@ -424,7 +424,7 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 		":dk":    &ddbtypes.AttributeValueMemberB{Value: wrapped},
 		":now":   &ddbtypes.AttributeValueMemberS{Value: now},
 	}
-	removeParts := []string{}
+	var removeParts []string
 	setStringAttr := func(attr, token, value string) {
 		value = strings.TrimSpace(value)
 		if value == "" {
