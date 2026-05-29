@@ -71,6 +71,23 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // what is configured here, so a typo is one tab away) AND the
 // escalation path (ask the admin to wire it up) since only the
 // admin can run setalias.
+//
+// Why this message keeps a `/qurl aliases` breadcrumb while sibling
+// [notAllowedInChannelMessage] dropped its `/qurl list` breadcrumb:
+// `/qurl aliases` is channel-scoped (shows aliases bound here), so
+// the breadcrumb stays accurate post-revert. `/qurl list` went
+// workspace-wide and would just surface the same row the user
+// pasted from, so the sibling's breadcrumb was misleading and was
+// removed. If `/qurl aliases` ever widens to workspace-wide too,
+// this breadcrumb deserves the same treatment.
+//
+// TODO(#460): a user can see `$<alias>` rendered by `/qurl list`
+// (workspace-wide post-revert of #234) and still hit this surface
+// when minting from a channel without the binding. Followup tracks
+// either an inline "alias resolves in: #channel-a, …" annotation on
+// the list output or a clearer error here distinguishing
+// "alias does not exist anywhere" from "alias not bound here, but
+// bound in: …".
 func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }
@@ -78,18 +95,24 @@ func noResourceForAliasMessage(alias string) string {
 // notAllowedInChannelMessage is the copy surfaced when a user passes
 // a `$r_<id>` resource token that is not in the channel's allowed-set
 // (the union of `alias_bindings.values()` and `allowed_resource_ids`
-// returned by [Store.AllowedResourceIDsForChannel]). Same posture as
-// [noResourceForAliasMessage]: name the literal token the user
-// typed, plain-English state, point at `/qurl list` so the user can
-// see what IS available without a manual lookup, and route to the
-// admin since only the admin can extend the allow-set.
+// returned by [Store.AllowedResourceIDsForChannel]). Name the literal
+// token the user typed, state plainly what state it's in, and route
+// to the admin since only the admin can extend the allow-set.
 //
 // Mirrored copy for the two not-allowed branches so a workspace
 // member probing for valid resource IDs can't distinguish "id doesn't
 // exist" from "id exists but not in this channel" through the wire
 // text.
+//
+// TODO(#460): post-revert of #234, `/qurl list` returns workspace-wide
+// tokens, so a user pasting a `$r_<id>` they saw in the list into a
+// foreign channel hits this surface. The earlier breadcrumb
+// ("Run `/qurl list` to see what's available here") was misleading
+// under the new disclosure model and was removed. The follow-up
+// either reintroduces a channel-scoped discoverability hint or
+// reframes the list output so the asymmetry is obvious upstream.
 func notAllowedInChannelMessage(token string) string {
-	return fmt.Sprintf("`$%s` is not allowed in this channel. Run `/qurl list` to see what's available here, or contact your Slack admin for assistance.", token)
+	return fmt.Sprintf("`$%s` is not allowed in this channel. Contact your Slack admin for assistance.", token)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key
@@ -389,8 +412,13 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 // resourceID in channelID. Workspace admins may always (so the
 // list-and-get round-trip works in the admin's unfiltered list view);
 // non-admins only when the ID is in `AllowedResourceIDsForChannel` (the
-// union of `alias_bindings.values()` and `allowed_resource_ids`),
-// keeping list visibility and mintability aligned for them.
+// union of `alias_bindings.values()` and `allowed_resource_ids`).
+//
+// Post-revert of #234 (PR #459), `/qurl list` is workspace-wide, so a
+// non-admin can see `$r_<id>` tokens from channels they can't mint in.
+// This gate keeps mintability channel-scoped despite the widened list
+// visibility — the asymmetry is intentional but surfaces a UX gap
+// tracked by TODO(#460).
 //
 // Returns (false, [*userError]) on AdminStore-nil or allow-set fetch
 // failure so callers fail closed. The decision is split from the
