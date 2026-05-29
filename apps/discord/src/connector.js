@@ -2,6 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 
 const { sanitizeFilename } = require('./utils/sanitize');
+const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
@@ -161,11 +162,18 @@ function connectorAuthHeaders(apiKey) {
 // re-upload, file via Discord CDN download, JSON) thread the same wire
 // field name. The connector validates the value (PR #477); we forward
 // it as a string and let the connector own the contract.
+//
+// Asymmetry note: viewer_ttl_seconds is forwarded VERBATIM (so 0.5 →
+// "0.5"; the fileviewer's client-side blank reads the value directly).
+// The sibling formatSessionDurationSeconds() helper in utils/time.js
+// FLOORS 0.5 to "1s" because qurl-service's MinSessionDuration is
+// 1 * time.Second. A reader looking at one wire field should know the
+// other has the opposite handling for the 0.5s preset.
 function appendViewerTtl(form, viewerTtlSeconds) {
-  // Number.isFinite already filters non-numbers (Number.isFinite('30') is
-  // false), so the typeof guard would be redundant. Strict positive-finite
-  // is the same invariant the modal-prefill setValue uses.
-  if (Number.isFinite(viewerTtlSeconds) && viewerTtlSeconds > 0) {
+  // Strict positive-finite: isPositiveFinite filters non-numbers
+  // (Number.isFinite('30') is false), zero, negatives, and ±Infinity
+  // — same invariant the modal-prefill setValue uses.
+  if (isPositiveFinite(viewerTtlSeconds)) {
     form.append('viewer_ttl_seconds', String(viewerTtlSeconds));
   }
 }
@@ -322,8 +330,26 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * field applies PER minted link: `n` recipients get `n` independent
  * one-time tokens, so one recipient opening their link doesn't
  * invalidate anyone else's.
+ *
+ * `selfDestructSeconds` is forwarded as `session_duration` so every
+ * minted token's L7 session window matches the fileviewer's client-
+ * side self-destruct timer (closes the mint-side gap left by
+ * qurl-integrations-infra#540, tracked in qurl-integrations-infra#764).
+ * The seconds→duration-string mapping lives in
+ * `utils/time.js::formatSessionDurationSeconds` (co-located with
+ * `SELF_DESTRUCT_PRESETS`).
+ *
+ * @param {string} resourceId — connector resource_id (alphanum + `_-`).
+ * @param {object} opts — minting options. Bag-shaped for sibling-consistency
+ *   with mintLinksInBatches, whose call-through used to position-align the
+ *   adjacent `expiresAt` and `apiKey` strings (cycle-1 footgun on PR #483).
+ * @param {string} opts.expiresAt — ISO string forwarded as `expires_at`.
+ * @param {number} opts.n — integer 1..100, count of links to mint.
+ * @param {?string} [opts.apiKey] — caller API key; falls back to `config.QURL_API_KEY`.
+ * @param {?number} [opts.selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
+ * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, expiresAt, n, apiKey) {
+async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -335,10 +361,15 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }
+  const body = { expires_at: expiresAt, n, one_time_use: true };
+  const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
+  if (sessionDuration !== null) {
+    body.session_duration = sessionDuration;
+  }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ expires_at: expiresAt, n, one_time_use: true }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30000),
   });
 

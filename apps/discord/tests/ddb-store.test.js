@@ -53,6 +53,7 @@ const {
   UpdateCommand,
   QueryCommand,
   ScanCommand,
+  BatchGetCommand,
   BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
@@ -403,6 +404,77 @@ describe('guild configs', () => {
     const result = await store.getGuildConfig('g-1');
     expect(result).not.toHaveProperty('qurl_api_key');
     expect(result).toMatchObject({ guild_id: 'g-1', configured_by: 'admin' });
+  });
+
+  test('propagateGuildWebhookSubscription: swallows ConditionalCheckFailedException as benign', async () => {
+    // Scenario: between listGuildSubscriptionsByOwner returning the
+    // sibling row and the UpdateCommand executing, another path
+    // cleared the sibling's webhook_owner_id (mid-rollback of an
+    // earlier link). The ConditionExpression rejects with CCFE.
+    // That's the documented "row no longer qualifies" signal — it
+    // MUST NOT bubble up as a failure (would mask real failures).
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
+    ] });
+    const ccfe = new Error('ConditionalCheckFailedException');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    const result = await store.propagateGuildWebhookSubscription('usr_o', {
+      webhookId: 'wh_new', webhookSecret: 'sec_new',
+    });
+    expect(result).toEqual({ updated: 0, failed: 0 });
+  });
+
+  test('propagateGuildWebhookSubscription: non-CCFE errors are counted as failed', async () => {
+    // A real DDB error (throttling, validation, etc.) is NOT benign —
+    // it counts toward the failed-row tally so the caller can decide
+    // whether to log+continue. Pins the discriminator at line 1633.
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
+    ] });
+    ddbMock.on(UpdateCommand).rejects(new Error('ProvisionedThroughputExceededException'));
+    const result = await store.propagateGuildWebhookSubscription('usr_o', {
+      webhookId: 'wh_new', webhookSecret: 'sec_new',
+    });
+    expect(result).toEqual({ updated: 0, failed: 1 });
+  });
+
+  test('setGuildWebhookSubscription: rejects with CCFE when qurl_api_key row does not exist (orphan guard)', async () => {
+    // ConditionExpression on the UpdateCommand requires
+    // attribute_exists(qurl_api_key) — a caller-bug or race that ran
+    // setGuildWebhookSubscription before setGuildApiKey would otherwise
+    // create an orphan row with webhook_* attrs but no api key.
+    const ccfe = new Error('ConditionalCheckFailedException');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    await expect(store.setGuildWebhookSubscription('g_orphan', {
+      webhookId: 'wh_x',
+      webhookSecret: 'sec_x',
+      webhookOwnerId: 'usr_y',
+    })).rejects.toThrow(/ConditionalCheckFailedException/);
+    // Confirm the UpdateCommand actually carried the guard expression
+    // (would otherwise be a false-positive test that passes on any
+    // CCFE source — e.g. a different attribute condition).
+    const calls = ddbMock.commandCalls(UpdateCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0].input.ConditionExpression)
+      .toMatch(/attribute_exists\(qurl_api_key\)/);
+  });
+
+  test('propagateGuildWebhookSubscription: excludes the just-written primary guild', async () => {
+    // excludeGuildId tells propagate to skip the primary row (already
+    // written by setGuildWebhookSubscription). Otherwise the primary
+    // would receive a redundant UpdateCommand with identical data.
+    ddbMock.on(ScanCommand).resolves({ Items: [
+      { guild_id: 'g_primary', webhook_id: 'wh_p', webhook_owner_id: 'usr_admin' },
+    ] });
+    const result = await store.propagateGuildWebhookSubscription('usr_admin', {
+      webhookId: 'wh_p', webhookSecret: 'sec_p', excludeGuildId: 'g_primary',
+    });
+    expect(result).toEqual({ updated: 0, failed: 0 });
+    // Short-circuit: no UpdateCommand fired for an "only excluded"
+    // result set.
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 });
 
@@ -1001,6 +1073,132 @@ describe('qurl sends', () => {
     });
     const result = await store.getSendConfig('s1', 'attacker');
     expect(result).toBeUndefined();
+  });
+});
+
+// ── QURL views (webhook-fed view counter) ──
+
+describe('qurl views', () => {
+  test('recordQurlView: conditional UpdateItem with MAX-merge + replay-protection clause + TTL refresh', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const before = Math.floor(Date.now() / 1000);
+    const result = await store.recordQurlView({
+      qurlId: 'q_aaaaaaaaaa1', accessCount: 3, consumed: false, eventId: 'evt-1',
+    });
+    expect(result).toBe('recorded');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-qurl-views');
+    expect(input.Key).toEqual({ qurl_id: 'q_aaaaaaaaaa1' });
+    // Pin the condition exactly so a refactor that drops any clause
+    // (replay, out-of-order, OR the consumed false→true flip on equal
+    // access_count) fails CI rather than silently corrupting the
+    // counter. `#consumed` is the DDB-reserved-keyword alias.
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(last_event_id) OR ('
+      + 'last_event_id <> :eid AND ('
+      + 'access_count < :n OR (access_count = :n AND #consumed = :false AND :c = :true)'
+      + '))',
+    );
+    expect(input.UpdateExpression).toBe(
+      'SET access_count = :n, #consumed = :c, last_event_id = :eid, last_updated = :now, expires_at = :exp',
+    );
+    expect(input.ExpressionAttributeNames).toEqual({ '#consumed': 'consumed' });
+    expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
+      ':n': 3, ':c': false, ':eid': 'evt-1', ':false': false, ':true': true,
+    }));
+    // TTL refresh on every write — 30 days from now, written to
+    // `expires_at` (the canonical TTL-attribute name across every
+    // table in this module). Numeric epoch seconds; DDB silently
+    // refuses to expire rows whose TTL attribute is the wrong type.
+    expect(input.UpdateExpression).toMatch(/expires_at = :exp/);
+    const THIRTY_DAYS = 30 * 24 * 60 * 60;
+    expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
+    expect(input.ExpressionAttributeValues[':exp']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
+  });
+
+  test('recordQurlView: ConditionalCheckFailedException → "dedup" (replay path, NOT a failure)', async () => {
+    const err = new Error('cond fail');
+    err.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(err);
+    const result = await store.recordQurlView({
+      qurlId: 'q_x', accessCount: 1, consumed: false, eventId: 'evt-1',
+    });
+    expect(result).toBe('dedup');
+  });
+
+  test('recordQurlView: rejects qurlId="" so an empty-id collision attractor never lands in DDB', async () => {
+    await expect(
+      store.recordQurlView({ qurlId: '', accessCount: 1, consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/qurlId is required/);
+  });
+
+  test('recordQurlView: rejects negative or non-numeric accessCount', async () => {
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: -1, consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/non-negative/);
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: 'two', consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/non-negative/);
+  });
+
+  test('recordQurlView: rejects missing eventId (replay protection requires a key)', async () => {
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: 1, consumed: false }),
+    ).rejects.toThrow(/eventId is required/);
+  });
+
+  test('getQurlViews: BatchGet for tracked ids, returns Map keyed on qurl_id', async () => {
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: {
+        'test-prefix-qurl-views': [
+          { qurl_id: 'q_a', access_count: 2, consumed: false },
+          { qurl_id: 'q_b', access_count: 1, consumed: true },
+        ],
+      },
+    });
+    const views = await store.getQurlViews(['q_a', 'q_b', 'q_c']);
+    expect(views.size).toBe(2);
+    expect(views.get('q_a')).toEqual({ accessCount: 2, consumed: false });
+    expect(views.get('q_b')).toEqual({ accessCount: 1, consumed: true });
+    expect(views.get('q_c')).toBeUndefined();
+    const keys = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'].Keys;
+    expect(keys).toEqual(expect.arrayContaining([
+      { qurl_id: 'q_a' }, { qurl_id: 'q_b' }, { qurl_id: 'q_c' },
+    ]));
+  });
+
+  test('getQurlViews: short-circuits to empty Map when called with empty or all-empty input', async () => {
+    expect((await store.getQurlViews([])).size).toBe(0);
+    expect((await store.getQurlViews(['', null, undefined])).size).toBe(0);
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(0);
+  });
+
+  test('getQurlViews: de-dupes input ids before BatchGet', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: {} });
+    await store.getQurlViews(['q_a', 'q_a', 'q_b']);
+    const keys = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'].Keys;
+    expect(keys).toHaveLength(2);
+  });
+
+  test('getQurlViews: retries once on UnprocessedKeys', async () => {
+    let attempt = 0;
+    ddbMock.on(BatchGetCommand).callsFake(() => {
+      attempt++;
+      if (attempt === 1) {
+        return Promise.resolve({
+          Responses: { 'test-prefix-qurl-views': [{ qurl_id: 'q_a', access_count: 1, consumed: false }] },
+          UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: [{ qurl_id: 'q_b' }] } },
+        });
+      }
+      return Promise.resolve({
+        Responses: { 'test-prefix-qurl-views': [{ qurl_id: 'q_b', access_count: 2, consumed: false }] },
+      });
+    });
+    const views = await store.getQurlViews(['q_a', 'q_b']);
+    expect(attempt).toBe(2);
+    expect(views.size).toBe(2);
   });
 });
 

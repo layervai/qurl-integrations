@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const { isPositiveFinite } = require('./utils/time');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -33,6 +34,7 @@ const {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  missingViewUpdatePushKeys,
   missingMapCommandKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -45,6 +47,9 @@ const {
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 const eventPublisher = require('./event-publisher');
+const viewUpdateConsumer = require('./view-update-consumer');
+const viewUpdatePublisher = require('./view-update-publisher');
+const webhookSubscriptions = require('./webhook-subscriptions');
 const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
@@ -247,11 +252,11 @@ if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINU
   logger.error('PENDING_LINK_EXPIRY_MINUTES must be a positive integer');
   process.exit(1);
 }
-if (!Number.isFinite(config.RATE_LIMIT_WINDOW_MS) || config.RATE_LIMIT_WINDOW_MS <= 0) {
+if (!isPositiveFinite(config.RATE_LIMIT_WINDOW_MS)) {
   logger.error('RATE_LIMIT_WINDOW_MS must be a positive integer (set to 0 would disable rate limiting)');
   process.exit(1);
 }
-if (!Number.isFinite(config.RATE_LIMIT_MAX_REQUESTS) || config.RATE_LIMIT_MAX_REQUESTS <= 0) {
+if (!isPositiveFinite(config.RATE_LIMIT_MAX_REQUESTS)) {
   logger.error('RATE_LIMIT_MAX_REQUESTS must be a positive integer');
   process.exit(1);
 }
@@ -295,6 +300,15 @@ if (process.env.NODE_ENV === 'production') {
 const eventShipperMissing = missingEventShipperKeys(config);
 if (eventShipperMissing.length > 0) {
   logger.error(`ENABLE_EVENT_SHIPPER=true but missing required env vars: ${eventShipperMissing.join(', ')}`);
+  process.exit(1);
+}
+
+// View-update push (feat #60). Same boot-time refusal pattern: if
+// the flag is on but the queue URL is missing, fail closed at boot
+// rather than silently dropping every view event at runtime.
+const viewUpdatePushMissing = missingViewUpdatePushKeys(config);
+if (viewUpdatePushMissing.length > 0) {
+  logger.error(`ENABLE_VIEW_UPDATE_PUSH=true but missing required env vars: ${viewUpdatePushMissing.join(', ')}`);
   process.exit(1);
 }
 
@@ -709,6 +723,18 @@ async function gracefulShutdown(code = 0) {
     // actually running per process (combined + flag-on is rejected
     // at boot), so the sequencing matters only as documentation.
     await eventPublisher.stop();
+    // View-update plumbing drain (feat #60). Same idempotent shape;
+    // unconditional. Consumer + publisher are stopped in parallel
+    // via Promise.all so the combined drain stays within the
+    // gracefulShutdown 10s budget — sequencing each module's
+    // DRAIN_DEADLINE_MS (3s each) plus the event-shipper drains
+    // above would push worst-case past 10s. Order-independence is
+    // safe: publisher.stop() snapshots inFlightSends; consumer.stop()
+    // aborts the long-poll; neither depends on the other's state.
+    await Promise.all([
+      viewUpdateConsumer.stop(),
+      viewUpdatePublisher.stop(),
+    ]);
     // Periodic REST refreshCache in http-only mode is .unref()ed so it
     // wouldn't block exit on its own, but clearing explicitly keeps
     // shutdown symmetric with the other intervals (server.js, oauth.js
@@ -1094,6 +1120,31 @@ async function start() {
   //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
+    // Webhook subscription registration is OUT-OF-PROCESS for the
+    // bot's default key, via the webhook-registrar Lambda — see
+    //   apps/discord/lambda/webhook-registrar/index.js  (handler)
+    //   apps/discord/lambda/webhook-registrar/README.md  (bundling)
+    //   apps/discord/docs/qurl-webhook-rollout.md        (operator flow)
+    // The Lambda is invoked once per deploy via Terraform and writes
+    // the default-key secret to SSM; the bot reads QURL_WEBHOOK_SECRET
+    // from env at boot.
+    //
+    // PER-GUILD subscriptions (BYOK view counter) are in-process:
+    // every guild that links its own API key (via /qurl setup or the
+    // OAuth callback) gets its own subscription. The registry below
+    // owns the in-memory map<owner_id, secret> the multi-secret
+    // receiver consults on every inbound webhook, primes from
+    // guild_configs at boot, and refreshes every 30s — including
+    // re-discovering the default-key owner_id by listing the
+    // Lambda's subscription. See src/webhook-subscriptions.js.
+    //
+    // Fire-and-forget: the receiver returns 503 until cachePrimed is
+    // true, so a slow first-scan doesn't drop events — qurl-service
+    // retries 503. Awaiting here would delay the HTTP listener
+    // unnecessarily.
+    webhookSubscriptions.start().catch((err) => {
+      logger.error('webhook-subscriptions registry initial scan crash', { error: err?.message });
+    });
   } else if (isGateway) {
     // Returns 503 until isReady() flips true (after READY from the
     // Discord gateway). Dockerfile --start-period=30s covers this
@@ -1172,6 +1223,25 @@ async function start() {
   // Same shutdown-race guard as the consumer above.
   if (isGateway && config.ENABLE_EVENT_SHIPPER && !isShuttingDown) {
     eventPublisher.start();
+  }
+
+  // View-update SQS plumbing (feat #60, sub-second view counter).
+  // Independent of the event-shipper gates above; gated only on
+  // `config.ENABLE_VIEW_UPDATE_PUSH` AND `isHttp` (the tier that
+  // owns BOTH the webhook receiver — publisher — and the
+  // monitorLinkStatus instances — consumer). Same shutdown-race
+  // guard as the event-shipper sibling above.
+  //
+  // Combined mode is intentionally NOT rejected here (unlike
+  // ENABLE_EVENT_SHIPPER): there's no in-process direct-dispatch
+  // path competing with the SQS round-trip — both paths converge
+  // in consumer → registry → monitor. Combined mode just means
+  // the publisher and consumer live in the same process; messages
+  // still round-trip through SQS, and registry dispatch + status
+  // === 'opened' guards handle any race or redelivery.
+  if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
+    viewUpdatePublisher.start();
+    viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });
   }
 
   // Open the Discord gateway WebSocket. Two disjoint paths:

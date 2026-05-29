@@ -94,12 +94,28 @@ const STORE_METHODS = Object.freeze([
   'getSendResourceIds',
   'getSendItems',
 
+  // QURL views (webhook-fed view counter)
+  'recordQurlView',
+  'getQurlViews',
+
   // Guild (BYOK) API keys
   'getGuildApiKey',
   'setGuildApiKey',
-  'removeGuildApiKey',
+  // Raw delete — see ddb-store.js's defensive comment. No production
+  // caller today. A future /qurl unlink admin command MUST tear down
+  // the qurl-service subscription BEFORE invoking this, otherwise it
+  // leaks an orphan webhook on qurl-service. See the link-side
+  // pattern in guild-webhook-link.js::linkGuildWebhookSubscription.
+  '_removeGuildApiKeyRaw',
   'getGuildConfig',
   'getGuildConfigWithApiKey',
+
+  // Per-guild qurl-service webhook subscriptions (BYOK view counter)
+  'setGuildWebhookSubscription',
+  'clearGuildWebhookSubscription',
+  'listGuildSubscriptionsByOwner',
+  'scanGuildSubscriptions',
+  'propagateGuildWebhookSubscription',
 
   // Orphaned OAuth tokens (background revoke-retry queue)
   'recordOrphanedToken',

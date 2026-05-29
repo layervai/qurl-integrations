@@ -10,7 +10,7 @@ package internal
 // Two helpers, in test-helper convention:
 //   - [newAdminTestHandler] wires a *Handler with AdminStore backed
 //     by an in-memory fakeDDB. Tests seed table rows via
-//     `ts.seedAdmin(...)`, `ts.seedPolicySingle(...)` before invoking.
+//     `ts.seedAdmin(...)`, `ts.seedPolicyDualShape(...)` before invoking.
 //   - [invokeAdminSlash] signs a slash-command form body and drives
 //     ServeHTTP. Returns (status, replyText) so assertion sites stay
 //     terse. The reply text is parsed from the JSON envelope — for
@@ -18,6 +18,7 @@ package internal
 //     response_url follow-up text is read off the captured POST.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -80,7 +81,7 @@ func (c *capturedResponseURL) waitForBody(t *testing.T, d time.Duration) []byte 
 //   - validateResponseURLFn relaxed (httptest server URLs are
 //     http://127.0.0.1:NNNNN — the production validator rejects those).
 //
-// Tests seed table rows via ts.seedAdmin / ts.seedPolicySingle / etc.
+// Tests seed table rows via ts.seedAdmin / ts.seedPolicyDualShape / etc.
 // before invoking the handler.
 func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	t.Helper()
@@ -130,7 +131,8 @@ type adminSlashInvoker struct {
 	responseU *httptest.Server
 	// channelID overrides the slash-command channel_id form field
 	// for the next invocation. Empty falls back to "C_test".
-	channelID string
+	channelID    string
+	enterpriseID string
 }
 
 // newAdminSlashInvoker spins up a response_url-capturing httptest
@@ -179,10 +181,14 @@ func (a *adminSlashInvoker) invokeAdmin(text, teamID, userID string) (status int
 		"channel_id":   {a.channelID},
 		"response_url": {a.responseU.URL},
 		"trigger_id":   {"trigger_test"},
-	}.Encode()
+	}
+	if a.enterpriseID != "" {
+		body.Set(fieldEnterpriseID, a.enterpriseID)
+	}
+	encoded := body.Encode()
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(body))
-	sig, ts := signSlackBody(a.t, body)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/slack/commands", strings.NewReader(encoded))
+	sig, ts := signSlackBody(a.t, encoded)
 	r.Header.Set(headerSlackSignature, sig)
 	r.Header.Set(headerSlackTimestamp, ts)
 	a.h.ServeHTTP(w, r)
@@ -203,19 +209,30 @@ func (a *adminSlashInvoker) invokeAdminAsync(text, teamID, userID string) (syncS
 // to the text field. Tests assert on text directly.
 func parseSlackText(t *testing.T, body []byte) string {
 	t.Helper()
-	var got map[string]string
+	var got map[string]any
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal reply: %v body=%s", err, body)
 	}
-	return got["text"]
+	text, _ := got["text"].(string)
+	return text
+}
+
+func parseSlackReplyBool(t *testing.T, body []byte, field string) bool {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, body)
+	}
+	value, _ := got[field].(bool)
+	return value
 }
 
 // workspaceMappingHasAdmin returns true iff the workspace_mappings
 // row for `teamID` exists AND carries `slackUserID` in its
-// admin_slack_user_ids SS (set). The post-pivot admin-claim flow
-// writes this row via BindWorkspace after RedeemBootstrap; without
-// it CheckAdmin returns (false, "", nil) on every subsequent admin
-// verb. This helper is the post-state fence for the persistence bug.
+// admin_slack_user_ids SS (set). The OAuth callback writes this row
+// via BindWorkspace as the installer becomes the seed admin;
+// without it CheckAdmin returns (false, "", nil) on every subsequent
+// admin verb. This helper is the post-state fence for the persistence bug.
 func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID string) bool {
 	t.Helper()
 	f.mu.Lock()
@@ -241,41 +258,6 @@ func (f *fakeDDB) workspaceMappingHasAdmin(t *testing.T, teamID, slackUserID str
 				}
 			}
 			return false
-		}
-	}
-	return false
-}
-
-// policyHasResource returns true iff the channel_policies row for
-// (teamID, channelID) carries resourceID in its allowed_resource_ids
-// SS (set). The production AllowResource path stores resources in
-// the SS shape so the post-mutation check needs to look for set
-// membership, not bare equality.
-func (f *fakeDDB) policyHasResource(t *testing.T, teamID, channelID, resourceID string) bool {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Look up the row by composite key teamID:channelID.
-	for _, tbl := range f.tables {
-		for _, item := range tbl {
-			team, _ := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS)
-			ch, _ := item[fAttrSlackChannelID].(*ddbtypes.AttributeValueMemberS)
-			if team == nil || ch == nil {
-				continue
-			}
-			if team.Value != teamID || ch.Value != channelID {
-				continue
-			}
-			if ss, ok := item[fAttrAllowedResourceIDs].(*ddbtypes.AttributeValueMemberSS); ok {
-				for _, v := range ss.Value {
-					if v == resourceID {
-						return true
-					}
-				}
-			}
-			if rid, ok := item[fAttrResourceID].(*ddbtypes.AttributeValueMemberS); ok && rid.Value == resourceID {
-				return true
-			}
 		}
 	}
 	return false

@@ -6,10 +6,13 @@ const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
+const { isPositiveFinite } = require('./utils/time');
 const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
+const qurlWebhookRouter = require('./routes/qurl-webhook');
+const webhookSubscriptions = require('./webhook-subscriptions');
 
 const app = express();
 
@@ -23,13 +26,13 @@ const app = express();
 // proxy', …)`. Express also accepts `true` (trust ALL hops) and `'true'`
 // (string), both of which let an attacker spoof X-Forwarded-For via any
 // upstream proxy to rotate their apparent IP and bypass the per-IP rate
-// limiter. The parseInt + Number.isFinite + > 0 chain below rejects all
-// of those: `'true'` / `'yes'` parse to NaN, negative values are
-// dropped, and a missing env falls through to the production-only
-// default of `1` (one hop = the ALB) rather than `true`.
+// limiter. The parseInt + isPositiveFinite chain below rejects all of
+// those: `'true'` / `'yes'` parse to NaN, negative values are dropped,
+// and a missing env falls through to the production-only default of `1`
+// (one hop = the ALB) rather than `true`.
 if (process.env.TRUST_PROXY) {
   const hops = parseInt(process.env.TRUST_PROXY, 10);
-  if (Number.isFinite(hops) && hops > 0) {
+  if (isPositiveFinite(hops)) {
     app.set('trust proxy', hops);
   } else {
     logger.warn(`Ignoring invalid TRUST_PROXY=${process.env.TRUST_PROXY} (must be a positive integer hop count, NOT 'true')`);
@@ -62,29 +65,22 @@ app.use(helmet({
 }));
 
 // Parse JSON for webhooks with raw body for signature verification. MUST be
-// registered BEFORE the general app.use(express.json()) below so /webhook
-// requests hit this parser first and get req.rawBody populated. Do not
-// reorder without also updating routes/webhooks.js verifySignature().
-//
-// Startup contract: routes/webhooks.js verifySignature() asserts req.rawBody
-// exists at request time and refuses the request with an error log if the
-// middleware chain drops it. See that file's guard comment for details.
-//
-// Gated on isOpenNHPActive for symmetry with the router mount below —
-// when /webhook routes aren't mounted, Express would still parse up to
-// 1 MB of JSON per request before falling through to the 404 handler.
-// Skipping the parser registration avoids that wasted work (and the
-// small DoS surface of parsing unauthenticated request bodies).
+// registered BEFORE the general app.use(express.json()) below so webhook
+// requests hit this parser first and get req.rawBody populated.
+const rawBodyJson = express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+});
+
+// /webhook (GitHub) gated on isOpenNHPActive so we don't parse 1MB of
+// JSON for routes that aren't mounted. /webhooks (qURL) is unconditional
+// — the receiver returns 503 when the per-guild subscription registry
+// is still warming up (cold-start or sibling-replica lag), so an
+// unmounted-cap fresh deploy never accepts traffic.
 if (config.isOpenNHPActive) {
-  app.use('/webhook', express.json({
-    // GitHub push-event payloads can exceed Express's 100KB default. Cap at
-    // 1MB so we accept legitimate payloads but still bound request memory.
-    limit: '1mb',
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    }
-  }));
+  app.use('/webhook', rawBodyJson);
 }
+app.use('/webhooks', rawBodyJson);
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -198,6 +194,18 @@ if (config.isOpenNHPActive) {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
 }
 
+// Unconditional mount. The receiver returns 503 while the per-guild
+// subscription registry (src/webhook-subscriptions.js) is unprimed
+// OR within the sibling-replica lag window — qurl-service retries
+// 503, so a fresh deploy never silently drops inbound webhooks.
+// Pure-BYOK setups (no QURL_WEBHOOK_SECRET) are supported; the
+// receiver matches each inbound event against the per-guild secret
+// the linking flow registered.
+app.use('/webhooks', qurlWebhookRouter);
+if (!config.QURL_WEBHOOK_SECRET) {
+  logger.warn('QURL_WEBHOOK_SECRET unset — running pure-BYOK mode (no default-key subscription; per-guild registrations only)');
+}
+
 // Cache-Control: no-store on every response from the OAuth surfaces —
 // success page surfaces guild + qURL email + key prefix; error pages
 // could leak detail in the future; not-configured page is also OAuth-
@@ -265,6 +273,15 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
+  // Each webhook router owns a per-IP bad-sig sweep; stop them all on
+  // graceful shutdown so the interval doesn't outlive the server.
+  if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
+  if (typeof webhooksRouter.stopIntervals === 'function') webhooksRouter.stopIntervals();
+  // 30s subscription-registry refresh ticker (per-guild webhook
+  // secrets cache). No-op on the gateway tier where the registry was
+  // never started; required on the HTTP tier so the ticker doesn't
+  // outlive the server during graceful shutdown.
+  webhookSubscriptions.stop();
 }
 
 module.exports = { app, startServer, stopIntervals };

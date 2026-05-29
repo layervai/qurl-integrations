@@ -6,82 +6,6 @@ import (
 	"testing"
 )
 
-// TestHelpResponse_ValidJSON fences the help payload's wire shape.
-// We don't assert exact text — that churns whenever the help message
-// updates — but we do require a parseable JSON object, an
-// `ephemeral` response_type, and at least a few non-empty section
-// blocks so an accidentally-empty payload is caught.
-func TestHelpResponse_ValidJSON(t *testing.T) {
-	t.Parallel()
-	raw, err := HelpResponse()
-	if err != nil {
-		t.Fatalf("HelpResponse: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody: %s", err, raw)
-	}
-	if got["response_type"] != respTypeEphemeral {
-		t.Errorf("response_type = %v, want %s", got["response_type"], respTypeEphemeral)
-	}
-	blocks, ok := got["blocks"].([]any)
-	if !ok {
-		t.Fatalf("blocks not an array: %T", got["blocks"])
-	}
-	if len(blocks) < 3 {
-		t.Errorf("blocks length = %d, want at least 3", len(blocks))
-	}
-	// Spot-check at least one block is a section with text. Slack's
-	// renderer rejects sections that lack a text object, so we
-	// fence that early.
-	foundSection := false
-	for _, b := range blocks {
-		if m, ok := b.(map[string]any); ok && m["type"] == "section" {
-			if _, hasText := m["text"]; hasText {
-				foundSection = true
-				break
-			}
-		}
-	}
-	if !foundSection {
-		t.Error("no section block with text — Slack will reject this payload")
-	}
-}
-
-// TestHelpResponse_MentionsSubcommands fences the help text content
-// against the parser grammar. Every verb declared in parser.go must
-// appear in the help body — a regression that drops a verb from
-// help silently degrades discoverability. Substring checks (not
-// full parse) so reformatting the help doesn't churn the test.
-func TestHelpResponse_MentionsSubcommands(t *testing.T) {
-	t.Parallel()
-	raw, err := HelpResponse()
-	if err != nil {
-		t.Fatalf("HelpResponse: %v", err)
-	}
-	body := string(raw)
-	// Every Subcommand + AdminAction from parser.go must surface.
-	// `admin allow` / `admin disallow` are parser-known but not wired
-	// in the dispatcher today; the help body omits them so users don't
-	// see verbs they can't run.
-	for _, want := range []string{
-		"qurl get",
-		"qurl setalias",
-		"qurl unsetalias",
-		"qurl aliases",
-		"qurl admin claim",
-		"qurl admin policies",
-		"qurl admin status",
-		"qurl admin revoke",
-		"qurl list",
-		"qurl help",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("help body missing %q", want)
-		}
-	}
-}
-
 // TestSetAliasRebindModal_Shape fences the modal payload structure.
 // Slack rejects any modal missing `type`, `title`, or `callback_id`,
 // so each is non-optional in the schema-shape sense.
@@ -95,13 +19,13 @@ func TestSetAliasRebindModal_Shape(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if got["type"] != "modal" {
-		t.Errorf("type = %v, want modal", got["type"])
+	if got[blockKitFieldType] != blockKitTypeModal {
+		t.Errorf("type = %v, want modal", got[blockKitFieldType])
 	}
-	if got["callback_id"] != callbackIDSetAliasRebind {
-		t.Errorf("callback_id = %v, want %s", got["callback_id"], callbackIDSetAliasRebind)
+	if got[blockKitFieldCallbackID] != callbackIDSetAliasRebind {
+		t.Errorf("callback_id = %v, want %s", got[blockKitFieldCallbackID], callbackIDSetAliasRebind)
 	}
-	for _, k := range []string{"title", "submit", "close", "blocks"} {
+	for _, k := range []string{blockKitFieldTitle, blockKitFieldSubmit, blockKitFieldClose, blockKitFieldBlocks} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("missing required key %q", k)
 		}
@@ -226,7 +150,7 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 			if err := json.Unmarshal(raw, &modal); err != nil {
 				t.Fatalf("modal JSON: %v", err)
 			}
-			pm, ok := modal["private_metadata"].(string)
+			pm, ok := modal[blockKitFieldPrivateMetadata].(string)
 			if !ok {
 				t.Fatalf("private_metadata not a string: %T", modal["private_metadata"])
 			}
@@ -244,91 +168,97 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 	}
 }
 
-// TestAdminClaimModal_StableIDsAndNoFakeMasking is the load-bearing
-// security fence for Blocker #3 ("no plaintext bootstrap codes
-// anywhere user-visible"). Because Slack's Block Kit has no
-// input-masking primitive (no `private_value`, no `secret`, no
-// `masked` — verified against api.slack.com/reference), the
-// mitigation lives at the bot's logging boundary: the handler
-// middleware redacts `state.values[blockIDClaimCode]` before any
-// view_submission payload is logged. This test fences the contract
-// that boundary depends on:
-//
-//  1. The block_id is exactly [blockIDClaimCode] (single source of
-//     truth — queried via [IsRedactedSubmissionBlock]).
-//  2. The action_id is exactly [actionIDClaimCode] (so the
-//     submission handler can pull the value out by a known key).
-//  3. The element does NOT carry a misleading `private_value` /
-//     `masked` / `secret` flag that would create a false sense of
-//     security at review time.
-func TestAdminClaimModal_StableIDsAndNoFakeMasking(t *testing.T) {
+func TestTunnelInstallModal_Shape(t *testing.T) {
 	t.Parallel()
-	raw, err := AdminClaimModal()
+	raw, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID:      testAdminTeamID,
+		ChannelID:   testTunnelChannelID,
+		UserID:      testAdminUserID,
+		ResponseURL: "https://hooks.slack.com/services/test",
+	})
 	if err != nil {
-		t.Fatalf("AdminClaimModal: %v", err)
+		t.Fatalf("TunnelInstallModal: %v", err)
 	}
 	var got map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if got["type"] != "modal" {
-		t.Errorf("type = %v, want modal", got["type"])
+	if got[blockKitFieldType] != blockKitTypeModal {
+		t.Errorf("type = %v, want modal", got[blockKitFieldType])
 	}
-	if got["callback_id"] != callbackIDAdminClaim {
-		t.Errorf("callback_id = %v, want %s", got["callback_id"], callbackIDAdminClaim)
+	if got[blockKitFieldCallbackID] != callbackIDTunnelInstall {
+		t.Errorf("callback_id = %v, want %s", got[blockKitFieldCallbackID], callbackIDTunnelInstall)
 	}
-	blocks, _ := got["blocks"].([]any)
-	var foundClaimBlock bool
-	for _, b := range blocks {
-		m, ok := b.(map[string]any)
-		if !ok || m["type"] != "input" {
-			continue
+	for _, k := range []string{blockKitFieldTitle, blockKitFieldSubmit, blockKitFieldClose, blockKitFieldBlocks, blockKitFieldPrivateMetadata} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing required key %q", k)
 		}
-		if m["block_id"] != blockIDClaimCode {
-			continue
-		}
-		el, ok := m["element"].(map[string]any)
-		if !ok {
-			t.Fatalf("claim_code_block element is not an object: %T", m["element"])
-		}
-		if el["action_id"] != actionIDClaimCode {
-			t.Errorf("action_id = %v, want %s", el["action_id"], actionIDClaimCode)
-		}
-		// Slack would silently accept any of these keys and ignore
-		// them — leaving the bot exposed while review thinks the
-		// field is masked. Fail loudly if any of them sneak back in.
-		for _, fake := range []string{"private_value", "masked", "secret", "is_password"} {
-			if _, present := el[fake]; present {
-				t.Errorf("element carries fictional masking key %q — Slack ignores this; redaction must live at the logging boundary, see IsRedactedSubmissionBlock", fake)
-			}
-		}
-		foundClaimBlock = true
 	}
-	if !foundClaimBlock {
-		t.Fatal("admin claim modal: input block for bootstrap code not found — Blocker #3 fence broken")
+	pm, ok := got[blockKitFieldPrivateMetadata].(string)
+	if !ok {
+		t.Fatalf("private_metadata not a string: %T", got[blockKitFieldPrivateMetadata])
 	}
-	// Fence the redaction registry: the claim block_id must be
-	// recognized by [IsRedactedSubmissionBlock], which is what the
-	// handler middleware consults before logging.
-	if !IsRedactedSubmissionBlock(blockIDClaimCode) {
-		t.Errorf("IsRedactedSubmissionBlock(%q) = false — logging boundary will leak the bootstrap code", blockIDClaimCode)
+	var meta TunnelInstallModalMetadata
+	if err := json.Unmarshal([]byte(pm), &meta); err != nil {
+		t.Fatalf("private_metadata JSON: %v", err)
+	}
+	if meta.TeamID != testAdminTeamID || meta.ChannelID != testTunnelChannelID || meta.UserID != testAdminUserID || meta.ResponseURL == "" {
+		t.Errorf("metadata = %+v, want team/channel/user/response_url", meta)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"qURL tunnel slug",
+		"Channel shortcut",
+		"Target environment",
+		"Docker snippets assume a Linux host",
+		string(tunnelEnvDocker),
+		string(tunnelEnvCompose),
+		string(tunnelEnvECSFargate),
+		string(tunnelEnvKubernetes),
+		"Local HTTP port",
+		"Optional for Linux Docker and Docker Compose only",
+		"\"text\":\"web\"",
+		"Leave blank for ECS/Fargate or Kubernetes",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("modal body missing %q", want)
+		}
 	}
 }
 
-// TestIsRedactedSubmissionBlock exercises the redaction-registry
-// query surface used by the (separate) handler package. Asserts the
-// happy and miss paths so a refactor of the underlying storage
-// shape (set, sync.Map, regex) can't silently change the contract.
-func TestIsRedactedSubmissionBlock(t *testing.T) {
+func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
 	t.Parallel()
-	if !IsRedactedSubmissionBlock(blockIDClaimCode) {
-		t.Errorf("IsRedactedSubmissionBlock(%q) = false, want true", blockIDClaimCode)
+	_, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   "https://hooks.slack.com/actions/" + strings.Repeat("x", slackPrivateMetadataMaxBytes),
+		CreatedAtUnix: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private_metadata exceeds Slack limit") {
+		t.Fatalf("TunnelInstallModal err = %v, want private_metadata size error", err)
 	}
-	if IsRedactedSubmissionBlock("some_other_block") {
-		t.Errorf("IsRedactedSubmissionBlock(\"some_other_block\") = true, want false")
+}
+
+func TestSlackChannelMentionValidatesWithoutLossyFiltering(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		channelID string
+		want      string
+	}{
+		{name: "ordinary Slack channel", channelID: "C0123456789", want: "<#C0123456789>"},
+		{name: "future safe hyphen", channelID: "C0123456789-ABC", want: "<#C0123456789-ABC>"},
+		{name: "invalid mention delimiter", channelID: "C0123>", want: slackChannelFallbackText},
+		{name: "empty", channelID: " ", want: slackChannelFallbackText},
 	}
-	if IsRedactedSubmissionBlock("") {
-		t.Errorf("IsRedactedSubmissionBlock(\"\") = true, want false")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := slackChannelMention(tc.channelID); got != tc.want {
+				t.Fatalf("slackChannelMention(%q) = %q, want %q", tc.channelID, got, tc.want)
+			}
+		})
 	}
 }
 

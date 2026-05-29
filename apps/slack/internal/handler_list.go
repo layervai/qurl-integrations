@@ -13,51 +13,51 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-// listResourcesPageLimit is the default page size for `/qurl list`.
-// Pivoted from the legacy 5-qURLs render to 10-resources because:
+// listResourcesScanLimit is the page size for the single
+// `/v1/resources` fetch backing `/qurl list`. `/qurl list` shows only
+// tunnel resources, but the API has no server-side type filter, so the
+// tunnel filter runs client-side on the fetched page. We over-fetch
+// (the server's max) rather than page to a small display target: a
+// 10-row page could surface zero tunnels in a URL-heavy workspace even
+// when tunnels exist, hiding the very thing the command is for. One
+// generous page keeps the command single-request while making the
+// client-side tunnel filter reliable; tunnel resources are created
+// deliberately (via `/qurl tunnel install`) so a real workspace has few
+// of them, well within Slack's ephemeral-message budget.
 //
-//  1. Resources are coarser than qURLs (one Resource per target URL,
-//     many qURLs per Resource), so 10 of them carry more information
-//     than 5 qURLs.
-//  2. Listing surfaces the `$<alias>` / `$<resource_id>` shape so
-//     users can copy-paste straight into `/qurl get $<token>` — more
-//     rows in one slash-command response means fewer round-trips for
-//     the common "show me what's available" workflow.
-//  3. Slack's ephemeral message budget comfortably fits 10 rows (each
-//     at ~80-120 chars) without scrolling.
-const listResourcesPageLimit = 10
+// A server-side `type=tunnel` filter (tracked in #531) would let this
+// drop to a normal page size and make `page.HasMore` mean "more
+// tunnels" rather than "more resources of any type" — see the footer
+// caveat in [Handler.processListResources].
+const listResourcesScanLimit = 100
 
-// listResourcesEmptyMessage is the friendly empty-state copy. Points
-// the user at `/qurl create <url>` so a brand-new workspace knows
-// what to do next.
-const listResourcesEmptyMessage = ":mag: No qURL resources found in this workspace. Create one with `/qurl create <url>` first."
+// listTunnelsEmptyMessage is the friendly empty-state copy for a
+// workspace with zero tunnels. `/qurl tunnel install` is admin-only,
+// so the copy names the command without imperatively telling every
+// member to run it — a non-admin reading this is routed implicitly to
+// their Slack admin. Post-revert of #234 (#459) `/qurl list` no longer
+// probes admin status, so there is a single empty-state for everyone
+// rather than the old admin/non-admin branch.
+const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl tunnel install <slug>`."
 
-// resourceTypeTunnel is the wire-level discriminator for tunnel
-// resources. Lifted to a constant so the list renderer keys on the
-// upstream type rather than guessing from empty `target_url` — a
-// non-tunnel resource with a transient empty target (data glitch,
-// partially-populated row) must NOT be silently re-labeled "(tunnel)".
-const resourceTypeTunnel = "tunnel"
-
-// handleListResources implements `/qurl list`. Returns the 10 most
-// recent Resources rendered as copy-paste-ready `$<alias>` (when
-// bound) or `$<resource_id>` tokens — each line pipes straight into
-// `/qurl get $<token>` without a manual alias-resolution step.
+// handleListResources implements `/qurl list`. It lists the workspace's
+// tunnel resources (type=tunnel only — URL/transit resources are
+// filtered out) so each line is a copy-paste-ready `$<slug>` token the
+// user can pipe into `/qurl get $<slug>` without a manual lookup. The
+// slug is the same stable handle `/qurl tunnel install <slug>` binds as
+// a channel alias, so the listed token resolves directly in `/qurl get`.
 //
-// The list is unscoped: every workspace member sees the same master
-// listing. This includes DM channels (`D…` channel IDs) — pre-#234
-// behavior was unscoped, #234 had filtered DMs to empty (no
-// channel_policies row), and this revert restores the unscoped
-// shape, so a user running /qurl list in a 1:1 now sees URLs and
-// aliases bound in any channel of the workspace.
-//
-// Capability gating on individual resources happens at mint
-// time — `/qurl get $r_<id>` still enforces the channel allow set
-// for non-admins via [Handler.authorizeResourceIDForGet], and
-// `/qurl get $<alias>` resolves through the per-channel
-// `alias_bindings` Map via [slackdata.Store.LookupChannelAlias]. So dropping
-// the list-side filter widens disclosure within a workspace but not
-// capability.
+// The listing is unscoped: every workspace member sees every tunnel,
+// in every channel including DMs. #234 had added a non-admin
+// channel-policy filter here; #459 reverted it because the gate
+// dead-ended workspace owners who weren't Slack-admins — their only
+// `/qurl list` output was a fail-closed empty state with no recoverable
+// path — while adding no real capability boundary. Capability gating
+// still happens at mint time: `/qurl get $r_<id>` enforces the channel
+// allow-set for non-admins via [Handler.resourceAllowedForUser], and
+// `/qurl get $<slug>` / `$<alias>` resolve through the per-channel
+// binding. So dropping the list-side filter widens disclosure within a
+// workspace (every member sees every tunnel's slug) but not capability.
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processListResources(ctx, log, values)
@@ -72,113 +72,118 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("list: API key lookup failed", "error", err)
-		h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
 		return
 	}
 
-	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesPageLimit})
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
-		h.postResponse(log, responseURL, ":warning: "+mapListResourcesError(log, teamID, err))
+		_ = h.postResponse(log, responseURL, ":warning: "+mapListResourcesError(log, teamID, err))
 		return
 	}
 
-	resources := page.Resources
+	// `/qurl list` shows tunnels only. The API has no server-side type
+	// filter, so drop URL/transit resources here. The result is the
+	// full workspace tunnel set — unscoped post-revert of #234 (#459),
+	// so every member sees the same listing regardless of channel.
+	resources := filterTunnelResources(page.Resources)
+
 	if len(resources) == 0 {
-		h.postResponse(log, responseURL, listResourcesEmptyMessage)
+		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
 		return
 	}
 
 	// Stable order for two-call idempotency at the Slack ephemeral
 	// surface — the server's pagination cursor implies an order but
-	// not a stable one across re-queries. Sort by the underlying
-	// token (alias if bound, else resource_id) BEFORE formatting.
+	// not a stable one across re-queries. Sort by the displayed token
+	// (the same slug→alias→resource_id precedence the rows render),
+	// with resource_id as a tiebreaker so two rows sharing a token
+	// (e.g. a slug == another row's alias) order deterministically
+	// rather than inheriting the unstable upstream order. BEFORE
+	// formatting.
 	sort.SliceStable(resources, func(i, j int) bool {
-		return resourceSortKey(&resources[i]) < resourceSortKey(&resources[j])
+		ti, tj := tunnelToken(&resources[i]), tunnelToken(&resources[j])
+		if ti != tj {
+			return ti < tj
+		}
+		return resources[i].ResourceID < resources[j].ResourceID
 	})
 	lines := make([]string, 0, len(resources))
 	for i := range resources {
-		lines = append(lines, formatResourceListLine(&resources[i]))
+		lines = append(lines, formatTunnelListLine(&resources[i]))
 	}
 
-	body := "*qURL Resources:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Copy any `$token` and run `/qurl get $token` to mint a qURL link._"
+	body := "*qURL Tunnels:*\n" + strings.Join(lines, "\n") +
+		"\n\n_Copy any `$slug` and run `/qurl get $slug` to mint a one-time qURL link._"
 	if page.HasMore {
-		// `$token` (not `$alias`) is deliberate — the list also
-		// surfaces `$r_<resource_id>` rows for un-aliased resources,
-		// so the breadcrumb has to cover both shapes.
-		body += fmt.Sprintf("\n_…more results past the first %d-row scan — narrow with `/qurl get $token`._", listResourcesPageLimit)
+		// page.HasMore is a master-list signal — more resources of ANY
+		// type, not necessarily more tunnels — so this footer can fire
+		// even when every tunnel is already shown. See the #531 caveat
+		// on listResourcesScanLimit; until then we warn rather than
+		// risk implying the listing is exhaustive.
+		body += fmt.Sprintf("\n_…more resources past the first %d-row scan — some tunnels may not be shown._", listResourcesScanLimit)
 	}
-	h.postResponse(log, responseURL, body)
+	_ = h.postResponse(log, responseURL, body)
 }
 
-// resourceSortKey returns the token used to order rows in the
-// /qurl list output. Aliased rows sort by alias, un-aliased rows
-// sort by resource_id — the same token that ends up in the rendered
-// `$<token>` prefix.
-func resourceSortKey(r *client.Resource) string {
+// filterTunnelResources returns only the tunnel-type resources from the
+// fetched page. `/qurl list` is tunnel-scoped; URL/transit resources are
+// dropped. Keys on r.Type == [client.ResourceTypeTunnel] (the upstream
+// discriminator), NOT on an empty target_url, so a non-tunnel row with a
+// transient empty target isn't mis-included.
+func filterTunnelResources(resources []client.Resource) []client.Resource {
+	out := make([]client.Resource, 0, len(resources))
+	for i := range resources {
+		if resources[i].Type == client.ResourceTypeTunnel {
+			out = append(out, resources[i])
+		}
+	}
+	return out
+}
+
+// tunnelToken returns the `$<token>` identifier shown for a tunnel in
+// /qurl list — and the key rows sort by. Precedence:
+//
+//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl tunnel
+//     install <slug>` binds `$<slug>` as a channel alias, so the slug
+//     pastes straight into `/qurl get $<slug>`. This is the common case
+//     and the identifier we want to surface (never the opaque r_<id>).
+//  2. Resource-level alias — fallback when a tunnel somehow carries no
+//     slug but does have an alias.
+//  3. resource_id — last resort for a legacy slug-less, alias-less
+//     tunnel. Vanishingly rare (tunnels are created with a slug), but
+//     better than an empty `$` token, and `/qurl get $r_<id>` still
+//     resolves it via the channel allow-set.
+func tunnelToken(r *client.Resource) string {
+	if r.Slug != "" {
+		return r.Slug
+	}
 	if r.Alias != "" {
 		return r.Alias
 	}
 	return r.ResourceID
 }
 
-// formatResourceListLine renders one resource as a single text line
-// in /qurl list output. Per-line shape:
+// formatTunnelListLine renders one tunnel resource as a single text
+// line in /qurl list output:
 //
-//   - With alias bound:    `• \`$<alias>\` → <target_url>`
-//   - Without alias bound: `• \`$<resource_id>\` → <target_url> (no alias set)`
-//   - Tunnel (Type=tunnel): `• \`$<token>\` → (tunnel)`
-//   - Empty target (other): `• \`$<token>\` → <empty>`
+//   - No description:   • `$<slug>`
+//   - With description: • `$<slug>` → <description>
 //
-// When `r.Description` is set, it appends ` — <description>` as a
-// trailing annotation (after the alias-set/tunnel hints). Legacy
-// /qurl list rendered description on a separate visual axis; the
-// trailing-em-dash form keeps the one-line-per-row shape needed for
-// the copy-paste-ready `$<token>` workflow while preserving the
-// operator-authored context.
-//
-// The token-in-backticks shape lets Slack render it as inline code
-// (easy click-to-copy) while keeping the line plaintext-greppable
-// for operator workflows. The "(no alias set)" annotation flags
-// non-tunnel rows that would benefit from a future `/qurl setalias`
-// call — it's suppressed on the tunnel branch because the "(tunnel)"
-// placeholder is already a strong visual signal and the doubled-up
-// "(tunnel) (no alias set)" reads as redundant noise.
-//
-// Tunnel detection keys on r.Type == "tunnel" (the upstream resource
-// type), NOT on empty target_url — keying on the empty field would
-// silently re-label any non-tunnel row with a missing target as
-// "(tunnel)", which would mislead operators triaging a data glitch.
-func formatResourceListLine(r *client.Resource) string {
-	token := r.Alias
-	noAlias := false
-	if token == "" {
-		token = r.ResourceID
-		noAlias = true
-	}
-	descSuffix := ""
+// The token is [tunnelToken] (slug-first; never the opaque r_<id> in
+// the common case). The token-in-backticks shape lets Slack render it
+// as inline code (easy click-to-copy) while keeping the line
+// plaintext-greppable. There is no `(tunnel)` label or `[slug:...]`
+// fragment — the whole list is tunnels and the token IS the slug, so
+// both would be redundant noise. The arrow joins the slug to its
+// human-readable description when one is set; an undescribed tunnel
+// renders just the token.
+func formatTunnelListLine(r *client.Resource) string {
+	line := "• `$" + tunnelToken(r) + "`"
 	if r.Description != "" {
-		descSuffix = " — " + r.Description
+		line += " → " + r.Description
 	}
-	if r.Type == resourceTypeTunnel {
-		// Tunnel-type resources have no target_url (the FRP server
-		// is the effective destination). Render a placeholder so the
-		// row still reads cleanly. The "(no alias set)" annotation
-		// is suppressed here — see godoc.
-		return fmt.Sprintf("• `$%s` → (tunnel)%s", token, descSuffix)
-	}
-	target := r.TargetURL
-	if target == "" {
-		// Non-tunnel row with an empty target_url — render "<empty>"
-		// rather than silently labeling as a tunnel. Surfaces the
-		// data anomaly to user + ops without misleading either.
-		target = "<empty>"
-	}
-	suffix := ""
-	if noAlias {
-		suffix = " (no alias set)"
-	}
-	return fmt.Sprintf("• `$%s` → %s%s%s", token, target, suffix, descSuffix)
+	return line
 }
 
 // mapListResourcesError surfaces a friendly user-facing error for

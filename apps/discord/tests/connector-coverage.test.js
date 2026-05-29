@@ -191,6 +191,74 @@ describe('Connector client — coverage boost', () => {
       expect(ttlField.value).toBe('60');
     });
 
+    // mintLinks forwards selfDestructSeconds as session_duration so
+    // every minted token on a self-destruct send gets an L7 session
+    // window matching the fileviewer's client-side blank. Sibling of
+    // the viewer_ttl_seconds tests above — same value, different
+    // wire-field (mint_link request JSON, not upload form).
+    describe('mintLinks — session_duration forwarding', () => {
+      function captureMintBody() {
+        let bodyJSON = null;
+        globalThis.fetch = jest.fn(async (_url, opts) => {
+          bodyJSON = JSON.parse(opts.body);
+          return {
+            ok: true,
+            json: async () => ({ success: true, links: [{ qurl_id: 'q_1', qurl_link: 'https://q.test/l' }] }),
+          };
+        });
+        return () => bodyJSON;
+      }
+
+      it('sends session_duration when selfDestructSeconds provided', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 30 });
+        expect(getBody().session_duration).toBe('30s');
+      });
+
+      it('clamps 0.5 (fileviewer preset) to "1s" — qurl-service MinSessionDuration floor', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 0.5 });
+        expect(getBody().session_duration).toBe('1s');
+      });
+
+      it('ceils fractional values >1 (defensive — presets are all integer ≥1)', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 2.3 });
+        expect(getBody().session_duration).toBe('3s');
+      });
+
+      it('omits session_duration when null', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: null });
+        expect(getBody().session_duration).toBeUndefined();
+      });
+
+      it('omits session_duration when omitted (default param)', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
+        expect(getBody().session_duration).toBeUndefined();
+      });
+
+      // Defensive: a future caller passing NaN, ±Infinity, a numeric
+      // string, a boolean, or an object shouldn't put garbage on the
+      // wire ("NaNs", "Infinitys", etc.) and turn a recoverable input
+      // mistake into a confusing 400 from qurl-service's
+      // validateSessionDuration. `Number.isFinite(x) && x > 0` is the
+      // load-bearing predicate. Mirrors the sibling viewer_ttl_seconds
+      // defensive-input test below (same idiom, same belt-and-
+      // suspenders justification: the confirm-card dropdown is the
+      // contract, but mintLinks is exported).
+      it('omits session_duration for non-finite / wrong-type / non-positive inputs', async () => {
+        const cases = [NaN, Infinity, -Infinity, '30', '0.5', true, false, {}, [], 0, -1, -0.5];
+        for (const v of cases) {
+          const getBody = captureMintBody();
+          // eslint-disable-next-line no-await-in-loop
+          await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: v });
+          expect(getBody().session_duration).toBeUndefined();
+        }
+      });
+    });
+
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
       // Defensive: an upstream caller passing 0, NaN, or a string by
       // mistake shouldn't cause the field to land on the form. The
@@ -233,7 +301,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.message).toMatch(/Connector mint_link failed \(502\)/);
@@ -254,7 +322,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.apiCode).toBe('quota_exceeded');
@@ -272,7 +340,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(500);
@@ -288,7 +356,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(503);
@@ -304,7 +372,7 @@ describe('Connector client — coverage boost', () => {
       });
 
       try {
-        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(504);
@@ -320,7 +388,7 @@ describe('Connector client — coverage boost', () => {
         json: async () => ({ success: true, links: null }),
       });
 
-      await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
         .rejects.toThrow('Connector mint_link returned no links array');
     });
 
@@ -330,7 +398,7 @@ describe('Connector client — coverage boost', () => {
         json: async () => ({ success: true, links: 'not-array' }),
       });
 
-      await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
         .rejects.toThrow('Connector mint_link returned no links array');
     });
 
@@ -340,7 +408,7 @@ describe('Connector client — coverage boost', () => {
         json: async () => ({ success: true }),
       });
 
-      await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
         .rejects.toThrow('Connector mint_link returned no links array');
     });
   });
@@ -376,7 +444,7 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
   });
 
   it('throws when QURL_API_KEY is empty on mintLinks', async () => {
-    await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+    await expect(connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 }))
       .rejects.toThrow('QURL_API_KEY is not configured');
   });
 });

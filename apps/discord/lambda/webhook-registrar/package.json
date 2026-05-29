@@ -1,0 +1,16 @@
+{
+  "name": "qurl-discord-webhook-registrar-lambda",
+  "version": "1.0.0",
+  "description": "One-shot Lambda that registers / rotates / reuses the Discord bot's qurl-service webhook subscription on each Terraform deploy.",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "echo 'tests live at apps/discord/tests/lambda/webhook-registrar/' && exit 0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ssm": "^3.1036.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

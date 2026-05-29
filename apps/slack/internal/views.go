@@ -3,6 +3,9 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -12,112 +15,52 @@ import (
 // in PR-3c.3+ will pass them to `views.open` / `response_url` /
 // `chat.postMessage` as appropriate. We don't depend on the
 // slack-go/slack library here to avoid pulling a heavyweight
-// transitive into the binary just for a fixed set of view payloads.
+// transitive into the binary just for a fixed set of view payloads. If the
+// bot grows a broader Slack Web API surface, revisit that decision instead
+// of expanding hand-rolled clients indefinitely.
 
-// callbackIDSetAliasRebind is the modal callback used by the
-// `setalias` rebind confirmation flow. The view-submission handler
-// matches on this to know which path to take.
-const callbackIDSetAliasRebind = "setalias_rebind_confirm"
+// Modal callback IDs. The view-submission handler matches on these to
+// dispatch the submitted Block Kit state into the right command path.
+const (
+	callbackIDSetAliasRebind = "setalias_rebind_confirm"
+	callbackIDTunnelInstall  = "tunnel_install"
+)
 
-// callbackIDAdminClaim is the modal callback used by the bootstrap
-// code claim flow. Distinct from the rebind callback so a single
-// submission handler can route by ID.
-const callbackIDAdminClaim = "admin_claim_redeem"
+const (
+	blockKitFieldBlocks          = "blocks"
+	blockKitFieldCallbackID      = "callback_id"
+	blockKitFieldClose           = "close"
+	blockKitFieldPrivateMetadata = "private_metadata"
+	blockKitFieldSubmit          = "submit"
+	blockKitFieldTitle           = "title"
+	blockKitFieldType            = "type"
+	blockKitTypeModal            = "modal"
+	// Slack caps private_metadata at 3000 bytes. Today's tunnel metadata is
+	// small; this guard is mainly defense against future field additions or a
+	// pathological response_url making modal submission fail only after open.
+	slackPrivateMetadataMaxBytes = 3000
+)
 
-// blockIDClaimCode is the block ID for the bootstrap-code field in
-// the admin-claim modal. Stable so view-submission handlers can pull
-// the value out by a known key — and so the bot's logging middleware
-// (PR-3c.3+) can match on it via [IsRedactedSubmissionBlock] before
-// serializing the payload.
-const blockIDClaimCode = "claim_code_block"
+const slackChannelFallbackText = "the channel where setup started"
 
-// actionIDClaimCode is the action ID for the bootstrap-code input
-// element. Slack's view_submission payload nests the value as
-// `state.values[block_id][action_id].value`, so both IDs need to be
-// stable.
-const actionIDClaimCode = "claim_code_input"
+// Keep this intentionally wider than today's C*/D*/G* Slack channel prefixes:
+// it is only used for benign fallback display text, and Slack has changed ID
+// shapes before. The channel ID is not an auth signal here; signature
+// verification on the Slack request envelope is the trust boundary.
+var slackChannelIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,127}$`)
 
-// redactedSubmissionBlockIDs is the set of view-submission `block_id`
-// values whose `state.values[block_id]` payload MUST NOT be logged or
-// otherwise echoed by the bot. The handler's logging middleware in
-// PR-3c.3+ consults this set via [IsRedactedSubmissionBlock] before
-// serializing a `view_submission` for diagnostics — entries here are
-// replaced with a sentinel.
-//
-// Why a set rather than a Slack-level masking primitive: Slack's
-// Block Kit `plain_text_input` element has no input-masking field
-// (no `private_value`, no `secret`, no `masked` — verified against
-// Slack's reference docs). The Slack client UI will render the
-// bootstrap code in plaintext, and the `view_submission` payload
-// will carry it in `state.values[claim_code_block][claim_code_input]
-// .value`. The mitigation for Blocker #3 ("no plaintext bootstrap
-// codes anywhere user-visible") therefore lives at the bot's
-// logging boundary, not in the modal payload itself: the code
-// transits the wire once (TLS to the bot, then DDB UpdateItem on
-// the in-account `bootstrap_codes` table via in-account IAM — see
-// the 2026-05-12 pivot, qurl-integrations-infra #523) and is never
-// written to logs or telemetry. This map is the single source of
-// truth for that guarantee.
-//
-// Unexported because [IsRedactedSubmissionBlock] is the supported
-// query surface — keeping the map private lets a future change to
-// the storage shape (a sync.Map, a regex set) avoid an API break.
-var redactedSubmissionBlockIDs = map[string]struct{}{
-	blockIDClaimCode: {},
-}
-
-// IsRedactedSubmissionBlock reports whether `blockID` names a
-// view-submission block whose `state.values[blockID]` content must
-// not be logged. The handler middleware in PR-3c.3+ calls this
-// before serializing any `view_submission` payload for diagnostics.
-// Exported so the (separate) handler package can consume it without
-// reaching into an unexported map.
-//
-// TODO(PR-3c.3+): wire this into the view-submission logging
-// middleware so the bootstrap code never reaches diagnostics. Until
-// that lands, [AdminClaimModal] ships without the matching
-// redaction at the logging boundary — the bot must NOT log
-// `view_submission` payloads in the interim. Tracking: this PR
-// (#228) provides the query surface; the consumer is part of the
-// PR-3c.3+ command-implementation stack.
-func IsRedactedSubmissionBlock(blockID string) bool {
-	_, ok := redactedSubmissionBlockIDs[blockID]
-	return ok
-}
-
-// HelpResponse renders the JSON for `/qurl help`. Returned as the
-// slash-command HTTP response body (not a modal).
-func HelpResponse() ([]byte, error) {
-	payload := map[string]any{
-		respFieldResponseType: respTypeEphemeral,
-		"blocks": []any{
-			sectionBlock("*/qurl* — Create and manage qURLs from Slack"),
-			dividerBlock(),
-			sectionBlock(strings.Join([]string{
-				"*Commands*",
-				"`/qurl get <url>` — get a qURL for a URL",
-				"`/qurl get $name` — get a qURL for a name your Slack admin has configured in this channel",
-				"`/qurl get <url|$name> dm:true` — DM the link instead of posting it in-channel",
-				"`/qurl get <url|$name> reason:\"audit text\"` — attach a reason to the mint (audit trail)",
-				"`/qurl list` — show your 5 most recent qURLs",
-			}, "\n")),
-			dividerBlock(),
-			sectionBlock(strings.Join([]string{
-				"*Admin commands*",
-				"`/qurl admin claim` — open the bootstrap-code modal",
-				"`/qurl setalias $<alias> <url-or-resource-id>` — configure an alias in this channel",
-				"`/qurl unsetalias $<alias>` — remove a configured alias in this channel",
-				"`/qurl aliases` — list aliases configured in this channel",
-				"`/qurl admin policies` — list channel/alias policies",
-				"`/qurl admin status` — workspace bot health and admin info",
-				"`/qurl admin revoke $<alias>` — revoke a previously minted link",
-			}, "\n")),
-			dividerBlock(),
-			sectionBlock("`/qurl help` — show this message"),
-		},
-	}
-	return json.Marshal(payload)
-}
+const (
+	tunnelInstallBlockSlug         = "tunnel_slug"
+	tunnelInstallActionSlug        = "slug_input"
+	tunnelInstallBlockShortcut     = "channel_shortcut"
+	tunnelInstallActionShortcut    = "channel_shortcut_input"
+	tunnelInstallBlockEnvironment  = "target_environment"
+	tunnelInstallActionEnvironment = "target_environment_select"
+	tunnelInstallBlockLocalPort    = "local_port"
+	tunnelInstallActionLocalPort   = "local_port_input"
+	tunnelInstallBlockWebRef       = "web_container"
+	tunnelInstallActionWebRef      = "web_container_input"
+)
 
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
 // in `private_metadata`. JSON-encoded so the view-submission handler
@@ -162,13 +105,13 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 		return nil, fmt.Errorf("marshal private_metadata: %w", err)
 	}
 	payload := map[string]any{
-		"type":             "modal",
-		"callback_id":      callbackIDSetAliasRebind,
-		"title":            plainTextObj("Confirm alias rebind"),
-		"submit":           plainTextObj("Rebind"),
-		"close":            plainTextObj("Cancel"),
-		"private_metadata": string(meta),
-		"blocks": []any{
+		blockKitFieldType:            blockKitTypeModal,
+		blockKitFieldCallbackID:      callbackIDSetAliasRebind,
+		blockKitFieldTitle:           plainTextObj("Confirm alias rebind"),
+		blockKitFieldSubmit:          plainTextObj("Rebind"),
+		blockKitFieldClose:           plainTextObj("Cancel"),
+		blockKitFieldPrivateMetadata: string(meta),
+		blockKitFieldBlocks: []any{
 			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", escapeMrkdwnCode(aliasName))),
 			sectionBlock(fmt.Sprintf("*Current target:* `%s`", escapeMrkdwnCode(oldTarget))),
 			sectionBlock(fmt.Sprintf("*New target:* `%s`", escapeMrkdwnCode(newTarget))),
@@ -176,6 +119,86 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 		},
 	}
 	return json.Marshal(payload)
+}
+
+// TunnelInstallModalMetadata is carried through Slack private_metadata from
+// the slash-command request that opened the modal to the later
+// view_submission. The response_url lets the async installer post the same
+// ephemeral follow-up shape as the direct `/qurl tunnel install <slug>` path.
+// CreatedAtUnix lets the submit handler reject stale modals before creating a
+// resource or minting a bootstrap key; Slack response URLs are time-limited.
+type TunnelInstallModalMetadata struct {
+	TeamID        string `json:"team_id"`
+	ChannelID     string `json:"channel_id"`
+	UserID        string `json:"user_id"`
+	ResponseURL   string `json:"response_url"`
+	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
+}
+
+// TunnelInstallModal renders the guided tunnel installer. The modal collects
+// only customer-facing choices: the stable slug, optional channel shortcut,
+// local service port, target environment, and an optional Docker/Compose target
+// name used only by the Docker and Docker Compose renderers.
+func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
+	privateMeta, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private_metadata: %w", err)
+	}
+	if len(privateMeta) > slackPrivateMetadataMaxBytes {
+		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
+	}
+	defaultPort := strconv.Itoa(defaultTunnelLocalPort)
+	payload := map[string]any{
+		blockKitFieldType:            blockKitTypeModal,
+		blockKitFieldCallbackID:      callbackIDTunnelInstall,
+		blockKitFieldTitle:           plainTextObj("Install qURL tunnel"),
+		blockKitFieldSubmit:          plainTextObj("Generate"),
+		blockKitFieldClose:           plainTextObj("Cancel"),
+		blockKitFieldPrivateMetadata: string(privateMeta),
+		blockKitFieldBlocks: []any{
+			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
+			inputBlock(tunnelInstallBlockSlug, "qURL tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
+				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
+			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
+				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
+			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output. Docker snippets assume a Linux host.", false,
+				staticSelect(tunnelInstallActionEnvironment, []map[string]any{
+					optionObj("Docker sidecar", string(tunnelEnvDocker)),
+					optionObj("Docker Compose", string(tunnelEnvCompose)),
+					optionObj("AWS ECS/Fargate task", string(tunnelEnvECSFargate)),
+					optionObj("Kubernetes pod", string(tunnelEnvKubernetes)),
+				}, optionObj("Docker sidecar", string(tunnelEnvDocker)))),
+			inputBlock(tunnelInstallBlockLocalPort, "Local HTTP port", "The port the local service listens on inside the shared network namespace.", false,
+				plainTextInput(tunnelInstallActionLocalPort, defaultPort, defaultPort)),
+			inputBlock(tunnelInstallBlockWebRef, "Docker service/container", "Optional for Linux Docker and Docker Compose only. Leave blank for ECS/Fargate or Kubernetes.", true,
+				plainTextInput(tunnelInstallActionWebRef, "web", "")),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// TunnelInstallErrorModal replaces a submitted tunnel-install modal with a
+// form-level error. Slack's `response_action: errors` can only attach copy to
+// input fields, which makes auth/config failures look like bad user input.
+func TunnelInstallErrorModal(message string) ([]byte, error) {
+	payload := map[string]any{
+		blockKitFieldType:  blockKitTypeModal,
+		blockKitFieldTitle: plainTextObj("qURL tunnel setup"),
+		blockKitFieldClose: plainTextObj("Close"),
+		blockKitFieldBlocks: []any{
+			sectionBlock(":warning: " + message),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+func slackChannelMention(channelID string) string {
+	channelID = strings.TrimSpace(channelID)
+	if !slackChannelIDPattern.MatchString(channelID) {
+		slog.Warn("using fallback Slack channel label for malformed channel id", "channel_id_present", channelID != "")
+		return slackChannelFallbackText
+	}
+	return "<#" + channelID + ">"
 }
 
 // escapeMrkdwnCode neutralizes the characters that can break out of
@@ -228,46 +251,6 @@ var mrkdwnCodeEscaper = strings.NewReplacer(
 	"\r", " ",
 )
 
-// AdminClaimModal renders the modal shown when a user runs
-// `/qurl admin claim`. The bootstrap code is collected via a regular
-// `plain_text_input` (Slack's Block Kit has no input-masking
-// primitive — see the redaction-registry comment above for the
-// mitigation strategy). The user-visible `:lock:` context line
-// documents the guarantee: the bot never logs the submitted code;
-// it transits TLS once and is consumed by the DDB-direct redeem
-// path in PR-3c.3+ (`apps/slack/internal/slackdata`).
-//
-// This satisfies Blocker #3 (no plaintext bootstrap codes anywhere
-// user-visible) at the slash-command grammar layer (the parser
-// rejects any `admin claim <args>` form so the code can't be typed
-// into the slash-command box) and at the bot's logging boundary
-// (handler middleware redacts [blockIDClaimCode] before serializing
-// any `view_submission` payload for diagnostics).
-func AdminClaimModal() ([]byte, error) {
-	payload := map[string]any{
-		"type":        "modal",
-		"callback_id": callbackIDAdminClaim,
-		"title":       plainTextObj("Claim qURL workspace"),
-		"submit":      plainTextObj("Submit"),
-		"close":       plainTextObj("Cancel"),
-		"blocks": []any{
-			sectionBlock("Paste the bootstrap code your admin received from LayerV. The code is single-use."),
-			map[string]any{
-				"type":     "input",
-				"block_id": blockIDClaimCode,
-				"label":    plainTextObj("Bootstrap code"),
-				"element": map[string]any{
-					"type":        "plain_text_input",
-					"action_id":   actionIDClaimCode,
-					"placeholder": plainTextObj("e.g. boot_xxxx-xxxx-xxxx"),
-				},
-			},
-			contextBlock(":lock: The bot never logs this code. It is sent once to LayerV over TLS and discarded from memory after redemption."),
-		},
-	}
-	return json.Marshal(payload)
-}
-
 // ErrorResponse renders an ephemeral-channel error message via the
 // `response_url` shape. Used by every parser/handler error path so
 // the user sees a friendly `:warning: <message>` instead of an
@@ -314,12 +297,6 @@ func contextBlock(text string) map[string]any {
 	}
 }
 
-// dividerBlock returns a divider. No payload — just a structural
-// separator between sections.
-func dividerBlock() map[string]any {
-	return map[string]any{"type": "divider"}
-}
-
 // plainTextObj returns a `plain_text` text object. Slack uses two
 // distinct text-object shapes (`plain_text` and `mrkdwn`); the modal
 // title/submit/close fields require `plain_text` specifically.
@@ -328,5 +305,51 @@ func plainTextObj(text string) map[string]any {
 		"type":  "plain_text",
 		"text":  text,
 		"emoji": true,
+	}
+}
+
+func inputBlock(blockID, label, hint string, optional bool, element map[string]any) map[string]any {
+	block := map[string]any{
+		"type":     "input",
+		"block_id": blockID,
+		"label":    plainTextObj(label),
+		"element":  element,
+	}
+	if hint != "" {
+		block["hint"] = plainTextObj(hint)
+	}
+	if optional {
+		block["optional"] = true
+	}
+	return block
+}
+
+func plainTextInput(actionID, placeholder, initialValue string) map[string]any {
+	element := map[string]any{
+		"type":      "plain_text_input",
+		"action_id": actionID,
+	}
+	if placeholder != "" {
+		element["placeholder"] = plainTextObj(placeholder)
+	}
+	if initialValue != "" {
+		element["initial_value"] = initialValue
+	}
+	return element
+}
+
+func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
+	return map[string]any{
+		"type":           "static_select",
+		"action_id":      actionID,
+		"options":        options,
+		"initial_option": initial,
+	}
+}
+
+func optionObj(text, value string) map[string]any {
+	return map[string]any{
+		"text":  plainTextObj(text),
+		"value": value,
 	}
 }

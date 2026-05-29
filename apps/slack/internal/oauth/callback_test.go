@@ -59,14 +59,23 @@ func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
 	return nil
 }
 
-// fakeIDTokenVerifier always returns the configured email or err.
+// fakeIDTokenVerifier always returns the configured email/sub or err.
 type fakeIDTokenVerifier struct {
-	email string
-	err   error
+	email  string
+	sub    string
+	err    error
+	subErr error
 }
 
 func (f *fakeIDTokenVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
 	return f.email, f.err
+}
+
+func (f *fakeIDTokenVerifier) VerifySub(_ context.Context, _ string) (string, error) {
+	if f.subErr != nil {
+		return "", f.subErr
+	}
+	return f.sub, nil
 }
 
 // fakeSlackClient captures PostDirectMessage calls.
@@ -642,5 +651,315 @@ func TestCallbackDMsConfiguredUser(t *testing.T) {
 	defer slackClient.mu.Unlock()
 	if slackClient.gotUser != testUserID {
 		t.Errorf("DM user: got %q want %q", slackClient.gotUser, testUserID)
+	}
+}
+
+const testAdminSub = "auth0|abc123def456"
+
+type fakeAdminStore struct {
+	mu        sync.Mutex
+	gotTeamID string
+	gotOwner  string
+	gotSeed   string
+	calls     int
+	err       error
+}
+
+func (f *fakeAdminStore) BindWorkspace(_ context.Context, m *WorkspaceMapping, seedAdmin string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.gotTeamID = m.TeamID
+	f.gotOwner = m.OwnerID
+	f.gotSeed = seedAdmin
+	return f.err
+}
+
+// TestCallbackSeedsAdminOnBind fences the load-bearing collapse: a
+// successful /qurl setup must call BindWorkspace with the verified
+// state's userID as seedAdmin and the Auth0 sub as OwnerID. Without
+// this, the workspace gets an API key but no admin row — every
+// subsequent /qurl admin command would reply "you are not an admin."
+func TestCallbackSeedsAdminOnBind(t *testing.T) {
+	cfg, _, _, _ := newCallbackCfg(t) //nolint:dogsled // intentional discard
+	admin := &fakeAdminStore{}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	admin.mu.Lock()
+	defer admin.mu.Unlock()
+	if admin.calls != 1 {
+		t.Fatalf("BindWorkspace calls: got %d want 1", admin.calls)
+	}
+	if admin.gotTeamID != testTeamID {
+		t.Errorf("BindWorkspace TeamID: got %q want %q", admin.gotTeamID, testTeamID)
+	}
+	if admin.gotOwner != testAdminSub {
+		t.Errorf("BindWorkspace OwnerID: got %q want %q (must come from id_token sub claim)", admin.gotOwner, testAdminSub)
+	}
+	if admin.gotSeed != testUserID {
+		t.Errorf("BindWorkspace seedAdmin: got %q want %q (must come from verified state's userID)", admin.gotSeed, testUserID)
+	}
+}
+
+// TestCallbackBindFailureSkipsMint fences the bind-before-mint
+// invariant: a generic BindWorkspace failure must return 500
+// WITHOUT minting an API key or writing to the workspace store.
+// Pre-PR the order was mint → persist → bind, which left a revoked
+// key in the workspace's DDB row when bind classified as a generic
+// failure. Now the bind runs first; if it fails we never reach the
+// mint, so the existing key state is untouched.
+func TestCallbackBindFailureSkipsMint(t *testing.T) {
+	cfg, store := newCallbackCfgStore(t)
+	admin := &fakeAdminStore{err: errors.New("ddb timeout")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return "" }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500", rec.Code)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
+	}
+}
+
+// TestCallbackBindIdempotentForSameCaller fences the rotation
+// posture: the same Slack user re-running /qurl setup must succeed
+// idempotently. The new API key is persisted (key rotated) and the
+// admin set is unchanged. Without this, an admin re-running setup
+// to rotate keys would see the rebind-refused page.
+func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	// The error text is irrelevant — the stubbed classifier returns
+	// the same-caller code regardless. Use sentinel text so a future
+	// reader doesn't think production reads the message string.
+	admin := &fakeAdminStore{err: errors.New("classified as same-caller")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (idempotent rotation, body=%s)", rec.Code, rec.Body.String())
+	}
+	// The "key rotated" half of the promise — SetAPIKey must actually
+	// run after the idempotent-bind continue. A regression that
+	// short-circuited mint on AlreadyBoundToCaller would pass the
+	// 200-status check but leave the user's stale key in place.
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKey must run on idempotent rebind so the key rotates")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("SetAPIKey APIKey: got %q want %q (the rotation must persist the freshly minted key)", store.setArgs.APIKey, testAPIKey)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if minter.revoked {
+		t.Error("idempotent rebind must not revoke the just-minted key")
+	}
+}
+
+// TestCallbackBindRefusedForDifferentAdmin fences the cross-admin
+// rebind guard. A different Slack user attempting to install into
+// an already-bound workspace must NOT overwrite the admin set or
+// the workspace's stored API key; instead the rebind-refused page
+// renders and mint is skipped entirely. (Pre-reorder this path
+// would mint K2, overwrite K1 in DDB, then revoke K2 — bricking
+// the workspace for the existing admin. The reorder makes that
+// failure mode impossible by construction.)
+func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
+	cfg, store := newCallbackCfgStore(t)
+	admin := &fakeAdminStore{err: errors.New("workspace already bound")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBound }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status: got %d want 409 (rebind-refused page)", rec.Code)
+	}
+	// Fence the page body: a refactor swapping renderRebindRefused
+	// for a bare http.Error with status 409 would slip past the
+	// status-only check and leave operators staring at the default
+	// error string instead of the rebind-refused copy.
+	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must not run on rebind-refused — would overwrite the existing admin's encrypted key")
+	}
+}
+
+// TestCallbackBindRefusedWhenUnverified fences the unverified-conflict
+// posture: when the post-CCFE disambiguation can't read the existing
+// row's admin set, BindConflictUnverified arrives. The handler must
+// treat it the same as the cross-admin rebind (refuse + 409), not
+// as the idempotent same-caller case — the safer default is to
+// refuse than to potentially overwrite. The two cases share a switch
+// arm today, but this fence prevents a future split that silently
+// downgrades unverified to "idempotent success."
+func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
+	cfg, store := newCallbackCfgStore(t)
+	admin := &fakeAdminStore{err: errors.New("could not confirm bind")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictUnverified }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status: got %d want 409 (rebind-refused page, unverified arm)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must not run on unverified-rebind — same posture as the cross-admin arm")
+	}
+}
+
+// TestCallbackBindSkippedWhenSubMissing fences the hard-failure
+// posture: if the id_token's sub claim can't be verified, we have
+// no OwnerID to bind with. The handler must NOT silently skip the
+// bind (which would half-install the workspace) and — under the
+// bind-before-mint ordering — must also skip the mint entirely
+// rather than mint then revoke.
+func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
+	cfg, store := newCallbackCfgStore(t)
+	admin := &fakeAdminStore{}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, subErr: errors.New("jwks failed")}
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (cannot bind without sub)", rec.Code)
+	}
+	admin.mu.Lock()
+	if admin.calls != 0 {
+		t.Errorf("BindWorkspace must not be called with empty OwnerID; got %d calls", admin.calls)
+	}
+	admin.mu.Unlock()
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
+	}
+}
+
+// TestCallbackBindSucceedsThenMintFails fences the recovery path
+// after the bind-before-mint reorder. With bind running first, a
+// fresh install where bind succeeds but mint then 502s leaves the
+// workspace_mappings row seeded but no workspace_keys row. The user
+// re-runs /qurl setup; bind returns BindConflictAlreadyBoundToCaller
+// (idempotent), the callback continues to mint, mint now succeeds,
+// and the workspace lands in the fully-installed state. Without
+// this fence the new ordering's recovery story rests on inspection
+// alone.
+func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
+	// First attempt: bind succeeds (admin.err=nil), mint fails (502).
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	admin := &fakeAdminStore{}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	minter.mintErr = errors.New("simulated qurl-service 502")
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("first attempt status: got %d want 502 (mint failure)", rec.Code)
+	}
+	admin.mu.Lock()
+	if admin.calls != 1 || admin.gotSeed != testUserID {
+		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d seed=%q)", admin.calls, admin.gotSeed)
+	}
+	admin.mu.Unlock()
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("first attempt: SetAPIKey must NOT run when mint failed")
+	}
+	store.mu.Unlock()
+
+	// Second attempt: same caller re-runs /qurl setup. Bind now
+	// returns the same-caller-already-bound classifier code; mint
+	// succeeds; rotation completes. This is the documented recovery.
+	admin.err = errors.New("classified as same-caller")
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
+	minter.mintErr = nil
+	state2 := mintTestState(t, &cfg)
+	h2 := Callback(cfg)
+	rec2 := httptest.NewRecorder()
+	h2(rec2, callbackRequest(state2))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry status: got %d want 200 (recovery path, body=%s)", rec2.Code, rec2.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Fatal("retry: SetAPIKey must run after bind classifies as same-caller and mint succeeds")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("retry: SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+	}
+}
+
+// TestCallbackSkipsBindWhenAdminStoreNil fences the sandbox / no-DDB
+// contract: AdminStore=nil is the documented degraded path (cmd/main.go
+// surfaces it when slackdata.NewStore fails). The callback must still
+// complete the mint + render the success page so the API-key surface
+// stays functional; the bind is logged-and-skipped.
+func TestCallbackSkipsBindWhenAdminStoreNil(t *testing.T) {
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	cfg.AdminStore = nil
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (sandbox path must render success, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Error("SetAPIKey must still run in the sandbox path so the API-key surface is functional")
 	}
 }

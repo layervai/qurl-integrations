@@ -2,12 +2,9 @@ package internal
 
 // Test-only fixture helpers for seeding the fake DDB with the
 // post-pivot table shapes. Mirrors the workspace_mappings /
-// channel_policies / bootstrap_codes schemas fenced in
-// modules/qurl-slack-ddb/main.tf.
+// channel_policies schemas fenced in modules/qurl-slack-ddb/main.tf.
 
 import (
-	"strconv"
-	"testing"
 	"time"
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -23,17 +20,11 @@ const (
 	fAttrAdminSlackUserIDs  = "admin_slack_user_ids"
 	fAttrCreatedAt          = "created_at"
 	fAttrUpdatedAt          = "updated_at"
-	fAttrAPIKeyFingerprint  = "api_key_fingerprint"
 	fAttrAlias              = "alias"
 	fAttrResourceID         = "resource_id"
 	fAttrAllowedResourceIDs = "allowed_resource_ids"
 	fAttrAliasBindings      = "alias_bindings"
 )
-
-// fixtureFingerprint is the canned api_key_fingerprint value tests
-// seed when they don't need to vary it. Matches the legacy HTTP
-// fixture's `a3f1c2b9`.
-const fixtureFingerprint = "a3f1c2b9"
 
 // seedWorkspaceAdmin returns a workspace_mappings row that marks
 // `slackUserID` as admin for `teamID`. Used by the admin-check
@@ -47,13 +38,19 @@ func seedWorkspaceAdmin(teamID, ownerID, slackUserID string, configuredAt time.T
 		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: []string{slackUserID}},
 		fAttrCreatedAt:          stringMember(at),
 		fAttrUpdatedAt:          stringMember(at),
-		fAttrAPIKeyFingerprint:  stringMember(fixtureFingerprint),
 	}
 }
 
 // seedWorkspaceNonAdmin returns a workspace_mappings row that
 // exists for `teamID` but does NOT name `slackUserID` as admin.
 // Used by the admin-check-no surfaces.
+//
+// `U_someone_else` violates the post-PR userMentionPattern (`[UW][A-Z0-9]{8,}`)
+// because it's never mention-parsed — DDB only stores it as opaque
+// data, CheckAdmin compares the *caller's* user_id (already
+// validated upstream) against the SS membership. Kept as-is so the
+// non-admin shape is visually distinct from the canonical
+// `UADMIN001` / `UOWNER001` fixtures.
 func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:        stringMember(teamID),
@@ -62,20 +59,30 @@ func seedWorkspaceNonAdmin(teamID, ownerID string) map[string]ddbtypes.Attribute
 		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: []string{"U_someone_else"}},
 		fAttrCreatedAt:          stringMember("2026-04-20T12:00:00Z"),
 		fAttrUpdatedAt:          stringMember("2026-04-20T12:00:00Z"),
-		fAttrAPIKeyFingerprint:  stringMember(fixtureFingerprint),
 	}
 }
 
-// seedChannelPolicySingle returns a channel_policies row with a
-// single alias+resource_id binding. Mirrors the legacy single-row
-// shape ListPolicies flattens.
-func seedChannelPolicySingle(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
+// seedChannelPolicyDualShape returns a channel_policies row that writes
+// both the post-pivot shape (`alias_bindings` Map +
+// `allowed_resource_ids` SS) AND the legacy single-row scalar
+// (`alias` + `resource_id`) so the fixture exercises ResolvePolicy's
+// gate against both shapes in one row. NOT a canonical legacy-only
+// row — tests that need the legacy scalar fallback in isolation
+// (the actual `TestResolvePolicy_LegacySingleRowShape`) construct
+// their row inline.
+func seedChannelPolicyDualShape(teamID, channelID, alias, resourceID string) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		fAttrSlackTeamID:    stringMember(teamID),
 		fAttrSlackChannelID: stringMember(channelID),
 		fAttrAlias:          stringMember(alias),
 		fAttrResourceID:     stringMember(resourceID),
-		fAttrCreatedAt:      stringMember("2026-04-20T12:00:00Z"),
+		fAttrAliasBindings: &ddbtypes.AttributeValueMemberM{
+			Value: map[string]ddbtypes.AttributeValue{
+				alias: stringMember(resourceID),
+			},
+		},
+		fAttrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+		fAttrCreatedAt:          stringMember("2026-04-20T12:00:00Z"),
 	}
 }
 
@@ -128,102 +135,8 @@ func seedChannelPolicyAliasBindings(teamID, channelID string, bindings map[strin
 	}
 }
 
-// seedBootstrapCode returns a bootstrap_codes row keyed by the
-// sha256(plaintext) code_hash. `expiresAt` is encoded as a numeric
-// epoch-seconds attribute (matches the DDB TTL conventions in the
-// production schema). When `redeemed` is true the row is already
-// consumed — the conditional UpdateItem will fail against it.
-// Currently unused on #231 (no claim flow); kept so #233 can reuse
-// the same fixture set.
-func seedBootstrapCode(_ *testing.T, plaintext, ownerID, keyID string, expiresAt time.Time, redeemed bool) map[string]ddbtypes.AttributeValue {
-	return map[string]ddbtypes.AttributeValue{
-		"code_hash":  stringMember(plaintextCodeHash(plaintext)),
-		fAttrOwnerID: stringMember(ownerID),
-		"key_id":     stringMember(keyID),
-		"redeemed":   boolMember(redeemed),
-		"expires_at": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt.Unix(), 10)},
-	}
-}
-
-// plaintextCodeHash mirrors slackdata.hashBootstrapCode without
-// importing it (the helper is unexported on the production side).
-// Kept in sync with that implementation; if the algorithm rotates,
-// update here too.
-func plaintextCodeHash(plaintext string) string {
-	return fakeSha256Hex([]byte(plaintext))
-}
-
 // stringMember is a 3-character alias for the AttributeValueMemberS
 // constructor so fixture rows fit on one line.
 func stringMember(v string) *ddbtypes.AttributeValueMemberS {
 	return &ddbtypes.AttributeValueMemberS{Value: v}
-}
-
-// boolMember mirrors stringMember for boolean attrs.
-func boolMember(v bool) *ddbtypes.AttributeValueMemberBOOL {
-	return &ddbtypes.AttributeValueMemberBOOL{Value: v}
-}
-
-// containsSetMember returns true iff `item[attr]` is a string set
-// containing `member`. Test assertion helper.
-func containsSetMember(item map[string]ddbtypes.AttributeValue, attr, member string) bool {
-	v, ok := item[attr].(*ddbtypes.AttributeValueMemberSS)
-	if !ok {
-		return false
-	}
-	for _, m := range v.Value {
-		if m == member {
-			return true
-		}
-	}
-	return false
-}
-
-// errFromString is a tiny constructor for injected DDB errors.
-// Returns a plain error — the production code wraps these into the
-// `*slackdata.Error` shape via ddbToError, so the underlying type
-// doesn't need to be a DDB exception type.
-func errFromString(msg string) error {
-	return errString(msg)
-}
-
-type errString string
-
-func (e errString) Error() string { return string(e) }
-
-// Keep optional helpers referenced so the unused linter doesn't
-// drop them when only a subset of branches uses them today. #233
-// (admin-claim flow) pulls in seedBootstrapCode + boolMember +
-// plaintextCodeHash + fakeSha256Hex. The DDB-error injection set
-// (containsSetMember / errFromString / errString) is referenced by
-// the fail-mode tests #233 still references; keep them anchored
-// here so the unused-linter doesn't strip them under our feet
-// before #233 merges.
-var (
-	_       = seedBootstrapCode
-	_       = boolMember
-	_       = plaintextCodeHash
-	_       = fakeSha256Hex
-	_       = containsSetMember
-	_       = errFromString
-	_ error = errString("")
-)
-
-// Helpers added by #231 / #234 that #233's tests don't consume
-// directly. The unused-linter (v2.10.1, CI's pinned version) doesn't
-// see through method-value bindings in a func body, so we anchor
-// each one via a TestMain init-time touch. See the
-// adminTestHelpersKeepReferenced init below.
-//
-//nolint:gochecknoinits // keep-referenced until #231 / #234 land — needs an init body for method-value anchors.
-func init() {
-	var ts *adminTestServers
-	var f *fakeDDB
-	_ = seedWorkspaceNonAdmin
-	_ = seedChannelPolicySingle
-	_ = ts.seedNonAdmin
-	_ = ts.seedWorkspaceCustom
-	_ = ts.seedPolicySingle
-	_ = ts.failOnAllowResource
-	_ = f.policyHasResource
 }

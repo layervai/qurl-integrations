@@ -230,6 +230,16 @@ const tables = [
     attributes: [{ AttributeName: 'send_id', AttributeType: 'S' }],
   },
   {
+    // Webhook-fed view counter; multi-instance bridge between the
+    // /webhooks/qurl receiver and the per-send monitor. No GSI —
+    // read path is BatchGet by qurlLinks set. 30d TTL on `expires_at`
+    // (canonical attribute name) refreshed on every webhook write.
+    name: 'qurl-views',
+    keySchema: [{ AttributeName: 'qurl_id', KeyType: 'HASH' }],
+    attributes: [{ AttributeName: 'qurl_id', AttributeType: 'S' }],
+    ttlAttribute: 'expires_at',
+  },
+  {
     name: 'orphaned-oauth-tokens',
     keySchema: [{ AttributeName: 'token_hash', KeyType: 'HASH' }],
     attributes: [{ AttributeName: 'token_hash', AttributeType: 'S' }],

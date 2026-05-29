@@ -1,5 +1,17 @@
 const logger = require('../logger');
 
+// isPositiveFinite — single predicate for "valid positive numeric
+// seconds/count/TTL" gate. Rejects null, undefined, NaN, ±Infinity,
+// 0, and negative numbers. Strict Number.isFinite (NOT global
+// isFinite) so non-numbers like '1', true, {} are also rejected
+// without coercion. Use whenever you need "definitely a positive
+// number" — TTL gates, count validators, threshold checks. Hoisted
+// to file top so readers see the definition before its (lexically
+// lower) callers in this file.
+function isPositiveFinite(n) {
+  return Number.isFinite(n) && n > 0;
+}
+
 const EXPIRY_UNITS = { m: 60, h: 3600, d: 86400 };
 // Cap the expiry at 30 days in ms. An arbitrarily large numeric component in
 // the expiry string (e.g. "99999999999d") would otherwise overflow Number
@@ -11,7 +23,7 @@ function parseExpiryMs(expiresIn) {
   const match = String(expiresIn ?? '').match(/^(\d{1,6})([mhd])$/);
   if (!match) return null;
   const ms = Number(match[1]) * EXPIRY_UNITS[match[2]] * 1000;
-  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (!isPositiveFinite(ms)) return null;
   return Math.min(ms, MAX_EXPIRY_MS);
 }
 
@@ -39,6 +51,13 @@ function expiryToMs(expiresIn) {
 // (qurl-s3-connector PR #477). Connector contract is 0.5–3600 inclusive,
 // so every preset here is in range; clamping is unreachable.
 const SELF_DESTRUCT_PRESETS = Object.freeze([
+  // 0.5s residual: fileviewer blanks at 500ms (client-side), but the
+  // L7 session_duration floors at 1s per qurl-service's
+  // MinSessionDuration. A recipient refreshing between t=500ms and
+  // t=1000ms still re-renders. The preset is intentionally retained
+  // because the client-side blank is the perceived "self destruct"
+  // and the 500ms residual closes on retry past 1s. If qurl-service
+  // ever lowers MinSessionDuration to sub-second, this gap closes.
   Object.freeze({ seconds: 0.5, label: '1/2 second' }),
   Object.freeze({ seconds: 1, label: '1 second' }),
   Object.freeze({ seconds: 5, label: '5 seconds' }),
@@ -106,6 +125,13 @@ function isLegitimateSelfDestructSelectValue(value) {
 function formatSelfDestructLabel(seconds) {
   const match = findPresetBySeconds(seconds);
   if (match) return match.label;
+  // Intentionally NOT isPositiveFinite — this branch's purpose is
+  // to flag *non-finite* (NaN/Infinity) as "(invalid)" while still
+  // letting 0 / negative off-preset values render as "0s" / "-5s"
+  // for the next gate to handle (the form caller maps a finite-but-
+  // off-preset value to the underlying numeric formatting). Don't
+  // "finish the refactor" by switching to isPositiveFinite — that
+  // would silently re-route 0 / negatives to "(invalid)" too.
   if (!Number.isFinite(seconds)) return '(invalid)';
   return `${seconds}s`;
 }
@@ -117,10 +143,49 @@ function formatSelfDestructLabel(seconds) {
 // selected" sentinel — so the segment is always present and aligned
 // with the rest of the header.
 function formatSelfDestructSegment(seconds) {
-  if (Number.isFinite(seconds) && seconds > 0) {
+  if (isPositiveFinite(seconds)) {
     return `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
   }
   return 'Self-destruct: off';
+}
+
+// formatSessionDurationSeconds maps a SELF_DESTRUCT_PRESETS-shaped
+// number to the qurl-service-format duration string the connector's
+// `mint_link` body and the upload-time `CreateQURL` body both expect.
+//
+// Co-located with SELF_DESTRUCT_PRESETS because the preset values are
+// the ONLY legitimate input source — keeping the formatter here
+// prevents the bot's wire-format mapping from drifting if the preset
+// set ever changes (e.g., adding a 100ms preset would force a decision
+// here about how to floor it).
+//
+// Returns the duration string (e.g. "1s", "30s") when the input is a
+// finite positive number; returns null otherwise. Callers should omit
+// the wire field entirely when the result is null (qurl-service then
+// uses QURL_SESSION_TTL as the default).
+//
+// Value mapping:
+//   null / undefined / non-finite / non-numeric / ≤0  → null (omit)
+//   0.5 (the only fractional preset)                  → "1s" (qurl-service
+//                                                       MinSessionDuration
+//                                                       floor — fileviewer's
+//                                                       500ms client-side
+//                                                       blank still fires)
+//   N >= 1                                            → "Ns" (Math.ceil
+//                                                       defensively floors
+//                                                       any non-preset
+//                                                       fractional input)
+//
+// Mirrors qurl-s3-connector's `sessionDurationFor()` (Go) so the
+// upload-time and mint-time wire mappings stay in lockstep. If one
+// changes, the other must too — fenced by qurl-integrations-infra
+// PR #764 + this PR landing as a coordinated pair.
+function formatSessionDurationSeconds(seconds) {
+  if (!isPositiveFinite(seconds)) return null;
+  // Math.ceil of any value in (0, 1] is 1; of any positive finite
+  // number is ≥1. Combined with the isPositiveFinite guard above,
+  // this never emits "0s".
+  return `${Math.ceil(seconds)}s`;
 }
 
 module.exports = {
@@ -128,6 +193,8 @@ module.exports = {
   expiryToMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
+  formatSessionDurationSeconds,
+  isPositiveFinite,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,

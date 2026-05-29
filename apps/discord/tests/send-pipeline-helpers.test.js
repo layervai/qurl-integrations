@@ -777,7 +777,7 @@ describe('Connector client', () => {
         json: async () => ({ success: true, links: mockLinks }),
       });
 
-      const result = await connector.mintLinks('conn-res-1', '2026-01-16T00:00:00.000Z', 2);
+      const result = await connector.mintLinks('conn-res-1', { expiresAt: '2026-01-16T00:00:00.000Z', n: 2 });
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
@@ -800,7 +800,7 @@ describe('Connector client', () => {
         text: async () => 'Bad Request',
       });
 
-      await expect(connector.mintLinks('bad', 'date', 1))
+      await expect(connector.mintLinks('bad', { expiresAt: 'date', n: 1 }))
         .rejects.toThrow(/Connector mint_link failed.*400/);
     });
 
@@ -810,7 +810,7 @@ describe('Connector client', () => {
         json: async () => ({ success: false }),
       });
 
-      await expect(connector.mintLinks('id', 'date', 1))
+      await expect(connector.mintLinks('id', { expiresAt: 'date', n: 1 }))
         .rejects.toThrow(/success: false/);
     });
   });
@@ -1277,7 +1277,7 @@ describe('handleAddRecipients', () => {
       null,
     );
     // mintLinks is called against the NEW resource (conn-res-43)
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     // DMs should have been sent
@@ -1323,6 +1323,17 @@ describe('handleAddRecipients', () => {
       'test-api-key',
       30,
     );
+    // End-to-end fence (CR cycle 2 ask): selfDestructSeconds must
+    // also reach mintLinks. The 7 sibling assertions in this file
+    // pin the call signature with null; this one pins that a
+    // non-null value flows through mintLinksInBatches → mintLinks
+    // unchanged. Without this, a future rename of the
+    // mintLinksInBatches opt key (selfDestructSeconds → ...) would
+    // silently drop the value at the boundary.
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      'conn-res-44',
+      { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: 30 },
+    );
   });
 
   it('URL send: uploads location JSON and mints links', async () => {
@@ -1354,7 +1365,7 @@ describe('handleAddRecipients', () => {
       'location.json', 'test-api-key',
       null,
     );
-    expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', expect.any(String), 1, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(1);
@@ -1390,6 +1401,15 @@ describe('handleAddRecipients', () => {
       'test-api-key',
       300,
     );
+    // Symmetric with the file-path end-to-end fence above:
+    // selfDestructSeconds must also reach mintLinks on the URL/maps
+    // re-upload path. Without this, a future rename of the
+    // mintLinksInBatches opt key would silently drop the value here
+    // even if the upload side caught it.
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      'res-loc-2',
+      { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: 300 },
+    );
   });
 
   it('maps send: uploads location JSON with location_name and mints links', async () => {
@@ -1423,7 +1443,7 @@ describe('handleAddRecipients', () => {
       'location.json', 'test-api-key',
       null,
     );
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', expect.any(String), 1, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     expect(result.msg).toMatch(/Added 1 recipient/);
   });
@@ -1515,7 +1535,7 @@ describe('handleAddRecipients', () => {
     // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
@@ -1580,8 +1600,8 @@ describe('handleAddRecipients', () => {
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', expect.any(String), 10, 'test-api-key');
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 10, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
@@ -1613,7 +1633,7 @@ describe('handleAddRecipients', () => {
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', expect.any(String), 8, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', { expiresAt: expect.any(String), n: 8, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(mockSendDM).toHaveBeenCalledTimes(8);
     expect(result.msg).toMatch(/Added 8 recipients/);
   });

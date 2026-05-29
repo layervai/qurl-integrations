@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -73,7 +72,6 @@ func newStore(client DynamoDBClient) *Store {
 		Client:                client,
 		WorkspaceMappingsName: "ws",
 		ChannelPoliciesName:   "cp",
-		BootstrapCodesName:    "bc",
 		Now:                   func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
 	}
 }
@@ -96,8 +94,8 @@ func TestError_FormatPreservesAdminErrorShape(t *testing.T) {
 		},
 		{
 			name: "no detail",
-			e:    Error{StatusCode: 410, Code: ErrCodeBootstrapInvalid, Title: "RedeemBootstrap: code is invalid, expired, or already used"},
-			want: "RedeemBootstrap: code is invalid, expired, or already used [bootstrap_code_invalid] (410)",
+			e:    Error{StatusCode: 409, Code: ErrCodeAdminAlreadyExists, Title: "AddAdmin: user already on admin set"},
+			want: "AddAdmin: user already on admin set [admin_already_exists] (409)",
 		},
 		{
 			name: "no code",
@@ -287,6 +285,43 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 	})
 }
 
+// TestBindWorkspace_WritesSeedAdminAttribute fences the forensic-
+// attribution promise documented at workspace.go's
+// attrSeedAdminSlackUser comment block: BindWorkspace MUST stamp the
+// seedAdmin Slack user ID onto a write-only `seed_admin_slack_user_id`
+// attribute so on-call can answer "who was the original installer?"
+// after the admin set churns. A refactor that drops this line from
+// the PutItem (e.g., by inlining the item map) would silently lose
+// the attribution; no other test exercises this attr.
+func TestBindWorkspace_WritesSeedAdminAttribute(t *testing.T) {
+	var captured *dynamodb.PutItemInput
+	store := newStore(&stubDDB{
+		putItemFn: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			captured = in
+			return &dynamodb.PutItemOutput{}, nil
+		},
+	})
+	const (
+		teamID    = "T_seed"
+		ownerID   = "auth0|owner-1"
+		seedAdmin = "USEEDADMIN"
+	)
+	if err := store.BindWorkspace(context.Background(),
+		&WorkspaceMapping{TeamID: teamID, OwnerID: ownerID}, seedAdmin); err != nil {
+		t.Fatalf("BindWorkspace: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("PutItem not invoked")
+	}
+	got, ok := captured.Item[attrSeedAdminSlackUser].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		t.Fatalf("seed_admin_slack_user_id missing or wrong type in PutItem (item=%+v)", captured.Item)
+	}
+	if got.Value != seedAdmin {
+		t.Errorf("seed_admin_slack_user_id: got %q want %q", got.Value, seedAdmin)
+	}
+}
+
 // TestBindWorkspace_TransportErrorMapsTo503 fences the
 // ddbToError fallthrough: a non-CCFE PutItem error becomes
 // 503/ddb_error, NOT 409. The handler's `surfaceBindError` routes
@@ -309,135 +344,6 @@ func TestBindWorkspace_TransportErrorMapsTo503(t *testing.T) {
 	}
 	if ae.Code != "ddb_error" {
 		t.Errorf("Code = %q, want %q", ae.Code, "ddb_error")
-	}
-}
-
-// TestRedeemBootstrap_ConditionalCheckFailedMapsToGone fences the
-// "code is invalid, expired, or already used" mapping. The handler
-// branches on `ae.Code == ErrCodeBootstrapInvalid` to render the
-// retry-friendly copy; drift the Code constant and the user sees a
-// generic "could not redeem code" instead.
-func TestRedeemBootstrap_ConditionalCheckFailedMapsToGone(t *testing.T) {
-	store := newStore(&stubDDB{
-		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("expired or used")}
-		},
-	})
-	_, err := store.RedeemBootstrap(context.Background(), "BOOT-VALID-CODE", "T", "U_caller")
-	var ae *Error
-	if !errors.As(err, &ae) {
-		t.Fatalf("got %v, want *Error", err)
-	}
-	if ae.StatusCode != http.StatusGone {
-		t.Errorf("StatusCode = %d, want 410", ae.StatusCode)
-	}
-	if ae.Code != ErrCodeBootstrapInvalid {
-		t.Errorf("Code = %q, want %q", ae.Code, ErrCodeBootstrapInvalid)
-	}
-}
-
-// TestRedeemBootstrap_MalformedRowReturns500 fences round-18 cr #2:
-// the conditional UpdateItem succeeded (so the code existed and IS
-// now consumed) but the returned row is missing owner_id. Surface
-// the malformed-row signal at the slackdata boundary so an
-// issuer-side regression doesn't get masked into the generic
-// surfaceBindError "contact support" copy after BindWorkspace
-// 400s on the empty OwnerID.
-func TestRedeemBootstrap_MalformedRowReturns500(t *testing.T) {
-	store := newStore(&stubDDB{
-		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			// Successful redeem but the returned row has no owner_id —
-			// what an issuer-side regression that forgot to write the
-			// attribute would look like.
-			return &dynamodb.UpdateItemOutput{
-				Attributes: map[string]ddbtypes.AttributeValue{
-					"code_hash": &ddbtypes.AttributeValueMemberS{Value: "deadbeef"},
-					// owner_id intentionally omitted.
-				},
-			}, nil
-		},
-	})
-	_, err := store.RedeemBootstrap(context.Background(), "BOOT-VALID-CODE", "T", "U_caller")
-	var ae *Error
-	if !errors.As(err, &ae) {
-		t.Fatalf("got %v, want *Error", err)
-	}
-	if ae.StatusCode != http.StatusInternalServerError {
-		t.Errorf("StatusCode = %d, want 500 (malformed row should surface as operator-actionable signal, not 503/410)", ae.StatusCode)
-	}
-	if ae.Code != ErrCodeBootstrapRowMalformed {
-		t.Errorf("Code = %q, want %q", ae.Code, ErrCodeBootstrapRowMalformed)
-	}
-}
-
-// TestRedeemBootstrap_ValidationGuards fences the input-validation
-// 400 surface: empty code / team_id / user_id bail before touching
-// DDB.
-func TestRedeemBootstrap_ValidationGuards(t *testing.T) {
-	cases := []struct {
-		name             string
-		code, team, user string
-	}{
-		{"empty code", "", "T", "U"},
-		{"empty team_id", "BOOT-VALID-CODE", "", "U"},
-		{"empty user_id", "BOOT-VALID-CODE", "T", ""},
-	}
-	store := newStore(&stubDDB{
-		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			t.Fatalf("UpdateItem must not be called when validation rejects upstream")
-			return nil, errors.New("unreachable")
-		},
-	})
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			_, err := store.RedeemBootstrap(context.Background(), c.code, c.team, c.user)
-			var ae *Error
-			if !errors.As(err, &ae) {
-				t.Fatalf("got %v, want *Error", err)
-			}
-			if ae.StatusCode != http.StatusBadRequest {
-				t.Errorf("StatusCode = %d, want 400", ae.StatusCode)
-			}
-		})
-	}
-}
-
-// TestHashBootstrapCode_RejectsShortPlaintext fences the
-// entropy-floor tripwire. Round-20 cr flipped the contract from
-// panic to ("", *Error{StatusCode:410, Code:ErrCodeBootstrapInvalid})
-// so a missed handler-side length gate degrades to a "code invalid
-// or expired" reply instead of a per-request panic. The
-// unsalted-sha256 posture still depends on the issuer mint shape
-// carrying ≥80 bits of entropy — a regression at the issuer side
-// (e.g. a 6-digit OTP) hits this branch and surfaces a
-// user-visible reject rather than silently weakening the hash.
-func TestHashBootstrapCode_RejectsShortPlaintext(t *testing.T) {
-	// 6-digit OTP — the regression class the cr called out.
-	got, err := hashBootstrapCode("123456")
-	if got != "" {
-		t.Errorf("hashBootstrapCode returned non-empty hash %q on short plaintext", got)
-	}
-	var ae *Error
-	if !errors.As(err, &ae) {
-		t.Fatalf("got %v, want *Error", err)
-	}
-	if ae.StatusCode != http.StatusGone {
-		t.Errorf("StatusCode = %d, want 410", ae.StatusCode)
-	}
-	if ae.Code != ErrCodeBootstrapInvalid {
-		t.Errorf("Code = %q, want %q (so callers route through the same code-invalid path)", ae.Code, ErrCodeBootstrapInvalid)
-	}
-}
-
-// TestHashBootstrapCode_AcceptsAtAndAboveFloor sanity-checks the
-// boundary: exactly MinBootstrapPlaintextLen chars must succeed.
-func TestHashBootstrapCode_AcceptsAtAndAboveFloor(t *testing.T) {
-	plain := strings.Repeat("a", MinBootstrapPlaintextLen)
-	if _, err := hashBootstrapCode(plain); err != nil {
-		t.Errorf("hashBootstrapCode at floor (%d chars) returned err: %v", MinBootstrapPlaintextLen, err)
-	}
-	if _, err := hashBootstrapCode(plain + "b"); err != nil {
-		t.Errorf("hashBootstrapCode above floor returned err: %v", err)
 	}
 }
 
@@ -627,5 +533,66 @@ func TestLookupChannelAlias_DDBError(t *testing.T) {
 	}
 	if ae.StatusCode < 500 || ae.StatusCode >= 600 {
 		t.Errorf("StatusCode = %d, want 5xx (transport-class)", ae.StatusCode)
+	}
+}
+
+func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
+	var calls []*dynamodb.UpdateItemInput
+	store := newStore(&stubDDB{
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			calls = append(calls, in)
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	if err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01"); err != nil {
+		t.Fatalf("BindChannelAlias: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("UpdateItem calls = %d, want 2", len(calls))
+	}
+	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty" {
+		t.Errorf("seed UpdateExpression = %q", got)
+	}
+	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid" {
+		t.Errorf("write UpdateExpression = %q", got)
+	}
+	if got := aws.ToString(calls[1].ConditionExpression); got != "attribute_not_exists(#ab.#a)" {
+		t.Errorf("write ConditionExpression = %q", got)
+	}
+	if calls[1].ExpressionAttributeNames["#ab"] != attrAliasBindings || calls[1].ExpressionAttributeNames["#a"] != "prod-dashboard" {
+		t.Errorf("ExpressionAttributeNames = %+v, want alias map key escaped", calls[1].ExpressionAttributeNames)
+	}
+	rid, ok := calls[1].ExpressionAttributeValues[":rid"].(*ddbtypes.AttributeValueMemberS)
+	if !ok || rid.Value != "r_prod_dash01" {
+		t.Errorf(":rid = %#v, want r_prod_dash01", calls[1].ExpressionAttributeValues[":rid"])
+	}
+}
+
+func TestBindChannelAlias_DuplicateReturnsSentinel(t *testing.T) {
+	var calls int
+	store := newStore(&stubDDB{
+		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			calls++
+			if calls == 2 {
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			}
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01")
+	if !errors.Is(err, ErrAliasAlreadyBound) {
+		t.Fatalf("err = %v, want ErrAliasAlreadyBound", err)
+	}
+}
+
+func TestUnbindChannelAlias_NotFoundReturnsSentinel(t *testing.T) {
+	store := newStore(&stubDDB{
+		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("missing")}
+		},
+	})
+	err := store.UnbindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard")
+	if !errors.Is(err, ErrAliasNotFound) {
+		t.Fatalf("err = %v, want ErrAliasNotFound", err)
 	}
 }

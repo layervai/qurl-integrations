@@ -272,3 +272,103 @@ func TestJWKSVerifierReturnsEmptyEmailWhenClaimMissing(t *testing.T) {
 		t.Errorf("expected empty email when claim missing, got %q", got)
 	}
 }
+
+// TestJWKSVerifierVerifySubReturnsSub fences the happy path: a verified
+// id_token's sub claim becomes the workspace OwnerID at bind time. Drift
+// the JWKS parse posture or strip the sub-extraction and this test fires.
+func TestJWKSVerifierVerifySubReturnsSub(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	const wantSub = "auth0|abc123def456"
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    wantSub,
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+	})
+	got, err := f.verifier.VerifySub(context.Background(), string(signed))
+	if err != nil {
+		t.Fatalf("VerifySub: %v", err)
+	}
+	if got != wantSub {
+		t.Errorf("sub: got %q want %q", got, wantSub)
+	}
+}
+
+// TestJWKSVerifierVerifySubRejectsEmptySub fences the misconfigured-
+// federation posture documented at jwks.go: an empty sub on an otherwise
+// valid token must surface as an error so the callback's checkBindAllowed
+// fail-closes (no OwnerID → no bind → 500) instead of silently writing
+// a workspace_mappings row with an empty owner_id.
+func TestJWKSVerifierVerifySubRejectsEmptySub(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    "",
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+	})
+	got, err := f.verifier.VerifySub(context.Background(), string(signed))
+	if err == nil {
+		t.Errorf("VerifySub must return an error on empty sub; got %q nil", got)
+	}
+}
+
+// TestJWKSVerifierVerifySubRejectsBadSignature mirrors VerifyEmail's
+// bad-signature fence — a sub-extraction path that skipped signature
+// verification (or silently degraded the parse posture) would let an
+// attacker-controlled sub flow into BindWorkspace as OwnerID.
+func TestJWKSVerifierVerifySubRejectsBadSignature(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	// Sign with a *different* RSA key — verifier's JWKS holds only
+	// f.signKey's public half, so signature verify must fail.
+	rogue, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rogue key: %v", err)
+	}
+	rogueJWK, err := jwk.FromRaw(rogue)
+	if err != nil {
+		t.Fatalf("jwk.FromRaw rogue: %v", err)
+	}
+	if err := rogueJWK.Set(jwk.KeyIDKey, "test-key"); err != nil {
+		t.Fatalf("set rogue kid: %v", err)
+	}
+	if err := rogueJWK.Set(jwk.AlgorithmKey, jwa.RS256); err != nil {
+		t.Fatalf("set rogue alg: %v", err)
+	}
+	now := time.Now()
+	tok := jwt.New()
+	_ = tok.Set(jwt.IssuerKey, f.issuer)
+	_ = tok.Set(jwt.AudienceKey, []string{f.audience})
+	_ = tok.Set(jwt.SubjectKey, "attacker-controlled-sub")
+	_ = tok.Set(jwt.IssuedAtKey, now)
+	_ = tok.Set(jwt.ExpirationKey, now.Add(5*time.Minute))
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256, rogueJWK))
+	if err != nil {
+		t.Fatalf("rogue sign: %v", err)
+	}
+	if _, err := f.verifier.VerifySub(context.Background(), string(signed)); err == nil {
+		t.Error("VerifySub must reject a token signed with the wrong key — silent acceptance lets attacker-controlled sub flow to BindWorkspace")
+	}
+}
+
+// TestJWKSVerifierVerifySubRejectsExpired fences the exp claim. A
+// stale id_token whose sub matches a known owner shouldn't be able
+// to bind a workspace after the token's expiry.
+func TestJWKSVerifierVerifySubRejectsExpired(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    "auth0|some-sub",
+		jwt.IssuedAtKey:   now.Add(-10 * time.Minute),
+		jwt.ExpirationKey: now.Add(-5 * time.Minute),
+	})
+	if _, err := f.verifier.VerifySub(context.Background(), string(signed)); err == nil {
+		t.Error("VerifySub must reject an expired id_token")
+	}
+}

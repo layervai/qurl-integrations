@@ -415,6 +415,70 @@ const AUDIT_EVENTS = {
   // stays zero — but for an idle bot the rotation also doesn't
   // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
+
+  // qURL webhook receiver — feeds CloudWatch metric filters +
+  // alarms managed in the deploying organization's infrastructure
+  // (separate from this repo). Flat counters only: do NOT promote
+  // qurl_id/resource_id to dimensions (unbounded).
+  QURL_WEBHOOK_RECEIVED: 'qurl_webhook_received',
+  // Sustained rate = SSM secret drift OR attacker probing.
+  QURL_WEBHOOK_SIGNATURE_INVALID: 'qurl_webhook_signature_invalid',
+  // Legit traffic NEVER triggers — sustained rate = sustained attacker.
+  QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',
+  // Sustained rate = qurl_views table hot.
+  QURL_WEBHOOK_STORE_ERROR: 'qurl_webhook_store_error',
+
+  // Subscription registry (BYOK per-guild webhooks). The registry is a
+  // process-local Map<owner_id, …> primed from guild_configs at boot and
+  // refreshed every 30s. Sustained rate of UNPRIMED = boot stall OR DDB
+  // throttling on the priming scan. Sustained rate of UNKNOWN_OWNER after
+  // priming = a real auth0 owner is hitting the receiver without ever
+  // having linked a key (attacker probing) OR an upstream contract drift
+  // (qurl-service emitting events under a different owner_id than the one
+  // that registered the subscription).
+  QURL_WEBHOOK_CACHE_MISS_UNPRIMED: 'qurl_webhook_cache_miss_unprimed',
+  QURL_WEBHOOK_CACHE_MISS_UNKNOWN_OWNER: 'qurl_webhook_cache_miss_unknown_owner',
+  // Refresh failure. After N consecutive failures the registry stays
+  // unprimed (or stale) — receiver responds 503; qurl-service retries.
+  QURL_WEBHOOK_CACHE_REFRESH_FAIL: 'qurl_webhook_cache_refresh_fail',
+  // Default-key discovery failed for N consecutive ticks. Fires once
+  // at the escalation threshold. BYOK delivery is unaffected — the
+  // bot's own default-key webhook deliveries 401 until discovery
+  // recovers; ops should investigate qurl-service `GET /v1/webhooks`
+  // availability for the bot's QURL_API_KEY identity.
+  QURL_WEBHOOK_DEFAULT_DISCOVERY_FAIL: 'qurl_webhook_default_discovery_fail',
+  // Lifecycle. SUBSCRIPTION_DELETE_FAILED fires when DELETE returns 401
+  // (key revoked) or 404 (already gone) — both are swallowed so guild
+  // unlink doesn't fail user-facing on stale qurl-service state.
+  // REGISTER_FAILED fires on every linkGuildWebhookSubscription failure
+  // branch so CloudWatch alarms can fire on the right side of the
+  // binary (success has its own event below).
+  QURL_WEBHOOK_SUBSCRIPTION_REGISTERED: 'qurl_webhook_subscription_registered',
+  QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED: 'qurl_webhook_subscription_register_failed',
+  QURL_WEBHOOK_SUBSCRIPTION_DELETE_FAILED: 'qurl_webhook_subscription_delete_failed',
+  // Per-row decrypt failure during scanGuildSubscriptions. Sustained
+  // rate = KMS key rotation drift, partial migration, or manual DDB
+  // tamper — a guild's secret is unrecoverable from the cache until
+  // re-encrypted via backfill or /qurl setup.
+  QURL_WEBHOOK_CACHE_ROW_DECRYPT_FAIL: 'qurl_webhook_cache_row_decrypt_fail',
+  // Mass-decrypt-fail escalation. Fires once per scan when >50% of
+  // provisioned rows fail decrypt (min 3 rows). Distinguishes a KMS-
+  // wide event from a single bad row — both emit the per-row event
+  // above, so without this distinct signal an alarm can't tell them
+  // apart by event-count alone.
+  QURL_WEBHOOK_CACHE_MASS_DECRYPT_FAIL: 'qurl_webhook_cache_mass_decrypt_fail',
+  // Orphan webhook left on qurl-service after a 401 rollback path —
+  // the admin revoked the key on layerv.ai before our DELETE landed.
+  // NOT alarmed by default (routine on every key rotation), but
+  // metric-filter-greppable so a future orphan-subscription sweeper
+  // can list-and-diff against qurl-service's own subscription state.
+  QURL_WEBHOOK_ORPHAN_LEFT_AFTER_401: 'qurl_webhook_orphan_left_after_401',
+  // Sibling-row propagate partially failed: link succeeded for the
+  // user but some sibling guilds may hold a stale secret until the
+  // next propagate run converges them. Distinct from
+  // SUBSCRIPTION_REGISTER_FAILED so the REGISTER_FAILED metric
+  // filter unambiguously means "the link failed for the user."
+  QURL_WEBHOOK_PROPAGATE_PARTIAL: 'qurl_webhook_propagate_partial',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
@@ -423,6 +487,14 @@ const AUDIT_EVENTS = {
 // constant objects in this file aren't frozen, but AUDIT_EVENTS is the
 // only one whose mutation is undetectable by tests.
 Object.freeze(AUDIT_EVENTS);
+
+// Wire-protocol event-type strings for qURL webhook payloads.
+// Pinned as constants so a typo in the receiver's type check (or in a
+// test asserting against the wire shape) fails to import rather than
+// silently matching nothing. Mirrors qurl-service WebhookEventType.
+const QURL_WEBHOOK_EVENTS = Object.freeze({
+  ACCESSED: 'qurl.accessed',
+});
 
 // Discord gateway dispatch event names (the `t` field on op=0 frames).
 // Today only INTERACTION_CREATE is published to the worker tier;
@@ -457,6 +529,12 @@ const GATEWAY_DISPATCH_TYPES = Object.freeze({
 // alarm filter the other two sites still emit.
 const LOG_KINDS = Object.freeze({
   UNHANDLED_REJECTION: 'unhandledRejection',
+  // Separate kind for view-update publish/dispatch failures (feat #60).
+  // Decoupled from UNHANDLED_REJECTION so CloudWatch alarm filters
+  // targeting interaction-loss (event-shipper + global unhandled-
+  // rejection paths) don't page on view-update failures — those are
+  // covered by the polling-tick fallback at the render layer.
+  VIEW_UPDATE_PUBLISH_FAIL: 'viewUpdatePublishFail',
 });
 
 module.exports = {
@@ -474,6 +552,7 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  QURL_WEBHOOK_EVENTS,
   TRUST,
   GATEWAY_DISPATCH_TYPES,
   LOG_KINDS,

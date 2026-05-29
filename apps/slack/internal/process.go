@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -25,13 +26,14 @@ import (
 // it would risk SSRF if the signature gate ever broke, so postResponse
 // validates the scheme and host before dialing.
 const (
-	fieldResponseURL = "response_url"
-	fieldTeamID      = "team_id"
-	fieldUserID      = "user_id"
-	fieldChannelID   = "channel_id"
-	fieldCommand     = "command"
-	fieldText        = "text"
-	fieldTriggerID   = "trigger_id"
+	fieldResponseURL  = "response_url"
+	fieldTeamID       = "team_id"
+	fieldUserID       = "user_id"
+	fieldChannelID    = "channel_id"
+	fieldCommand      = "command"
+	fieldText         = "text"
+	fieldTriggerID    = "trigger_id"
+	fieldEnterpriseID = "enterprise_id"
 )
 
 // slackResponseURLHost is Slack's webhook ingress for slash-command
@@ -41,6 +43,8 @@ const (
 // The host string is the only Slack-controlled identifier the Slack
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
+
+const deleteOriginalRetryDelay = 250 * time.Millisecond
 
 // runAsync acks the request synchronously with ackWorkingOnIt and runs
 // `work` in a bounded-pool goroutine. Returns after the ack is written.
@@ -63,16 +67,29 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 	log := slog.With(
 		"command", command,
 		"team_id", values.Get(fieldTeamID),
+		"enterprise_id", values.Get(fieldEnterpriseID),
 		"channel_id", values.Get(fieldChannelID),
 		"trigger_id", values.Get(fieldTriggerID),
 	)
 
+	if !h.startAsyncWorker(log, work) {
+		respondSlack(w, ackBusy)
+		return
+	}
+
+	respondSlack(w, ackWorkingOnIt)
+}
+
+// startAsyncWorker runs async slash-command or interaction work through the
+// same bounded pool, shutdown drain, timeout, and panic recovery. The caller
+// owns the Slack ack shape because slash commands and modal submissions have
+// different response contracts.
+func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Context, log *slog.Logger)) bool {
 	select {
 	case h.sem <- struct{}{}:
 	default:
 		log.Warn("async pool saturated — dropping request")
-		respondSlack(w, ackBusy)
-		return
+		return false
 	}
 
 	h.wg.Add(1)
@@ -101,8 +118,7 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 		defer cancel()
 		work(ctx, log)
 	}()
-
-	respondSlack(w, ackWorkingOnIt)
+	return true
 }
 
 // sanitizeAPIError builds a user-safe message from a (possibly non-nil)
@@ -137,9 +153,10 @@ func sanitizeAPIError(err error, prefix string) string {
 }
 
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.
-// Errors are logged, never re-raised — the user will retry the command
-// if the follow-up never arrives, which is preferable to retrying our
-// own POST and risking a duplicate-message storm at Slack.
+// Errors are logged, never retried. The bool tells sensitive callers whether
+// they should add extra audit context after a failed delivery.
+// Ordinary command handlers intentionally ignore the bool; callers that minted
+// sensitive material should branch on false and log the relevant audit fields.
 //
 // Validates scheme+host before dialing so a malformed (or attacker-
 // controlled, in the event of a signature-gate bypass) URL can't make
@@ -152,17 +169,7 @@ func sanitizeAPIError(err error, prefix string) string {
 // responseURLTimeout lets the follow-up land before Fargate's hard
 // kill while still bounding the goroutine's lifetime.
 // handler.Wait()/WaitTimeout in main blocks process exit.
-func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
-	if responseURL == "" {
-		log.Warn("missing response_url — async result has nowhere to go")
-		return
-	}
-	target, err := h.validateResponseURLFn(responseURL)
-	if err != nil {
-		log.Warn("invalid response_url — refusing to dial", "error", err)
-		return
-	}
-
+func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool {
 	body, err := json.Marshal(map[string]string{
 		respFieldResponseType: respTypeEphemeral,
 		respFieldText:         text,
@@ -171,7 +178,66 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 		// json.Marshal of a map[string]string can't fail in practice; log
 		// and bail rather than POSTing a half-baked body.
 		log.Error("marshal response_url payload failed", "error", err)
-		return
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
+func (h *Handler) postErrorResponse(log *slog.Logger, responseURL, message string, replaceOriginal bool) bool {
+	body, err := ErrorResponse(message, replaceOriginal)
+	if err != nil {
+		log.Error("marshal response_url error payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
+func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) bool {
+	body, err := json.Marshal(map[string]bool{"delete_original": true})
+	if err != nil {
+		log.Error("marshal response_url delete payload failed", "error", err)
+		return false
+	}
+	if h.postResponseBody(log, responseURL, body) {
+		return true
+	}
+	// Retry only delete_original: a stale "Working on it" ack is uniquely
+	// confusing after a modal opens, while ordinary async replies are safer as
+	// single-attempt deliveries with explicit failure logging. The short delay
+	// makes the retry useful for transient Slack blips without materially
+	// extending the async worker's lifetime.
+	log.Warn("response_url delete_original failed; retrying once")
+	if !h.waitForDeleteOriginalRetry() {
+		log.Warn("response_url delete_original retry skipped because handler is shutting down")
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
+func (h *Handler) waitForDeleteOriginalRetry() bool {
+	ctx := h.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(deleteOriginalRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []byte) bool {
+	if responseURL == "" {
+		log.Warn("missing response_url — async result has nowhere to go")
+		return false
+	}
+	target, err := h.validateResponseURLFn(responseURL)
+	if err != nil {
+		log.Warn("invalid response_url — refusing to dial", "error", err)
+		return false
 	}
 
 	deliverCtx, cancel := context.WithTimeout(context.Background(), responseURLTimeout)
@@ -187,14 +253,14 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	req, err := http.NewRequestWithContext(deliverCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("build response_url request failed", "error", err)
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.responseURLClient.Do(req)
 	if err != nil {
 		log.Error("response_url POST failed", "error", err)
-		return
+		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -205,13 +271,18 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	// the connection — without that, keep-alive degrades silently if
 	// Slack ever returns a body larger than the cap.
 	const respBodyCap = 4096
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap))
-	if len(respBody) == respBodyCap {
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap+1))
+	if len(respBody) > respBodyCap {
 		_, _ = io.Copy(io.Discard, resp.Body)
+		// Keep the log body bounded at respBodyCap bytes; the extra byte was
+		// read only to detect overflow.
+		respBody = respBody[:respBodyCap]
 	}
 	if resp.StatusCode >= 400 {
 		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
+		return false
 	}
+	return true
 }
 
 // validateResponseURL fences the response_url POST destination to

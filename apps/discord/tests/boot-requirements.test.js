@@ -175,6 +175,65 @@ describe('missingEventShipperKeys', () => {
   });
 });
 
+describe('missingViewUpdatePushKeys', () => {
+  const { missingViewUpdatePushKeys } = require('../src/boot-requirements');
+
+  it('returns empty when the flag is unset (view-update-push path inactive)', () => {
+    expect(missingViewUpdatePushKeys({})).toEqual([]);
+    expect(missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: false })).toEqual([]);
+    expect(
+      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: false, QURL_BOT_VIEW_UPDATES_QUEUE_URL: undefined })
+    ).toEqual([]);
+  });
+
+  it('flags QURL_BOT_VIEW_UPDATES_QUEUE_URL when flag is on without a URL', () => {
+    expect(
+      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: true })
+    ).toEqual(['QURL_BOT_VIEW_UPDATES_QUEUE_URL']);
+    expect(
+      missingViewUpdatePushKeys({ ENABLE_VIEW_UPDATE_PUSH: true, QURL_BOT_VIEW_UPDATES_QUEUE_URL: '' })
+    ).toEqual(['QURL_BOT_VIEW_UPDATES_QUEUE_URL']);
+  });
+
+  it('returns empty when both are set', () => {
+    expect(
+      missingViewUpdatePushKeys({
+        ENABLE_VIEW_UPDATE_PUSH: true,
+        QURL_BOT_VIEW_UPDATES_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-view-updates',
+      }),
+    ).toEqual([]);
+  });
+
+  // Pin the asymmetric "URL set without the flag" case. During the
+  // flag-flip rollout, infra changes may land the URL on the task
+  // def BEFORE the flag flips — the boot check must treat that as
+  // a harmlessly-ignored config.
+  it('returns empty when URL is set but flag is off (mid-rollout shape)', () => {
+    expect(
+      missingViewUpdatePushKeys({
+        ENABLE_VIEW_UPDATE_PUSH: false,
+        QURL_BOT_VIEW_UPDATES_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-view-updates',
+      }),
+    ).toEqual([]);
+  });
+});
+
+// Pin the contract that combined-mode + view-update-push
+// is intentionally accepted (no analog of `unsupportedRoleShipperCombo`).
+// Locks the design so a copy-paste-from-shipper refactor doesn't silently
+// add a rejection.
+describe('combined-mode + view-update-push (no equivalent of unsupportedRoleShipperCombo)', () => {
+  it('boot-requirements exports no view-update combined-mode rejector', () => {
+    // The shipper has unsupportedRoleShipperCombo for combined-mode
+    // rejection. The view-update-push intentionally has no such
+    // helper — the registry's silent-drop-on-miss + status==='opened'
+    // idempotency guard make combined-mode safe.
+    const bootReq = require('../src/boot-requirements');
+    expect(bootReq.unsupportedRoleShipperCombo).toBeDefined();
+    expect(bootReq.unsupportedRoleViewUpdatePushCombo).toBeUndefined();
+  });
+});
+
 describe('unsupportedRoleShipperCombo', () => {
   it('rejects combined + flag-on with operator-facing remediation', () => {
     const msg = unsupportedRoleShipperCombo('combined', true);

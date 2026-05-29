@@ -18,7 +18,6 @@ package internal
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -42,24 +41,25 @@ type fakeDDB struct {
 	// tables maps tableName → composite-key string → item.
 	tables map[string]map[string]map[string]ddbtypes.AttributeValue
 	// keySchemas maps tableName → ordered PK/SK attr names, used for
-	// composite-key construction. workspace_mappings & bootstrap_codes
-	// are PK-only; channel_policies is PK+SK.
+	// composite-key construction. workspace_mappings is PK-only;
+	// channel_policies is PK+SK.
 	keySchemas map[string][]string
 
 	// updateHook is invoked on every UpdateItem if non-nil. Tests use
-	// it for "must NOT be called" assertions (e.g., the AllowResource
-	// gate that prevents non-admins from reaching the mutation).
+	// it for "must NOT be called" assertions (e.g., the AddAdmin /
+	// RemoveAdmin admin-gate that prevents non-admins from reaching
+	// the mutation — see failOnAdminMutation).
 	updateHook func(in *dynamodb.UpdateItemInput)
 	// putHook mirrors updateHook for PutItem (BindWorkspace).
 	putHook func(in *dynamodb.PutItemInput)
+	// getHook mirrors updateHook for GetItem read assertions.
+	getHook func(table string, key map[string]string)
 	// getItemErrs maps tableName → injected GetItem error.
 	getItemErrs map[string]error
 	// updateItemErrs maps tableName → injected UpdateItem error.
 	updateItemErrs map[string]error
 	// putItemErrs maps tableName → injected PutItem error.
 	putItemErrs map[string]error
-	// queryErrs maps tableName → injected Query error.
-	queryErrs map[string]error
 	// getItemCounts tracks call counts per table for the
 	// SetGetItemErrAfter mechanism.
 	getItemCounts map[string]int
@@ -131,16 +131,6 @@ func (f *fakeDDB) SetPutItemErr(table string, err error) {
 	f.putItemErrs[table] = err
 }
 
-// SetQueryErr injects an error returned on every Query against `table`.
-func (f *fakeDDB) SetQueryErr(table string, err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.queryErrs == nil {
-		f.queryErrs = map[string]error{}
-	}
-	f.queryErrs[table] = err
-}
-
 // SetUpdateItemHook installs a callback invoked on every UpdateItem.
 // Used by tests that need to fail-on-call assertions.
 func (f *fakeDDB) SetUpdateItemHook(hook func(in interface{})) {
@@ -164,43 +154,46 @@ func (f *fakeDDB) SetPutItemHook(hook func(in interface{})) {
 	f.putHook = func(in *dynamodb.PutItemInput) { hook(in) }
 }
 
-// tableNames groups the three table names used across the post-pivot
+// SetGetItemHook installs a callback invoked on every GetItem.
+func (f *fakeDDB) SetGetItemHook(hook func(table string, key map[string]string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getHook = hook
+}
+
+// tableNames groups the table names used across the post-pivot
 // production code. Tests construct one of these per fakeDDB so the
 // fake and the Store agree on which table maps to which schema.
 type tableNames struct {
-	workspace      string
-	channelPolicy  string
-	bootstrapCodes string
+	workspace     string
+	channelPolicy string
 }
 
 // defaultTestTableNames returns the canonical table-name set tests
 // use. Lifted as a helper because every newAdminTestHandler call site
-// needs the same triple.
+// needs the same pair.
 func defaultTestTableNames() tableNames {
 	return tableNames{
-		workspace:      "test-workspace-mappings",
-		channelPolicy:  "test-channel-policies",
-		bootstrapCodes: "test-bootstrap-codes",
+		workspace:     "test-workspace-mappings",
+		channelPolicy: "test-channel-policies",
 	}
 }
 
-// newFakeDDB builds an empty in-memory store with the three
-// post-pivot tables registered. `seed` may pre-populate items by
-// table name; if nil the store starts empty. The t parameter is
-// kept for t.Helper / future test-only Fatal calls; today it's
-// referenced only to satisfy the signature.
+// newFakeDDB builds an empty in-memory store with the post-pivot
+// tables registered. `seed` may pre-populate items by table name; if
+// nil the store starts empty. The t parameter is kept for t.Helper /
+// future test-only Fatal calls; today it's referenced only to satisfy
+// the signature.
 func newFakeDDB(t *testing.T, names tableNames, seed map[string][]map[string]ddbtypes.AttributeValue) *fakeDDB {
 	t.Helper()
 	f := &fakeDDB{
 		tables: map[string]map[string]map[string]ddbtypes.AttributeValue{
-			names.workspace:      {},
-			names.channelPolicy:  {},
-			names.bootstrapCodes: {},
+			names.workspace:     {},
+			names.channelPolicy: {},
 		},
 		keySchemas: map[string][]string{
-			names.workspace:      {fAttrSlackTeamID},
-			names.channelPolicy:  {fAttrSlackTeamID, fAttrSlackChannelID},
-			names.bootstrapCodes: {"code_hash"},
+			names.workspace:     {fAttrSlackTeamID},
+			names.channelPolicy: {fAttrSlackTeamID, fAttrSlackChannelID},
 		},
 	}
 	for tbl, items := range seed {
@@ -233,7 +226,7 @@ func newStoreFromFake(t *testing.T, f *fakeDDB, names tableNames, now func() str
 	t.Helper()
 	s, err := slackdata.NewStore(context.Background(),
 		slackdata.WithDynamoDBClient(f),
-		slackdata.WithTableNames(names.workspace, names.channelPolicy, names.bootstrapCodes),
+		slackdata.WithTableNames(names.workspace, names.channelPolicy),
 	)
 	if err != nil {
 		t.Fatalf("newStoreFromFake: %v", err)
@@ -273,6 +266,9 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	name := aws.ToString(in.TableName)
+	if f.getHook != nil {
+		f.getHook(name, stringKey(in.Key))
+	}
 	if err, ok := f.getItemErrs[name]; ok {
 		return nil, err
 	}
@@ -301,6 +297,16 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 		return &dynamodb.GetItemOutput{}, nil
 	}
 	return &dynamodb.GetItemOutput{Item: cloneItem(item)}, nil
+}
+
+func stringKey(in map[string]ddbtypes.AttributeValue) map[string]string {
+	out := make(map[string]string, len(in))
+	for name, value := range in {
+		if s, ok := value.(*ddbtypes.AttributeValueMemberS); ok {
+			out[name] = s.Value
+		}
+	}
+	return out
 }
 
 // PutItem implements [slackdata.DynamoDBClient]. Honors the
@@ -381,7 +387,7 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 	} else {
 		existing = cloneItem(existing)
 	}
-	if err := applyUpdateExpression(aws.ToString(in.UpdateExpression), existing, in.ExpressionAttributeValues); err != nil {
+	if err := applyUpdateExpression(aws.ToString(in.UpdateExpression), existing, in.ExpressionAttributeValues, in.ExpressionAttributeNames); err != nil {
 		return nil, err
 	}
 	table[key] = existing
@@ -410,89 +416,6 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-// Query implements [slackdata.DynamoDBClient] over the
-// `slack_team_id = :tid` shape used by [slackdata.Store.ListPolicies]
-// and [slackdata.Store.countPoliciesForTeam]. Honors Limit,
-// ExclusiveStartKey, and Select=COUNT.
-//
-// We don't parse the KeyConditionExpression — the only shape in use
-// is `slack_team_id = :tid`. If a future caller adds a begins_with
-// or SK predicate the fake will need to grow with it; until then
-// keeping the parser narrow avoids over-engineering.
-func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err, ok := f.queryErrs[aws.ToString(in.TableName)]; ok {
-		return nil, err
-	}
-	table, schema, err := f.tableAndSchema(aws.ToString(in.TableName))
-	if err != nil {
-		return nil, err
-	}
-	if len(schema) < 1 {
-		return nil, errors.New("fakeDDB.Query: table has no PK")
-	}
-	pkAttr := schema[0]
-	tidVal, err := requireStringExprValue(in.ExpressionAttributeValues, ":tid")
-	if err != nil {
-		return nil, err
-	}
-	// Filter rows whose PK matches :tid, ordered by composite-key
-	// string so pagination is deterministic across runs.
-	keys := make([]string, 0, len(table))
-	for k, item := range table {
-		s, ok := item[pkAttr].(*ddbtypes.AttributeValueMemberS)
-		if !ok || s.Value != tidVal {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	sortStrings(keys)
-
-	startKey := ""
-	if len(in.ExclusiveStartKey) > 0 {
-		startKey, err = compositeKey(schema, in.ExclusiveStartKey)
-		if err != nil {
-			return nil, fmt.Errorf("Query: ExclusiveStartKey: %w", err)
-		}
-	}
-
-	limit := -1
-	if in.Limit != nil {
-		limit = int(*in.Limit)
-	}
-
-	out := &dynamodb.QueryOutput{}
-	collected := 0
-	skipping := startKey != ""
-	for _, k := range keys {
-		if skipping {
-			if k == startKey {
-				skipping = false
-			}
-			continue
-		}
-		out.Items = append(out.Items, cloneItem(table[k]))
-		collected++
-		out.Count = int32(collected)
-		if limit > 0 && collected >= limit {
-			// Did we reach the end? If more keys remain after this
-			// position, set LastEvaluatedKey to the current row's PK/SK.
-			pos := indexOf(keys, k)
-			if pos >= 0 && pos < len(keys)-1 {
-				out.LastEvaluatedKey = lastEvaluatedKeyFrom(schema, table[k])
-			}
-			break
-		}
-	}
-
-	// COUNT-only requests strip Items (matches DDB behavior).
-	if in.Select == ddbtypes.SelectCount {
-		out.Items = nil
-	}
-	return out, nil
-}
-
 // tableAndSchema looks up the table map and key schema, returning a
 // clear error on an unknown table name (catches typos in test setup).
 func (f *fakeDDB) tableAndSchema(name string) (table map[string]map[string]ddbtypes.AttributeValue, schema []string, err error) {
@@ -501,15 +424,6 @@ func (f *fakeDDB) tableAndSchema(name string) (table map[string]map[string]ddbty
 		return nil, nil, fmt.Errorf("fakeDDB: unknown table %q (did you wire it via newFakeDDB?)", name)
 	}
 	return t, f.keySchemas[name], nil
-}
-
-// lastEvaluatedKeyFrom extracts just the PK/SK attrs from an item.
-func lastEvaluatedKeyFrom(schema []string, item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.AttributeValue {
-	out := make(map[string]ddbtypes.AttributeValue, len(schema))
-	for _, attr := range schema {
-		out[attr] = item[attr]
-	}
-	return out
 }
 
 // cloneItem returns a shallow copy of the item map. AttributeValue
@@ -523,41 +437,6 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 	return out
 }
 
-// sortStrings is a tiny stable insertion sort so the package doesn't
-// need an additional import for sort.Strings. The slices are small
-// (typical workspace has tens of channel_policies rows) so an O(n^2)
-// sort is fine.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
-}
-
-func indexOf(s []string, v string) int {
-	for i, x := range s {
-		if x == v {
-			return i
-		}
-	}
-	return -1
-}
-
-// requireStringExprValue reads a string expression-attribute value
-// or errors. Used by Query to extract :tid.
-func requireStringExprValue(vals map[string]ddbtypes.AttributeValue, name string) (string, error) {
-	v, ok := vals[name]
-	if !ok {
-		return "", fmt.Errorf("fakeDDB: missing expression attribute %q", name)
-	}
-	s, ok := v.(*ddbtypes.AttributeValueMemberS)
-	if !ok {
-		return "", fmt.Errorf("fakeDDB: expression attribute %q is not a string", name)
-	}
-	return s.Value, nil
-}
-
 // applyUpdateExpression walks the SET/ADD/DELETE clauses the
 // production code emits. Supports the exact shapes in use:
 //
@@ -568,7 +447,7 @@ func requireStringExprValue(vals map[string]ddbtypes.AttributeValue, name string
 // A general DDB expression parser is much larger than this; we'd
 // rather grow this with each new production callsite than ship a
 // half-finished parser.
-func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.AttributeValue) error {
+func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	if expr == "" {
 		return nil
 	}
@@ -576,7 +455,7 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 	for _, c := range clauses {
 		switch c.verb {
 		case "SET":
-			if err := applySetClause(c.body, item, vals); err != nil {
+			if err := applySetClause(c.body, item, vals, names); err != nil {
 				return err
 			}
 		case "ADD":
@@ -585,6 +464,10 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 			}
 		case "DELETE":
 			if err := applyDeleteClause(c.body, item, vals); err != nil {
+				return err
+			}
+		case "REMOVE":
+			if err := applyRemoveClause(c.body, item, names); err != nil {
 				return err
 			}
 		default:
@@ -638,7 +521,9 @@ func splitUpdateClauses(expr string) []updateClause {
 }
 
 // applySetClause handles `<attr> = <value>[, <attr> = <value>]*`.
-func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
+// Values are `:vN` tokens (literal substitutions from
+// ExpressionAttributeValues).
+func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	pairs := splitTopLevelCommas(body)
 	for _, p := range pairs {
 		eq := strings.Index(p, "=")
@@ -651,13 +536,23 @@ func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 		if !ok {
 			return fmt.Errorf("fakeDDB SET: unknown value %q", valTok)
 		}
-		item[attr] = v
+		if err := setAttrPath(item, attr, names, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRemoveClause(body string, item map[string]ddbtypes.AttributeValue, names map[string]string) error {
+	paths := strings.Fields(body)
+	for _, path := range paths {
+		removeAttrPath(item, strings.TrimSuffix(path, ","), names)
 	}
 	return nil
 }
 
 // applyAddClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) merge form used by AllowResource.
+// SS (string-set) merge form used by AddAdmin.
 func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
 	body = strings.TrimSpace(body)
 	parts := strings.Fields(body)
@@ -680,7 +575,7 @@ func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 }
 
 // applyDeleteClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) remove form used by DisallowResource. Removing the
+// SS (string-set) remove form used by RemoveAdmin. Removing the
 // last element of the set drops the attribute, matching DDB's
 // "empty set is not allowed" rule.
 func applyDeleteClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
@@ -784,35 +679,18 @@ func splitTopLevelCommas(s string) []string {
 //
 //	attribute_exists(<attr>)
 //	attribute_not_exists(<attr>)
+//	contains(<attr>, :val)
+//	NOT contains(<attr>, :val)
 //	<attr> = :val
 //	<attr> > :val
 //
-// Returns (true, nil) when every subexpression is satisfied. We do
-// NOT parse OR — except a single top-level
-// `attribute_not_exists(<pk>) OR <attr> = :val` shape used by
-// [slackdata.Store.BindWorkspace], which we special-case below.
-func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, _ map[string]string) (bool, error) {
+// Returns (true, nil) when every subexpression is satisfied. OR is
+// NOT parsed — no production caller emits it post-scope-cut.
+func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
-	// Special-case BindWorkspace's
-	//   `attribute_not_exists(<pk>) OR <attr> = :val`
-	// shape: a top-level OR with exactly two subexpressions. We bail
-	// to false only if both halves fail.
-	if strings.Contains(expr, " OR ") {
-		halves := strings.SplitN(expr, " OR ", 2)
-		for _, h := range halves {
-			ok, err := evalCondition(strings.TrimSpace(h), item, present, vals, nil)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
 	parts := strings.Split(expr, " AND ")
 	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals)
+		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
 			return false, err
 		}
@@ -823,22 +701,98 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 	return true, nil
 }
 
-func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue) (bool, error) {
+func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	switch {
 	case strings.HasPrefix(term, "attribute_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_exists("), ")")
 		if !present {
 			return false, nil
 		}
-		_, ok := item[attr]
+		_, ok := getAttrPath(item, attr, names)
 		return ok, nil
 	case strings.HasPrefix(term, "attribute_not_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_not_exists("), ")")
 		if !present {
 			return true, nil
 		}
-		_, ok := item[attr]
+		_, ok := getAttrPath(item, attr, names)
 		return !ok, nil
+	case strings.HasPrefix(term, "NOT contains("):
+		// `NOT contains(<attr>, :val)` — true iff the SS attribute
+		// at <attr> does NOT contain :val. Used by AddAdmin's
+		// "is :uid already on the admin set?" guard to fold the
+		// membership check into the conditional UpdateItem
+		// (alongside `attribute_exists(slack_team_id)`).
+		inner := strings.TrimSuffix(strings.TrimPrefix(term, "NOT contains("), ")")
+		comma := strings.Index(inner, ",")
+		if comma < 0 {
+			return false, fmt.Errorf("fakeDDB condition: malformed NOT contains term %q", term)
+		}
+		attr := strings.TrimSpace(inner[:comma])
+		valTok := strings.TrimSpace(inner[comma+1:])
+		if !present {
+			return true, nil
+		}
+		raw, ok := getAttrPath(item, attr, names)
+		if !ok {
+			return true, nil
+		}
+		ss, ok := raw.(*ddbtypes.AttributeValueMemberSS)
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: NOT contains target %q is not SS", attr)
+		}
+		rhs, ok := vals[valTok]
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: unknown value %q", valTok)
+		}
+		want, ok := rhs.(*ddbtypes.AttributeValueMemberS)
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: NOT contains :val %q is not S", valTok)
+		}
+		for _, m := range ss.Value {
+			if m == want.Value {
+				return false, nil
+			}
+		}
+		return true, nil
+	case strings.HasPrefix(term, "contains("):
+		// `contains(<attr>, :val)` — true iff the SS attribute at
+		// <attr> contains :val. Used by RemoveAdmin's guard
+		// (membership-required-for-removal) combined with
+		// `attribute_exists(slack_team_id)` via the AND-splitter
+		// above.
+		inner := strings.TrimSuffix(strings.TrimPrefix(term, "contains("), ")")
+		comma := strings.Index(inner, ",")
+		if comma < 0 {
+			return false, fmt.Errorf("fakeDDB condition: malformed contains term %q", term)
+		}
+		attr := strings.TrimSpace(inner[:comma])
+		valTok := strings.TrimSpace(inner[comma+1:])
+		if !present {
+			return false, nil
+		}
+		raw, ok := getAttrPath(item, attr, names)
+		if !ok {
+			return false, nil
+		}
+		ss, ok := raw.(*ddbtypes.AttributeValueMemberSS)
+		if !ok {
+			return false, nil
+		}
+		rhs, ok := vals[valTok]
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: unknown value %q", valTok)
+		}
+		want, ok := rhs.(*ddbtypes.AttributeValueMemberS)
+		if !ok {
+			return false, fmt.Errorf("fakeDDB condition: contains :val %q is not S", valTok)
+		}
+		for _, m := range ss.Value {
+			if m == want.Value {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	// Binary comparison: `<attr> <op> :val`. The only operators in
 	// production use are `=` and `>`.
@@ -849,7 +803,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		}
 		attr := strings.TrimSpace(term[:idx])
 		valTok := strings.TrimSpace(term[idx+len(op)+2:])
-		lhs, ok := item[attr]
+		lhs, ok := getAttrPath(item, attr, names)
 		if !ok {
 			return false, nil
 		}
@@ -860,6 +814,83 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		return compareAttr(lhs, op, rhs)
 	}
 	return false, fmt.Errorf("fakeDDB condition: unsupported term %q", term)
+}
+
+func setAttrPath(item map[string]ddbtypes.AttributeValue, path string, names map[string]string, v ddbtypes.AttributeValue) error {
+	parts := resolvePath(path, names)
+	if len(parts) == 0 {
+		return fmt.Errorf("fakeDDB SET: empty attr path %q", path)
+	}
+	if len(parts) == 1 {
+		item[parts[0]] = v
+		return nil
+	}
+	if len(parts) != 2 {
+		return fmt.Errorf("fakeDDB SET: unsupported nested attr path %q", path)
+	}
+	m, ok := item[parts[0]].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return fmt.Errorf("fakeDDB SET: %q is not a map", parts[0])
+	}
+	m.Value[parts[1]] = v
+	return nil
+}
+
+func removeAttrPath(item map[string]ddbtypes.AttributeValue, path string, names map[string]string) {
+	parts := resolvePath(path, names)
+	if len(parts) == 0 {
+		return
+	}
+	if len(parts) == 1 {
+		delete(item, parts[0])
+		return
+	}
+	if len(parts) != 2 {
+		return
+	}
+	m, ok := item[parts[0]].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return
+	}
+	delete(m.Value, parts[1])
+}
+
+func getAttrPath(item map[string]ddbtypes.AttributeValue, path string, names map[string]string) (ddbtypes.AttributeValue, bool) {
+	parts := resolvePath(path, names)
+	if len(parts) == 0 {
+		return nil, false
+	}
+	if len(parts) == 1 {
+		v, ok := item[parts[0]]
+		return v, ok
+	}
+	if len(parts) != 2 {
+		return nil, false
+	}
+	m, ok := item[parts[0]].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return nil, false
+	}
+	v, ok := m.Value[parts[1]]
+	return v, ok
+}
+
+func resolvePath(path string, names map[string]string) []string {
+	raw := strings.Split(path, ".")
+	parts := make([]string, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if names != nil {
+			if resolved, ok := names[p]; ok {
+				p = resolved
+			}
+		}
+		parts = append(parts, p)
+	}
+	return parts
 }
 
 func compareAttr(lhs ddbtypes.AttributeValue, op string, rhs ddbtypes.AttributeValue) (bool, error) {

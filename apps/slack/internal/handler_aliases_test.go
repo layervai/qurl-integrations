@@ -13,8 +13,8 @@ import (
 )
 
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
-// flow: ListPolicies → filter by channel → per-row resource fetch →
-// rendered list. Single alias binding on the channel.
+// flow: LookupChannelAlias → per-row resource fetch → rendered
+// list. Single alias binding on the channel.
 func TestHandleAliases_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -30,6 +30,30 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(async, "`$prod-db` → https://prod.example.com") {
 		t.Errorf("async reply missing prod-db line: %q", async)
+	}
+}
+
+// TestHandleAliases_TunnelAliasShowsSlug fences the alias→slug rendering
+// for tunnel-backed aliases: a tunnel resource has no target_url, so the
+// row shows the tunnel's `$<slug>` (the same token /qurl list renders
+// and /qurl get accepts) instead of the opaque resource_id.
+func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": "r_bastion01",
+	})
+	ts.addCustomer("GET", "/v1/resources/by-alias/bastion", func(w http.ResponseWriter, _ *http.Request) {
+		writeTunnelResourceFixture(t, w, "r_bastion01", "bastion", "ops-bastion")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$bastion` → `$ops-bastion`") {
+		t.Errorf("aliases reply missing alias→slug mapping: %q", async)
+	}
+	if strings.Contains(async, "r_bastion01") {
+		t.Errorf("aliases reply leaked opaque resource_id instead of slug: %q", async)
 	}
 }
 
@@ -98,7 +122,7 @@ func TestHandleAliases_ChannelWithNoAliasBindingsShowsNone(t *testing.T) {
 // gets a helpful "ask an admin" hint rather than an empty reply.
 func TestHandleAliases_NoEntries(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// No seeded policies — ListPolicies returns empty.
+	// No seeded policies — LookupChannelAlias returns empty.
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 

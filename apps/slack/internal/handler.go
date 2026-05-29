@@ -26,6 +26,56 @@ const (
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. A workspace admin can run `/qurl setup` to connect it."
 )
 
+// ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
+// trigger_id expiry distinctly from auth, network, and Slack API failures.
+var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
+
+// ErrSlackRateLimited lets Config.OpenView surface Slack views.open rate
+// limiting distinctly so the slash-command follow-up can give the operator a
+// retry-shaped action instead of a generic setup failure.
+var ErrSlackRateLimited = errors.New("slack views.open rate limited")
+
+// SlackRateLimitError preserves Slack's Retry-After hint while still matching
+// [ErrSlackRateLimited] through errors.Is. OpenView implementations return it
+// when Slack includes a concrete retry delay.
+type SlackRateLimitError struct {
+	RetryAfter string
+}
+
+func (e *SlackRateLimitError) Error() string {
+	if e == nil || e.RetryAfter == "" {
+		return ErrSlackRateLimited.Error()
+	}
+	return fmt.Sprintf("%s: retry_after=%s", ErrSlackRateLimited, e.RetryAfter)
+}
+
+func (e *SlackRateLimitError) Unwrap() error {
+	return ErrSlackRateLimited
+}
+
+// NewSlackRateLimitError wraps a non-empty Retry-After header; empty headers
+// fall back to the sentinel so callers do not need separate branching.
+func NewSlackRateLimitError(retryAfter string) error {
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		return ErrSlackRateLimited
+	}
+	return &SlackRateLimitError{RetryAfter: retryAfter}
+}
+
+// OpenViewFunc posts a Slack modal through `views.open`.
+type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
+
+// SlackRateLimitRetryAfter returns Slack's Retry-After hint from err when the
+// OpenView implementation preserved one with [NewSlackRateLimitError].
+func SlackRateLimitRetryAfter(err error) string {
+	var rateLimitErr *SlackRateLimitError
+	if errors.As(err, &rateLimitErr) && rateLimitErr != nil {
+		return rateLimitErr.RetryAfter
+	}
+	return ""
+}
+
 // authErrorMessage maps an APIKey-lookup error to the right user-facing
 // reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
 // /qurl setup yet" path — surface a useful next-action instead of the
@@ -63,8 +113,11 @@ const (
 	// defaultMaxConcurrentAsync caps in-flight goroutines. A Slack-side
 	// flood (replay storm, runaway integration) drops with ackBusy past
 	// this threshold rather than unbounded-spawning until the task OOMs.
-	// 50 is generous for steady-state — the target customer (50 active
-	// users) won't sustain >1 click/sec across the whole workspace.
+	// Guided tunnel setup acks before its async admin check to preserve
+	// Slack's trigger_id window, so keep this high enough that admin-check
+	// retries cannot starve normal async replies. 50 is generous for
+	// steady-state — the target customer (50 active users) won't sustain
+	// >1 click/sec across the whole workspace.
 	defaultMaxConcurrentAsync = 50
 
 	// asyncWorkTimeout caps how long a single async job may run. Slack's
@@ -134,27 +187,40 @@ type Config struct {
 	ResponseURLClient *http.Client
 
 	// AdminStore is the DDB-direct facade for workspace_mappings +
-	// channel_policies + bootstrap_codes. When nil, `/qurl get`'s
-	// policy + rate-limit checks short-circuit to a graceful "admin
-	// features are not configured" reply rather than crashing — fine
-	// for sandbox / no-DDB tests. Production wires one in cmd/main.go
-	// from the three QURL_*_TABLE env vars (see slackdata.NewStore).
+	// channel_policies. When nil, the admin verbs short-circuit to a
+	// graceful "admin features are not configured" reply — fine for
+	// sandbox / no-DDB tests. Production wires one in cmd/main.go
+	// from the QURL_*_TABLE env vars (see slackdata.NewStore).
 	AdminStore *slackdata.Store
 
 	// OpenView posts a `views.open` Slack web API call to display a
-	// modal in response to a slash command. Production wires this in
-	// cmd/main.go using the workspace bot token; tests inject a stub
-	// that records the call. Nil disables the modal-opening surface
-	// (`/qurl admin claim` replies "modal cannot be opened").
-	OpenView func(ctx context.Context, triggerID string, viewJSON []byte) error
+	// modal in response to a slash command. The token owner parameter is
+	// usually the workspace team_id; Enterprise Grid org installs can pass
+	// enterprise_id instead while the modal metadata remains workspace-scoped.
+	// Legacy single-workspace deploys can still fall back to one
+	// SLACK_BOT_TOKEN. Tests inject a stub that records the call. Tunnel
+	// install uses this for guided setup; setalias-rebind can use the same seam
+	// for confirmation modals.
+	OpenView OpenViewFunc
+
+	// SlackInstallURL starts the Slack app install/reauthorization flow that
+	// stores the per-workspace bot token used by OpenView. When set, guided
+	// setup can give sandbox admins a direct recovery link instead of an
+	// operator-only reinstall prompt.
+	SlackInstallURL string
 
 	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
-	// on `/qurl get` and the admin-claim success path. Production
-	// wires this in cmd/main.go; tests inject a stub. Empty (nil) on
-	// the production path until cmd/main.go ships the bot-token
-	// plumbing; `/qurl get dm:true` surfaces a friendly fallback in
-	// that case.
+	// on `/qurl get`. Production wires this in cmd/main.go; tests
+	// inject a stub. Empty (nil) on the production path until
+	// cmd/main.go ships the bot-token plumbing; `/qurl get dm:true`
+	// surfaces a friendly fallback in that case.
 	PostDM func(ctx context.Context, slackUserID, text string) error
+
+	// TunnelImage is the Docker image shown by `/qurl tunnel install`.
+	// Empty falls back to the public client image with the `latest` tag for
+	// dev/sandbox installs; production deploys should set an immutable tag or
+	// digest so Slack never instructs customers to run a floating image.
+	TunnelImage string
 }
 
 // Handler processes Slack events and commands.
@@ -261,6 +327,18 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	// poison every subsequent MintState call.
 	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
+}
+
+// SetSlackInstallURL wires the customer Slack install URL used to recover
+// guided tunnel setup when a workspace has no stored bot token yet. Must be
+// called before Serve. Empty is a no-op so deployments without Slack install
+// OAuth keep the operator-directed fallback copy.
+func (h *Handler) SetSlackInstallURL(installURL string) {
+	installURL = strings.TrimSpace(installURL)
+	if installURL == "" {
+		return
+	}
+	h.cfg.SlackInstallURL = installURL
 }
 
 // NewHandler creates a new Slack handler. Config is intentionally
@@ -382,13 +460,6 @@ func defaultResponseURLClient() *http.Client {
 	}
 }
 
-// PR-3c.3+ wiring TODO (grep-able marker — `redaction-todo`):
-// when this handler grows a view-submission router (pathSlackInteractions),
-// any logging middleware that serializes `view_submission` payloads MUST
-// consult [IsRedactedSubmissionBlock] before emitting `state.values` —
-// otherwise the bootstrap-code modal leaks its plaintext input to logs.
-// See views.go::IsRedactedSubmissionBlock for the contract and the
-// Blocker #3 background.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks are silent: ALB target-group probes hit this every
 	// 15-30s per task and would otherwise dominate log volume.
@@ -526,6 +597,43 @@ func classifySlackErr(err error) string {
 	}
 }
 
+func slashSubcommand(text, command string) bool {
+	matched, _ := slashVerb(text, command)
+	return matched
+}
+
+func slashVerb(text string, verbs ...string) (matched bool, rest string) {
+	for _, verb := range verbs {
+		if text == verb {
+			return true, ""
+		}
+		if strings.HasPrefix(text, verb+" ") {
+			return true, strings.TrimSpace(strings.TrimPrefix(text, verb))
+		}
+	}
+	return false, text
+}
+
+func setAliasSubcommand(text string) bool {
+	matched, _ := slashVerb(text, "setalias", "set-alias")
+	return matched
+}
+
+func stripSetAliasPrefix(text string) string {
+	_, rest := slashVerb(text, "setalias", "set-alias")
+	return rest
+}
+
+func unsetAliasSubcommand(text string) bool {
+	matched, _ := slashVerb(text, "unsetalias", "unset-alias")
+	return matched
+}
+
+func stripUnsetAliasPrefix(text string) string {
+	_, rest := slashVerb(text, "unsetalias", "unset-alias")
+	return rest
+}
+
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
@@ -536,22 +644,14 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	command := values.Get(fieldCommand)
 	text := strings.TrimSpace(values.Get(fieldText))
 
-	// Redact `admin claim <code>` arguments from the slash-command
-	// audit log. The modal path routes the bootstrap code through
-	// [interactionPayload.LogValue] for redaction; the slash-command
-	// path is unprotected without this sanitizer. A user typing
-	// `/qurl admin claim BOOT-SECRET` triggers the
-	// "admin claim "-prefix dispatch branch below, which surfaces a
-	// usage hint instead of routing — but we still log the request
-	// here and must not echo the tail.
-	slog.Info("slash command", "command", command, "text", redactSlashCommandText(text))
+	slog.Info("slash command", "command", command, "text", text)
 
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, h.helpMessage())
 	case text == "setup":
 		h.handleSetup(w, values)
-	case text == "create" || strings.HasPrefix(text, "create "):
+	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated — its URL-form behavior is
 		// folded into `/qurl get <url>`, and the alias form was never
 		// promoted to a user-facing command. Surface a deprecation
@@ -566,7 +666,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// bare token falls through to the unknown-subcommand branch
 		// and gets a help nudge.
 		h.handleListResources(w, values)
-	case text == "get" || strings.HasPrefix(text, "get "):
+	case slashSubcommand(text, "get"):
 		// Exact-token boundary so `getter`, `get-foo` fall through
 		// to the unknown-subcommand branch instead of silently
 		// routing here. The parser then produces ErrEmptyResource
@@ -574,82 +674,29 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		h.handleGet(w, values)
 	case text == "aliases":
 		h.handleAliases(w, values)
-	case text == "admin claim":
-		// `admin claim` opens a modal — it cannot run async because
-		// the trigger_id rotates after one use. Sync dispatch via
-		// views.open is the only correct shape.
-		//
-		// Exact-match-only is load-bearing: `admin claim <code>` must
-		// NOT route here because the slash-command logger above would
-		// have already written the bootstrap code into CloudWatch
-		// before we got to the handler. Anything other than the bare
-		// verb falls through to the AdminClaimArgsHint branch below,
-		// which renders a usage hint without echoing the args. NOTE:
-		// case-fold + Unicode-whitespace tolerance for the redaction
-		// fence lives in [redactSlashCommandText]; case-sensitivity
-		// here is intentional — mixed-case variants fall through to
-		// the default branch's redacted slog.Info, NOT to the modal
-		// path. Do not case-fold here without thinking through the
-		// load-bearing position.
-		h.handleAdminClaim(w, values)
-	case strings.HasPrefix(text, "admin claim "):
-		// User typed `admin claim <something>` — usually the
-		// bootstrap code on the slash-command line instead of via
-		// the modal. Refuse routing and surface a hint that the
-		// code goes in the modal. Crucially we do NOT echo `text`
-		// in the reply (the code lives in the tail) — the
-		// slash-command log line at the top of this handler is
-		// the only line that could see it, and we intentionally
-		// route it through the redactSlashCommandText sanitizer
-		// before logging on this path.
-		respondSlack(w, ":warning: Do not pass the bootstrap code on the slash-command line — it shows up in our logs. Run `/qurl admin claim` (no arguments) and enter the code in the modal.")
-	case text == "setalias" || strings.HasPrefix(text, "setalias "):
+	case slashSubcommand(text, "admin"):
+		// All admin verbs (revoke / add / remove / list) route through
+		// the parse-then-dispatch handler. The retired `admin claim`
+		// verb surfaces as ErrUnknownAdminAction from the parser, so
+		// the user gets a helpful "unknown admin action" reply rather
+		// than a stale modal opener. Bare `admin` lands here so the
+		// parser emits the `missing admin action` error.
+		h.handleAdmin(w, values)
+	case slashSubcommand(text, "tunnel"):
+		h.handleTunnel(w, values)
+	case setAliasSubcommand(text):
 		// Bare `setalias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
 		h.handleSetAlias(w, values)
-	case text == "unsetalias" || strings.HasPrefix(text, "unsetalias "):
+	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
-		// redactSlashCommandText keeps `admin claim <tail>` and any future
-		// secret-bearing verb out of CloudWatch.
-		slog.Info("unknown slash subcommand", "command", command, "text", redactSlashCommandText(text))
+		slog.Info("unknown slash subcommand", "command", command, "text", text)
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 	}
-}
-
-// redactSlashCommandText sanitizes the slash-command `text` form field
-// before it reaches slog. Currently masks the tail of `admin claim
-// <code>` so a bootstrap code typed on the slash-command line (instead
-// of via the modal) doesn't land in CloudWatch verbatim.
-//
-// The dispatcher above routes `admin claim <args>` to a user-facing
-// "use the modal" hint rather than the redeem path, but the slash-
-// command audit log line fires before dispatch. This is the
-// defense-in-depth seam that keeps the secret out of logs regardless.
-//
-// Whitespace tolerance: Slack's UI sends the bootstrap code separated
-// from `admin claim` by a single space, but a hand-crafted POST could
-// substitute a tab or other Unicode whitespace and bypass a
-// space-only prefix check. We tokenize on [strings.Fields] (every
-// Unicode whitespace separator) so the redaction holds regardless of
-// the separator byte.
-//
-// Case tolerance: Slack passes slash-command text verbatim, so a
-// user typing `Admin Claim BOOT-SECRET` (mobile autocorrect / habit)
-// falls through to the dispatcher's case-sensitive switch and lands
-// at the unknown-subcommand slog.Info that calls back into here.
-// Match the two prefix tokens with [strings.EqualFold] so the
-// redaction is a fence under every casing the user might submit.
-func redactSlashCommandText(text string) string {
-	const claimPrefix = "admin claim "
-	fields := strings.Fields(text)
-	if len(fields) >= 3 && strings.EqualFold(fields[0], "admin") && strings.EqualFold(fields[1], "claim") {
-		return claimPrefix + "<redacted>"
-	}
-	return text
 }
 
 // handleSetup mints a workspace-bound state token and replies with the
@@ -721,41 +768,65 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 
 // helpMessage renders the /qurl help text. Verbs that depend on
 // optional Config wiring are omitted when that wiring is nil — a
-// workspace without OpenView won't see /qurl admin claim, and one
-// without PostDM won't see the dm:true variant. The verbs still
-// dispatch if a user types them directly; the omission is just so
-// help text doesn't advertise a path that will reply with
+// workspace without PostDM won't see the dm:true variant. The verbs
+// still dispatch if a user types them directly; the omission is just
+// so help text doesn't advertise a path that will reply with
 // ":warning: not configured".
 func (h *Handler) helpMessage() string {
 	lines := []string{
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl get <url>` — Get a qURL for a URL",
-		"• `/qurl get $name` — Get a qURL for a name your Slack admin has configured in this channel",
+		"• `/qurl get <url|$slug>` — Mint a one-time qURL for a URL, or a `$slug` (tunnel or shortcut) configured in this channel",
 	}
 	if h.cfg.PostDM != nil {
-		lines = append(lines, "• `/qurl get <url|$name> dm:true` — DM the link to you instead of posting it in-channel")
+		lines = append(lines, "• `/qurl get <url|$slug> dm:true` — DM the link to you instead of posting it in-channel")
 	}
 	lines = append(lines,
-		"• `/qurl get <url|$name> reason:\"…\"` — Annotate the audit log with a reason",
-		"• `/qurl list` — Show your 5 most recent qURLs",
-		"• `/qurl setup` — Connect qURL to your Slack workspace (workspace admin only)",
+		"• `/qurl get <url|$slug> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+		"• `/qurl list` — List the tunnels available to you",
+		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
-	if h.cfg.OpenView != nil {
-		lines = append(lines, "• `/qurl admin claim` — Open the bootstrap-code modal to claim this workspace (admin only)")
+	if h.aliasStore != nil && h.cfg.AdminStore != nil {
+		if h.cfg.OpenView != nil {
+			lines = append(lines,
+				"• `/qurl tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
+				"  Guided setup is enabled in this workspace; use bare `/qurl tunnel install` to choose a target environment.",
+				"• `/qurl tunnel install <slug> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<slug>` in this channel",
+				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
+			)
+		} else {
+			lines = append(lines,
+				"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+				"  Guided setup is not enabled in this deployment; use the typed installer form.",
+			)
+		}
 	}
 	if h.aliasStore != nil {
 		// setalias/unsetalias/aliases reply ":warning: not configured"
 		// on a sandbox deploy without an aliasStore; mirror the
-		// PostDM / OpenView gates above so help doesn't advertise
-		// verbs whose reply tells the user they can't be used. These
-		// are admin verbs — the internal "alias" terminology is fine
-		// here because the audience for these lines is admins.
+		// PostDM gates above so help doesn't advertise verbs whose
+		// reply tells the user they can't be used. Keep user-facing copy
+		// on "shortcut" even though the admin verbs retain their
+		// historical set-alias/unset-alias names.
 		lines = append(lines,
-			"• `/qurl setalias $<alias> <url-or-resource-id>` — Configure an alias in this channel (admin only)",
-			"• `/qurl unsetalias $<alias>` — Remove a configured alias in this channel (admin only)",
-			"• `/qurl aliases` — List the aliases configured in this channel",
+			"• `/qurl set-alias $<shortcut> <url-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
+			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
+			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
+		)
+	}
+	if h.cfg.AdminStore != nil {
+		// add/remove/list/revoke all require AdminStore — on sandbox
+		// deploys without the three QURL_*_TABLE env vars (see
+		// cmd/main.go), AdminStore is nil and these verbs render
+		// "Admin features are not configured". Gate the help lines on
+		// the same condition so the listing stays consistent with
+		// what the verbs will actually do.
+		lines = append(lines,
+			"• `/qurl admin add @user` — Promote a Slack user to bot admin (admin only)",
+			"• `/qurl admin remove @user` — Demote a Slack user from bot admin (admin only)",
+			"• `/qurl admin list` — List the workspace owner and current bot admins (admin only)",
+			"• `/qurl admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
 		)
 	}
 	lines = append(lines,
