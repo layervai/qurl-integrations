@@ -154,7 +154,7 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 // qurl-service — bind acts as the gate so a rebind-refused outcome
 // can't overwrite the existing admin's stored credential. The
 // seedAdmin becomes the only entry in admin_slack_user_ids;
-// additional admins are added later via /qurl admin add.
+// additional admins are added later via /qurl-admin admin add.
 //
 // Returns 409 (via *Error) if the row already exists. Two sub-cases:
 //   - caller is already on the admin set → ErrCodeWorkspaceAlreadyBoundToCaller.
@@ -517,7 +517,7 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 // owner alongside additional admins added via AddAdmin.
 //
 // 404 workspace_not_bound when the row is missing. The slice is
-// sorted ascending so callers (the `/qurl admin list` handler in
+// sorted ascending so callers (the `/qurl-admin admin list` handler in
 // particular) render a deterministic order across calls — operators
 // audit-via-paste, and a re-ordered listing reads as state churn
 // that didn't actually happen.

@@ -47,7 +47,7 @@ const (
 //     hand-seeded or carried over from pre-pivot rows. `/qurl get
 //     $r_<id>` checks via [ResolvePolicy].
 //   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl setalias` / `/qurl unsetalias` mutate;
+//     surface `/qurl-admin set-alias` / `/qurl-admin unset-alias` mutate;
 //     `/qurl get $alias` checks via [ResolveAlias].
 //
 // Either surface allows the row to mint, so `/qurl list` must show

@@ -254,8 +254,8 @@ type Config struct {
 	// AdminStore persists the workspace_mappings row that seeds the
 	// installer as the workspace's first admin. The callback calls
 	// BindWorkspace after the qurl-service key mint + DDB persist
-	// succeed, so /qurl admin verbs work immediately without a
-	// second /qurl admin claim step.
+	// succeed, so /qurl-admin admin verbs work immediately without a
+	// second /qurl-admin admin claim step.
 	//
 	// Nil disables the bind (sandbox / no-DDB deploy) — the callback
 	// emits a slog.Warn and continues with the existing API-key

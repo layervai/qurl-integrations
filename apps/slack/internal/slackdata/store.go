@@ -12,7 +12,7 @@
 //
 // /qurl setup also seeds the workspace admin row from the OAuth
 // callback (the installer becomes the seed admin), so the previously
-// separate bootstrap_codes table and the `/qurl admin claim` redeem
+// separate bootstrap_codes table and the `/qurl-admin admin claim` redeem
 // step are gone — this package owns only workspace_mappings +
 // channel_policies.
 //

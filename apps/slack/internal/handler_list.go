@@ -32,7 +32,7 @@ import (
 const listResourcesScanLimit = 100
 
 // listTunnelsEmptyMessage / listTunnelsEmptyMessageNonAdmin are the
-// friendly empty-state copy, branched on admin status. `/qurl tunnel
+// friendly empty-state copy, branched on admin status. `/qurl-admin tunnel
 // install` is admin-only, so admins are told to run it directly while
 // non-admins are routed to ask an admin — telling a non-admin to run a
 // command they can't would dead-end them.
@@ -291,7 +291,7 @@ func filterResourcesByAllowedSet(resources []client.Resource, allowed map[string
 // tunnelToken returns the `$<token>` identifier shown for a tunnel in
 // /qurl list — and the key rows sort by. Precedence:
 //
-//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl tunnel
+//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin tunnel
 //     install <slug>` binds `$<slug>` as a channel alias, so the slug
 //     pastes straight into `/qurl get $<slug>`. This is the common case
 //     and the identifier we want to surface (never the opaque r_<id>).
