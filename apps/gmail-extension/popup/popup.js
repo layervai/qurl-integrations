@@ -38,7 +38,10 @@ const footer = document.querySelector('.footer');
 // would push the user to retry manually and duplicate links. Keep in sync with background.js.
 const RUNTIME_MESSAGE_TIMEOUT_MS = 25000;
 const RUNTIME_MESSAGE_RETRY_DELAY_MS = 250;
-const SETTINGS_PANEL_AUTO_CLOSE_MS = 1200;
+// The popup reads each file fully into memory before upload, so cap per-file size to keep the
+// renderer from OOM-ing. This is a popup-safety ceiling, not the server's limit.
+const MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024;
+const SETTINGS_PANEL_AUTO_CLOSE_MS = 2000;
 const COPY_BUTTON_REVERT_MS = 1500;
 const FOCUS_DEFER_MS = 0;
 
@@ -336,6 +339,20 @@ uploadBtn.addEventListener('click', async () => {
   for (const file of selectedFiles) {
     // Add progress item
     const progressItem = addProgressItem(file.name, 'uploading');
+
+    // The popup reads each file fully into memory (file.arrayBuffer) before upload, so guard
+    // against an oversized file OOM-ing the popup. Reject it with a clear message BEFORE the
+    // read rather than crashing the renderer.
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      const tooLarge = getMessage(
+        'file_too_large_error',
+        '$1 is too large to upload from the popup (max $2).',
+        [file.name, formatFileSize(MAX_UPLOAD_FILE_BYTES)]
+      );
+      errors.push({ filename: file.name, error: tooLarge });
+      updateProgressItem(progressItem, 'error', `${file.name}: ${tooLarge}`);
+      continue;
+    }
 
     try {
       const buf = await file.arrayBuffer();

@@ -55,6 +55,11 @@ If you plan to publish to the Chrome Web Store, see [docs/chrome-web-store-revie
 > it (clicking elsewhere, switching windows) destroys its context and cancels any in-flight
 > upload. The popup shows an "keep this popup open" hint while a batch is uploading. Links are
 > always appended at the **end** of the active draft, regardless of where your cursor is.
+>
+> **Gmail must be the active tab in the focused window** when you open the popup — the extension
+> targets the active tab, so a Gmail tab in a *different* window won't be found. Large files are
+> capped (the popup reads each file into memory); oversized files are reported per-file instead
+> of crashing the popup.
 
 ---
 

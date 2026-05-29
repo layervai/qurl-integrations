@@ -73,6 +73,20 @@
     "message": "Server returned success but no download link was provided.",
     "description": "Shown when the qURL server returns a success response without a qurl_link field"
   },
+  "file_too_large_error": {
+    "message": "$FILENAME$ is too large to upload from the popup (max $MAX$).",
+    "description": "Shown when a selected file exceeds the popup's per-file size cap",
+    "placeholders": {
+      "filename": {
+        "content": "$1",
+        "example": "video.mp4"
+      },
+      "max": {
+        "content": "$2",
+        "example": "100.0 MB"
+      }
+    }
+  },
   "config_reset_error": {
     "message": "Failed to reset qURL server URL.",
     "description": "Fallback error shown when resetting the server URL fails"

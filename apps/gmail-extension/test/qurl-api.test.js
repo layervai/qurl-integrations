@@ -536,6 +536,9 @@ test('setStoredQurlApiBase surfaces a permission denial before saving', async fu
     runtime: { lastError: null },
     storage: {
       local: {
+        get(_keys, callback) {
+          callback({});
+        },
         set() {
           setCalled = true;
         },
@@ -565,6 +568,9 @@ test('setStoredQurlApiBase skips a second permission prompt when the caller alre
     runtime: { lastError: null },
     storage: {
       local: {
+        get(_keys, callback) {
+          callback({});
+        },
         set(_payload, callback) {
           setCalled = true;
           callback();
@@ -621,6 +627,76 @@ test('setStoredQurlApiBase clears the override without requesting host permissio
   assert.equal(cleared, null);
   assert.equal(removeCalled, true);
   assert.equal(permissionRevoked, true);
+});
+
+test('setStoredQurlApiBase revokes the previous custom origin when switching custom-A -> custom-B', async function () {
+  const revokedOrigins = [];
+  global.chrome = {
+    runtime: { lastError: null },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({ qurlApiBase: 'https://custom-a.example.com' });
+        },
+        set(_payload, callback) {
+          callback();
+        },
+      },
+    },
+    permissions: {
+      contains(_details, callback) {
+        callback(true);
+      },
+      request(_details, callback) {
+        callback(true);
+      },
+      remove(opts, callback) {
+        revokedOrigins.push(opts.origins[0]);
+        callback(true);
+      },
+    },
+  };
+
+  const saved = await qurlApi.setStoredQurlApiBase('https://custom-b.example.com');
+
+  assert.equal(saved, 'https://custom-b.example.com');
+  // The no-longer-reachable custom-A origin is revoked; custom-B is not.
+  assert.deepEqual(revokedOrigins, ['https://custom-a.example.com/*']);
+});
+
+test('setStoredQurlApiBase does not revoke when re-saving the same custom origin', async function () {
+  let revokeCalled = false;
+  global.chrome = {
+    runtime: { lastError: null },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({ qurlApiBase: 'https://custom-a.example.com' });
+        },
+        set(_payload, callback) {
+          callback();
+        },
+      },
+    },
+    permissions: {
+      contains(_details, callback) {
+        callback(true);
+      },
+      request(_details, callback) {
+        callback(true);
+      },
+      remove(_opts, callback) {
+        revokeCalled = true;
+        callback(true);
+      },
+    },
+  };
+
+  // Same host, only a path change — the host permission is still needed, so no revoke.
+  const saved = await qurlApi.setStoredQurlApiBase('https://custom-a.example.com/team');
+
+  assert.equal(saved, 'https://custom-a.example.com/team');
+  assert.equal(revokeCalled, false);
 });
 
 test('uploadFile reports network failures', async function () {

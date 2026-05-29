@@ -273,6 +273,12 @@ async function setStoredQurlApiBase(value, options) {
   const normalized = normalizeQurlApiBase(value);
   const resolvedOptions = options || {};
 
+  // Capture the previous override up front so its host permission can be revoked once we've
+  // switched away from it — whether the user clears the override (custom → default) OR moves to
+  // a different custom server (custom-A → custom-B). Least privilege: don't leave a granted
+  // origin that the UI can no longer reach.
+  const previousBase = await getStoredQurlApiBase();
+
   if (normalized) {
     const granted = await ensureQurlHostPermission(normalized, !resolvedOptions.skipPermissionRequest);
     if (!granted) {
@@ -283,26 +289,7 @@ async function setStoredQurlApiBase(value, options) {
     }
   }
 
-  // When clearing the override, revoke any previously-granted custom origin permission.
-  // This honors the principle of least privilege — the user no longer needs access to
-  // the custom server once they've switched back to the bundled default.
-  if (!normalized) {
-    const previousBase = await getStoredQurlApiBase();
-    if (previousBase && !isDefaultQurlOrigin(previousBase)) {
-      const pattern = getQurlHostPermissionPattern(previousBase);
-      if (typeof chrome !== 'undefined' && chrome.permissions && chrome.permissions.remove) {
-        try {
-          await new Promise(function (res) {
-            chrome.permissions.remove({ origins: [pattern] }, res);
-          });
-        } catch (_err) {
-          // Best-effort revocation; failure is non-fatal.
-        }
-      }
-    }
-  }
-
-  return new Promise(function (resolve, reject) {
+  const stored = await new Promise(function (resolve, reject) {
     if (!normalized) {
       chrome.storage.local.remove(QURL_API_BASE_STORAGE_KEY, function () {
         if (chrome.runtime && chrome.runtime.lastError) {
@@ -323,6 +310,47 @@ async function setStoredQurlApiBase(value, options) {
       }
       resolve(normalized);
     });
+  });
+
+  // Only after the new value is persisted (so a failed grant/store leaves the old permission in
+  // place) do we drop the previous custom origin if it is no longer the active base.
+  await revokeStaleCustomOrigin(previousBase, normalized);
+  return stored;
+}
+
+/**
+ * Best-effort revocation of a previous custom origin's host permission once it is no longer the
+ * active base URL. No-op for the bundled default and when the host is unchanged (custom-A →
+ * custom-A, or a path-only change on the same host). Revocation failure is non-fatal.
+ *
+ * @param {string|null} previousBase
+ * @param {string|null} normalizedBase
+ * @returns {Promise<void>}
+ */
+function revokeStaleCustomOrigin(previousBase, normalizedBase) {
+  if (!previousBase || isDefaultQurlOrigin(previousBase)) {
+    return Promise.resolve();
+  }
+
+  const previousPattern = getQurlHostPermissionPattern(previousBase);
+  if (normalizedBase && getQurlHostPermissionPattern(normalizedBase) === previousPattern) {
+    // Same host still in use — keep the permission.
+    return Promise.resolve();
+  }
+
+  if (typeof chrome === 'undefined' || !chrome.permissions || !chrome.permissions.remove) {
+    return Promise.resolve();
+  }
+
+  return new Promise(function (res) {
+    try {
+      chrome.permissions.remove({ origins: [previousPattern] }, function () {
+        void (chrome.runtime && chrome.runtime.lastError);
+        res();
+      });
+    } catch (_err) {
+      res();
+    }
   });
 }
 

@@ -65,7 +65,8 @@
 
     const requestId = typeof message.requestId === 'string' ? message.requestId : '';
     if (!requestId) {
-      // Backward-compatible path for callers that do not participate in request deduplication.
+      // Legacy fallback for a caller that sends no requestId; never produced by popup.js today
+      // (it always sets a crypto.randomUUID requestId), kept as a defensive no-dedup path.
       insertLinksIntoGmailDraft(results, function (ok) {
         sendResponse({ success: ok });
       });
@@ -325,7 +326,9 @@
     const seen = new Set();
 
     for (const selector of COMPOSE_BODY_SELECTORS) {
-      const query = focusedOnly ? `${selector}:focus` : selector;
+      // Wrap in :is(...) so the :focus qualifier applies to the whole selector even if an entry
+      // is ever a comma-separated list (a bare `a, b:focus` would only constrain the last item).
+      const query = focusedOnly ? `:is(${selector}):focus` : selector;
       const selectorMatches = root.querySelectorAll(query);
       for (const match of selectorMatches) {
         if (seen.has(match)) {
