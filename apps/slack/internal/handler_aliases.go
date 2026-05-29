@@ -120,13 +120,16 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 
 	if hasMore && unresolved > 0 {
 		// A bound tunnel resolved to alias-only AND the page reports more
-		// resources past it — so the missing slug may just be paginated
-		// out (not gone). This also covers a short/empty list returned
-		// with has_more set: the listing is incomplete relative to the
-		// channel's bindings either way. One triage line for "why doesn't
-		// `$foo` show its slug?"; arms the #555 follow-up. Additive only —
-		// the rows already rendered above are unchanged.
-		log.Warn("aliases: listing may be incomplete — unresolved bindings with more resources past the scanned page",
+		// resources past it. Two causes share this signal because
+		// page.HasMore is a master-list flag ("more resources of any
+		// type", not "more tunnels" — until the #531 server-side filter):
+		// the bound resource may be paginated out, OR the binding may be
+		// stale (its resource was deleted but the DDB row remains). The
+		// message names both so operators don't only chase pagination.
+		// One triage line for "why doesn't `$foo` show its slug?"; arms
+		// the #555 follow-up. Additive only — the rendered rows are
+		// unchanged.
+		log.Warn("aliases: listing may be incomplete — a bound resource was not on the scanned page (paginated out, or the binding is stale)",
 			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "team_id", teamID, "channel_id", channelID)
 	}
 
