@@ -102,8 +102,8 @@ type TokenStore interface {
 // used solely for views.open (see apps/slack/cmd/main.go), which requires no
 // scope (https://docs.slack.dev/reference/methods/views.open), and `commands`
 // is the minimal scope to install this slash-command app into a workspace.
-// An earlier revision also requested `views:write`, which is not a real Slack
-// scope — Slack rejects it at the authorize step with `invalid_scope`.
+// Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
+// at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
 	return []string{botScopeCommands}
 }
