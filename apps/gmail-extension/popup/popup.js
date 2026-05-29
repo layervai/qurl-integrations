@@ -364,6 +364,8 @@ uploadBtn.addEventListener('click', async () => {
     insertionError = await insertIntoGmailDraft(results);
   }
 
+  // Reflects the most recent batch only (the Copy button re-copies this batch); it
+  // intentionally does not accumulate across uploads.
   lastSuccessfulResults = results.slice();
 
   // Show results
@@ -709,10 +711,9 @@ function createInsertLinksMessage(results) {
 }
 
 function createRequestId() {
-  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-    return window.crypto.randomUUID();
-  }
-  return `qurl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  // crypto.randomUUID is guaranteed at minimum_chrome_version 99 (and in the Node test runtime),
+  // so no non-crypto fallback is needed.
+  return window.crypto.randomUUID();
 }
 
 function isRetryableRuntimeMessageError(err) {

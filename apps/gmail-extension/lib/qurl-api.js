@@ -166,6 +166,9 @@ async function uploadFile(fileBuffer, filename, contentType) {
     }
 
     const resourceId = _get(payloadObject, 'resource_id', 'resourceId', 'id');
+    // _get also coerces finite numbers to strings (useful for numeric resource_id). For the URL
+    // fields that's harmless: a backend emitting a number would yield e.g. "123", which
+    // normalizeAllowedLink rejects, so it surfaces as "no download link" rather than a bad link.
     const qurlLink = _get(payloadObject, 'qurl_link', 'qurlLink');
     const resourceUrl = _get(payloadObject, 'resource_url', 'resourceUrl');
 
@@ -390,6 +393,9 @@ function requestQurlHostPermission(baseUrl) {
  * @param {string} contentType
  * @returns {Blob}
  */
+// Builds the multipart body with an explicit boundary rather than via FormData (which would
+// let fetch set the boundary). The explicit form keeps the header sanitization above under our
+// control and yields deterministic bytes the unit tests assert against.
 function _buildMultipartBody(boundary, fileBuffer, filename, contentType) {
   const safeFilename = _sanitizeFilename(filename);
   const safeContentType = _sanitizeContentType(contentType);

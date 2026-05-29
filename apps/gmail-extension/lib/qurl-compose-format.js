@@ -49,12 +49,19 @@
     }
 
     const pad = function (n) { return ('0' + n).slice(-2); };
+    // Render in the sender's local time, but append the UTC offset so the absolute instant is
+    // unambiguous once the string is inserted into an email a recipient may read in another zone.
+    const offsetMinutes = -d.getTimezoneOffset();
+    const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+    const offsetAbs = Math.abs(offsetMinutes);
+    const offset = offsetSign + pad(Math.floor(offsetAbs / 60)) + pad(offsetAbs % 60);
     return d.getFullYear() + '-'
       + pad(d.getMonth() + 1) + '-'
       + pad(d.getDate()) + ' '
       + pad(d.getHours()) + ':'
       + pad(d.getMinutes()) + ':'
-      + pad(d.getSeconds());
+      + pad(d.getSeconds()) + ' '
+      + offset;
   }
 
   function getMessage(key, fallback, substitutions) {

@@ -10,6 +10,15 @@
 
   // Prevent double injection. This guard is safe because MV3 content scripts run in an
   // isolated world — page scripts cannot observe or tamper with this property.
+  //
+  // The guard flag and the onMessage listener share this isolated-world context's lifetime: if
+  // Chrome tears the context down (the case a reinject is meant to recover), the flag is gone too,
+  // so the reinjected run falls through and re-registers the listener. The only gap is the rare
+  // case where the message port is severed but the JS context survives — then a reinject early-
+  // returns here without re-registering, and the popup may still see "no response from content
+  // script". We do NOT move addListener above this guard: that would register a duplicate listener
+  // on every legitimate double-injection (manifest auto-inject + reinject), double-replying to
+  // each message. A full reload of the Gmail tab recovers the severed-port case.
   if (window.__QURL_COMPOSE_INJECTED__) return;
   window.__QURL_COMPOSE_INJECTED__ = true;
   const INSERT_REQUEST_CACHE_TTL_MS = 30000;

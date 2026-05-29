@@ -112,6 +112,14 @@ npm run icons
 
 The project includes scripts for bumping the extension version, building a clean release directory, and creating a Chrome Web Store upload ZIP.
 
+> **Versioning.** Released versions are owned by Release Please monorepo mode (this app is
+> registered in `release-please-config.json` with a `node` release-type; an `extra-files` entry
+> keeps `manifest.json`'s `$.version` in lockstep with `package.json`). The Release Please seed
+> in `.release-please-manifest.json` is **`1.0.2`** — intentionally not the `0.1.0` the other
+> apps use — because the extension already carried `1.0.2` (its pre-monorepo Chrome Web Store
+> version); seeding lower would make automated bumps appear to regress. The `bump-version.js`
+> scripts below remain a convenience for ad-hoc local Web Store ZIPs outside the release flow.
+
 ### Recommended One-Command Packaging
 
 For most release and local validation workflows, use:

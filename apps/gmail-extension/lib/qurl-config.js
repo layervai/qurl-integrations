@@ -22,7 +22,9 @@
 'use strict';
 
 (function (global) {
-  // qurl-config:DEFAULT_QURL_API_BASE — build-release.js regenerates this declaration.
+  // build-release.js rewrites the DEFAULT_QURL_API_BASE declaration on the next line for the
+  // QURL_API_BASE override (it matches the `const DEFAULT_QURL_API_BASE = '...';` statement, not
+  // this comment — keep the declaration a single simple string literal so that match holds).
   const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.ai/';
 
   const QURLConfig = { DEFAULT_QURL_API_BASE };
