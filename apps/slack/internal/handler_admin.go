@@ -101,9 +101,11 @@ const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup` first
 
 // adminGateBudget bounds the sync admin-gate CheckAdmin call so a
 // hung DDB can't out-block Slack's 3s slash-command ack window. The
-// gate is the FIRST upstream call on every sync admin verb; using
-// `context.Background()` here would let a misbehaving upstream
-// silently consume the entire user-visible budget.
+// gate is the FIRST upstream call on every sync admin verb (and is
+// reused by the owner gate in handleSetup, which makes the same
+// CheckAdmin call); using `context.Background()` here would let a
+// misbehaving upstream silently consume the entire user-visible
+// budget.
 //
 // 800ms covers a healthy DDB GetItem with ample tail-latency margin
 // (warm-path p99 is well under 100ms; 800ms is ~10x that). The

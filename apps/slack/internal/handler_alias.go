@@ -276,13 +276,14 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 //
 // **Admin restriction:** This handler is admin-gated at the Slack app
 // manifest level — the `/qurl setalias` command must be declared
-// admin-only in the install config. The same posture is used for
-// `/qurl setup` (see handleSetup) — gating in the manifest avoids an
-// extra Slack API round-trip per invocation. The CR feedback on the
-// old #230 (claude-bot review id 2026-05-10) flagged "admin gate
-// before alias resolution" as an info-disclosure surface. Moving the
-// gate to the manifest closes that gap structurally: a non-admin's
-// command never reaches this handler.
+// admin-only in the install config; gating in the manifest avoids an
+// extra Slack API round-trip per invocation. (Note: `/qurl setup`
+// does NOT share this posture — it enforces an owner-only gate in
+// code, see handleSetup.) The CR feedback on the old #230 (claude-bot
+// review id 2026-05-10) flagged "admin gate before alias resolution"
+// as an info-disclosure surface. Moving the gate to the manifest
+// closes that gap structurally: a non-admin's command never reaches
+// this handler.
 //
 // **Reply contract:** URL/resource_id targets reply synchronously and
 // ephemerally per the

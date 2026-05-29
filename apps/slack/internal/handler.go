@@ -706,15 +706,25 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // (the alternative, taking team_id from an unsigned query param at
 // /start, was the workspace-rebind primitive flagged in PR review).
 //
-// Admin restriction: this handler does NOT verify the invoking user is
-// a workspace admin. That gate lives in the Slack app manifest — the
-// `/qurl setup` command must be declared admin-only (or restricted via
-// channel/role permissions in the install config). Without that gate,
-// any workspace user could initiate setup and overwrite the workspace's
-// qURL key with one minted against their own Auth0 account. Confirm
-// the manifest before shipping; an in-bot check would require an extra
-// Slack API round-trip per setup attempt that the manifest already
-// covers.
+// Owner-only rebind gate: on fresh install (no workspace_mappings
+// row), any workspace user may run /setup — that user becomes the
+// workspace owner. First install is first-user-wins: if two members
+// race an unbound workspace, BindWorkspace's consistent read picks the
+// single winner (the loser gets the rebind-refused page). On
+// subsequent runs only the owner is permitted;
+// other workspace members (including admins added via /qurl admin
+// add) get a "owner-only" reply. Without this gate, any added admin
+// could complete OAuth against their own Auth0 account and silently
+// rotate the workspace's qURL credential — the OAuth callback's
+// BindWorkspace also rejects that case as a defense in depth, but
+// gating here means non-owners don't get a setup URL minted in their
+// name at all (cleaner audit, no half-completed OAuth flows).
+//
+// AdminStore=nil (sandbox / no-DDB) skips the owner gate — same posture
+// as every other admin verb; the caller falls through to mint as on a
+// fresh install. That is a separate short-circuit from the oauthSetup==nil
+// check below, which is the branch that returns "qURL OAuth is not
+// configured" (and which fires first, before AdminStore is consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
@@ -725,6 +735,72 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	if teamID == "" || userID == "" {
 		respondSlack(w, "Could not read your Slack workspace or user ID from the command payload.")
 		return
+	}
+	// Owner gate. AdminStore==nil skips entirely (sandbox/no-DDB);
+	// otherwise check whether the workspace has an owner and whether
+	// it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
+	// err); we only consume ownerID here — the admin-set membership
+	// is irrelevant for /setup specifically (added admins can't rerun
+	// /setup, only the owner can). Times the read off h.baseCtx (not the
+	// request ctx) so a Slack-side connection-close can't truncate the
+	// gate read mid-flight; adminGateBudget is the only bound — same
+	// posture as requireAdminSync.
+	if h.cfg.AdminStore != nil {
+		gateCtx, gateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		defer gateCancel()
+		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+		if err != nil {
+			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
+			respondSlack(w, ":warning: could not verify workspace ownership (upstream error; see logs). Try again in a moment.")
+			return
+		}
+		// ownerID=="" → workspace not yet bound → fresh install, allow.
+		// (CheckAdmin reads eventually-consistent, and BindWorkspace
+		// validates OwnerID != "" before PutItem, so an empty ownerID
+		// almost always means "no row yet" rather than a half-written
+		// one.) The one exception is a manually-edited row left with a
+		// blank owner_id: it also reads as "" here and slips past this
+		// gate, but BindWorkspace's consistent check refuses it (the
+		// caller lands on the rebind-refused page after the OAuth round-
+		// trip, and the empty-owner Warn there flags the bad row). That
+		// requires DDB tampering, so it isn't worth a second read to
+		// distinguish at the gate.
+		// ownerID==userID → idempotent rerun by owner (rotates the
+		// API key on OAuth-callback success), allow.
+		// otherwise → non-owner rebind attempt, refuse here so we
+		// don't even mint the state token / setup URL.
+		//
+		// This gate is best-effort: in the brief eventual-read window
+		// after a fresh bind a fast second-mover could still see "" and
+		// get a setup URL, but BindWorkspace's consistent owner check is
+		// the structural backstop — that caller just lands on the
+		// generic rebind-refused page instead of the friendly copy here.
+		// The eventual read is deliberate, not an oversight: CheckAdmin
+		// is the shared admin-gate read (same call the admin verbs make),
+		// so the race only ever costs the loser a less-friendly error
+		// page — never security, since the consistent backstop is
+		// authoritative. Upgrading just this caller to a consistent read
+		// would spend 2x RCU on every /setup to improve one racer's copy.
+		if ownerID != "" && ownerID != userID {
+			// Shape-guard the stored owner_id before interpolating it
+			// into a `<@%s>` mention. BindWorkspace writes owner_id
+			// from the OAuth callback (a different code path than the
+			// parser), and a pre-pivot row holds an Auth0 sub, not a
+			// Slack ID — exactly the case the migration runbook calls
+			// out. Mirrors the looksLikeSlackUserID guard in
+			// handleAdminList so a malformed value can't break out of
+			// the mention surface. Branch the whole reply so the
+			// shape-bad copy reads cleanly rather than "the current
+			// owner is the existing workspace owner".
+			if looksLikeSlackUserID(ownerID) {
+				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID) //nolint:gosec // G706: slog escapes control bytes in attribute values; owner_user_id is shape-validated by looksLikeSlackUserID above.
+				respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is <@%s>. Ask them to re-run setup. For admin actions that don't need workspace ownership, use the other `/qurl admin` commands.", ownerID))
+			} else {
+				slog.Error("/qurl setup: rebind refused; stored owner_id is shape-bad — likely a pre-pivot Auth0 sub. Operator must delete the workspace_mappings row to recover.", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID and owner_id_len is an int.
+				respondSlack(w, "Only the workspace owner can re-run `/qurl setup`, but this workspace's stored owner record is malformed and can't be displayed (likely a legacy record). Please contact support to recover access.")
+			}
+			return
+		}
 	}
 	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
 	if err != nil {
@@ -785,8 +861,16 @@ func (h *Handler) helpMessage() string {
 	lines = append(lines,
 		"• `/qurl get <url|$slug> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		"• `/qurl list` — List the tunnels available to you",
-		"• `/qurl setup` — Connect qURL to your Slack workspace and become its qURL admin (workspace admin only)",
 	)
+	// The ownership semantics only exist when AdminStore is wired; on the
+	// sandbox/no-DDB path the owner gate is skipped, so re-running /setup
+	// just mints again. Append the owner parenthetical only there so the
+	// help text matches the actual behavior of the deployment.
+	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
+	if h.cfg.AdminStore != nil {
+		setupLine += " (the first runner becomes the workspace owner; only they can re-run it)"
+	}
+	lines = append(lines, setupLine)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,

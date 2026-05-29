@@ -702,8 +702,15 @@ func TestCallbackSeedsAdminOnBind(t *testing.T) {
 	if admin.gotTeamID != testTeamID {
 		t.Errorf("BindWorkspace TeamID: got %q want %q", admin.gotTeamID, testTeamID)
 	}
-	if admin.gotOwner != testAdminSub {
-		t.Errorf("BindWorkspace OwnerID: got %q want %q (must come from id_token sub claim)", admin.gotOwner, testAdminSub)
+	// OwnerID is the Slack user ID of the /setup invoker (workspace
+	// owner in the LayerV admin model). It must equal verified.UserID
+	// — the same value as seedAdmin — by construction at first bind.
+	// The id_token sub claim is still required at OAuth-callback time
+	// (verifier runs upstream of this) but no longer persisted; the
+	// security gate it provides is still in place via the
+	// `qurlSub == ""` check in checkBindAllowed.
+	if admin.gotOwner != testUserID {
+		t.Errorf("BindWorkspace OwnerID: got %q want %q (must equal verified.UserID — the Slack user who ran /setup)", admin.gotOwner, testUserID)
 	}
 	if admin.gotSeed != testUserID {
 		t.Errorf("BindWorkspace seedAdmin: got %q want %q (must come from verified state's userID)", admin.gotSeed, testUserID)
