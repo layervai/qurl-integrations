@@ -127,6 +127,17 @@ const (
 // rather than the literal commandAdmin so a non-prod env whose commands
 // carry an env infix still reaches the admin surface instead of falling
 // through to the user one.
+//
+// SCOPE OF THE REWRITE: only the help text is rewritten to the invoked
+// command name (userHelpMessage / adminHelpMessage, via ReplaceAll). Static
+// error / usage / retry copy elsewhere (tunnelInstallUsage, the alias usage
+// strings, modal-error and rate-limit messages, empty-state hints) bakes in
+// the prod `/qurl-admin` / `/qurl` literal and is deliberately NOT rewritten.
+// That drift is accepted: non-prod (env-infix) installs are operator-only
+// internal sandboxes, where a retry hint naming the prod command is a
+// non-issue, and customer installs are always prod where the literals are
+// already correct. Threading the invoked command through every error site
+// isn't worth the churn for that audience.
 const adminCommandSuffix = "-admin"
 
 // isAdminCommand reports whether the invoked slash command is the admin
@@ -136,6 +147,12 @@ const adminCommandSuffix = "-admin"
 // `/some-other-admin` doesn't) — a foreign command can't route to admin
 // dispatch and then have userCommandName/help name a sibling that doesn't
 // exist.
+//
+// Classification is best-effort and assumes Slack only dispatches the
+// commands registered for this app (the `/qurl[-env][-admin]` family). An
+// unregistered shape like `/qurl-admin-extra` (suffix `-extra`, not `-admin`)
+// would fall through to the user surface and render its own name in help —
+// harmless, because Slack never sends a command that wasn't registered.
 func isAdminCommand(command string) bool {
 	return strings.HasPrefix(command, commandUser+"-") && strings.HasSuffix(command, adminCommandSuffix)
 }
@@ -146,6 +163,13 @@ func isAdminCommand(command string) bool {
 // `/qurl-sandbox-admin`, not the prod `/qurl-admin`). Both are idempotent
 // on their own surface: userCommandName(commandUser)==commandUser and
 // adminCommandName(commandAdmin)==commandAdmin.
+//
+// The returned names are Slack-stamped command literals (a registered slash
+// command, never free-form user input), so the redirect/unknown-subcommand
+// replies interpolate them into backtick fences raw — only the user-typed
+// verb text is run through echoText. That keeps the no-op hygiene off trusted
+// literals; if Slack's command tokens ever stopped being backtick-free this
+// assumption (documented on isAdminCommand) would need revisiting.
 func userCommandName(command string) string {
 	return strings.TrimSuffix(command, adminCommandSuffix)
 }

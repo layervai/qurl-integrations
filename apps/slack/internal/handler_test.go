@@ -293,11 +293,12 @@ func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 
-	// Matches a leading-slash command token plus any trailing command-name
-	// characters (the lowercase/digit/hyphen alphabet of `/qurl-admin` and
-	// non-prod names). It stops at the first space/backtick/other byte, so
-	// `/qurl-admin help` yields `/qurl-admin`, not the rest of the line.
-	tokenRe := regexp.MustCompile(`/qurl[a-z0-9-]*`)
+	// Matches `/qurl` plus the run of bytes up to the next formatting
+	// delimiter (space, the `*` bold marker, or a backtick fence). Captured
+	// broadly — not just [a-z0-9-] — so a mangle-able token like `/qurl_admin`
+	// or `/qurl.docs` (which would otherwise slip past as a bare, allowed
+	// `/qurl`) surfaces as its own non-allowed token and fails here.
+	tokenRe := regexp.MustCompile(`/qurl[^\s*\x60]*`) // \x60 = backtick fence
 	allowed := map[string]bool{commandUser: true, commandAdmin: true}
 
 	for _, tc := range []struct {
