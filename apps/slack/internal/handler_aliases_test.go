@@ -28,7 +28,9 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	if !strings.Contains(async, "Aliases configured for this channel") {
 		t.Errorf("async reply missing header: %q", async)
 	}
-	if !strings.Contains(async, "`$prod-db` → https://prod.example.com") {
+	// Legacy URL binding: the alias points at a raw URL (no slug), so the
+	// line reads "<url> (URL) → `$<alias>`".
+	if !strings.Contains(async, "https://prod.example.com (URL) → `$prod-db`") {
 		t.Errorf("async reply missing prod-db line: %q", async)
 	}
 }
@@ -49,8 +51,10 @@ func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$bastion` → `$ops-bastion`") {
-		t.Errorf("aliases reply missing alias→slug mapping: %q", async)
+	// Tunnel-backed: the slug is the canonical name (left of the arrow,
+	// labeled "(tunnel)") and the alias is its alternate name.
+	if !strings.Contains(async, "`$ops-bastion` (tunnel) → `$bastion`") {
+		t.Errorf("aliases reply missing slug→alias mapping: %q", async)
 	}
 	if strings.Contains(async, "r_bastion01") {
 		t.Errorf("aliases reply leaked opaque resource_id instead of slug: %q", async)
@@ -145,19 +149,20 @@ func TestHandleAliases_AdminStoreNil(t *testing.T) {
 	}
 }
 
-// TestFanoutAliasRows_RespectsCtxCancellation fences the dispatcher
+// TestFanoutAliasGroups_RespectsCtxCancellation fences the dispatcher
 // loop's ctx-aware semaphore acquire: a canceled ctx during dispatch
-// fills un-dispatched rows with id-only fallbacks (no goroutine
+// fills un-dispatched groups with id-only fallbacks (no goroutine
 // leaks, no deadlock).
-func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
+func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel so the dispatcher bails on first iteration.
 
-	entries := []slackdata.PolicyEntry{
+	// Distinct resource_ids → one group per entry.
+	groups := groupAliasEntriesByResource([]slackdata.PolicyEntry{
 		{Alias: "a", ResourceID: "r_a", ChannelID: "C"},
 		{Alias: "b", ResourceID: "r_b", ChannelID: "C"},
 		{Alias: "c", ResourceID: "r_c", ChannelID: "C"},
-	}
+	})
 
 	var hits atomic.Int32
 	ts := newAdminTestServers(t)
@@ -172,7 +177,7 @@ func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
 	}
 	log := slogTestLogger(t)
 
-	lines := fanoutAliasRows(ctx, log, c, entries, 1)
+	lines := fanoutAliasGroups(ctx, log, c, groups, 1)
 	if len(lines) != 3 {
 		t.Fatalf("lines len = %d, want 3", len(lines))
 	}
@@ -204,11 +209,11 @@ func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
 //     `$alias` → `r_xxx` lines instead of `$alias` → https://...).
 //
 // Without this fence, a refactor that swallows ctx in
-// [fanoutAliasRows]'s per-row goroutine (e.g., dropping the
+// [fanoutAliasGroups]'s per-group goroutine (e.g., dropping the
 // ctx-canceled branch in the error switch) would leave the
 // dispatcher waiting on wg.Wait() past the response_url deadline,
 // silently failing the entire `/qurl aliases` reply.
-func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
+func TestFanoutAliasGroups_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 	const numEntries = 80
 	entries := make([]slackdata.PolicyEntry, numEntries)
 	for i := range entries {
@@ -218,6 +223,8 @@ func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 			ChannelID:  "C",
 		}
 	}
+	// Distinct resource_ids → one group per entry.
+	groups := groupAliasEntriesByResource(entries)
 
 	ts := newAdminTestServers(t)
 	// Every resource fetch blocks until ctx is canceled — simulates a
@@ -246,7 +253,7 @@ func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	lines := fanoutAliasRows(ctx, log, c, entries, aliasesResourceFanoutLimit)
+	lines := fanoutAliasGroups(ctx, log, c, groups, aliasesResourceFanoutLimit)
 	elapsed := time.Since(start)
 
 	if len(lines) != numEntries {

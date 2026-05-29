@@ -159,7 +159,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
 			inputBlock(tunnelInstallBlockSlug, "qURL tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
-			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
+			inputBlock(tunnelInstallBlockShortcut, "Channel alias", "Optional. Leave blank to use the tunnel slug.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
 			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output. Docker snippets assume a Linux host.", false,
 				staticSelect(tunnelInstallActionEnvironment, []map[string]any{

@@ -384,7 +384,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 	for _, want := range []string{
 		"qURL tunnel `" + testTunnelSlug + "` is ready to install.",
-		"qURL shortcut `$" + testTunnelSlug + "` is ready in this channel.",
+		"qURL alias `$" + testTunnelSlug + "` is ready in this channel.",
 		"The shell block below prompts for it",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
@@ -1139,7 +1139,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	}
 	for _, want := range []string{
 		"qURL tunnel `" + testTunnelSlug + "` is ready to install.",
-		"qURL shortcut `$team-dash` is ready in this channel.",
+		"qURL alias `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
 		"The shell block below prompts for it",
 		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
@@ -1408,7 +1408,7 @@ func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "Channel shortcut storage is not configured") {
+	if !strings.Contains(w.Body.String(), "Channel alias storage is not configured") {
 		t.Fatalf("modal response = %s, want channel-shortcut store rejection", w.Body.String())
 	}
 }
@@ -1743,7 +1743,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL shortcut `$prod-dashboard` is ready in this channel.")
+	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
@@ -1774,7 +1774,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL shortcut `$prod-dashboard` is ready in this channel.")
+	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
 	}
@@ -2172,7 +2172,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 		t.Fatalf("first async reply = %q, want mint failure", first)
 	}
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "qURL shortcut `$"+testTunnelSlug+"` is ready in this channel.") {
+	if !strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "qURL alias `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("second async reply = %q, want successful remint against existing alias", second)
 	}
 	if apiKeyHits != 2 {
@@ -2197,7 +2197,7 @@ func TestEnsureTunnelAliasRecoversConcurrentSameResourceBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureTunnelAlias: %v", err)
 	}
-	if !strings.Contains(status, "qURL shortcut `$"+testTunnelSlug+"` is ready in this channel.") {
+	if !strings.Contains(status, "qURL alias `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("status = %q, want idempotent ready copy", status)
 	}
 }
@@ -2297,7 +2297,7 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "qURL shortcut") || !strings.Contains(async, "already used") {
+	if !strings.Contains(async, "qURL alias") || !strings.Contains(async, "already used") {
 		t.Fatalf("async reply = %q, want already-bound refusal", async)
 	}
 	if apiKeyHits != 0 {

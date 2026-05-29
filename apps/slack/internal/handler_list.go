@@ -140,7 +140,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	}
 
 	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Copy any `$slug` or `$alias` and run `/qurl get` on it to mint a one-time qURL link. Any `(also …)` aliases shown are specific to this channel._"
+		"\n\n_Each `$<slug>` is a tunnel's name; the `(alias: …)` names are alternate names for it in this channel. Copy a slug or an alias and run `/qurl get` on it to mint a one-time qURL link._"
 	if page.HasMore {
 		// page.HasMore is a master-list signal — more resources of ANY
 		// type, not necessarily more tunnels — so this footer can fire
@@ -216,15 +216,15 @@ func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 // line in /qurl list output:
 //
 //   - Slug only:           • `$<slug>`
-//   - With bound aliases:  • `$<slug>` (also `$<alias>`, `$<alias2>`)
+//   - With bound aliases:  • `$<slug>` (aliases: `$<alias>`, `$<alias2>`)
 //   - With description:    • `$<slug>` → <description>
 //
 // The primary token is [tunnelDisplayToken] (slug-first; never the opaque
-// r_<id>). `boundAliases` are the channel `$alias` shortcuts that resolve
+// r_<id>). `boundAliases` are the channel `$alias` names that resolve
 // to this tunnel in `/qurl get` — a tunnel can have several. They render
-// as "(also …)" so the user sees every name that works, EXCLUDING the
-// primary token itself (the install flow binds `$<slug>` as a channel
-// alias, so the slug would otherwise appear twice). The token-in-backticks
+// as "(alias: …)" / "(aliases: …)" so the user sees every name that works,
+// EXCLUDING the primary token itself (the install flow binds `$<slug>` as a
+// channel alias, so the slug would otherwise appear twice). The token-in-backticks
 // shape lets Slack render each as inline code. There is no `(tunnel)` label
 // or `[slug:...]` fragment — the whole list is tunnels and the token IS the
 // slug. The arrow joins to the human-readable description when one is set.
@@ -253,7 +253,11 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 		}
 	}
 	if len(extras) > 0 {
-		line += " (also " + strings.Join(extras, ", ") + ")"
+		label := "aliases: "
+		if len(extras) == 1 {
+			label = "alias: "
+		}
+		line += " (" + label + strings.Join(extras, ", ") + ")"
 	}
 	if r.Description != "" {
 		line += " → " + r.Description

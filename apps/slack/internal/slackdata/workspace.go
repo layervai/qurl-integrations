@@ -108,6 +108,32 @@ const bindDisambiguationBudget = 300 * time.Millisecond
 // single shared const would tie the two together implicitly.
 const addAdminDisambiguationBudget = 300 * time.Millisecond
 
+// LooksLikeSlackUserID reports whether s matches Slack's documented
+// user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid) prefix
+// followed by 8-63 uppercase-alphanumeric chars (9-64 chars total).
+//
+// This is the single source of truth for the Slack-ID shape check; the
+// handler package's looksLikeSlackUserID delegates here. Two callers
+// depend on it: the handler interpolates owner_id into `<@%s>` mrkdwn
+// mentions (a malformed value must not break out of the mention
+// surface), and BindWorkspace uses it to detect a pre-pivot Auth0-sub
+// owner_id so it can self-heal a legacy row (see BindWorkspace).
+func LooksLikeSlackUserID(s string) bool {
+	if len(s) < 9 || len(s) > 64 {
+		return false
+	}
+	if s[0] != 'U' && s[0] != 'W' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
 //
 // Workspace not yet bound to an owner → (false, "", nil). The handler
@@ -169,6 +195,10 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 //     circuits this way — admins added via /qurl admin add cannot
 //     re-run /setup, by design (prevents them from rotating the
 //     workspace credential to a different Auth0 account).
+//   - the existing owner_id is a shape-bad pre-pivot Auth0 sub →
+//     reclaim the orphaned row for the caller and return nil (the
+//     callback then mints as on a fresh install). See
+//     reclaimLegacyWorkspace.
 //   - any other caller (admin or non-admin) → ErrCodeWorkspaceAlreadyBound.
 //     The callback renders a rebind-refused page; no key is minted
 //     so there's nothing to revoke and the existing owner's
@@ -292,6 +322,20 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 				Title:      "BindWorkspace: caller is the existing workspace owner",
 			}
 		}
+		if existingOwner != "" && !LooksLikeSlackUserID(existingOwner) {
+			// Legacy/orphaned row: owner_id is a pre-pivot Auth0 sub
+			// (`auth0|…`), not a Slack user ID. No Slack user can ever
+			// equal it, so the workspace is permanently locked for
+			// everyone — including the real owner. Self-heal by
+			// reclaiming the row for this caller, the same first-come-
+			// claims posture an unbound workspace already has. Before
+			// #510 owner_id was the Auth0 sub; the migration left these
+			// rows behind, and the old recovery ("operator deletes the
+			// row") needed manual DDB access. This makes /qurl setup
+			// recover them on its own.
+			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_len", len(existingOwner))
+			return s.reclaimLegacyWorkspace(ctx, m, seedAdmin, existingOwner)
+		}
 		if existingOwner == "" {
 			// A row exists but carries no owner_id. This shouldn't happen —
 			// every BindWorkspace PutItem writes a non-empty OwnerID — so it
@@ -316,6 +360,58 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		Code:       ErrCodeWorkspaceAlreadyBound,
 		Title:      "BindWorkspace: workspace is owned by a different Slack user",
 	}
+}
+
+// reclaimLegacyWorkspace overwrites a pre-pivot workspace_mappings row
+// whose owner_id is a shape-bad Auth0 sub (detected by BindWorkspace).
+// The caller becomes the new owner and sole admin — identical to a
+// fresh bind, just replacing the orphaned row instead of creating one.
+//
+// The PutItem is conditioned on `owner_id = :legacy` (the exact value
+// BindWorkspace read on the strong-consistent disambiguation GetItem),
+// so two callers racing to reclaim the same legacy row can't both win:
+// the loser's condition fails because the owner_id is no longer the
+// legacy value, and it surfaces AlreadyBound — the same refusal any
+// non-owner rebind gets.
+func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin, legacyOwner string) error {
+	now := s.nowOrDefault().UTC()
+	nowISO := now.Format(time.RFC3339)
+	created := m.CreatedAt
+	if created.IsZero() {
+		created = now
+	}
+	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Item: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:        stringAttr(m.TeamID),
+			attrOwnerID:            stringAttr(m.OwnerID),
+			attrSeedAdminSlackUser: stringAttr(seedAdmin),
+			attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
+				Value: []string{seedAdmin},
+			},
+			attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
+			attrUpdatedAt: stringAttr(nowISO),
+		},
+		ConditionExpression: aws.String("owner_id = :legacy"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":legacy": stringAttr(legacyOwner),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if errors.As(err, &ccfe) {
+		// Lost the reclaim race — a concurrent caller already replaced
+		// the legacy owner_id with a valid Slack owner. Refuse, the same
+		// safe default as any other non-owner rebind.
+		return &Error{
+			StatusCode: http.StatusConflict,
+			Code:       ErrCodeWorkspaceAlreadyBound,
+			Title:      "BindWorkspace: legacy reclaim lost the race to a concurrent owner",
+		}
+	}
+	return ddbToError("BindWorkspace.reclaim", err)
 }
 
 // AddAdmin promotes targetUserID to bot admin on the (teamID)
