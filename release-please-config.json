@@ -22,6 +22,20 @@
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true
     },
+    "apps/gmail-extension": {
+      "release-type": "node",
+      "component": "gmail-extension",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "manifest.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "apps/cli": {
       "release-type": "go",
       "component": "cli",

@@ -68,6 +68,7 @@ body:
         - discord
         - cli
         - zapier
+        - gmail-extension
         - shared
         - ci
         - other
