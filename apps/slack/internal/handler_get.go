@@ -113,7 +113,7 @@ func noResourceForAliasMessage(alias string) string {
 // admin (only an admin can re-point it at a tunnel). Same posture as
 // [noResourceForAliasMessage].
 func legacyAliasBindingMessage(alias string) string {
-	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl set-alias $%s $<slug>`.", alias, alias)
+	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<slug>`.", alias, alias)
 }
 
 // notAllowedInChannelMessage is the copy surfaced when a user passes

@@ -491,6 +491,36 @@ func TestSetAlias_NonAdminDenied(t *testing.T) {
 	}
 }
 
+// TestUnsetAlias_NonAdminDenied is the symmetric fence to
+// TestSetAlias_NonAdminDenied: handleUnsetAlias carries the same in-code
+// admin gate, so a non-admin must be denied before the alias store is
+// touched. Pre-binds an alias so a dropped gate would leave a visible
+// effect (the binding cleared); the gate must keep it intact. Guards
+// against a regression that drops the gate from one alias verb but not the
+// other.
+func TestUnsetAlias_NonAdminDenied(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	store := newFakeAliasStore()
+	h.aliasStore = store
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, testTunnelResourceID); err != nil {
+		t.Fatalf("seed bind: %v", err)
+	}
+	// AdminStore names U_admin / U_alias_admin; "U_not_admin" is not among them.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	status, reply := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdmin("unset-alias $"+testAliasName, testAliasTeamID, "U_not_admin")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(reply, "admin-only") {
+		t.Errorf("reply = %q, want admin-only denial", reply)
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b[testAliasName] != testTunnelResourceID {
+		t.Errorf("alias cleared despite non-admin gate: %v", b)
+	}
+}
+
 func TestSetAlias_TunnelSlugMissingDoesNotCreateResource(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	var postHits atomic.Int32
