@@ -40,6 +40,11 @@ var oauthEnvKeys = []string{
 	"SLACK_BASE_URL", "OAUTH_STATE_SECRET", "QURL_ENDPOINT",
 }
 
+var slackInstallEnvKeys = []string{
+	envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL",
+	envSlackInstallStateSecret, "OAUTH_STATE_SECRET", envSlackBotScopes,
+}
+
 func validEnv() map[string]string {
 	return map[string]string{
 		"AUTH0_DOMAIN":        "example.auth0.com",
@@ -52,12 +57,66 @@ func validEnv() map[string]string {
 	}
 }
 
+func validSlackInstallEnv() map[string]string {
+	return map[string]string{
+		envSlackClientID:           "111.222",
+		envSlackClientSecret:       "slack-secret",
+		"SLACK_BASE_URL":           "https://slack-bot.example",
+		envSlackInstallStateSecret: validStateSecret,
+		"OAUTH_STATE_SECRET":       "",
+		envSlackBotScopes:          "",
+	}
+}
+
+func TestValidateSlackBotToken(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		token   string
+		wantErr bool
+	}{
+		{name: "unset"},
+		{name: "bot token", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")+10)},
+		{name: "rotating bot token", token: "xoxe.xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxe.xoxb-"))},
+		{name: "rotating refresh token", token: "xoxe-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxe-")), wantErr: true},
+		{name: "user token", token: "xoxp-test-token", wantErr: true},
+		{name: "app token", token: "xapp-test-token", wantErr: true},
+		{name: "placeholder bot token", token: "xoxb-", wantErr: true},
+		{name: "minimum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-"))},
+		{name: "one below typo-guard length", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")-1), wantErr: true},
+		{name: "token with whitespace", token: "xoxb-test-token\r", wantErr: true},
+		{name: "token with non-ascii", token: "xoxb-test-tokené", wantErr: true},
+		{name: "token with underscore", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")) + "_ok"},
+		{name: "token with dot", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMin-len("xoxb-")) + ".ok"},
+		{name: "long bot token", token: "xoxb-" + strings.Repeat("a", 250)},
+		{name: "maximum typo-guard length bot token", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMax-len("xoxb-"))},
+		{name: "one above typo-guard length", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMax-len("xoxb-")+1), wantErr: true},
+		{name: "token too long", token: "xoxb-" + strings.Repeat("a", auth.SlackBotTokenTypoGuardMax-len("xoxb-")+100), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := auth.ValidateSlackBotTokenShape(tc.token)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // applyEnv writes every oauthEnvKeys entry — empty when absent from kvs
 // — so the test doesn't depend on what was inherited from the shell.
 // t.Setenv handles per-test cleanup.
 func applyEnv(t *testing.T, kvs map[string]string) {
 	t.Helper()
 	for _, k := range oauthEnvKeys {
+		t.Setenv(k, kvs[k])
+	}
+}
+
+func applySlackInstallEnv(t *testing.T, kvs map[string]string) {
+	t.Helper()
+	for _, k := range slackInstallEnvKeys {
 		t.Setenv(k, kvs[k])
 	}
 }
@@ -401,5 +460,92 @@ func TestBuildOAuthConfigNormalizesURLEnvVars(t *testing.T) {
 	}
 	if cfg.Auth0Domain != "example.auth0.com" {
 		t.Errorf("Auth0Domain not normalized (expect scheme + trailing slash stripped): got %q", cfg.Auth0Domain)
+	}
+}
+
+func TestBuildSlackInstallConfigHappyPath(t *testing.T) {
+	env := validSlackInstallEnv()
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true with Slack install env set")
+	}
+	if cfg.ClientID != "111.222" || cfg.ClientSecret != "slack-secret" {
+		t.Fatalf("Slack client config not threaded through: %+v", cfg)
+	}
+	if cfg.SlackBaseURL != "https://slack-bot.example" {
+		t.Fatalf("SlackBaseURL = %q", cfg.SlackBaseURL)
+	}
+	if string(cfg.StateSecret) != validStateSecret {
+		t.Fatalf("StateSecret not threaded through")
+	}
+	if strings.Join(cfg.BotScopes, ",") != "commands,views:write" {
+		t.Fatalf("default bot scopes = %v", cfg.BotScopes)
+	}
+	if cfg.TokenStore == nil {
+		t.Fatal("TokenStore should be wired")
+	}
+}
+
+func TestBuildSlackInstallConfigFallsBackToOAuthStateSecret(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackInstallStateSecret] = ""
+	env["OAUTH_STATE_SECRET"] = validStateSecret
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want fallback to OAUTH_STATE_SECRET", ok, err)
+	}
+	if string(cfg.StateSecret) != validStateSecret {
+		t.Fatalf("StateSecret not sourced from OAUTH_STATE_SECRET")
+	}
+}
+
+func TestBuildSlackInstallConfigMissingVar(t *testing.T) {
+	for _, missing := range []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", envSlackInstallStateSecret} {
+		t.Run("missing="+missing, func(t *testing.T) {
+			env := validSlackInstallEnv()
+			delete(env, missing)
+			if missing == envSlackInstallStateSecret {
+				env["OAUTH_STATE_SECRET"] = ""
+			}
+			applySlackInstallEnv(t, env)
+			_, ok, err := buildSlackInstallConfig(newFakeProvider())
+			if err != nil {
+				t.Fatalf("expected nil error on missing var, got %v", err)
+			}
+			if ok {
+				t.Fatalf("expected ok=false when %s is missing", missing)
+			}
+		})
+	}
+}
+
+func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackBotScopes] = "commands views:write,chat:write"
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if strings.Join(cfg.BotScopes, ",") != "commands,views:write,chat:write" {
+		t.Fatalf("custom scopes = %v", cfg.BotScopes)
+	}
+}
+
+func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
+	env := validSlackInstallEnv()
+	env["SLACK_BASE_URL"] = "http://slack-bot.example"
+	applySlackInstallEnv(t, env)
+	_, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if ok {
+		t.Fatal("ok=true, want bad Slack install base URL to fail at config build")
+	}
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("err=%v, want https error", err)
 	}
 }

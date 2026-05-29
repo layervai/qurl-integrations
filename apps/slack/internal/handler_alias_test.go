@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Shared fixture values for alias-handler tests. Lifted to package
@@ -36,8 +41,8 @@ type fakeAliasStore struct {
 	rows map[string]map[string]string
 
 	// errBind, errUnbind let tests inject deterministic errors without
-	// spinning a real DDB fake. Set to a sentinel (ErrAliasAlreadyBound
-	// / ErrAliasNotFound) to exercise the typed-conflict branches.
+	// spinning a real DDB fake. Set to a slackdata sentinel to exercise
+	// the typed-conflict branches.
 	errBind   error
 	errUnbind error
 
@@ -78,7 +83,7 @@ func (f *fakeAliasStore) BindChannelAlias(ctx context.Context, teamID, channelID
 		f.rows[k] = row
 	}
 	if _, exists := row[aliasName]; exists {
-		return ErrAliasAlreadyBound
+		return slackdata.ErrAliasAlreadyBound
 	}
 	row[aliasName] = resourceID
 	return nil
@@ -93,10 +98,10 @@ func (f *fakeAliasStore) UnbindChannelAlias(_ context.Context, teamID, channelID
 	k := f.key(teamID, channelID)
 	row, ok := f.rows[k]
 	if !ok {
-		return ErrAliasNotFound
+		return slackdata.ErrAliasNotFound
 	}
 	if _, exists := row[aliasName]; !exists {
-		return ErrAliasNotFound
+		return slackdata.ErrAliasNotFound
 	}
 	delete(row, aliasName)
 	if len(row) == 0 {
@@ -183,6 +188,7 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
 		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
 		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},
+		{name: "happy tunnel slug", input: "$staging $prod-dashboard", wantAlias: testAliasName, wantTgt: "$prod-dashboard"},
 
 		{name: "missing target", input: "$staging", wantErr: true},
 		{name: "missing alias", input: testAliasURL, wantErr: true},
@@ -311,6 +317,104 @@ func TestSetAlias_HappyResourceID(t *testing.T) {
 	}
 }
 
+func TestSetAlias_HyphenatedHappyURL(t *testing.T) {
+	h, store := newAliasTestHandler(t)
+	body, sign := aliasSlashRequest(t, "set-alias $staging https://example.com", testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	b := store.bindings(testAliasTeamID, testAliasChannelID)
+	if b[testAliasName] != testAliasURL {
+		t.Errorf("stored bindings = %v, want {%q: %q}", b, testAliasName, testAliasURL)
+	}
+}
+
+func TestSetAlias_HappyTunnelSlug(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+		gotQuery = r.URL.Query()
+		respondQURLEnvelope(t, w, []map[string]any{{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		}})
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	store := newFakeAliasStore()
+	h.aliasStore = store
+	status, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-alias $staging $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if ack != ackWorkingOnIt {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	if !strings.Contains(async, testTunnelResourceID) {
+		t.Errorf("async response = %q, want resolved resource id", async)
+	}
+	if gotQuery.Get("slug") != testTunnelSlug {
+		t.Errorf("upstream query = %v, want slug=%q", gotQuery, testTunnelSlug)
+	}
+	if gotQuery.Get("limit") != "" || gotQuery.Get("cursor") != "" {
+		t.Errorf("upstream query = %v, want no pagination params", gotQuery)
+	}
+	b := store.bindings(testAliasTeamID, testAliasChannelID)
+	if b[testAliasName] != testTunnelResourceID {
+		t.Errorf("stored bindings = %v, want {%q: %s}", b, testAliasName, testTunnelResourceID)
+	}
+}
+
+func TestSetAlias_TunnelSlugMissingDoesNotCreateResource(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	var postHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits.Add(1)
+			t.Fatalf("setalias $slug must not create resources; got %s %s", r.Method, r.URL.Path)
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+		if gotSlug := r.URL.Query().Get("slug"); gotSlug != testTunnelSlug {
+			t.Fatalf("upstream slug query = %q, want %q", gotSlug, testTunnelSlug)
+		}
+		respondQURLEnvelope(t, w, []map[string]any{})
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	store := newFakeAliasStore()
+	h.aliasStore = store
+
+	_, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("setalias $staging $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
+
+	if ack != ackWorkingOnIt {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	if !strings.Contains(async, "was not found") {
+		t.Fatalf("async response = %q, want not-found copy", async)
+	}
+	if got := postHits.Load(); got != 0 {
+		t.Fatalf("POST hits = %d, want 0", got)
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+		t.Fatalf("alias store touched on missing slug: %v", b)
+	}
+}
+
 func TestSetAlias_ParserError(t *testing.T) {
 	// Fence: a parser-rejection path must not call into the store.
 	// Counts as a regression test for "admin-gate before resolution"
@@ -362,7 +466,7 @@ func TestSetChannelAlias_SecondAliasOnSameChannelSucceeds(t *testing.T) {
 
 func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 	// Binding the same alias name twice in the same channel must
-	// surface as a typed conflict (ErrAliasAlreadyBound). A different
+	// surface as a typed conflict (slackdata.ErrAliasAlreadyBound). A different
 	// resource id on the second call does NOT silently overwrite.
 	h, store := newAliasTestHandler(t)
 
@@ -552,7 +656,7 @@ func TestClearChannelAlias_OneOfManyLeavesOthers(t *testing.T) {
 
 func TestClearChannelAlias_NotPresentIsNoop(t *testing.T) {
 	// Clearing an alias that isn't bound surfaces the typed
-	// ErrAliasNotFound branch as "not bound; nothing to clear."
+	// slackdata.ErrAliasNotFound branch as "not bound; nothing to clear."
 	h, _ := newAliasTestHandler(t)
 
 	body, sign := aliasSlashRequest(t, "unsetalias $staging", testAliasTeamID, testAliasChannelID)
@@ -615,6 +719,25 @@ func TestUnsetAlias_NoStoreWired(t *testing.T) {
 	}
 }
 
+func TestUnsetAlias_HyphenatedForm(t *testing.T) {
+	h, store := newAliasTestHandler(t)
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, testAliasURL); err != nil {
+		t.Fatalf("seed alias: %v", err)
+	}
+	body, sign := aliasSlashRequest(t, "unset-alias $staging", testAliasTeamID, testAliasChannelID)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, "no longer bound") {
+		t.Fatalf("response = %q, want cleared copy", got)
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+		t.Fatalf("bindings after unset-alias = %v, want none", b)
+	}
+}
+
 func TestHelpListsNewVerbs(t *testing.T) {
 	// CR feedback fence from old #230: /qurl help must surface
 	// setalias and unsetalias when the alias store is wired. The
@@ -627,11 +750,14 @@ func TestHelpListsNewVerbs(t *testing.T) {
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
 
 	got := decodeSlackText(t, w.Body.Bytes())
-	if !strings.Contains(got, "setalias") {
-		t.Errorf("/qurl help = %q, missing setalias", got)
+	if !strings.Contains(got, "set-alias") {
+		t.Errorf("/qurl help = %q, missing set-alias", got)
 	}
-	if !strings.Contains(got, "unsetalias") {
-		t.Errorf("/qurl help = %q, missing unsetalias", got)
+	if !strings.Contains(got, "unset-alias") {
+		t.Errorf("/qurl help = %q, missing unset-alias", got)
+	}
+	if strings.Contains(got, "tunnel install") {
+		t.Errorf("/qurl help = %q, advertised tunnel install without AdminStore", got)
 	}
 }
 
@@ -652,11 +778,11 @@ func TestHelpHidesAliasVerbsWhenAliasStoreNil(t *testing.T) {
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
 
 	got := decodeSlackText(t, w.Body.Bytes())
-	if strings.Contains(got, "setalias") {
-		t.Errorf("/qurl help = %q, leaked setalias verb on unwired aliasStore", got)
+	if strings.Contains(got, "set-alias") {
+		t.Errorf("/qurl help = %q, leaked set-alias verb on unwired aliasStore", got)
 	}
-	if strings.Contains(got, "unsetalias") {
-		t.Errorf("/qurl help = %q, leaked unsetalias verb on unwired aliasStore", got)
+	if strings.Contains(got, "unset-alias") {
+		t.Errorf("/qurl help = %q, leaked unset-alias verb on unwired aliasStore", got)
 	}
 	// help itself MUST still appear — the gate only hides the
 	// alias-bearing verbs, not the help line.

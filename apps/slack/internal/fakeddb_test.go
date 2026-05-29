@@ -52,6 +52,8 @@ type fakeDDB struct {
 	updateHook func(in *dynamodb.UpdateItemInput)
 	// putHook mirrors updateHook for PutItem (BindWorkspace).
 	putHook func(in *dynamodb.PutItemInput)
+	// getHook mirrors updateHook for GetItem read assertions.
+	getHook func(table string, key map[string]string)
 	// getItemErrs maps tableName → injected GetItem error.
 	getItemErrs map[string]error
 	// updateItemErrs maps tableName → injected UpdateItem error.
@@ -71,7 +73,7 @@ type fakeDDB struct {
 
 // SetGetItemErr injects an error returned on every GetItem against
 // `table`. Used to simulate transport failures from the admin gate
-// (workspace_mappings) or the ResolvePolicy path (channel_policies).
+// (workspace_mappings) or the channel-policy reads (channel_policies).
 func (f *fakeDDB) SetGetItemErr(table string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -150,6 +152,13 @@ func (f *fakeDDB) SetPutItemHook(hook func(in interface{})) {
 		return
 	}
 	f.putHook = func(in *dynamodb.PutItemInput) { hook(in) }
+}
+
+// SetGetItemHook installs a callback invoked on every GetItem.
+func (f *fakeDDB) SetGetItemHook(hook func(table string, key map[string]string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getHook = hook
 }
 
 // tableNames groups the table names used across the post-pivot
@@ -257,6 +266,9 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	name := aws.ToString(in.TableName)
+	if f.getHook != nil {
+		f.getHook(name, stringKey(in.Key))
+	}
 	if err, ok := f.getItemErrs[name]; ok {
 		return nil, err
 	}
@@ -285,6 +297,16 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 		return &dynamodb.GetItemOutput{}, nil
 	}
 	return &dynamodb.GetItemOutput{Item: cloneItem(item)}, nil
+}
+
+func stringKey(in map[string]ddbtypes.AttributeValue) map[string]string {
+	out := make(map[string]string, len(in))
+	for name, value := range in {
+		if s, ok := value.(*ddbtypes.AttributeValueMemberS); ok {
+			out[name] = s.Value
+		}
+	}
+	return out
 }
 
 // PutItem implements [slackdata.DynamoDBClient]. Honors the
@@ -365,7 +387,7 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 	} else {
 		existing = cloneItem(existing)
 	}
-	if err := applyUpdateExpression(aws.ToString(in.UpdateExpression), existing, in.ExpressionAttributeValues); err != nil {
+	if err := applyUpdateExpression(aws.ToString(in.UpdateExpression), existing, in.ExpressionAttributeValues, in.ExpressionAttributeNames); err != nil {
 		return nil, err
 	}
 	table[key] = existing
@@ -425,7 +447,7 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 // A general DDB expression parser is much larger than this; we'd
 // rather grow this with each new production callsite than ship a
 // half-finished parser.
-func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.AttributeValue) error {
+func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	if expr == "" {
 		return nil
 	}
@@ -433,7 +455,7 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 	for _, c := range clauses {
 		switch c.verb {
 		case "SET":
-			if err := applySetClause(c.body, item, vals); err != nil {
+			if err := applySetClause(c.body, item, vals, names); err != nil {
 				return err
 			}
 		case "ADD":
@@ -442,6 +464,10 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 			}
 		case "DELETE":
 			if err := applyDeleteClause(c.body, item, vals); err != nil {
+				return err
+			}
+		case "REMOVE":
+			if err := applyRemoveClause(c.body, item, names); err != nil {
 				return err
 			}
 		default:
@@ -497,7 +523,7 @@ func splitUpdateClauses(expr string) []updateClause {
 // applySetClause handles `<attr> = <value>[, <attr> = <value>]*`.
 // Values are `:vN` tokens (literal substitutions from
 // ExpressionAttributeValues).
-func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
+func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	pairs := splitTopLevelCommas(body)
 	for _, p := range pairs {
 		eq := strings.Index(p, "=")
@@ -510,7 +536,17 @@ func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 		if !ok {
 			return fmt.Errorf("fakeDDB SET: unknown value %q", valTok)
 		}
-		item[attr] = v
+		if err := setAttrPath(item, attr, names, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRemoveClause(body string, item map[string]ddbtypes.AttributeValue, names map[string]string) error {
+	paths := strings.Fields(body)
+	for _, path := range paths {
+		removeAttrPath(item, strings.TrimSuffix(path, ","), names)
 	}
 	return nil
 }
@@ -650,11 +686,11 @@ func splitTopLevelCommas(s string) []string {
 //
 // Returns (true, nil) when every subexpression is satisfied. OR is
 // NOT parsed — no production caller emits it post-scope-cut.
-func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, _ map[string]string) (bool, error) {
+func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
 	parts := strings.Split(expr, " AND ")
 	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals)
+		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
 			return false, err
 		}
@@ -665,21 +701,21 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 	return true, nil
 }
 
-func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue) (bool, error) {
+func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	switch {
 	case strings.HasPrefix(term, "attribute_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_exists("), ")")
 		if !present {
 			return false, nil
 		}
-		_, ok := item[attr]
+		_, ok := getAttrPath(item, attr, names)
 		return ok, nil
 	case strings.HasPrefix(term, "attribute_not_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_not_exists("), ")")
 		if !present {
 			return true, nil
 		}
-		_, ok := item[attr]
+		_, ok := getAttrPath(item, attr, names)
 		return !ok, nil
 	case strings.HasPrefix(term, "NOT contains("):
 		// `NOT contains(<attr>, :val)` — true iff the SS attribute
@@ -697,7 +733,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		if !present {
 			return true, nil
 		}
-		raw, ok := item[attr]
+		raw, ok := getAttrPath(item, attr, names)
 		if !ok {
 			return true, nil
 		}
@@ -735,7 +771,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		if !present {
 			return false, nil
 		}
-		raw, ok := item[attr]
+		raw, ok := getAttrPath(item, attr, names)
 		if !ok {
 			return false, nil
 		}
@@ -767,7 +803,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		}
 		attr := strings.TrimSpace(term[:idx])
 		valTok := strings.TrimSpace(term[idx+len(op)+2:])
-		lhs, ok := item[attr]
+		lhs, ok := getAttrPath(item, attr, names)
 		if !ok {
 			return false, nil
 		}
@@ -778,6 +814,83 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		return compareAttr(lhs, op, rhs)
 	}
 	return false, fmt.Errorf("fakeDDB condition: unsupported term %q", term)
+}
+
+func setAttrPath(item map[string]ddbtypes.AttributeValue, path string, names map[string]string, v ddbtypes.AttributeValue) error {
+	parts := resolvePath(path, names)
+	if len(parts) == 0 {
+		return fmt.Errorf("fakeDDB SET: empty attr path %q", path)
+	}
+	if len(parts) == 1 {
+		item[parts[0]] = v
+		return nil
+	}
+	if len(parts) != 2 {
+		return fmt.Errorf("fakeDDB SET: unsupported nested attr path %q", path)
+	}
+	m, ok := item[parts[0]].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return fmt.Errorf("fakeDDB SET: %q is not a map", parts[0])
+	}
+	m.Value[parts[1]] = v
+	return nil
+}
+
+func removeAttrPath(item map[string]ddbtypes.AttributeValue, path string, names map[string]string) {
+	parts := resolvePath(path, names)
+	if len(parts) == 0 {
+		return
+	}
+	if len(parts) == 1 {
+		delete(item, parts[0])
+		return
+	}
+	if len(parts) != 2 {
+		return
+	}
+	m, ok := item[parts[0]].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return
+	}
+	delete(m.Value, parts[1])
+}
+
+func getAttrPath(item map[string]ddbtypes.AttributeValue, path string, names map[string]string) (ddbtypes.AttributeValue, bool) {
+	parts := resolvePath(path, names)
+	if len(parts) == 0 {
+		return nil, false
+	}
+	if len(parts) == 1 {
+		v, ok := item[parts[0]]
+		return v, ok
+	}
+	if len(parts) != 2 {
+		return nil, false
+	}
+	m, ok := item[parts[0]].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return nil, false
+	}
+	v, ok := m.Value[parts[1]]
+	return v, ok
+}
+
+func resolvePath(path string, names map[string]string) []string {
+	raw := strings.Split(path, ".")
+	parts := make([]string, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if names != nil {
+			if resolved, ok := names[p]; ok {
+				p = resolved
+			}
+		}
+		parts = append(parts, p)
+	}
+	return parts
 }
 
 func compareAttr(lhs ddbtypes.AttributeValue, op string, rhs ddbtypes.AttributeValue) (bool, error) {

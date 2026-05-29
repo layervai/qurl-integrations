@@ -157,8 +157,12 @@ func (ts *adminTestServers) seedPolicyDualShape(t *testing.T, teamID, channelID,
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyDualShape(teamID, channelID, alias, resourceID))
 }
 
-// seedPolicySet seeds a channel_policies row carrying an
-// allowed_resource_ids SS attribute. Used for ResolvePolicy tests.
+// seedPolicySet seeds a channel_policies row carrying an explicit
+// allowed_resource_ids SS attribute. Used by any test that needs such a
+// row — the `$r_<id>` mint gate (authorizeResourceIDForGet →
+// AllowedResourceIDsForChannel) is the primary consumer, but alias and
+// admin-policy tests (and the deliberately-inert restrictive policy in
+// the /qurl list regression test) use it too.
 // If alias is non-empty, also seeds a single-binding alias_bindings
 // Map so /qurl aliases lists the channel — convenient for tests
 // that exercise both surfaces against the same row.

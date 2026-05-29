@@ -535,3 +535,64 @@ func TestLookupChannelAlias_DDBError(t *testing.T) {
 		t.Errorf("StatusCode = %d, want 5xx (transport-class)", ae.StatusCode)
 	}
 }
+
+func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
+	var calls []*dynamodb.UpdateItemInput
+	store := newStore(&stubDDB{
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			calls = append(calls, in)
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	if err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01"); err != nil {
+		t.Fatalf("BindChannelAlias: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("UpdateItem calls = %d, want 2", len(calls))
+	}
+	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty" {
+		t.Errorf("seed UpdateExpression = %q", got)
+	}
+	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid" {
+		t.Errorf("write UpdateExpression = %q", got)
+	}
+	if got := aws.ToString(calls[1].ConditionExpression); got != "attribute_not_exists(#ab.#a)" {
+		t.Errorf("write ConditionExpression = %q", got)
+	}
+	if calls[1].ExpressionAttributeNames["#ab"] != attrAliasBindings || calls[1].ExpressionAttributeNames["#a"] != "prod-dashboard" {
+		t.Errorf("ExpressionAttributeNames = %+v, want alias map key escaped", calls[1].ExpressionAttributeNames)
+	}
+	rid, ok := calls[1].ExpressionAttributeValues[":rid"].(*ddbtypes.AttributeValueMemberS)
+	if !ok || rid.Value != "r_prod_dash01" {
+		t.Errorf(":rid = %#v, want r_prod_dash01", calls[1].ExpressionAttributeValues[":rid"])
+	}
+}
+
+func TestBindChannelAlias_DuplicateReturnsSentinel(t *testing.T) {
+	var calls int
+	store := newStore(&stubDDB{
+		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			calls++
+			if calls == 2 {
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			}
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	err := store.BindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard", "r_prod_dash01")
+	if !errors.Is(err, ErrAliasAlreadyBound) {
+		t.Fatalf("err = %v, want ErrAliasAlreadyBound", err)
+	}
+}
+
+func TestUnbindChannelAlias_NotFoundReturnsSentinel(t *testing.T) {
+	store := newStore(&stubDDB{
+		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("missing")}
+		},
+	})
+	err := store.UnbindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard")
+	if !errors.Is(err, ErrAliasNotFound) {
+		t.Fatalf("err = %v, want ErrAliasNotFound", err)
+	}
+}

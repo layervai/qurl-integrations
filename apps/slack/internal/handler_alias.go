@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // AliasStore is the persistence surface the alias verbs depend on.
@@ -20,10 +23,9 @@ import (
 // carries an app-managed `alias_bindings: Map<alias_name,
 // resource_id>` attribute so a channel can host `$grafana`,
 // `$staging-db`, `$logs` etc. simultaneously, each pointing at a
-// distinct resource. A small interface here rather than a direct dep
-// on the slackdata package keeps this PR shippable against main even
-// while #231/#233's slackdata pivot rework is in flight; the eventual
-// store satisfies the same shape.
+// distinct resource. The concrete slackdata.Store satisfies this small
+// interface, which keeps handler tests focused on Slack behavior instead of
+// DynamoDB plumbing.
 //
 // Schema decision locked 2026-05-17: app-managed Map attribute on the
 // existing PK/SK; no GSI, no SK reshape, no data migration (the table
@@ -34,28 +36,18 @@ type AliasStore interface {
 	// `SET alias_bindings.#a = :rid` with
 	// `ConditionExpression: attribute_not_exists(alias_bindings.#a)` so
 	// a duplicate alias name in the same channel returns
-	// ErrAliasAlreadyBound rather than overwriting a teammate's
+	// slackdata.ErrAliasAlreadyBound rather than overwriting a teammate's
 	// binding. Other aliases on the same channel are untouched.
 	BindChannelAlias(ctx context.Context, teamID, channelID, aliasName, resourceID string) error
 	// UnbindChannelAlias removes aliasName from (teamID, channelID).
 	// Implementations issue `REMOVE alias_bindings.#a` with
 	// `ConditionExpression: attribute_exists(alias_bindings.#a)`.
-	// Returns ErrAliasNotFound when aliasName is not bound in the
+	// Returns slackdata.ErrAliasNotFound when aliasName is not bound in the
 	// channel. Other aliases on the same channel are untouched.
 	UnbindChannelAlias(ctx context.Context, teamID, channelID, aliasName string) error
 }
 
-// ErrAliasAlreadyBound is returned by AliasStore implementations when
-// BindChannelAlias is called for an aliasName that already has a
-// binding in (teamID, channelID). Handlers use errors.Is to map this
-// to the 409 / "alias already bound" friendly copy.
-var ErrAliasAlreadyBound = errors.New("alias already bound in this channel")
-
-// ErrAliasNotFound is returned by AliasStore implementations when
-// UnbindChannelAlias is called for an aliasName that has no binding
-// in (teamID, channelID). Handlers use errors.Is to map this to the
-// 404 / "alias not bound" friendly copy.
-var ErrAliasNotFound = errors.New("alias not bound in this channel")
+var errTunnelSlugNotFound = errors.New("tunnel slug not found")
 
 // resourceIDPrefix is the wire prefix on every qurl-service resource
 // id. setalias discriminates URL targets from resource-id targets on
@@ -80,7 +72,7 @@ var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 // aliasUsage is the help-text body returned when setalias/unsetalias
 // is invoked with an obvious typo. Centralized so the parser-rejection
 // path and the missing-arg path share the same copy.
-const aliasUsage = "Usage:\n• `/qurl setalias $<alias> <url-or-resource-id>`\n• `/qurl unsetalias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
+const aliasUsage = "Usage:\n• `/qurl set-alias $<alias> <url-or-resource-id-or-$slug>`\n• `/qurl unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
 
 // URL scheme constants. Lifted so the parser, validator, and any
 // future caller can't drift on the literal string match — and so
@@ -102,10 +94,14 @@ const (
 // the user but trips ST1005 if we wrap in `error`, and (c) the
 // dispatcher needs the literal string anyway.
 const (
-	msgAliasTargetInvalid = "Target must be a URL (http/https) or a resource id (`r_…`).\n\n" + aliasUsage
-	msgAliasMissing       = "Missing alias.\n\n" + aliasUsage
-	msgAliasNoSigil       = "Alias must start with `$` (e.g. `$staging`).\n\n" + aliasUsage
-	msgAliasEmptyName     = "Missing alias name after `$`.\n\n" + aliasUsage
+	reasonAliasMissing   = "Missing alias."
+	reasonAliasNoSigil   = "Alias must start with `$` (e.g. `$staging`)."
+	reasonAliasEmptyName = "Missing alias name after `$`."
+
+	msgAliasTargetInvalid = "Target must be a URL (http/https), a resource id (`r_...`), or a tunnel slug (`$prod-dashboard`). Tunnel slugs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
+	msgAliasMissing       = reasonAliasMissing + "\n\n" + aliasUsage
+	msgAliasNoSigil       = reasonAliasNoSigil + "\n\n" + aliasUsage
+	msgAliasEmptyName     = reasonAliasEmptyName + "\n\n" + aliasUsage
 )
 
 // aliasArgs is the parsed shape of a `/qurl setalias $a <target>` or
@@ -175,6 +171,17 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 		out.Target = tgt
 		return out, ""
 	}
+	if strings.HasPrefix(tgt, "$") {
+		slug, msg := requireAlias(tgt)
+		// Alias and tunnel-slug grammars intentionally diverge:
+		// aliases may start with a digit, while tunnel slugs must
+		// start with a letter and be at least three characters.
+		if msg != "" || !tunnelSlugPattern.MatchString(slug) {
+			return nil, msgAliasTargetInvalid
+		}
+		out.Target = "$" + slug
+		return out, ""
+	}
 	u, err := url.Parse(tgt)
 	if err != nil || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
 		return nil, msgAliasTargetInvalid
@@ -183,29 +190,37 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	return out, ""
 }
 
-// requireAlias checks that `tok` is `$<alias>` and returns the alias
-// without the sigil. Mirrors the grammar in the broader parser
-// (apps/slack/internal/parser.go on #228) so a future consolidation
-// is a textual no-op.
-//
-// Returns (alias, "") on success and ("", userCopy) on rejection.
-// See [parseAliasArgs] for the rationale on plain strings vs error.
-func requireAlias(tok string) (alias, userMsg string) {
+func validateChannelShortcutToken(tok string) (alias, reason string) {
+	return validateAliasTokenForNoun(tok, "Channel shortcut", "channel shortcut")
+}
+
+func validateAliasTokenForNoun(tok, noun, nounLower string) (alias, reason string) {
 	if tok == "" {
-		return "", msgAliasMissing
+		return "", fmt.Sprintf("Missing %s.", nounLower)
 	}
 	if !strings.HasPrefix(tok, "$") {
-		return "", msgAliasNoSigil
+		return "", noun + " must start with `$` (e.g. `$staging`)."
 	}
 	alias = strings.TrimPrefix(tok, "$")
 	if alias == "" {
-		return "", msgAliasEmptyName
+		return "", fmt.Sprintf("Missing %s name after `$`.", nounLower)
 	}
 	if len(alias) > aliasMaxLen {
-		return "", fmt.Sprintf("Alias `$%s` is longer than %d characters.\n\n%s", alias, aliasMaxLen, aliasUsage)
+		return "", fmt.Sprintf("%s `$%s` is longer than %d characters.", noun, alias, aliasMaxLen)
 	}
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "", fmt.Sprintf("Alias `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).\n\n%s", alias, aliasUsage)
+		return "", fmt.Sprintf("%s `$%s` must be lowercase alphanumeric + dashes (no leading/trailing dash).", noun, alias)
+	}
+	return alias, ""
+}
+
+// requireAlias checks that `tok` is `$<alias>` and returns copy suitable for
+// slash-command responses. See [parseAliasArgs] for the rationale on plain
+// strings vs error.
+func requireAlias(tok string) (alias, userMsg string) {
+	alias, reason := validateAliasTokenForNoun(tok, "Alias", "alias")
+	if reason != "" {
+		return "", reason + "\n\n" + aliasUsage
 	}
 	return alias, ""
 }
@@ -215,8 +230,8 @@ func requireAlias(tok string) (alias, userMsg string) {
 // calls (lookup + write) typically resolve in <100ms, so 2.5s leaves
 // headroom while keeping the bot's failure mode "we surfaced an
 // error" rather than "Slack reported timeout while we kept working
-// and the user retried." Re-evaluate (move to runAsync + response_url)
-// only if DDB tail latency starts exceeding this budget in practice.
+// and the user retried." Slug-targeted set-alias uses runAsync because
+// it must first resolve the slug through qurl-service.
 //
 // `var` (not `const`) so tests can swap in a short budget without
 // dropping a 2.5-second real-time wait into the suite. Production
@@ -257,7 +272,7 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 	return
 }
 
-// handleSetAlias routes `/qurl setalias $<alias> <target>`.
+// handleSetAlias routes `/qurl set-alias $<alias> <target>`.
 //
 // **Admin restriction:** This handler is admin-gated at the Slack app
 // manifest level — the `/qurl setalias` command must be declared
@@ -269,20 +284,33 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 // gate to the manifest closes that gap structurally: a non-admin's
 // command never reaches this handler.
 //
-// **Synchronous reply contract:** sets reply ephemerally per the
+// **Reply contract:** URL/resource_id targets reply synchronously and
+// ephemerally per the
 // admin-verb posture in the rollout doc — user feedback is
-// admin-only, so default-public would be wrong. The qurl-bot-slack
-// stack today returns the user copy directly on the slash-command
-// HTTP body; the async response_url path (postResponse) is used only
-// when the work cannot complete inside Slack's 3-second ack window.
-// Alias upsert is a single DDB UpdateItem — synchronous is fine.
+// admin-only, so default-public would be wrong. Slug targets do a
+// qurl-service lookup before the DDB write, so they ack immediately
+// and post the final result via response_url.
 func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
-	rest := strings.TrimSpace(strings.TrimPrefix(text, "setalias"))
+	rest := stripSetAliasPrefix(text)
 
 	args, userMsg := parseAliasArgs(rest, true)
 	if userMsg != "" {
 		respondSlack(w, userMsg)
+		return
+	}
+
+	if strings.HasPrefix(args.Target, "$") {
+		_, cancel, teamID, channelID, ok := h.aliasPreamble(w, values, "setalias")
+		if !ok {
+			return
+		}
+		cancel()
+		slug := strings.TrimPrefix(args.Target, "$")
+		h.runAsync(w, "setalias_slug", values, func(ctx context.Context, log *slog.Logger) {
+			msg := h.resolveAndBindTunnelSlugAlias(ctx, log, teamID, channelID, args.Alias, slug)
+			_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
+		})
 		return
 	}
 
@@ -292,22 +320,43 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	}
 	defer cancel()
 
+	msg, err := h.bindAliasTarget(ctx, teamID, channelID, args.Alias, args.Target)
+	if err != nil {
+		slog.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
+	}
+	respondSlack(w, msg)
+}
+
+func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) string {
+	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
+	if err != nil {
+		log.Error("setalias tunnel slug target resolution failed", "error", err, "alias", alias)
+		if errors.Is(err, errTunnelSlugNotFound) {
+			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl tunnel install %s` first, then retry this alias.", slug, slug)
+		}
+		return sanitizeAPIError(err, "Failed to resolve tunnel slug")
+	}
+	msg, err := h.bindAliasTarget(ctx, teamID, channelID, alias, resourceID)
+	if err != nil {
+		log.Error("setalias write failed", "error", err, "alias", alias)
+	}
+	return msg
+}
+
+func (h *Handler) bindAliasTarget(ctx context.Context, teamID, channelID, alias, target string) (string, error) {
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
 	// on alias_bindings.#a with attribute_not_exists. A second alias
 	// name on the same channel succeeds (different map key); a
-	// duplicate alias name surfaces as ErrAliasAlreadyBound and is
+	// duplicate alias name surfaces as slackdata.ErrAliasAlreadyBound and is
 	// rendered as a refusal. The refusal copy names only the alias
 	// (not its bound target) to keep the info-disclosure surface
 	// narrow — claude-bot review #5 on the prior single-alias version.
-	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.Alias, args.Target)
-	if errors.Is(err, ErrAliasAlreadyBound) {
-		respondSlack(w, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unsetalias $%s` first, or pick a different alias.", args.Alias, args.Alias))
-		return
+	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, target)
+	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
+		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unset-alias $%s` first, or pick a different alias.", alias, alias), nil
 	}
 	if err != nil {
-		slog.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
-		respondSlack(w, "Failed to update alias. Please try again.")
-		return
+		return "Failed to update alias. Please try again.", err
 	}
 	// Admin-verb audit trail: log the bound (alias, target) pair on
 	// success so post-incident reconstruction doesn't depend on
@@ -316,8 +365,40 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// stripped) so credentials embedded by a setting admin don't
 	// land in operator-visible logs where the readership is wider
 	// than the writer's admin scope.
-	slog.Info("alias bound", "team_id", teamID, "channel_id", channelID, "alias", args.Alias, "target", redactURLForLog(args.Target)) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
-	respondSlack(w, fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", args.Alias, args.Target))
+	logAliasBound(teamID, channelID, alias, target)
+	return fmt.Sprintf("Alias `$%s` now points to `%s` in this channel.", alias, target), nil
+}
+
+func logAliasBound(teamID, channelID, alias, target string) {
+	slog.LogAttrs(context.Background(), slog.LevelInfo, "alias bound",
+		slog.String("team_id", teamID),
+		slog.String("channel_id", channelID),
+		slog.String("alias", alias),
+		slog.String("target", redactURLForLog(target)),
+	)
+}
+
+func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug string) (string, error) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		return "", err
+	}
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: slug})
+	if err != nil {
+		return "", err
+	}
+	for i := range page.Resources {
+		resource := &page.Resources[i]
+		// Defense-in-depth: the server's `?slug=` filter is single-
+		// purpose, but re-assert type/slug/active here so an upstream
+		// regression can't leak a non-tunnel, wrong-slug, or revoked
+		// resource into mintable state (this resolves the resource_id
+		// that both /qurl set-alias and /qurl get then mint against).
+		if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
+			return resource.ResourceID, nil
+		}
+	}
+	return "", errTunnelSlugNotFound
 }
 
 // redactURLForLog strips userinfo (e.g. `user:token@`) and any raw
@@ -343,7 +424,7 @@ func redactURLForLog(target string) string {
 	return redacted.String()
 }
 
-// handleUnsetAlias routes `/qurl unsetalias $<alias>`.
+// handleUnsetAlias routes `/qurl unset-alias $<alias>`.
 //
 // **Admin restriction:** Same Slack-manifest-level gate as
 // handleSetAlias — see that comment. The CR feedback's
@@ -352,12 +433,12 @@ func redactURLForLog(target string) string {
 //
 // **Not-bound posture:** UnbindChannelAlias is conditional on
 // attribute_exists(alias_bindings.#a) — clearing an alias that
-// isn't bound surfaces as ErrAliasNotFound and is rendered as
+// isn't bound surfaces as slackdata.ErrAliasNotFound and is rendered as
 // "no such alias on this channel." Other aliases on the same channel
 // are untouched.
 func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
-	rest := strings.TrimSpace(strings.TrimPrefix(text, "unsetalias"))
+	rest := stripUnsetAliasPrefix(text)
 
 	args, userMsg := parseAliasArgs(rest, false)
 	if userMsg != "" {
@@ -372,7 +453,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	defer cancel()
 
 	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
-	if errors.Is(err, ErrAliasNotFound) {
+	if errors.Is(err, slackdata.ErrAliasNotFound) {
 		respondSlack(w, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", args.Alias))
 		return
 	}

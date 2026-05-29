@@ -8,6 +8,7 @@ on:
       - 'shared/**'
       - 'go.mod'
       - 'go.sum'
+      - '.golangci.yml'
       - '.github/workflows/slack.yml'
   pull_request:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - 'shared/**'
       - 'go.mod'
       - 'go.sum'
+      - '.golangci.yml'
       - '.github/workflows/slack.yml'
 
 permissions:
@@ -91,7 +93,11 @@ jobs:
   docker-check:
     name: Docker
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # arm64 Go builds under QEMU routinely take several minutes, and Buildx's
+    # GitHub Actions cache export is part of the job. Keep the timeout above
+    # the observed build+cache path so successful image builds do not get
+    # canceled during cache upload.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 

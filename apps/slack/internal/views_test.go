@@ -19,13 +19,13 @@ func TestSetAliasRebindModal_Shape(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if got["type"] != "modal" {
-		t.Errorf("type = %v, want modal", got["type"])
+	if got[blockKitFieldType] != blockKitTypeModal {
+		t.Errorf("type = %v, want modal", got[blockKitFieldType])
 	}
-	if got["callback_id"] != callbackIDSetAliasRebind {
-		t.Errorf("callback_id = %v, want %s", got["callback_id"], callbackIDSetAliasRebind)
+	if got[blockKitFieldCallbackID] != callbackIDSetAliasRebind {
+		t.Errorf("callback_id = %v, want %s", got[blockKitFieldCallbackID], callbackIDSetAliasRebind)
 	}
-	for _, k := range []string{"title", "submit", "close", "blocks"} {
+	for _, k := range []string{blockKitFieldTitle, blockKitFieldSubmit, blockKitFieldClose, blockKitFieldBlocks} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("missing required key %q", k)
 		}
@@ -150,7 +150,7 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 			if err := json.Unmarshal(raw, &modal); err != nil {
 				t.Fatalf("modal JSON: %v", err)
 			}
-			pm, ok := modal["private_metadata"].(string)
+			pm, ok := modal[blockKitFieldPrivateMetadata].(string)
 			if !ok {
 				t.Fatalf("private_metadata not a string: %T", modal["private_metadata"])
 			}
@@ -163,6 +163,100 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 			}
 			if meta.NewTarget != tc.newTarget {
 				t.Errorf("new_target = %q, want %q", meta.NewTarget, tc.newTarget)
+			}
+		})
+	}
+}
+
+func TestTunnelInstallModal_Shape(t *testing.T) {
+	t.Parallel()
+	raw, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID:      testAdminTeamID,
+		ChannelID:   testTunnelChannelID,
+		UserID:      testAdminUserID,
+		ResponseURL: "https://hooks.slack.com/services/test",
+	})
+	if err != nil {
+		t.Fatalf("TunnelInstallModal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if got[blockKitFieldType] != blockKitTypeModal {
+		t.Errorf("type = %v, want modal", got[blockKitFieldType])
+	}
+	if got[blockKitFieldCallbackID] != callbackIDTunnelInstall {
+		t.Errorf("callback_id = %v, want %s", got[blockKitFieldCallbackID], callbackIDTunnelInstall)
+	}
+	for _, k := range []string{blockKitFieldTitle, blockKitFieldSubmit, blockKitFieldClose, blockKitFieldBlocks, blockKitFieldPrivateMetadata} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing required key %q", k)
+		}
+	}
+	pm, ok := got[blockKitFieldPrivateMetadata].(string)
+	if !ok {
+		t.Fatalf("private_metadata not a string: %T", got[blockKitFieldPrivateMetadata])
+	}
+	var meta TunnelInstallModalMetadata
+	if err := json.Unmarshal([]byte(pm), &meta); err != nil {
+		t.Fatalf("private_metadata JSON: %v", err)
+	}
+	if meta.TeamID != testAdminTeamID || meta.ChannelID != testTunnelChannelID || meta.UserID != testAdminUserID || meta.ResponseURL == "" {
+		t.Errorf("metadata = %+v, want team/channel/user/response_url", meta)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"qURL tunnel slug",
+		"Channel shortcut",
+		"Target environment",
+		"Docker snippets assume a Linux host",
+		string(tunnelEnvDocker),
+		string(tunnelEnvCompose),
+		string(tunnelEnvECSFargate),
+		string(tunnelEnvKubernetes),
+		"Local HTTP port",
+		"Optional for Linux Docker and Docker Compose only",
+		"\"text\":\"web\"",
+		"Leave blank for ECS/Fargate or Kubernetes",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("modal body missing %q", want)
+		}
+	}
+}
+
+func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
+	t.Parallel()
+	_, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   "https://hooks.slack.com/actions/" + strings.Repeat("x", slackPrivateMetadataMaxBytes),
+		CreatedAtUnix: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private_metadata exceeds Slack limit") {
+		t.Fatalf("TunnelInstallModal err = %v, want private_metadata size error", err)
+	}
+}
+
+func TestSlackChannelMentionValidatesWithoutLossyFiltering(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		channelID string
+		want      string
+	}{
+		{name: "ordinary Slack channel", channelID: "C0123456789", want: "<#C0123456789>"},
+		{name: "future safe hyphen", channelID: "C0123456789-ABC", want: "<#C0123456789-ABC>"},
+		{name: "invalid mention delimiter", channelID: "C0123>", want: slackChannelFallbackText},
+		{name: "empty", channelID: " ", want: slackChannelFallbackText},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := slackChannelMention(tc.channelID); got != tc.want {
+				t.Fatalf("slackChannelMention(%q) = %q, want %q", tc.channelID, got, tc.want)
 			}
 		})
 	}

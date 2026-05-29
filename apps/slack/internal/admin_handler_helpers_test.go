@@ -18,6 +18,7 @@ package internal
 //     response_url follow-up text is read off the captured POST.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -130,7 +131,8 @@ type adminSlashInvoker struct {
 	responseU *httptest.Server
 	// channelID overrides the slash-command channel_id form field
 	// for the next invocation. Empty falls back to "C_test".
-	channelID string
+	channelID    string
+	enterpriseID string
 }
 
 // newAdminSlashInvoker spins up a response_url-capturing httptest
@@ -179,10 +181,14 @@ func (a *adminSlashInvoker) invokeAdmin(text, teamID, userID string) (status int
 		"channel_id":   {a.channelID},
 		"response_url": {a.responseU.URL},
 		"trigger_id":   {"trigger_test"},
-	}.Encode()
+	}
+	if a.enterpriseID != "" {
+		body.Set(fieldEnterpriseID, a.enterpriseID)
+	}
+	encoded := body.Encode()
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(body))
-	sig, ts := signSlackBody(a.t, body)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/slack/commands", strings.NewReader(encoded))
+	sig, ts := signSlackBody(a.t, encoded)
 	r.Header.Set(headerSlackSignature, sig)
 	r.Header.Set(headerSlackTimestamp, ts)
 	a.h.ServeHTTP(w, r)
@@ -203,11 +209,22 @@ func (a *adminSlashInvoker) invokeAdminAsync(text, teamID, userID string) (syncS
 // to the text field. Tests assert on text directly.
 func parseSlackText(t *testing.T, body []byte) string {
 	t.Helper()
-	var got map[string]string
+	var got map[string]any
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal reply: %v body=%s", err, body)
 	}
-	return got["text"]
+	text, _ := got["text"].(string)
+	return text
+}
+
+func parseSlackReplyBool(t *testing.T, body []byte, field string) bool {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, body)
+	}
+	value, _ := got[field].(bool)
+	return value
 }
 
 // workspaceMappingHasAdmin returns true iff the workspace_mappings
