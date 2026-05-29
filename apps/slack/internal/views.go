@@ -26,6 +26,16 @@ const (
 	callbackIDTunnelInstall  = "tunnel_install"
 )
 
+// listCreateQurlActionID is the action_id on the "Create qURL" button
+// rendered next to each `/qurl list` row. The block_actions handler
+// matches on it to mint a one-time qURL for that row's tunnel — the same
+// resolve→authorize→mint work as `/qurl get $<slug>`. The button's value
+// carries the row's `$<slug>`/`$<alias>` token with the `$` sigil
+// stripped. Reused as the action_id on every row (Slack only requires
+// action_id uniqueness within a block, not across the message), so the
+// clicked row is identified by the button's value, not its action_id.
+const listCreateQurlActionID = "list_create_qurl"
+
 const (
 	blockKitFieldBlocks          = "blocks"
 	blockKitFieldCallbackID      = "callback_id"
@@ -279,6 +289,28 @@ func sectionBlock(text string) map[string]any {
 		"text": map[string]any{
 			"type": "mrkdwn",
 			"text": text,
+		},
+	}
+}
+
+// sectionWithButton returns a `section` block whose accessory is a
+// button. Slack renders an accessory to the RIGHT of the section text —
+// Block Kit has no leading/left accessory slot, so the right-aligned
+// accessory is the idiomatic "one action per row" shape. `value` rides
+// along on the button and is echoed back in the block_actions payload
+// when the button is clicked, so the handler knows which row was tapped.
+func sectionWithButton(text, buttonText, actionID, value string) map[string]any {
+	return map[string]any{
+		"type": "section",
+		"text": map[string]any{
+			"type": "mrkdwn",
+			"text": text,
+		},
+		"accessory": map[string]any{
+			"type":      "button",
+			"text":      plainTextObj(buttonText),
+			"action_id": actionID,
+			"value":     value,
 		},
 	}
 }

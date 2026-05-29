@@ -40,6 +40,38 @@ const listResourcesScanLimit = 100
 // rather than the old admin/non-admin branch.
 const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl tunnel install <slug>`."
 
+// listCreateButtonLabel is the text on the per-row "Create qURL" button.
+// Clicking it mints a one-time qURL for that row's tunnel — the same work
+// as typing `/qurl get $<slug>`. (Brand spelling: lowercase q, uppercase URL.)
+const listCreateButtonLabel = "Create qURL"
+
+// listCreateButtonMaxRows caps how many tunnel rows /qurl list renders as
+// interactive section+button blocks. Slack rejects a message with more
+// than 50 blocks; the rendered shape is header (1) + N row sections +
+// footer (1) + optional has-more note (1), so 45 rows tops out at 48 —
+// 2 blocks of deliberate headroom against a future non-row block. A
+// workspace with more tunnels than this degrades to the plain-text
+// listing (every tunnel still visible — the text path has no block
+// ceiling — just without the per-row button) rather than a message Slack
+// would refuse to render. Tunnels are created deliberately (via `/qurl
+// tunnel install`), so a real workspace is far below this; see
+// [listResourcesScanLimit].
+const listCreateButtonMaxRows = 45
+
+// listFooterText is the guidance line under /qurl list when rendered as
+// plain text — both the Block Kit fallback (`text`) and the visible
+// message when the tunnel set is too large for per-row buttons (see
+// [listCreateButtonMaxRows]). It names the typed path and the
+// one-time-use default; the button path is named only in
+// [listFooterButtons], shown when the buttons are actually present.
+const listFooterText = "Copy any `$slug` or `$alias` and run `/qurl get` to mint a link. Every qURL is one-time use — it opens access once, then expires. Any `(also …)` shortcuts shown are specific to this channel."
+
+// listFooterButtons is the guidance line beneath the interactive /qurl
+// list (the version with a per-row Create qURL button). It names BOTH
+// ways to mint — tapping the button and the typed command — and the
+// one-time-use default.
+const listFooterButtons = "Tap *Create qURL* on any tunnel, or run `/qurl get $slug` (or `$alias`), to mint a link. Every qURL is one-time use — it opens access once, then expires. Any `(also …)` shortcuts shown are specific to this channel."
+
 // handleListResources implements `/qurl list`. It lists the workspace's
 // tunnel resources (type=tunnel only — URL/transit resources are
 // filtered out) so each line is a copy-paste-ready `$<slug>` token the
@@ -134,22 +166,57 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return resources[i].ResourceID < resources[j].ResourceID
 	})
 
+	// Render each tunnel as a section block carrying a "Create qURL"
+	// accessory button (so a click mints the one-time link without the
+	// user copy-pasting `/qurl get $slug`), and in parallel build the
+	// plain-text `body` Slack uses as the block fallback. useButtons is
+	// false when the tunnel set exceeds Slack's per-message block ceiling
+	// (see listCreateButtonMaxRows) — then only the text path renders.
+	useButtons := len(resources) <= listCreateButtonMaxRows
 	lines := make([]string, 0, len(resources))
+	var blocks []any
+	if useButtons {
+		blocks = make([]any, 0, len(resources)+3)
+		blocks = append(blocks, sectionBlock("*Protected Tunnel Resources:*"))
+	}
 	for i := range resources {
-		lines = append(lines, formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID]))
+		line := formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID])
+		lines = append(lines, line)
+		if !useButtons {
+			continue
+		}
+		// displayTok is "" only for a slug-less, alias-less tunnel — the
+		// "(no slug …)" row, which has no `$<token>` that `/qurl get` (or
+		// the button) could mint against — so that row gets no button.
+		if tok := displayTok[resources[i].ResourceID]; tok != "" {
+			blocks = append(blocks, sectionWithButton(line, listCreateButtonLabel, listCreateQurlActionID, tok))
+		} else {
+			blocks = append(blocks, sectionBlock(line))
+		}
 	}
 
-	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Copy any `$slug` or `$alias` and run `/qurl get` on it to mint a one-time qURL link. Any `(also …)` aliases shown are specific to this channel._"
+	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
+	if useButtons {
+		blocks = append(blocks, contextBlock(listFooterButtons))
+	}
 	if page.HasMore {
 		// page.HasMore is a master-list signal — more resources of ANY
 		// type, not necessarily more tunnels — so this footer can fire
 		// even when every tunnel is already shown. See the #531 caveat
 		// on listResourcesScanLimit; until then we warn rather than
 		// risk implying the listing is exhaustive.
-		body += fmt.Sprintf("\n_…more resources past the first %d-row scan — some tunnels may not be shown._", listResourcesScanLimit)
+		hasMore := fmt.Sprintf("…more resources past the first %d-row scan — some tunnels may not be shown.", listResourcesScanLimit)
+		body += "\n_" + hasMore + "_"
+		if useButtons {
+			blocks = append(blocks, contextBlock(hasMore))
+		}
 	}
-	_ = h.postResponse(log, responseURL, body)
+
+	if !useButtons {
+		_ = h.postResponse(log, responseURL, body)
+		return
+	}
+	_ = h.postResponseBlocks(log, responseURL, body, blocks)
 }
 
 // filterTunnelResources returns only the tunnel-type resources from the

@@ -39,22 +39,137 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		"view_id", payload.View.ID,
 	)
 
-	if payload.Type != "view_submission" {
-		// Buttons + select menus + shortcut entries land here. Ack
-		// 200 with an empty body and ignore until a feature wires
-		// the dispatch.
+	switch payload.Type {
+	case "block_actions":
+		// Button clicks in messages — currently the per-row "Create qURL"
+		// button on `/qurl list`. handleBlockActions acks and dispatches.
+		h.handleBlockActions(w, payload)
+	case "view_submission":
+		switch payload.View.CallbackID {
+		case callbackIDTunnelInstall:
+			h.handleTunnelInstallSubmission(w, payload)
+		default:
+			// Unknown callback_id — ack 200 (Slack hangs the modal
+			// otherwise) and log so a future view drift is visible.
+			slog.Info("unknown view_submission callback_id", "callback_id", payload.View.CallbackID)
+			respondJSON(w, http.StatusOK, map[string]any{})
+		}
+	default:
+		// Select menus, shortcuts, and any other interaction type we
+		// don't wire yet. Ack 200 with an empty body and ignore.
+		respondJSON(w, http.StatusOK, map[string]any{})
+	}
+}
+
+// handleBlockActions routes Slack block_actions interactions (button
+// clicks in posted messages). The only button today is "Create qURL" on
+// each `/qurl list` row, which mints a one-time qURL for that row's
+// tunnel — the same resolve→authorize→mint work as `/qurl get $<slug>`.
+//
+// Slack requires a fast 200 ack on the interaction, so the mint runs on
+// the bounded async pool and the link is delivered out-of-band via the
+// interaction's response_url as a NEW ephemeral message (replace_original
+// defaults to false), leaving the list message itself intact.
+func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
+	action, ok := findListCreateQurlAction(payload.Actions)
+	if !ok {
+		// A button we don't handle (or an empty actions array). Ack and
+		// ignore so Slack doesn't surface an error to the clicking user.
+		// Log the action_ids present so a future button that's rendered
+		// into a message but never wired here surfaces as a breadcrumb
+		// rather than a silent no-op.
+		slog.Info("block_actions: no recognized action", "team_id", payload.Team.ID, "action_ids", blockActionIDs(payload.Actions))
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	switch payload.View.CallbackID {
-	case callbackIDTunnelInstall:
-		h.handleTunnelInstallSubmission(w, payload)
-	default:
-		// Unknown callback_id — ack 200 (Slack hangs the modal
-		// otherwise) and log so a future view drift is visible.
-		slog.Info("unknown view_submission callback_id", "callback_id", payload.View.CallbackID)
+
+	responseURL := payload.ResponseURL
+	log := slog.With(
+		"command", "list_create_qurl",
+		"team_id", payload.Team.ID,
+		"channel_id", payload.Channel.ID,
+		"user_id", payload.User.ID,
+	)
+
+	// The button value is the `$<slug>`/`$<alias>` token (sigil stripped)
+	// written when the list rendered. Re-validate it through the SAME
+	// grammar `/qurl get` uses so a malformed value fails the same way a
+	// typed token would, instead of reaching the resolve/mint path or
+	// burning an upstream slug lookup. Our own buttons always carry a
+	// valid token, so this is defense-in-depth; the notice is posted
+	// out-of-band (h.Go, not the async pool) to keep the ack prompt.
+	token, tokErr := parseAliasToken("$" + strings.TrimSpace(action.Value))
+	if tokErr != nil {
+		log.Warn("list create-qurl: button carried an unparseable token", "error", tokErr)
+		h.Go(func() { _ = h.postResponse(log, responseURL, ":warning: "+unexpectedGetShapeMessage) })
 		respondJSON(w, http.StatusOK, map[string]any{})
+		return
 	}
+
+	cmd := &Command{
+		Subcommand: SubcmdGet,
+		Alias:      token,
+		Flags:      map[string]string{},
+		Raw:        "get $" + token,
+	}
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		h.processButtonGet(ctx, log, responseURL, payload.Team.ID, payload.Channel.ID, payload.User.ID, payload.TriggerID, cmd)
+	}) {
+		// Pool saturated — don't let the click be a silent no-op. h.Go is
+		// wg-tracked but does NOT consume an async slot, so reporting the
+		// saturation can't itself deepen it.
+		log.Warn("async pool saturated — dropping list Create qURL click")
+		h.Go(func() { _ = h.postResponse(log, responseURL, ackBusy) })
+	}
+	respondJSON(w, http.StatusOK, map[string]any{})
+}
+
+// processButtonGet is the async-worker body for the `/qurl list`
+// "Create qURL" button. It mints a one-time qURL for the row's tunnel via
+// the same [Handler.getWork] pipeline as `/qurl get $<slug>` (resolve the
+// token → channel-authorize → rate-limit → mint) and posts the outcome to
+// the interaction's response_url. The cmd carries no dm/reason flags —
+// the button is the plain one-time-use mint.
+func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID, userID, triggerID string, cmd *Command) {
+	if channelID == "" {
+		// Channel-scope guard mirrors processGet: the resolve path is
+		// channel-scoped, so a channel-less interaction can't authorize.
+		log.Warn("list create-qurl: empty channel_id; refusing channel-less invocation")
+		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
+		return
+	}
+	text, err := h.getWork(ctx, log, getWorkArgs{
+		cmd:       cmd,
+		teamID:    teamID,
+		channelID: channelID,
+		userID:    userID,
+		triggerID: triggerID,
+	})
+	h.finishGet(log, responseURL, text, err)
+}
+
+// findListCreateQurlAction returns the first "Create qURL" list-row button
+// from a block_actions payload's actions array. Slack sends one entry per
+// clicked element, so a single button click yields exactly one match and
+// taking the first is correct for that contract. Matches on action_id so
+// an unrelated button on a future message doesn't trigger a mint.
+func findListCreateQurlAction(actions []interactionAction) (interactionAction, bool) {
+	for _, a := range actions {
+		if a.ActionID == listCreateQurlActionID {
+			return a, true
+		}
+	}
+	return interactionAction{}, false
+}
+
+// blockActionIDs lists the action_ids present in a block_actions payload,
+// for the no-recognized-action log breadcrumb.
+func blockActionIDs(actions []interactionAction) []string {
+	ids := make([]string, 0, len(actions))
+	for _, a := range actions {
+		ids = append(ids, a.ActionID)
+	}
+	return ids
 }
 
 func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
@@ -302,9 +417,9 @@ func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnel
 	return ""
 }
 
-// interactionPayload is the subset of Slack's view_submission
-// payload we read. Fields we don't touch are intentionally elided so
-// the JSON unmarshal is forgiving to upstream additions.
+// interactionPayload is the subset of Slack's view_submission and
+// block_actions payloads we read. Fields we don't touch are intentionally
+// elided so the JSON unmarshal is forgiving to upstream additions.
 type interactionPayload struct {
 	Type string `json:"type"`
 	Team struct {
@@ -322,6 +437,23 @@ type interactionPayload struct {
 		} `json:"state"`
 	} `json:"view"`
 	TriggerID string `json:"trigger_id"`
+	// Channel, ResponseURL, and Actions are populated on block_actions
+	// (button click) payloads. Channel is the conversation the button was
+	// clicked in (the mint authorizes against it); ResponseURL is where
+	// the minted link is delivered; Actions carries the clicked element(s).
+	Channel struct {
+		ID string `json:"id"`
+	} `json:"channel"`
+	ResponseURL string              `json:"response_url"`
+	Actions     []interactionAction `json:"actions"`
+}
+
+// interactionAction is one entry of a block_actions payload's `actions`
+// array (the elements the user interacted with). For our list button,
+// Value carries the `$<slug>`/`$<alias>` token (sigil stripped).
+type interactionAction struct {
+	ActionID string `json:"action_id"`
+	Value    string `json:"value"`
 }
 
 type interactionStateValue struct {
