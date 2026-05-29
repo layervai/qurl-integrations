@@ -118,6 +118,16 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 		if !strings.Contains(async, "`$secret`") {
 			t.Errorf("channel %q: non-admin should see the secret tunnel (no per-channel filter post-revert): %q", channelID, async)
 		}
+		// Negative fence: a filter reintroduced on only one branch would
+		// surface the empty-state or the (removed) non-admin
+		// pagination-gap copy for this non-admin caller, even if another
+		// branch still rendered rows.
+		if strings.Contains(async, "No tunnels found") {
+			t.Errorf("channel %q: empty-state copy fired — a channel filter may have dropped the listing: %q", channelID, async)
+		}
+		if strings.Contains(async, "past the first page") {
+			t.Errorf("channel %q: removed non-admin pagination-gap copy reappeared: %q", channelID, async)
+		}
 	}
 }
 
