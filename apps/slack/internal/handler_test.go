@@ -170,7 +170,10 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 
 	userHelp := slashReply(t, h, commandUser, "help")
-	if !strings.Contains(userHelp, "/qurl get") || !strings.Contains(userHelp, "/qurl list") {
+	// `/qurl list` is an unconditional user verb; `/qurl get` and `/qurl
+	// aliases` gate on AdminStore (not wired here) — their gating is fenced
+	// by TestUserHelpGatesGetAndAliasesOnAdminStore.
+	if !strings.Contains(userHelp, "/qurl list") {
 		t.Errorf("/qurl help missing user verbs: %q", userHelp)
 	}
 	// setup is a user verb (first-come-claims) — the user surface must
@@ -289,8 +292,10 @@ func TestDispatchSplit_NonProdCommandNamesRouteBySuffix(t *testing.T) {
 		t.Errorf("admin-verb redirect should name /qurl-sandbox-admin, got %q", reply)
 	}
 
-	// Help renders the invoked (sandbox) command names.
-	if userHelp := slashReply(t, h, "/qurl-sandbox", "help"); !strings.Contains(userHelp, "/qurl-sandbox get") {
+	// Help renders the invoked (sandbox) command names. Assert on the
+	// unconditional `/qurl-sandbox list` verb (get/aliases gate on AdminStore,
+	// not wired here) to prove the command-name rewrite.
+	if userHelp := slashReply(t, h, "/qurl-sandbox", "help"); !strings.Contains(userHelp, "/qurl-sandbox list") {
 		t.Errorf("/qurl-sandbox help should render the sandbox command name, got %q", userHelp)
 	}
 	if adminHelp := slashReply(t, h, "/qurl-sandbox-admin", "help"); !strings.Contains(adminHelp, "/qurl-sandbox-admin help") {
@@ -780,7 +785,10 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "/qurl get") {
+	// Assert on `/qurl help` — the unconditional help marker. (`/qurl get`
+	// is now gated on AdminStore, which this handler doesn't wire, so it's
+	// no longer a reliable "help rendered" signal here.)
+	if !strings.Contains(result["text"], "/qurl help") {
 		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }

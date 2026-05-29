@@ -909,9 +909,9 @@ func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
 	// absent" assertion fences the AdminStore-absent gating.
 	// newAliasTestHandler wires an AdminStore, which would advertise tunnel
 	// install and flip that assertion — so construct the handler directly.
-	// (The user-help `/qurl aliases` gate is fenced by
-	// TestUserHelpGatesAliasesOnAdminStore, not here — admin help never
-	// renders that line.)
+	// (The user-help `/qurl get` and `/qurl aliases` gates are fenced by
+	// TestUserHelpGatesGetAndAliasesOnAdminStore, not here — admin help
+	// never renders those user-verb lines.)
 	h := newTestHandler(t, noopQURLServer(t))
 	h.aliasStore = newFakeAliasStore()
 	body, sign := aliasSlashRequest(t, "help", testAliasTeamID, testAliasChannelID)
@@ -931,20 +931,30 @@ func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
 	}
 }
 
-// TestUserHelpGatesAliasesOnAdminStore fences the `/qurl aliases` line in
-// the USER help: it reads channel_policies through the AdminStore
-// (processAliases fails closed when AdminStore is nil), so userHelpMessage
-// must advertise it only when AdminStore is wired. Exercises
-// userHelpMessage directly because `help` routes to the admin surface in
-// the dispatch split, so the slash-command path can't reach user help.
-func TestUserHelpGatesAliasesOnAdminStore(t *testing.T) {
+// TestUserHelpGatesGetAndAliasesOnAdminStore fences the AdminStore gate on
+// the `/qurl get` and `/qurl aliases` lines in the USER help: both resolve
+// through the AdminStore (get via resolveTokenForGet, aliases via
+// processAliases) and fail closed when it's nil post-tunnels-only, so
+// userHelpMessage must advertise them only when AdminStore is wired.
+// Exercises userHelpMessage directly because `help` routes to the admin
+// surface in the dispatch split, so the slash-command path can't reach
+// user help.
+func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	if got := h.userHelpMessage(commandUser); strings.Contains(got, "/qurl aliases`") {
-		t.Errorf("user help advertised /qurl aliases with no AdminStore: %q", got)
+	noStore := h.userHelpMessage(commandUser)
+	if strings.Contains(noStore, "/qurl aliases`") {
+		t.Errorf("user help advertised /qurl aliases with no AdminStore: %q", noStore)
+	}
+	if strings.Contains(noStore, "/qurl get") {
+		t.Errorf("user help advertised /qurl get with no AdminStore: %q", noStore)
 	}
 	seedAliasAdminGate(t, h, testAliasTeamID)
-	if got := h.userHelpMessage(commandUser); !strings.Contains(got, "/qurl aliases`") {
-		t.Errorf("user help omitted /qurl aliases with AdminStore wired: %q", got)
+	withStore := h.userHelpMessage(commandUser)
+	if !strings.Contains(withStore, "/qurl aliases`") {
+		t.Errorf("user help omitted /qurl aliases with AdminStore wired: %q", withStore)
+	}
+	if !strings.Contains(withStore, "/qurl get") {
+		t.Errorf("user help omitted /qurl get with AdminStore wired: %q", withStore)
 	}
 }
 

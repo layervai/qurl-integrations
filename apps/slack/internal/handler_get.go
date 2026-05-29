@@ -110,13 +110,16 @@ func noResourceForAliasMessage(alias string) string {
 // admin (only an admin can re-point it at a tunnel). Same posture as
 // [noResourceForAliasMessage].
 //
-// Precondition: `alias` MUST be a parser-validated token (the charset gate
-// in parseGet/parseAliasToken), never raw user input. It's interpolated
-// verbatim into the reply AND a `/qurl set-alias $<alias>` hint, so a
-// charset-unchecked value would reopen the Slack-fence-escaping surface
-// the parser otherwise guards. Today every caller comes through the
-// validated get path, so this holds.
+// `alias` is interpolated verbatim into the reply AND a `/qurl-admin set-alias
+// $<alias>` hint, both inside Slack inline-code fences. Callers pass a
+// parser-validated token today, but rather than rely on that convention the
+// charset is re-asserted here: a value that isn't [aliasCharsetPattern]-clean
+// (e.g. one carrying a backtick) falls back to token-free copy, so a future
+// caller can't reopen the Slack-fence-escaping surface the parser guards.
 func legacyAliasBindingMessage(alias string) string {
+	if !aliasCharsetPattern.MatchString(alias) {
+		return "That channel shortcut points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias`."
+	}
 	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<slug>`.", alias, alias)
 }
 

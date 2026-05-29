@@ -173,9 +173,10 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 //     slug but does have an alias.
 //  3. "" — a slug-less, resource-alias-less tunnel has no intrinsic
 //     `$<token>` the user can `get` (get is slug/alias-only now).
-//     Vanishingly rare (tunnels are created with a slug).
-//     [tunnelDisplayToken] then tries a channel-bound alias before
-//     falling back to the bare resource_id.
+//     Vanishingly rare (tunnels are created with a slug). This function
+//     stops at ""; the channel-alias promotion and the bare-resource_id
+//     fallback both live downstream — in [tunnelDisplayToken] and
+//     [formatTunnelListLine] respectively, not here.
 func tunnelToken(r *client.Resource) string {
 	if r.Slug != "" {
 		return r.Slug
