@@ -125,7 +125,10 @@ func groupAliasEntriesByResource(entries []slackdata.PolicyEntry) []aliasGroup {
 		key := rid
 		if key == "" {
 			// No shared resource — key each resource-less row uniquely
-			// so two of them don't collapse into one line.
+			// so two of them don't collapse into one line. The "\x00"
+			// sentinel can't appear in a real resource_id (DDB string
+			// attrs written by this code are alias/slug/r_-id shaped), so
+			// it can't collide with a populated rid.
 			key = "\x00" + entries[i].Alias
 		}
 		gi, ok := idx[key]
@@ -185,6 +188,13 @@ loop:
 				// same resource, so one lookup (via the first alias)
 				// resolves the whole group. A tunnel carries a Slug and
 				// no TargetURL; a legacy URL binding the reverse.
+				//
+				// This single-fetch optimization assumes the upstream
+				// lookup-by-alias returns the canonical resource (the same
+				// one all aliases in the group are bound to in DDB), not an
+				// alias-specific view. True today; if GetResourceByAlias
+				// ever returned a per-alias view, a group line could pick up
+				// the wrong slug — fetch per alias then.
 				if r, rerr := c.GetResourceByAlias(ctx, g.aliases[0]); rerr == nil {
 					target = r.TargetURL
 					slug = r.Slug

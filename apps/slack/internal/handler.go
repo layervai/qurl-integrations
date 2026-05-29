@@ -791,7 +791,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			// the mention surface.
 			if looksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID) //nolint:gosec // G706: slog escapes control bytes in attribute values; owner_user_id is shape-validated by looksLikeSlackUserID above.
-				respondSlack(w, fmt.Sprintf("`/qurl setup` can only be re-run by the person who first connected qURL to this workspace (<@%s>) — this stops anyone else from re-pointing it at a different qURL account. Ask them to re-run it. For admin tasks that don't need re-connecting, use the other `/qurl admin` commands.", ownerID))
+				respondSlack(w, fmt.Sprintf("`/qurl setup` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the other `/qurl admin` commands.", ownerID))
 				return
 			}
 			// Shape-bad owner_id → a pre-pivot Auth0 sub left behind by
@@ -802,7 +802,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			// callback by reclaiming the orphaned row for this caller
 			// (first-come-claims, the same posture as an unbound
 			// workspace). Log loudly so the legacy reclaim is grep-able.
-			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID and owner_id_len is an int.
+			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID, legacy_owner_prefix is the bounded provider prefix, owner_id_len is an int.
 		}
 	}
 	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())

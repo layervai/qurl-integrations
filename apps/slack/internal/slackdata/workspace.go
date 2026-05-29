@@ -135,13 +135,14 @@ func LooksLikeSlackUserID(s string) bool {
 	return true
 }
 
-// legacyOwnerPrefix returns the bounded provider prefix of a shape-bad
+// LegacyOwnerPrefix returns the bounded provider prefix of a shape-bad
 // owner_id for logging — `auth0|`, `google-oauth2|`, etc. — so on-call
 // can confirm a pre-pivot row from CloudWatch without a DDB read. It
 // stops at (and includes) the first `|`, or the first 8 chars if there
 // is none, so the per-user identifier after the provider is never
-// logged.
-func legacyOwnerPrefix(s string) string {
+// logged. Exported so the slash-command gate (handler package) logs the
+// same field as BindWorkspace at the other reclaim-detection surface.
+func LegacyOwnerPrefix(s string) string {
 	if i := strings.IndexByte(s, '|'); i >= 0 && i <= 24 {
 		return s[:i+1]
 	}
@@ -331,10 +332,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			}
 		}
 		if existingOwner != "" && !LooksLikeSlackUserID(existingOwner) {
-			// Legacy/orphaned row: owner_id is a pre-pivot Auth0 sub
-			// (`auth0|…`), not a Slack user ID. No Slack user can ever
-			// equal it, so the workspace is permanently locked for
-			// everyone — including the real owner. Self-heal by
+			// Legacy/orphaned row: owner_id isn't a Slack user ID —
+			// overwhelmingly a pre-pivot Auth0 sub (`auth0|…`), but the
+			// predicate is the canonical "no Slack user can ever match
+			// this" signal (it also catches a tampered email, a stray
+			// newline, etc.). Either way the workspace is structurally
+			// locked for everyone — including the real owner. Self-heal by
 			// reclaiming the row for this caller, the same first-come-
 			// claims posture an unbound workspace already has. Before
 			// #510 owner_id was the Auth0 sub; the migration left these
@@ -344,7 +347,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			// Log the provider prefix (e.g. `auth0|`) — not the full sub —
 			// so on-call can confirm "yes, pre-pivot row" from CloudWatch
 			// without a DDB read. The prefix carries no per-user identifier.
-			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_prefix", legacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
+			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_prefix", LegacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
 			// Preserve the orphaned row's original created_at so the reclaim
 			// keeps the one durable signal that this workspace predates the
 			// #510 migration (the comment on reclaimLegacyWorkspace explains
