@@ -327,7 +327,7 @@ uploadBtn.addEventListener('click', async () => {
   // Reset UI
   clearResults();
   setLoading(true);
-  footer.textContent = getMessage('uploading_hint', 'Uploading, please wait...');
+  footer.textContent = getMessage('uploading_hint', 'Uploading — keep this popup open until it finishes…');
 
   const results = [];
   const errors = [];

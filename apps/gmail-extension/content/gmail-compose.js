@@ -31,6 +31,10 @@
   const INSERT_REQUEST_MAX_ENTRIES = 64;
   const INSERT_REQUEST_PENDING_TIMEOUT_MS = 8000;
   const COMPOSE_BODY_DISCOVERY_TIMEOUT_MS = 4000;
+  // TODO(gmail-frontend-classes): the first selector relies on Gmail's obfuscated CSS classes
+  // (.Am.Al.editable), which Google can rename without notice. The role/contenteditable
+  // selectors below are the stable fallbacks. If "Gmail insertion stopped working" is reported,
+  // start here.
   const COMPOSE_BODY_SELECTORS = [
     '.Am.Al.editable:not([contenteditable="false"])',
     '[role="dialog"] [role="textbox"][contenteditable="true"][aria-label]',

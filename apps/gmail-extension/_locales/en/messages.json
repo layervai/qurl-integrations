@@ -124,7 +124,7 @@
     "description": "Button label while uploading"
   },
   "uploading_hint": {
-    "message": "Uploading, please wait...",
+    "message": "Uploading — keep this popup open until it finishes…",
     "description": "Footer hint while uploading"
   },
   "inserting_hint": {

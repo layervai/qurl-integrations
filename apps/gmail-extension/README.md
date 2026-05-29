@@ -51,6 +51,11 @@ If you plan to publish to the Chrome Web Store, see [docs/chrome-web-store-revie
 6. Wait for the upload to complete — the qURL links will be automatically inserted at the bottom of your email draft
 7. Continue composing your email and send as normal
 
+> **Keep the popup open while uploading.** The popup is a regular extension page, so dismissing
+> it (clicking elsewhere, switching windows) destroys its context and cancels any in-flight
+> upload. The popup shows an "keep this popup open" hint while a batch is uploading. Links are
+> always appended at the **end** of the active draft, regardless of where your cursor is.
+
 ---
 
 ## How It Works
