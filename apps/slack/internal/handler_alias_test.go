@@ -201,50 +201,57 @@ func decodeSlackText(t *testing.T, raw []byte) string {
 // --- parser unit tests ---------------------------------------------------
 
 func TestParseAliasArgs_SetAlias(t *testing.T) {
+	// notTunnelSub is the substring unique to msgAliasTargetNotTunnel
+	// (the not-a-`$slug` rejection), used to assert that any non-`$`
+	// target — a URL, an `r_<id>`, or a sigil-less typo — gets the
+	// uniform not-a-tunnel copy rather than the generic usage dump.
+	const notTunnelSub = "aren't supported"
 	cases := []struct {
 		name      string
 		input     string
 		wantErr   bool
 		wantAlias string
 		wantTgt   string
+		// wantMsgSub, when set on a wantErr case, asserts which rejection
+		// copy fired — the not-a-tunnel copy (msgAliasTargetNotTunnel)
+		// for any non-`$` target, vs the usage dump
+		// (msgAliasTargetInvalid) for a malformed alias or a `$`-prefixed
+		// token that fails the slug grammar. Empty skips the copy check.
+		wantMsgSub string
 	}{
-		{name: "happy URL", input: "$staging https://example.com", wantAlias: testAliasName, wantTgt: testAliasURL},
-		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
-		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
-		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},
+		// Tunnels-only: the sole accepted target shape is a tunnel `$slug`.
 		{name: "happy tunnel slug", input: "$staging $prod-dashboard", wantAlias: testAliasName, wantTgt: "$prod-dashboard"},
+		{name: "single-char alias allowed with slug target", input: "$a $prod-dashboard", wantAlias: "a", wantTgt: "$prod-dashboard"},
+		{name: "internal dashes allowed in alias", input: "$demo-grafana $prod-dashboard", wantAlias: "demo-grafana", wantTgt: "$prod-dashboard"},
 
+		// URL / resource-id targets are well-formed but unsupported now —
+		// uniform not-a-tunnel copy (a valid r_<id> and a r_<typo> read
+		// the same; the URL too).
+		{name: "URL target rejected as not-a-tunnel", input: "$staging https://example.com", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "localhost URL target rejected as not-a-tunnel", input: "$staging http://localhost:3000", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "resource id target rejected as not-a-tunnel", input: "$staging r_abc123", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "bare r_ target rejected as not-a-tunnel", input: "$staging r_", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "garbage non-url target rejected as not-a-tunnel", input: "$staging not-a-url", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "non-http scheme target rejected as not-a-tunnel", input: "$staging ftp://example.com", wantErr: true, wantMsgSub: notTunnelSub},
+
+		// Alias-name / arity errors → usage dump.
 		{name: "missing target", input: "$staging", wantErr: true},
 		{name: "missing alias", input: testAliasURL, wantErr: true},
-		{name: "no sigil", input: "staging https://example.com", wantErr: true},
-		{name: "empty alias after sigil", input: "$ https://example.com", wantErr: true},
-		{name: "uppercase rejected", input: "$Staging https://example.com", wantErr: true},
-		{name: "trailing dash rejected", input: "$staging- https://example.com", wantErr: true},
-		{name: "leading dash rejected", input: "$-staging https://example.com", wantErr: true},
-		{name: "extra args rejected", input: "$staging https://example.com extra", wantErr: true},
-		{name: "non-http target rejected", input: "$staging ftp://example.com", wantErr: true},
-		{name: "garbage target rejected", input: "$staging not-a-url", wantErr: true},
-		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " https://x.example", wantErr: true},
-		{name: "bare r_ sigil rejected", input: "$staging r_", wantErr: true},
-		// Backtick in target would break the Slack inline-code fence
-		// the success-copy interpolates the target into. Rejected at
-		// parse time so the response renders cleanly.
-		{name: "backtick in r_ target rejected", input: "$staging r_abc`bad", wantErr: true},
-		{name: "backtick in URL target rejected", input: "$staging https://example.com/`x", wantErr: true},
-		// Non-printable runes in target garble the audit log line and
-		// the Slack response. Rejected at parse time alongside the
-		// backtick guard so the success-copy + slog.Info surfaces
-		// remain hygienic.
-		{name: "control byte in r_ target rejected", input: "$staging r_abc\x01bad", wantErr: true},
-		{name: "control byte in URL target rejected", input: "$staging https://example.com/\x01x", wantErr: true},
-
-		// Fence: http://localhost is currently ACCEPTED. The parser
-		// stays scheme-permissive because qurl-service is the
-		// authoritative validator on target reachability. The
-		// public-host gate follow-up is tracked in #350; when that
-		// lands, flip this row to wantErr and the test starts
-		// enforcing the new contract.
-		{name: "localhost target ACCEPTED (see #350: SSRF gate)", input: "$staging http://localhost:3000", wantAlias: "staging", wantTgt: "http://localhost:3000"},
+		{name: "no sigil", input: "staging $prod-dashboard", wantErr: true},
+		{name: "empty alias after sigil", input: "$ $prod-dashboard", wantErr: true},
+		{name: "uppercase alias rejected", input: "$Staging $prod-dashboard", wantErr: true},
+		{name: "trailing dash alias rejected", input: "$staging- $prod-dashboard", wantErr: true},
+		{name: "leading dash alias rejected", input: "$-staging $prod-dashboard", wantErr: true},
+		{name: "extra args rejected", input: "$staging $prod-dashboard extra", wantErr: true},
+		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " $prod-dashboard", wantErr: true},
+		// A `$slug` target that fails the tunnel-slug grammar → usage
+		// dump (it passed the `$`-prefix gate but isn't a valid slug).
+		{name: "slug target too short rejected", input: "$staging $ab", wantErr: true, wantMsgSub: "tunnel slug"},
+		{name: "slug target uppercase rejected", input: "$staging $Prod", wantErr: true, wantMsgSub: "tunnel slug"},
+		// Backtick / control byte in the target token are rejected before
+		// the slug check so the success-copy fence + audit log stay clean.
+		{name: "backtick in slug target rejected", input: "$staging $prod`bad", wantErr: true},
+		{name: "control byte in slug target rejected", input: "$staging $prod\x01bad", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,6 +259,9 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 			if tc.wantErr {
 				if userMsg == "" {
 					t.Fatalf("expected rejection, got %+v", got)
+				}
+				if tc.wantMsgSub != "" && !strings.Contains(userMsg, tc.wantMsgSub) {
+					t.Errorf("rejection copy = %q, want substring %q", userMsg, tc.wantMsgSub)
 				}
 				return
 			}
@@ -378,9 +388,15 @@ func TestSetAlias_HyphenatedHappyTunnelSlug(t *testing.T) {
 	if ack != ackWorkingOnIt {
 		t.Fatalf("ack = %q, want async working copy", ack)
 	}
-	if !strings.Contains(async, testTunnelResourceID) {
-		t.Errorf("async response = %q, want resolved resource id", async)
+	// Success copy echoes the slug the admin typed, not the opaque
+	// resolved resource_id.
+	if !strings.Contains(async, "$"+testTunnelSlug) {
+		t.Errorf("async response = %q, want the typed slug $%s", async, testTunnelSlug)
 	}
+	if strings.Contains(async, testTunnelResourceID) {
+		t.Errorf("async response = %q leaked the opaque resource_id", async)
+	}
+	// The binding still stores the resolved resource_id.
 	b := store.bindings(testAliasTeamID, testAliasChannelID)
 	if b[testAliasName] != testTunnelResourceID {
 		t.Errorf("stored bindings = %v, want {%q: %s}", b, testAliasName, testTunnelResourceID)
@@ -416,8 +432,12 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	if ack != ackWorkingOnIt {
 		t.Fatalf("ack = %q, want async working copy", ack)
 	}
-	if !strings.Contains(async, testTunnelResourceID) {
-		t.Errorf("async response = %q, want resolved resource id", async)
+	// Success copy echoes the typed slug, not the opaque resource_id.
+	if !strings.Contains(async, "$"+testTunnelSlug) {
+		t.Errorf("async response = %q, want the typed slug $%s", async, testTunnelSlug)
+	}
+	if strings.Contains(async, testTunnelResourceID) {
+		t.Errorf("async response = %q leaked the opaque resource_id", async)
 	}
 	if gotQuery.Get("slug") != testTunnelSlug {
 		t.Errorf("upstream query = %v, want slug=%q", gotQuery, testTunnelSlug)
@@ -589,8 +609,11 @@ func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 // writing a row keyed on empty strings.
 func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	h, store := newAliasTestHandler(t)
-	// Slug target: the missing-id guard in aliasPreamble fires before
-	// any qURL lookup, so the noop upstream is never dialed.
+	// Slug target: the missing-id guard in aliasValidate fires before
+	// runAsync, so the noop upstream is never dialed. The missing-id text
+	// assertions below are the ordering fence — if the guard regressed
+	// below the slug-resolve dial, the reply would become the "Tunnel
+	// slug not found" copy and fail the Contains check.
 	// channel_id empty.
 	body, sign := aliasSlashRequest(t, "setalias $staging $"+testTunnelSlug, testAliasTeamID, "")
 	w := httptest.NewRecorder()
@@ -610,35 +633,6 @@ func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	// Store must not have been dialed in either branch.
 	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
 		t.Errorf("missing-id guard should have short-circuited before store dial, got bindings=%v", b)
-	}
-}
-
-// TestRedactURLForLog fences the audit-log redaction contract:
-// userinfo (credentials embedded by a setting admin) and raw query
-// strings (often carry tokens/keys) are stripped before the target
-// lands in operator-visible logs. r_… resource ids and unparseable
-// strings pass through unchanged.
-func TestRedactURLForLog(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "plain https", input: "https://example.com/path", want: "https://example.com/path"},
-		{name: "userinfo stripped", input: "https://user:token@example.com/path", want: "https://example.com/path"},
-		{name: "raw query stripped", input: "https://example.com/path?key=secret", want: "https://example.com/path"},
-		{name: "fragment stripped", input: "https://example.com/path#section", want: "https://example.com/path"},
-		{name: "userinfo + query stripped", input: "https://u:p@example.com/path?k=v", want: "https://example.com/path"},
-		{name: "resource id passthrough", input: "r_abc123", want: "r_abc123"},
-		{name: "unparseable passthrough", input: "::not-a-url", want: "::not-a-url"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := redactURLForLog(tc.input)
-			if got != tc.want {
-				t.Errorf("redactURLForLog(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -858,6 +852,14 @@ func TestHelpListsNewVerbs(t *testing.T) {
 	}
 	if strings.Contains(got, "tunnel install") {
 		t.Errorf("/qurl help = %q, advertised tunnel install without AdminStore", got)
+	}
+	// newAliasTestHandler wires aliasStore but NOT AdminStore, and `/qurl
+	// aliases` reads channel_policies through the AdminStore (processAliases
+	// fails closed when it's nil). So help must gate it on AdminStore — with
+	// aliasStore wired here, a gate that regressed back to aliasStore would
+	// leak the verb.
+	if strings.Contains(got, "/qurl aliases`") {
+		t.Errorf("/qurl help = %q, advertised /qurl aliases without AdminStore", got)
 	}
 }
 

@@ -33,9 +33,10 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "get with dm flag", text: "get $prod-db dm:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "get with reason flag", text: `get $prod-db reason:"on call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "on call"}},
 		{name: "get with both flags", text: `get $prod-db dm:true reason:"audit"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true", "reason": "audit"}},
-		{name: "setalias url", text: "setalias $prod-db https://internal.example.com", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
-		{name: "setalias resource_id", text: "setalias $prod-db r_abc123", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "r_abc123", wantFlags: map[string]string{}},
-		{name: "setalias tunnel slug", text: "setalias $prod-db $prod-dashboard", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "$prod-dashboard", wantFlags: map[string]string{}},
+		// setalias grammar (the three target shapes) is fenced separately
+		// in TestParse_SetAliasGrammar — kept out of this "supported
+		// commands" table so the parser-accepts-but-handler-rejects URL /
+		// resource-id shapes aren't mistaken for wired forms.
 		{name: "unsetalias", text: "unsetalias $prod-db", wantSub: SubcmdUnsetAlias, wantAlias: "prod-db", wantFlags: map[string]string{}},
 		{name: "aliases", text: "aliases", wantSub: SubcmdAliases, wantFlags: map[string]string{}},
 		{name: "admin revoke qurl_id", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantTarget: "q_01HXYZ8ABCDEF0123456789AB", wantFlags: map[string]string{}},
@@ -102,6 +103,48 @@ func TestParse_HappyPaths(t *testing.T) {
 				if cmd.Flags[k] != v {
 					t.Errorf("Flags[%q] = %q, want %q", k, cmd.Flags[k], v)
 				}
+			}
+		})
+	}
+}
+
+// TestParse_SetAliasGrammar fences Parse()'s `setalias` grammar IN
+// ISOLATION from the tunnels-only policy. Parse is deliberately
+// non-strict: it copies the raw target token into cmd.Target whatever
+// the shape, so the URL and `r_<id>` rows below prove only that the
+// PARSER accepts the token — NOT that those targets are wired
+// end-to-end. The tunnels-only policy (only a `$slug` binds; URL and
+// `r_<id>` are rejected) lives in parseAliasArgs + handleSetAlias and is
+// fenced by TestParseAliasArgs_SetAlias. Kept out of TestParse_HappyPaths
+// so a reader scanning "supported commands" can't mistake these for
+// accepted forms.
+func TestParse_SetAliasGrammar(t *testing.T) {
+	t.Parallel()
+	slugTarget := "$" + testTunnelSlug // "$prod-dashboard"
+	cases := []struct {
+		name       string
+		text       string
+		wantTarget string
+	}{
+		{name: "url shape (parser accepts; handler rejects)", text: "setalias $prod-db https://example.com", wantTarget: testAliasURL},
+		{name: "resource-id shape (parser accepts; handler rejects)", text: "setalias $prod-db r_abc123", wantTarget: "r_abc123"},
+		{name: "tunnel slug (the only handler-accepted shape)", text: "setalias $prod-db " + slugTarget, wantTarget: slugTarget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd, err := Parse(tc.text)
+			if err != nil {
+				t.Fatalf("Parse(%q) error = %v", tc.text, err)
+			}
+			if cmd.Subcommand != SubcmdSetAlias {
+				t.Errorf("Subcommand = %q, want %q", cmd.Subcommand, SubcmdSetAlias)
+			}
+			if cmd.Alias != "prod-db" {
+				t.Errorf("Alias = %q, want %q", cmd.Alias, "prod-db")
+			}
+			if cmd.Target != tc.wantTarget {
+				t.Errorf("Target = %q, want %q", cmd.Target, tc.wantTarget)
 			}
 		})
 	}

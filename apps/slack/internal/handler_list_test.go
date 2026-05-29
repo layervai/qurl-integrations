@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -45,12 +47,17 @@ func writeResourceListFixture(t *testing.T, w http.ResponseWriter, resources []m
 	}
 }
 
-// TestHandleList_AdminSeesAllTunnels fences the admin happy path: a
-// workspace admin sees every tunnel the master listing returns, without
-// channel-policy filtering. Each row renders the slug as the
-// copy-paste-ready `$<slug>` token.
-func TestHandleList_AdminSeesAllTunnels(t *testing.T) {
+// TestHandleList_RendersAllTunnels fences the happy path: /qurl list
+// renders every tunnel the master listing returns, with each row
+// showing the slug as the copy-paste-ready `$<slug>` token. Post-revert
+// of #234 (#459) the listing is unscoped — no channel-policy filter —
+// so this is what every workspace member sees.
+func TestHandleList_RendersAllTunnels(t *testing.T) {
 	ts := newAdminTestServers(t)
+	// seedAdmin supplies the workspace_mappings / API-key fixture that
+	// authenticatedClient needs; the admin-vs-non-admin distinction no
+	// longer affects /qurl list, so this happy path renders identically
+	// for a non-admin (see TestHandleList_UnscopedAcrossChannels).
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
@@ -104,12 +111,133 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 	}
 }
 
-// TestHandleList_NonAdminFiltersToChannelPolicy fences the non-admin
-// path: only tunnels allowed in the current channel are visible.
-func TestHandleList_NonAdminFiltersToChannelPolicy(t *testing.T) {
+// TestFormatTunnelListLine fences the per-row rendering contract
+// directly so the slug-only and slug+description (no-alias) shapes are
+// pinned independently of the combined end-to-end TestHandleList_*
+// tests. In particular it locks the self-binding exclusion: the
+// install-flow binds `$<slug>` as a channel alias, and that name must
+// NOT re-appear in the "(also …)" extras.
+func TestFormatTunnelListLine(t *testing.T) {
+	tunnel := func(slug, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_" + slug,
+			Type:        client.ResourceTypeTunnel,
+			Slug:        slug,
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		want         string
+	}{
+		{name: "slug only, no aliases, no description", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "• `$prod-db`"},
+		{name: "slug + description, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` → Prod database"},
+		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{"grafana"}, want: "• `$prod-db` (also `$grafana`)"},
+		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, "grafana"}, want: "• `$prod-db` (also `$grafana`) → Prod database"},
+		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatTunnelListLine(tc.resource, tc.boundAliases); got != tc.want {
+				t.Errorf("formatTunnelListLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestChannelAliasesByResourceID fences the best-effort posture of the
+// alias-display helper DIRECTLY (TestHandleList_ShowsBoundAliases only
+// reaches it through the full happy path): the two short-circuits and the
+// fetch-error arm must each degrade to nil rather than panic, and the
+// happy path must group multiple aliases per resource and sort them.
+func TestChannelAliasesByResourceID(t *testing.T) {
+	t.Parallel()
+	log := slogTestLogger(t)
+	ctx := context.Background()
+
+	newH := func(t *testing.T, seed map[string]ddbtypes.AttributeValue) *Handler {
+		t.Helper()
+		names := defaultTestTableNames()
+		ddb := newFakeDDB(t, names, nil)
+		if seed != nil {
+			ddb.seedItem(t, names.channelPolicy, seed)
+		}
+		return &Handler{cfg: Config{AdminStore: newStoreFromFake(t, ddb, names, nil)}}
+	}
+
+	t.Run("nil AdminStore yields nil", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{}
+		if got := h.channelAliasesByResourceID(ctx, log, "T1", "C1"); got != nil {
+			t.Errorf("nil AdminStore: got %v, want nil", got)
+		}
+	})
+
+	t.Run("empty channelID short-circuits to nil before any fetch", func(t *testing.T) {
+		t.Parallel()
+		h := newH(t, nil)
+		if got := h.channelAliasesByResourceID(ctx, log, "T1", ""); got != nil {
+			t.Errorf("empty channelID: got %v, want nil", got)
+		}
+	})
+
+	t.Run("policy fetch error degrades to nil", func(t *testing.T) {
+		t.Parallel()
+		// GetChannelPolicy rejects an empty teamID (BadRequest);
+		// channelAliasesByResourceID only guards channelID, so this drives
+		// the err != nil arm (the closest reachable stand-in for a fetch
+		// failure with the current fake, which has no GetItem error hook).
+		h := newH(t, nil)
+		if got := h.channelAliasesByResourceID(ctx, log, "", "C1"); got != nil {
+			t.Errorf("fetch error: got %v, want nil", got)
+		}
+	})
+
+	t.Run("groups + sorts multiple aliases per resource", func(t *testing.T) {
+		t.Parallel()
+		const sharedRID = "r_shared0001" // two aliases point here
+		seed := seedChannelPolicyAliasBindings("T1", "C1", map[string]string{
+			"zed": sharedRID, "abe": sharedRID, "solo": "r_solo000001",
+		})
+		h := newH(t, seed)
+		got := h.channelAliasesByResourceID(ctx, log, "T1", "C1")
+		want := map[string][]string{
+			sharedRID:      {"abe", "zed"}, // grouped, lexically sorted
+			"r_solo000001": {"solo"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+}
+
+// TestHandleList_UnscopedAcrossChannels pins the post-revert (#459)
+// disclosure surface: /qurl list is workspace-wide for everyone, so the
+// SAME complete tunnel listing renders regardless of the caller's
+// channel. It exercises the three channel shapes that diverged
+// pre-revert (#234) for a non-admin:
+//
+//   - a channel carrying a restrictive channel_policies row (would have
+//     filtered the listing down to prod-db, hiding secret);
+//   - a channel with no policy row (would have fail-closed to empty);
+//   - a DM (`D…`) channel (would have fail-closed to empty) — the most
+//     user-surprising case, "I ran /qurl list in a 1:1 and saw URLs
+//     from #ops".
+//
+// Post-revert all three must show every tunnel. The seedNonAdmin +
+// restrictive seedPolicySet below are load-bearing, not inert: the list
+// handler no longer reads them, but if any channel-policy filter were
+// re-introduced on /qurl list this non-admin caller would see the old
+// filtered/empty output and the test would fail.
+func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testListResIDProdDB})
+	// A channel_policies row that, under the reverted gate, would have
+	// filtered the listing down to prod-db only (secret excluded).
+	ts.seedPolicySet(t, testAdminTeamID, "C_with_policy", testListAliasProdDB, []string{testListResIDProdDB})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
@@ -117,162 +245,32 @@ func TestHandleList_NonAdminFiltersToChannelPolicy(t *testing.T) {
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$prod-db`") {
-		t.Errorf("async reply missing allowed prod-db: %q", async)
-	}
-	if strings.Contains(async, "secret") {
-		t.Errorf("async reply leaked non-allowed tunnel: %q", async)
-	}
-}
-
-// TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAliasBinding fences
-// the `allowed_resource_ids`-only branch of the union: a tunnel whose
-// channel_policies has only `allowed_resource_ids` populated (no
-// `alias_bindings`) MUST surface in non-admin `/qurl list`. Pre-fix the
-// list handler walked alias-bindings only, so a pure-allowed-set
-// resource was `/qurl get`-mintable but invisible in `/qurl list` —
-// the two surfaces diverged. The row still renders its slug token
-// (the slug is a resource attribute, independent of the channel
-// alias_binding this test deliberately omits).
-func TestHandleList_NonAdminSeesAllowedResourceIDsWithoutAliasBinding(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// alias="" → seedPolicySet skips the auto-attached alias_bindings
-	// Map. Row carries ONLY `allowed_resource_ids`.
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_allow_only1"})
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_allow_only1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "allow-only-tun"},
-			{testKeyResourceID: "r_secret_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasSecret},
-		}, "", false)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$allow-only-tun`") {
-		t.Errorf("non-admin list dropped a tunnel in allowed_resource_ids but with no alias_binding: %q", async)
-	}
-	if strings.Contains(async, "secret") {
-		t.Errorf("async reply leaked non-allowed tunnel: %q", async)
-	}
-}
-
-// TestHandleList_NonAdminUnionsAllowedSetAndAliasBindings fences the
-// union behavior across both surfaces on the same row: an
-// alias-bindings-only tunnel AND an allowed-set-only tunnel must both
-// surface (an alias-only resource that lives outside the
-// allowed_resource_ids gate is still mintable via the alias path's
-// channel-scoped binding, so it belongs in the listing).
-func TestHandleList_NonAdminUnionsAllowedSetAndAliasBindings(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// Manually compose a row carrying BOTH surfaces with disjoint
-	// resource IDs — `allowed_resource_ids` covers r_allow_set_a,
-	// `alias_bindings` covers r_alias_only_b. Pre-fix, the bindings
-	// path won and the allowed-set entry was invisible.
-	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, map[string]ddbtypes.AttributeValue{
-		fAttrSlackTeamID:        stringMember(testAdminTeamID),
-		fAttrSlackChannelID:     stringMember("C_test"),
-		fAttrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"r_allow_set_a"}},
-		fAttrAliasBindings: &ddbtypes.AttributeValueMemberM{
-			Value: map[string]ddbtypes.AttributeValue{
-				"alias-b": stringMember("r_alias_only_b"),
-			},
-		},
-		fAttrCreatedAt: stringMember("2026-04-20T12:00:00Z"),
-	})
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_allow_set_a", testKeyType: client.ResourceTypeTunnel, testKeySlug: "allowset-tun"},
-			{testKeyResourceID: "r_alias_only_b", testKeyType: client.ResourceTypeTunnel, testKeySlug: "aliasonly-tun"},
-			{testKeyResourceID: "r_neither_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "neither-tun"},
-		}, "", false)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$allowset-tun`") {
-		t.Errorf("union missed the allowed-set entry: %q", async)
-	}
-	if !strings.Contains(async, "`$aliasonly-tun`") {
-		t.Errorf("union missed the alias-binding entry: %q", async)
-	}
-	if strings.Contains(async, "neither") {
-		t.Errorf("union leaked a tunnel present in neither surface: %q", async)
-	}
-}
-
-// TestHandleList_NonAdminEmptyChannelFailsClose fences the fail-closed
-// posture: a non-admin slash command with no channel_id (synthetic
-// test payload or wire-shape regression) returns the empty state
-// rather than leaking the unfiltered master list.
-func TestHandleList_NonAdminEmptyChannelFailsClose(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_leaked_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "leaked-tun"},
-		}, "", false)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvokerOnChannel(t, h, "")
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if strings.Contains(async, "leaked") {
-		t.Errorf("non-admin + empty channel_id leaked master list: %q", async)
-	}
-}
-
-// TestHandleList_NonAdminPaginationGap fences the distinct empty-state
-// copy when a non-admin's filter is empty AND the master list has
-// more pages. The plain empty-state would mislead the user — the issue
-// is pagination, not absence.
-func TestHandleList_NonAdminPaginationGap(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// No allowed policies → filter drops everything. Master list
-	// reports has_more=true so the non-admin pagination-gap copy
-	// fires.
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_unallowed_x", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unallowed-tun"},
-		}, "cursor_xyz", true)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "past the first page") {
-		t.Errorf("async reply missing pagination-gap copy: %q", async)
-	}
-}
-
-// TestHandleList_NonAdminEmptyChannelWithHasMoreShowsDefault fences
-// the empty-channel + has_more=true branch: the pagination-gap copy
-// must NOT fire when channel_id is empty (the message references
-// "this channel" — misleading when by construction there is none).
-func TestHandleList_NonAdminEmptyChannelWithHasMoreShowsDefault(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_leaked_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "leaked-tun"},
-		}, "cursor_xyz", true)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvokerOnChannel(t, h, "")
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if strings.Contains(async, "past the first page") {
-		t.Errorf("empty-channel branch leaked pagination-gap copy: %q", async)
-	}
-	if strings.Contains(async, "leaked") {
-		t.Errorf("empty-channel + non-admin leaked master list: %q", async)
+	// "D…" is a Slack DM channel ID; the others are a policy-bearing and
+	// a policy-free regular channel. All must render the full listing.
+	// Subtests so -run can target a single branch and PASS/FAIL is
+	// reported per channel.
+	for _, channelID := range []string{"C_with_policy", "C_no_policy_here", "D_direct_msg_1to1"} {
+		t.Run(channelID, func(t *testing.T) {
+			inv := newAdminSlashInvokerOnChannel(t, h, channelID)
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+			if !strings.Contains(async, "`$prod-db`") {
+				t.Errorf("non-admin should see prod-db tunnel (listing is unscoped post-revert): %q", async)
+			}
+			if !strings.Contains(async, "`$secret`") {
+				t.Errorf("non-admin should see the secret tunnel (no per-channel filter post-revert): %q", async)
+			}
+			// Negative fence: a filter reintroduced on only one branch
+			// would surface the empty-state or the (removed) non-admin
+			// pagination-gap copy for this non-admin caller, even if
+			// another branch still rendered rows.
+			if strings.Contains(async, "No tunnels found") {
+				t.Errorf("empty-state copy fired — a channel filter may have dropped the listing: %q", async)
+			}
+			if strings.Contains(async, "past the first page") {
+				t.Errorf("removed non-admin pagination-gap copy reappeared: %q", async)
+			}
+		})
 	}
 }
 
@@ -461,56 +459,6 @@ func TestHandleList_HasMoreFooter(t *testing.T) {
 	}
 }
 
-// TestHandleList_NonAdminPartialPageHasMoreFooter fences the distinct
-// non-admin footer when the filtered set is NON-empty and master
-// has_more=true. The admin footer understates the gap because
-// allow-listed tunnels may sit past the first scan invisibly; the
-// non-admin copy makes that explicit.
-func TestHandleList_NonAdminPartialPageHasMoreFooter(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// One allowed tunnel in the channel, plus has_more=true so the
-	// non-admin pagination-aware footer branch fires.
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "one", []string{"r_one_xxxxxx"})
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_one_xxxxxx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
-		}, "cursor_xyz", true)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Showing allow-listed tunnels") {
-		t.Errorf("async reply missing non-admin partial-page footer: %q", async)
-	}
-	// Admin-only "more resources past" copy must NOT fire on the non-admin
-	// path — these two branches are deliberately disjoint.
-	if strings.Contains(async, "more resources past") {
-		t.Errorf("async reply leaked admin-only footer copy on non-admin path: %q", async)
-	}
-}
-
-// TestHandleList_AdminStoreNilTreatedAsNonAdmin fences the no-DDB
-// sandbox case. Without AdminStore we can't check admin status, so
-// we treat the user as non-admin and fail-closed (empty list, no leak).
-func TestHandleList_AdminStoreNilTreatedAsNonAdmin(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_master_xx", testKeyType: client.ResourceTypeTunnel, testKeySlug: "master-tun"},
-		}, "", false)
-	})
-	h := newAdminTestHandler(t, ts)
-	h.cfg.AdminStore = nil
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if strings.Contains(async, "master") {
-		t.Errorf("async reply leaked master list when AdminStore nil: %q", async)
-	}
-}
-
 // TestHandleList_UpstreamError fences the friendly error surface when
 // the customer API returns 5xx. Raw API error text MUST NOT reach the
 // user.
@@ -621,39 +569,5 @@ func TestTunnelToken(t *testing.T) {
 				t.Errorf("tunnelToken() = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-// TestHandleList_NonAdminPaginationGapZeroTunnels fences the len(tunnels)
-// > 0 guard on the non-admin pagination-gap branch: when the scanned
-// page holds only URL/transit resources (zero tunnels) and reports
-// has_more, the gap-copy is SUPPRESSED — claiming "allowed tunnels may
-// sit past the first page" would be misleading when there are no tunnels
-// at all. The user sees the plain empty-state instead.
-func TestHandleList_NonAdminPaginationGapZeroTunnels(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		// Page is all URL resources — filterTunnelResources drops them
-		// all, so len(tunnels)==0 even though has_more=true.
-		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: "r_url_aaaaaa", fAttrAlias: "u1", testKeyTargetURL: "https://a.example.com"},
-			{testKeyResourceID: "r_url_bbbbbb", fAttrAlias: "u2", testKeyTargetURL: "https://b.example.com"},
-		}, "cursor_xyz", true)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	// Gap-copy suppressed (zero tunnels on the page) → plain empty-state.
-	if !strings.Contains(async, "No tunnels found") {
-		t.Errorf("async reply missing plain empty-state (gap-copy should be suppressed with zero tunnels): %q", async)
-	}
-	if strings.Contains(async, "past the first page") {
-		t.Errorf("gap-copy fired despite zero tunnels on the page: %q", async)
-	}
-	// No URL resource leaks into the (empty) tunnel listing.
-	if strings.Contains(async, "a.example.com") || strings.Contains(async, "b.example.com") {
-		t.Errorf("URL resource leaked into tunnel list: %q", async)
 	}
 }
