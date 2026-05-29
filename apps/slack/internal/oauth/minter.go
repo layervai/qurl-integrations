@@ -19,7 +19,22 @@ const (
 	// The real response is ~few hundred bytes; 8 KiB is generous head-
 	// room without leaving an unbounded read on a misbehaving upstream.
 	minterBodyLimit = 8 << 10
+
+	// errCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
+	// when POST /v1/api-keys is refused because the owner is already at
+	// their plan's API-key cap (free tier = 3). Mirrors qurl-service's
+	// validation.ErrorCodeAPIKeyLimit. Both that endpoint's qurl:write
+	// scope gate AND this quota check surface as HTTP 403, so the status
+	// code alone can't disambiguate — the body `code` is the only signal.
+	errCodeAPIKeyLimit = "api_key_limit"
 )
+
+// ErrAPIKeyLimitReached is returned by MintAPIKey when qurl-service refuses
+// the mint because the account holds the maximum number of API keys for its
+// plan. The OAuth callback maps this to an actionable "revoke a key" page
+// rather than the generic "try again" message — retrying never clears a
+// quota, so the old advice was actively misleading.
+var ErrAPIKeyLimitReached = errors.New("qurl-service API key limit reached")
 
 // HTTPAPIKeyMinter is the production QURLAPIKeyMinter, calling
 // qurl-service /v1/api-keys with the Auth0 access_token as Bearer.
@@ -112,6 +127,9 @@ func (m *HTTPAPIKeyMinter) MintAPIKey(ctx context.Context, accessToken, name str
 		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		if apiKeyLimitError(rb) {
+			return "", "", "", fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+		}
 		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
 	}
 	var mr mintResponse
@@ -152,4 +170,21 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// apiKeyLimitError reports whether body is a qurl-service error envelope
+// carrying the api-key-limit code. The envelope shape is
+// {"error":{"code":"...", ...}}; a body that doesn't parse to that shape
+// (e.g. a bare {"error":"forbidden"} string, or non-JSON) returns false so
+// the caller falls back to the generic status-code error.
+func apiKeyLimitError(body []byte) bool {
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.Error.Code == errCodeAPIKeyLimit
 }

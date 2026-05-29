@@ -410,6 +410,34 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	}
 }
 
+// TestCallbackMintAPIKeyLimitRendersGuidance locks the actionable-error
+// contract: when the mint fails because the account is at its API-key cap,
+// the callback renders a 409 page that names the limit and tells the admin
+// to revoke a key — NOT the generic "run setup again to retry" (which never
+// clears a quota). No key is minted, so nothing is persisted.
+func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.mintErr = ErrAPIKeyLimitReached
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d want 409 (api-key limit → 409)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "limit") || !strings.Contains(strings.ToLower(body), "revoke") {
+		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", body)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must NOT run when the mint hit the API-key limit")
+	}
+}
+
 func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.setErr = errors.New("ddb down")
