@@ -234,8 +234,10 @@ var aliasSyncTimeout = 2500 * time.Millisecond
 // verify the AliasStore is wired. Returns (teamID, channelID, ok); on
 // !ok the helper has already written the user-facing response and the
 // caller must return without dialing the store. No worker context is
-// created here — the async set-alias path uses runAsync's own ctx, so
-// only the synchronous unset path needs the timeout ([aliasPreamble]).
+// created here — the async set-alias path runs on runAsync's own ctx
+// (bounded by [asyncWorkTimeout], 25s, so a wedged upstream can't hang
+// the slug-resolve + bind indefinitely), so only the synchronous unset
+// path needs the shorter sync timeout ([aliasPreamble]).
 func (h *Handler) aliasValidate(w http.ResponseWriter, values url.Values, verb string) (teamID, channelID string, ok bool) {
 	teamID = strings.TrimSpace(values.Get(fieldTeamID))
 	channelID = strings.TrimSpace(values.Get(fieldChannelID))
@@ -334,9 +336,10 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 // TOCTOU note: the slug→resource_id resolve and the DDB bind are two
 // steps; if the tunnel is deleted upstream between them, the binding
 // lands pointing at a dead resource. That's acceptable — a stale
-// binding is caught at mint time (`/qurl get` re-validates the resource
-// against qurl-service), so the worst case is a deferred, well-handled
-// error rather than a silent success.
+// binding is caught at mint time: the bound resource_id flows to the
+// qurl-service mint call, which rejects a deleted resource, surfaced to
+// the user via [mapMintError]. So the worst case is a deferred,
+// well-handled error rather than a silent success.
 func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) string {
 	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 	if err != nil {

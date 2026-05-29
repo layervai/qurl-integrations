@@ -584,8 +584,11 @@ func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 // writing a row keyed on empty strings.
 func TestSetAlias_MissingTeamOrChannelID(t *testing.T) {
 	h, store := newAliasTestHandler(t)
-	// Slug target: the missing-id guard in aliasPreamble fires before
-	// any qURL lookup, so the noop upstream is never dialed.
+	// Slug target: the missing-id guard in aliasValidate fires before
+	// runAsync, so the noop upstream is never dialed. The missing-id text
+	// assertions below are the ordering fence — if the guard regressed
+	// below the slug-resolve dial, the reply would become the "Tunnel
+	// slug not found" copy and fail the Contains check.
 	// channel_id empty.
 	body, sign := aliasSlashRequest(t, "setalias $staging $"+testTunnelSlug, testAliasTeamID, "")
 	w := httptest.NewRecorder()

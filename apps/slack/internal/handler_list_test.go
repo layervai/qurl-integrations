@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -139,6 +141,72 @@ func TestFormatTunnelListLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestChannelAliasesByResourceID fences the best-effort posture of the
+// alias-display helper DIRECTLY (TestHandleList_ShowsBoundAliases only
+// reaches it through the full happy path): the two short-circuits and the
+// fetch-error arm must each degrade to nil rather than panic, and the
+// happy path must group multiple aliases per resource and sort them.
+func TestChannelAliasesByResourceID(t *testing.T) {
+	t.Parallel()
+	log := slogTestLogger(t)
+	ctx := context.Background()
+
+	newH := func(t *testing.T, seed map[string]ddbtypes.AttributeValue) *Handler {
+		t.Helper()
+		names := defaultTestTableNames()
+		ddb := newFakeDDB(t, names, nil)
+		if seed != nil {
+			ddb.seedItem(t, names.channelPolicy, seed)
+		}
+		return &Handler{cfg: Config{AdminStore: newStoreFromFake(t, ddb, names, nil)}}
+	}
+
+	t.Run("nil AdminStore yields nil", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{}
+		if got := h.channelAliasesByResourceID(ctx, log, "T1", "C1"); got != nil {
+			t.Errorf("nil AdminStore: got %v, want nil", got)
+		}
+	})
+
+	t.Run("empty channelID short-circuits to nil before any fetch", func(t *testing.T) {
+		t.Parallel()
+		h := newH(t, nil)
+		if got := h.channelAliasesByResourceID(ctx, log, "T1", ""); got != nil {
+			t.Errorf("empty channelID: got %v, want nil", got)
+		}
+	})
+
+	t.Run("policy fetch error degrades to nil", func(t *testing.T) {
+		t.Parallel()
+		// GetChannelPolicy rejects an empty teamID (BadRequest);
+		// channelAliasesByResourceID only guards channelID, so this drives
+		// the err != nil arm (the closest reachable stand-in for a fetch
+		// failure with the current fake, which has no GetItem error hook).
+		h := newH(t, nil)
+		if got := h.channelAliasesByResourceID(ctx, log, "", "C1"); got != nil {
+			t.Errorf("fetch error: got %v, want nil", got)
+		}
+	})
+
+	t.Run("groups + sorts multiple aliases per resource", func(t *testing.T) {
+		t.Parallel()
+		const sharedRID = "r_shared0001" // two aliases point here
+		seed := seedChannelPolicyAliasBindings("T1", "C1", map[string]string{
+			"zed": sharedRID, "abe": sharedRID, "solo": "r_solo000001",
+		})
+		h := newH(t, seed)
+		got := h.channelAliasesByResourceID(ctx, log, "T1", "C1")
+		want := map[string][]string{
+			sharedRID:      {"abe", "zed"}, // grouped, lexically sorted
+			"r_solo000001": {"solo"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
 }
 
 // TestHandleList_NonAdminFiltersToChannelPolicy fences the non-admin

@@ -24,7 +24,7 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 // [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
 // renders so multi-sentence prose stays out of the parser's error
 // values (repo convention).
-const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels."
+const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels (or `/qurl aliases` for this channel's shortcuts)."
 
 // unexpectedGetShapeMessage is the reply for getWork's defensive default
 // arm; it routes the user to their operator rather than looping them on a
@@ -85,6 +85,18 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // admin can run setalias.
 func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
+}
+
+// legacyAliasBindingMessage is the copy surfaced when a channel alias
+// resolves to a value that isn't a tunnel resource id — a raw URL bound
+// by the pre-tunnels-only `/qurl set-alias`. Those rows still exist in
+// DDB; resolving one would hand a URL to `POST /v1/resources/<url>/qurls`
+// and surface as the generic retry-friendly [commonGetMintFailedMessage],
+// stranding the user. Name the dead shortcut plainly and route to the
+// admin (only an admin can re-point it at a tunnel). Same posture as
+// [noResourceForAliasMessage].
+func legacyAliasBindingMessage(alias string) string {
+	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl set-alias $%s $<slug>`.", alias, alias)
 }
 
 // notAllowedInChannelMessage is the copy surfaced when a user passes
@@ -391,6 +403,19 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
 	if found {
+		// Legacy-binding guard: the pre-tunnels-only `/qurl set-alias`
+		// stored raw URLs verbatim in alias_bindings, and those rows
+		// survive this PR. Resolving one would hand a URL to the mint
+		// call and surface as the generic retry error, stranding the
+		// user. Gate on the `r_` prefix (not the parser's exact
+		// [resourceIDPattern] — a stored id is whatever qurl-service
+		// issued, length not guaranteed to match the 11-char get-token
+		// shape): a legacy `r_<id>` is a real resource and still mints,
+		// only a non-`r_` value (a URL) is refused with a re-bind hint.
+		if !strings.HasPrefix(resourceID, "r_") {
+			log.Warn("get: channel alias bound to a non-resource-id (legacy URL) target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
+			return "", &userError{msg: legacyAliasBindingMessage(token)}
+		}
 		return resourceID, nil
 	}
 

@@ -237,6 +237,38 @@ func TestHandleGet_URLRejected(t *testing.T) {
 	}
 }
 
+// TestHandleGet_LegacyURLBindingRefused fences the read-side guard for
+// bindings created by the pre-tunnels-only `/qurl set-alias`, which
+// stored a raw URL verbatim in alias_bindings. Those rows survive this
+// PR; resolving one would hand a URL to the mint call and surface as the
+// generic retry error, stranding the user. Instead the resolver detects
+// the non-resource-id shape and replies with an actionable "ask an admin
+// to re-bind" message, and the mint is never reached.
+func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// A raw URL is the canonical pre-tunnels-only binding value; testAliasURL
+	// is reused (vs a fresh literal) only to stay under goconst's threshold.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{"legacy": testAliasURL})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix("POST", "/v1/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $legacy", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "no longer supported") {
+		t.Errorf("async reply missing legacy-binding copy: %q", async)
+	}
+	if !strings.Contains(async, "re-point it at a tunnel") {
+		t.Errorf("async reply missing re-bind instruction: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached despite a legacy URL binding (hits = %d)", mintHits.Load())
+	}
+}
+
 // TestHandleGet_DMVariantRefusedWhenPostDMNil fences the privacy-
 // preserving refusal: dm:true asks for the link in a DM (so it does
 // NOT leak into channel history). When PostDM is not wired we
