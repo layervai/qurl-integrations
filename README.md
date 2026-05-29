@@ -40,9 +40,9 @@ All integrations connect to the qURL API. The endpoint is configurable via the `
 
 ## Slack Tunnel Onboarding
 
-Customer onboarding is install-first: install the qURL Slack app, run `/qurl setup`, then use `/qurl tunnel install` or `/qurl get`. The Slack app install stores the workspace bot token for modal support; customers do not manually provide a bot token.
+Customer onboarding is install-first: install the qURL Slack app, run `/qurl setup`, then use `/qurl-admin tunnel install` or `/qurl get`. The Slack app install stores the workspace bot token for modal support; customers do not manually provide a bot token. Admin verbs live under a separate `/qurl-admin` slash command (registered against the same request URL as `/qurl`); user verbs — including `setup` — stay on `/qurl`.
 
-Slack admins can run `/qurl tunnel install` to generate a guided install for the qURL reverse-tunnel sidecar. The workflow asks for the customer-facing tunnel slug, an optional channel shortcut, the local HTTP port, and the target runtime. Slack then returns copy/paste output tailored for Docker, Docker Compose, AWS ECS/Fargate, or Kubernetes.
+Slack admins can run `/qurl-admin tunnel install` to generate a guided install for the qURL reverse-tunnel sidecar. The workflow asks for the customer-facing tunnel slug, an optional channel shortcut, the local HTTP port, and the target runtime. Slack then returns copy/paste output tailored for Docker, Docker Compose, AWS ECS/Fargate, or Kubernetes.
 
 The Docker and Docker Compose paths create the proxy config, bootstrap-key secret, and slug-scoped durable agent-state directory in one guarded shell block. ECS/Fargate and Kubernetes output runtime-native task or pod artifacts, including a per-sidecar persistent state mount. Bootstrap API keys are short-lived and should be removed from the runtime after the sidecar logs show a successful tunnel connection.
 

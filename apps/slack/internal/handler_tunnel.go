@@ -171,13 +171,13 @@ func parseTunnelInstallOption(args *tunnelInstallArgs, token string) string {
 func tunnelInstallUsage() string {
 	return strings.Join([]string{
 		"Usage:",
-		"• `/qurl tunnel install` for guided setup",
-		"Guided setup is exactly `/qurl tunnel install`; add arguments only when using typed setup.",
-		"• Docker: `/qurl tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
-		"• Compose: `/qurl tunnel install <slug|$slug> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
-		"• ECS/Fargate or Kubernetes: `/qurl tunnel install <slug|$slug> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
+		"• `/qurl-admin tunnel install` for guided setup",
+		"Guided setup is exactly `/qurl-admin tunnel install`; add arguments only when using typed setup.",
+		"• Docker: `/qurl-admin tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
+		"• Compose: `/qurl-admin tunnel install <slug|$slug> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
+		"• ECS/Fargate or Kubernetes: `/qurl-admin tunnel install <slug|$slug> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
 		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
-		"Example: `/qurl tunnel install prod-dashboard port:8080`",
+		"Example: `/qurl-admin tunnel install prod-dashboard port:8080`",
 	}, "\n")
 }
 
@@ -211,7 +211,7 @@ func (e tunnelInstallEnvironment) label() (string, error) {
 	}
 }
 
-// handleTunnel routes `/qurl tunnel install` and `/qurl tunnel install <slug>`.
+// handleTunnel routes `/qurl-admin tunnel install` and `/qurl-admin tunnel install <slug>`.
 func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	if tunnelInstallWizardRequest(text) {
@@ -238,7 +238,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, ":warning: missing channel_id in slash command payload")
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminAction("tunnel_install")) {
+	if !h.requireAdminSync(w, teamID, userID, AdminActionTunnelInstall) {
 		return
 	}
 
@@ -269,7 +269,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl tunnel install <slug> [port:8080]` instead.")
+		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <slug> [port:8080]` instead.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -282,7 +282,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	}
 	triggerID := strings.TrimSpace(values.Get(fieldTriggerID))
 	if triggerID == "" {
-		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl tunnel install <slug> [port:8080]` instead.")
+		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl-admin tunnel install <slug> [port:8080]` instead.")
 		return
 	}
 	log := slog.With(
@@ -324,7 +324,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	)
 	if openBudget <= 0 {
 		log.Warn("tunnel install wizard trigger expired before admin check")
-		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin tunnel install` again.", true)
 		return
 	}
 	// adminGateBudget + slackTriggerOpenViewBudget intentionally fit inside
@@ -365,7 +365,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	openBudget = slackTriggerOpenViewBudgetRemaining(triggerElapsed)
 	if openBudget <= 0 {
 		log.Warn("tunnel install wizard trigger expired before views.open", "slack_trigger_elapsed_ms", triggerElapsed.Milliseconds())
-		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin tunnel install` again.", true)
 		return
 	}
 	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
@@ -380,9 +380,9 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		)
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
-			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl tunnel install` again.", true)
+			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin tunnel install` again.", true)
 		case errors.Is(err, context.DeadlineExceeded):
-			_ = h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl tunnel install` again.", true)
+			_ = h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl-admin tunnel install` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
 			_ = h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
 		case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
@@ -413,9 +413,9 @@ func (h *Handler) openTunnelInstallView(ctx context.Context, log *slog.Logger, t
 func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
 	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
 	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
-		return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl tunnel install` again."
+		return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin tunnel install` again."
 	}
-	return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl tunnel install` again."
+	return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin tunnel install` again."
 }
 
 func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {
@@ -513,7 +513,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "response_url_delivery_failed")
-		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl tunnel install` again.") {
+		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin tunnel install` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 	}
@@ -580,7 +580,7 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 		if existing == resourceID {
 			return fmt.Sprintf("qURL alias `$%s` is ready in this channel.", alias), nil
 		}
-		return fmt.Sprintf("qURL alias `$%s` is already used in this channel. Run `/qurl unset-alias $%s` first, or pick a different alias.", alias, alias), slackdata.ErrAliasAlreadyBound
+		return fmt.Sprintf("qURL alias `$%s` is already used in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
@@ -685,9 +685,9 @@ func tunnelImageNote(usingDefaultImage bool) string {
 func tunnelInstallRateLimitMessage(err error) string {
 	retryAfter := slackRetryAfterLabel(SlackRateLimitRetryAfter(err))
 	if retryAfter == "" {
-		return "Slack rate-limited guided tunnel setup. Wait up to " + humanDurationCeilMinutes(slackRetryAfterDisplayCap) + ", then run `/qurl tunnel install` again."
+		return "Slack rate-limited guided tunnel setup. Wait up to " + humanDurationCeilMinutes(slackRetryAfterDisplayCap) + ", then run `/qurl-admin tunnel install` again."
 	}
-	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl tunnel install` again."
+	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl-admin tunnel install` again."
 }
 
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image string) (string, error) {

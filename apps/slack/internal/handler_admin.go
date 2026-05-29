@@ -58,7 +58,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	switch cmd.AdminAction {
+	switch cmd.AdminAction { //nolint:exhaustive // dispatch handles only parser-producible actions; gate-audit labels never reach here, default covers the rest
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:
@@ -231,7 +231,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 	if target == callerUserID {
 		// requireAdminSync already passed → the caller is an admin →
 		// adding themselves is a no-op. Render an explicit copy so an
-		// admin who fat-fingered `/qurl admin add @themselves` doesn't
+		// admin who fat-fingered `/qurl-admin admin add @themselves` doesn't
 		// read the indirect "already an admin" surface as if it
 		// referred to someone else.
 		respondSlack(w, "You're already an admin — nothing to do.")
@@ -296,7 +296,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 	if target == callerUserID {
 		// The store-side owner-check catches owners; this catches the
 		// non-owner self-remove. We refuse rather than allowing it so
-		// an admin who fat-fingers `/qurl admin remove @themselves`
+		// an admin who fat-fingers `/qurl-admin admin remove @themselves`
 		// doesn't lock themselves out without an explicit confirmation.
 		respondSlack(w, "You can't remove yourself — ask another admin.")
 		return

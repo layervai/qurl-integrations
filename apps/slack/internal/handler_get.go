@@ -118,7 +118,7 @@ func noResourceForAliasMessage(alias string) string {
 // admin (only an admin can re-point it at a tunnel). Same posture as
 // [noResourceForAliasMessage].
 //
-// `alias` is interpolated verbatim into the reply AND a `/qurl set-alias
+// `alias` is interpolated verbatim into the reply AND a `/qurl-admin set-alias
 // $<alias>` hint, both inside Slack inline-code fences. Callers pass a
 // parser-validated token today, but rather than rely on that convention the
 // charset is re-asserted here: a value that isn't [aliasCharsetPattern]-clean
@@ -126,9 +126,9 @@ func noResourceForAliasMessage(alias string) string {
 // caller can't reopen the Slack-fence-escaping surface the parser guards.
 func legacyAliasBindingMessage(alias string) string {
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl set-alias`."
+		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias`."
 	}
-	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl set-alias $%s $<slug>`.", alias, alias)
+	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<slug>`.", alias, alias)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key
@@ -375,8 +375,8 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //
 //  1. Channel alias binding (`channel_policies.alias_bindings`). The
 //     presence of the binding in THIS channel is itself the
-//     authorization signal — `/qurl set-alias` is the admin act that
-//     authorizes a resource for use here.
+//     authorization signal — `/qurl-admin set-alias` is the admin act
+//     that authorizes a resource for use here.
 //  2. Tunnel-slug fallback. When no binding matches, the token may
 //     still be a tunnel slug: `/qurl list` renders `$<slug>` for tunnels
 //     surfaced via admin-sees-all or `allowed_resource_ids` that have no

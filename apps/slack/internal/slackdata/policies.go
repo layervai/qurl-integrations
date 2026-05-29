@@ -48,7 +48,7 @@ const (
 //     hand-seeded or carried over from pre-pivot rows. `/qurl get
 //     $r_<id>` checks membership here.
 //   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl setalias` / `/qurl unsetalias` mutate; the
+//     surface `/qurl-admin set-alias` / `/qurl-admin unset-alias` mutate; the
 //     binding's resource_id is also accepted on the `$r_<id>` path so
 //     an aliased resource is mintable by its raw ID too.
 //

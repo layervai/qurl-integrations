@@ -67,7 +67,7 @@ var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 // aliasUsage is the help-text body returned when setalias/unsetalias
 // is invoked with an obvious typo. Centralized so the parser-rejection
 // path and the missing-arg path share the same copy.
-const aliasUsage = "Usage:\n• `/qurl set-alias $<alias> $<slug>`\n• `/qurl unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
+const aliasUsage = "Usage:\n• `/qurl-admin set-alias $<alias> $<slug>`\n• `/qurl-admin unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
 
 // Parser-rejection user copy. These strings are returned via
 // [parseAliasArgs] as the second return value (a user-facing message)
@@ -101,10 +101,10 @@ const (
 // admins are most likely to try) rather than asserting the admin typed
 // one. Distinct from [msgAliasTargetInvalid], which fires once a
 // `$`-prefixed target fails the tunnel-slug grammar.
-const msgAliasTargetNotTunnel = "`/qurl set-alias` points an alias at a tunnel slug — `/qurl set-alias $<alias> $<slug>`. (Raw URLs and resource IDs aren't supported targets.)"
+const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a tunnel slug — `/qurl-admin set-alias $<alias> $<slug>`. (Raw URLs and resource IDs aren't supported targets.)"
 
-// aliasArgs is the parsed shape of a `/qurl setalias $a <target>` or
-// `/qurl unsetalias $a` text body. Kept as a separate value type so
+// aliasArgs is the parsed shape of a `/qurl-admin set-alias $a <target>` or
+// `/qurl-admin unset-alias $a` text body. Kept as a separate value type so
 // the parser is unit-testable without spinning a full handler.
 type aliasArgs struct {
 	Alias  string // sigil stripped (no leading `$`)
@@ -283,18 +283,33 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 	return
 }
 
-// handleSetAlias routes `/qurl set-alias $<alias> <target>`.
+// requireAliasAdminGate is the in-code admin gate shared by set-alias and
+// unset-alias: Slack does not restrict a slash command to workspace admins,
+// so the `/qurl-admin` registration can't be the gate. It checks AdminStore
+// is wired (requireAdminStoreSync — guarantees AdminStore, == aliasStore in
+// prod per cmd/main.go SetAliasStore, is non-nil for CheckAdmin) and that
+// the caller is a qURL admin (requireAdminSync). Returns false (and has
+// written the reply) when either fails; callers `if !h.requireAliasAdminGate(...) { return }`.
+func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
+	if !h.requireAdminStoreSync(w) {
+		return false
+	}
+	return h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
+}
+
+// handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
 //
-// **Admin restriction:** This handler is admin-gated at the Slack app
-// manifest level — the `/qurl setalias` command must be declared
-// admin-only in the install config; gating in the manifest avoids an
-// extra Slack API round-trip per invocation. (Note: `/qurl setup`
-// does NOT share this posture — it enforces an owner-only gate in
-// code, see handleSetup.) The CR feedback on the old #230 (claude-bot
-// review id 2026-05-10) flagged "admin gate before alias resolution"
-// as an info-disclosure surface. Moving the gate to the manifest
-// closes that gap structurally: a non-admin's command never reaches
-// this handler.
+// **Admin restriction:** Enforced in code via requireAdminSync (a
+// CheckAdmin lookup against AdminStore), the same gate handleTunnel and
+// the admin membership verbs use. Slack does NOT restrict a slash command
+// to workspace admins — the "admins only" label on the `/qurl-admin`
+// registration is display text, not enforcement — so this code gate is the
+// only real boundary. It runs before alias resolution, so the CR feedback
+// on the old #230 (claude-bot review 2026-05-10) that flagged "admin gate
+// before alias resolution" stays addressed: a non-admin is denied before
+// any tunnel/resource lookup. (setup is different — it lives on the open
+// `/qurl` command and is guarded at the OAuth-callback bind layer instead;
+// see handleSetup.)
 //
 // **Target contract:** the only accepted target is a tunnel `$slug`.
 // A raw URL or an `r_<id>` resource id is rejected synchronously with
@@ -324,6 +339,19 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
+
+	// Admin gate, in code (see requireAliasAdminGate). Runs after
+	// aliasValidate (team/channel IDs + store-wired check) but before the
+	// slug resolve + DDB bind, so a non-admin is denied before any resource
+	// interaction. The parse/validate usage hints (parseAliasArgs above) are
+	// deliberately surfaced before the gate: the grammar is public — it's in
+	// the ungated `/qurl-admin help` — so a non-admin's malformed attempt gets
+	// the usage reply rather than a bare denial. The gate's guarantee is "no
+	// slug resolve or store mutation before the admin check," not "no parser
+	// feedback to non-admins."
+	if !h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias) {
+		return
+	}
 	slug := strings.TrimPrefix(args.Target, "$")
 	h.runAsync(w, "setalias_slug", values, func(ctx context.Context, log *slog.Logger) {
 		msg := h.resolveAndBindTunnelSlugAlias(ctx, log, teamID, channelID, args.Alias, slug)
@@ -351,7 +379,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl tunnel install %s` first, then retry this alias.", slug, slug)
+			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl-admin tunnel install %s` first, then retry this alias.", slug, slug)
 		}
 		return sanitizeAPIError(err, "Failed to resolve tunnel slug")
 	}
@@ -365,7 +393,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unset-alias $%s` first, or pick a different alias.", alias, alias)
+		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias)
 	}
 	if err != nil {
 		log.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
@@ -406,7 +434,7 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 		// purpose, but re-assert type/slug/active here so an upstream
 		// regression can't leak a non-tunnel, wrong-slug, or revoked
 		// resource into mintable state (this resolves the resource_id
-		// that both /qurl set-alias and /qurl get then mint against).
+		// that both /qurl-admin set-alias and /qurl get then mint against).
 		if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
 			return resource.ResourceID, nil
 		}
@@ -414,12 +442,12 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 	return "", errTunnelSlugNotFound
 }
 
-// handleUnsetAlias routes `/qurl unset-alias $<alias>`.
+// handleUnsetAlias routes `/qurl-admin unset-alias $<alias>`.
 //
-// **Admin restriction:** Same Slack-manifest-level gate as
-// handleSetAlias — see that comment. The CR feedback's
-// "info-disclosure" concern (a non-admin probing alias existence via
-// the response delta) is closed structurally by the manifest gate.
+// **Admin restriction:** Same in-code requireAdminSync gate as
+// handleSetAlias — see that comment. The CR "info-disclosure" concern (a
+// non-admin probing alias existence via the response delta) is closed by
+// the gate running before any store read.
 //
 // **Not-bound posture:** UnbindChannelAlias is conditional on
 // attribute_exists(alias_bindings.#a) — clearing an alias that
@@ -442,18 +470,25 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	}
 	defer cancel()
 
+	// Admin gate, in code (see requireAliasAdminGate). Runs after
+	// aliasPreamble (IDs + store-wired check) but before UnbindChannelAlias,
+	// so a non-admin is denied before any store write.
+	if !h.requireAliasAdminGate(w, teamID, values, AdminActionUnsetAlias) {
+		return
+	}
+
 	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
 	if errors.Is(err, slackdata.ErrAliasNotFound) {
 		respondSlack(w, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", args.Alias))
 		return
 	}
 	if err != nil {
-		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
+		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
 		respondSlack(w, "Failed to clear alias. Please try again.")
 		return
 	}
 	// Admin-verb audit trail: counterpart to the setalias "alias bound"
 	// audit line. team/channel/alias are validated upstream.
-	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
+	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
 	respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
 }

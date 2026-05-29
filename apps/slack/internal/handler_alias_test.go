@@ -142,7 +142,32 @@ func newAliasTestHandler(t *testing.T) (*Handler, *fakeAliasStore) {
 	h := newTestHandler(t, noopQURLServer(t))
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	// set-alias / unset-alias are admin-gated in code (requireAdminSync);
+	// wire an AdminStore where the test callers are admins so the verb
+	// bodies are reachable. Harmless for the few callers that return
+	// before the gate (parser error, missing-id guard, help).
+	//
+	// Note this wires AdminStore unconditionally, so a test that needs the
+	// AdminStore-nil path must build the handler directly rather than through
+	// this helper (see TestUserHelpGatesGetAndAliasesOnAdminStore and
+	// TestHelpListsAliasVerbsWhenAliasStoreWired).
+	seedAliasAdminGate(t, h, testAliasTeamID)
 	return h, store
+}
+
+// seedAliasAdminGate wires h.cfg.AdminStore so the alias-test callers —
+// "U_admin" (from aliasSlashRequest) and "U_alias_admin" (from the async
+// invoker) — are workspace admins for teamID, letting them clear the
+// in-code admin gate (requireAdminSync → CheckAdmin) that set-alias /
+// unset-alias enforce. The alias bind still runs against the test's
+// fakeAliasStore; this only satisfies the gate. No customer server is
+// created — the alias tests point the qURL client at their own upstream.
+func seedAliasAdminGate(t *testing.T, h *Handler, teamID string) {
+	t.Helper()
+	names := defaultTestTableNames()
+	ddb := newFakeDDB(t, names, nil)
+	ddb.seedItem(t, names.workspace, seedWorkspaceAdmins(teamID, testAdminOwnerID, []string{"U_admin", "U_alias_admin"}, testWorkspaceConfiguredAt))
+	h.cfg.AdminStore = newStoreFromFake(t, ddb, names, nil)
 }
 
 // aliasSlashRequest builds a signed /slack/commands request for the
@@ -153,7 +178,7 @@ func newAliasTestHandler(t *testing.T) (*Handler, *fakeAliasStore) {
 func aliasSlashRequest(t *testing.T, text, teamID, channelID string) (body, signBody string) {
 	t.Helper()
 	body = url.Values{
-		fieldCommand:   {testSlashCmd},
+		fieldCommand:   {slashCommandForVerb(text)},
 		fieldText:      {text},
 		fieldTeamID:    {teamID},
 		fieldChannelID: {channelID},
@@ -362,6 +387,7 @@ func TestSetAlias_HyphenatedHappyTunnelSlug(t *testing.T) {
 	h := newTestHandler(t, srv)
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, testAliasTeamID)
 	_, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("set-alias $staging $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
 	if ack != ackWorkingOnIt {
@@ -402,6 +428,7 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	h := newTestHandler(t, srv)
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, testAliasTeamID)
 	status, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("set-alias $staging $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
 	if status != http.StatusOK {
@@ -429,6 +456,76 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 	}
 }
 
+// TestSetAlias_NonAdminDenied fences the in-code admin gate on set-alias:
+// a caller who isn't on the workspace admin set is denied with the
+// admin-only reply BEFORE any tunnel-slug resolution, so no upstream
+// resource lookup and no alias bind happen. Before this gate, set-alias
+// relied only on the (cosmetic) Slack-manifest restriction — see
+// handleSetAlias. Mirrors TestHandleAdminRevoke_NonAdmin for the
+// membership verbs; the upstream-hit assertion pins the gate-before-resolve
+// ordering.
+func TestSetAlias_NonAdminDenied(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	var resolveHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resolveHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	store := newFakeAliasStore()
+	h.aliasStore = store
+	// AdminStore names U_admin / U_alias_admin as admins; the caller below
+	// ("U_not_admin") is deliberately not among them.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	status, reply := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdmin("set-alias $staging $"+testTunnelSlug, testAliasTeamID, "U_not_admin")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(reply, "admin-only") {
+		t.Errorf("reply = %q, want admin-only denial", reply)
+	}
+	if resolveHits.Load() != 0 {
+		t.Errorf("tunnel resolve fired despite non-admin gate (hits = %d)", resolveHits.Load())
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b != nil {
+		t.Errorf("alias bound despite non-admin gate: %v", b)
+	}
+}
+
+// TestUnsetAlias_NonAdminDenied is the symmetric fence to
+// TestSetAlias_NonAdminDenied: handleUnsetAlias carries the same in-code
+// admin gate, so a non-admin must be denied before the alias store is
+// touched. Pre-binds an alias so a dropped gate would leave a visible
+// effect (the binding cleared); the gate must keep it intact. Guards
+// against a regression that drops the gate from one alias verb but not the
+// other.
+func TestUnsetAlias_NonAdminDenied(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	store := newFakeAliasStore()
+	h.aliasStore = store
+	if err := store.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testAliasName, testTunnelResourceID); err != nil {
+		t.Fatalf("seed bind: %v", err)
+	}
+	// AdminStore names U_admin / U_alias_admin; "U_not_admin" is not among them.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	status, reply := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdmin("unset-alias $"+testAliasName, testAliasTeamID, "U_not_admin")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(reply, "admin-only") {
+		t.Errorf("reply = %q, want admin-only denial", reply)
+	}
+	if b := store.bindings(testAliasTeamID, testAliasChannelID); b[testAliasName] != testTunnelResourceID {
+		t.Errorf("alias cleared despite non-admin gate: %v", b)
+	}
+}
+
 func TestSetAlias_TunnelSlugMissingDoesNotCreateResource(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	var postHits atomic.Int32
@@ -450,6 +547,7 @@ func TestSetAlias_TunnelSlugMissingDoesNotCreateResource(t *testing.T) {
 	h := newTestHandler(t, srv)
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, testAliasTeamID)
 
 	_, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("setalias $staging $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
@@ -520,6 +618,7 @@ func TestSetChannelAlias_SecondAliasOnSameChannelSucceeds(t *testing.T) {
 	h := newTestHandler(t, slugResolvingQURLServer(t))
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, testAliasTeamID)
 
 	_, _, async1 := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("setalias $a $tunnel-a", testAliasTeamID, "U_alias_admin")
@@ -551,6 +650,7 @@ func TestSetChannelAlias_DuplicateAliasIsRefused(t *testing.T) {
 	h := newTestHandler(t, slugResolvingQURLServer(t))
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, testAliasTeamID)
 
 	_, _, async1 := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("setalias $staging $first-tun", testAliasTeamID, "U_alias_admin")
@@ -634,6 +734,7 @@ func TestSetAlias_StoreWriteError(t *testing.T) {
 	store := newFakeAliasStore()
 	store.errBind = errors.New("ddb conditional failure")
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, testAliasTeamID)
 
 	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("setalias $staging $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
@@ -799,16 +900,25 @@ func TestUnsetAlias_HyphenatedForm(t *testing.T) {
 	}
 }
 
-func TestHelpGatesAliasVerbsByBackingStore(t *testing.T) {
-	// CR feedback fence from old #230: /qurl help must surface
-	// setalias and unsetalias when the alias store is wired. The
-	// old PR had a stale helpMessage() that listed only
-	// create/list/help even after the alias verbs landed. This also
-	// fences the gate asymmetry: with aliasStore wired but AdminStore
-	// nil, set-alias/unset-alias show (they write through aliasStore)
-	// while `/qurl aliases` and `tunnel install` stay hidden (they
-	// read/need AdminStore).
-	h, _ := newAliasTestHandler(t)
+func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
+	// CR feedback fence from old #230: help must surface set-alias and
+	// unset-alias when the alias store is wired. The old PR had a stale
+	// helpMessage() that listed only create/list/help even after the alias
+	// verbs landed. In the command split these are admin verbs, and `help`
+	// routes to `/qurl-admin` (help isn't a user verb; see
+	// slashCommandForVerb), so this exercises adminHelpMessage.
+	//
+	// Built with aliasStore wired but NO AdminStore: that combination keeps
+	// the alias verbs visible (they gate on aliasStore) while tunnel install
+	// stays hidden (it gates on AdminStore/OpenView), so the "tunnel install
+	// absent" assertion fences the AdminStore-absent gating.
+	// newAliasTestHandler wires an AdminStore, which would advertise tunnel
+	// install and flip that assertion — so construct the handler directly.
+	// (The user-help `/qurl get` and `/qurl aliases` gates are fenced by
+	// TestUserHelpGatesGetAndAliasesOnAdminStore, not here — admin help
+	// never renders those user-verb lines.)
+	h := newTestHandler(t, noopQURLServer(t))
+	h.aliasStore = newFakeAliasStore()
 	body, sign := aliasSlashRequest(t, "help", testAliasTeamID, testAliasChannelID)
 
 	w := httptest.NewRecorder()
@@ -816,27 +926,40 @@ func TestHelpGatesAliasVerbsByBackingStore(t *testing.T) {
 
 	got := decodeSlackText(t, w.Body.Bytes())
 	if !strings.Contains(got, "set-alias") {
-		t.Errorf("/qurl help = %q, missing set-alias", got)
+		t.Errorf("/qurl-admin help = %q, missing set-alias", got)
 	}
 	if !strings.Contains(got, "unset-alias") {
-		t.Errorf("/qurl help = %q, missing unset-alias", got)
+		t.Errorf("/qurl-admin help = %q, missing unset-alias", got)
 	}
 	if strings.Contains(got, "tunnel install") {
-		t.Errorf("/qurl help = %q, advertised tunnel install without AdminStore", got)
+		t.Errorf("/qurl-admin help = %q, advertised tunnel install without AdminStore", got)
 	}
-	// newAliasTestHandler wires aliasStore but NOT AdminStore, and `/qurl
-	// aliases` reads channel_policies through the AdminStore (processAliases
-	// fails closed when it's nil). So help must gate it on AdminStore — with
-	// aliasStore wired here, a gate that regressed back to aliasStore would
-	// leak the verb.
-	if strings.Contains(got, "/qurl aliases`") {
-		t.Errorf("/qurl help = %q, advertised /qurl aliases without AdminStore", got)
+}
+
+// TestUserHelpGatesGetAndAliasesOnAdminStore fences the AdminStore gate on
+// the `/qurl get` and `/qurl aliases` lines in the USER help: both resolve
+// through the AdminStore (get via resolveTokenForGet, aliases via
+// processAliases) and fail closed when it's nil post-tunnels-only, so
+// userHelpMessage must advertise them only when AdminStore is wired.
+// Exercises userHelpMessage directly because `help` routes to the admin
+// surface in the dispatch split, so the slash-command path can't reach
+// user help.
+func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	noStore := h.userHelpMessage(commandUser)
+	if strings.Contains(noStore, "/qurl aliases`") {
+		t.Errorf("user help advertised /qurl aliases with no AdminStore: %q", noStore)
 	}
-	// get also gates on AdminStore: resolveTokenForGet fails closed without
-	// it post-tunnels-only (the URL form that worked without DDB is gone),
-	// so help must not advertise get on an AdminStore-nil deploy.
-	if strings.Contains(got, "/qurl get") {
-		t.Errorf("/qurl help = %q, advertised /qurl get without AdminStore", got)
+	if strings.Contains(noStore, "/qurl get") {
+		t.Errorf("user help advertised /qurl get with no AdminStore: %q", noStore)
+	}
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	withStore := h.userHelpMessage(commandUser)
+	if !strings.Contains(withStore, "/qurl aliases`") {
+		t.Errorf("user help omitted /qurl aliases with AdminStore wired: %q", withStore)
+	}
+	if !strings.Contains(withStore, "/qurl get") {
+		t.Errorf("user help omitted /qurl get with AdminStore wired: %q", withStore)
 	}
 }
 
@@ -858,15 +981,15 @@ func TestHelpHidesAliasVerbsWhenAliasStoreNil(t *testing.T) {
 
 	got := decodeSlackText(t, w.Body.Bytes())
 	if strings.Contains(got, "set-alias") {
-		t.Errorf("/qurl help = %q, leaked set-alias verb on unwired aliasStore", got)
+		t.Errorf("/qurl-admin help = %q, leaked set-alias verb on unwired aliasStore", got)
 	}
 	if strings.Contains(got, "unset-alias") {
-		t.Errorf("/qurl help = %q, leaked unset-alias verb on unwired aliasStore", got)
+		t.Errorf("/qurl-admin help = %q, leaked unset-alias verb on unwired aliasStore", got)
 	}
-	// help itself MUST still appear — the gate only hides the
-	// alias-bearing verbs, not the help line.
-	if !strings.Contains(got, "/qurl help") {
-		t.Errorf("/qurl help = %q, missing help line", got)
+	// The admin help itself MUST still render — the gate only hides the
+	// alias-bearing verbs, not the always-present `/qurl-admin help` line.
+	if !strings.Contains(got, "/qurl-admin help") {
+		t.Errorf("/qurl-admin help = %q, missing help line", got)
 	}
 }
 
@@ -882,6 +1005,7 @@ func TestSetAlias_CrossTenancyIsolation(t *testing.T) {
 	h := newTestHandler(t, slugResolvingQURLServer(t))
 	store := newFakeAliasStore()
 	h.aliasStore = store
+	seedAliasAdminGate(t, h, "T2")
 	// Seed T1's binding directly (the stored value is opaque; T1 is the
 	// tenant we're fencing isolation against).
 	if err := store.BindChannelAlias(context.Background(), "T1", "C_shared", testAliasName, testAliasURL); err != nil {

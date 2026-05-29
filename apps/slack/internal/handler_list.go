@@ -22,7 +22,7 @@ import (
 // when tunnels exist, hiding the very thing the command is for. One
 // generous page keeps the command single-request while making the
 // client-side tunnel filter reliable; tunnel resources are created
-// deliberately (via `/qurl tunnel install`) so a real workspace has few
+// deliberately (via `/qurl-admin tunnel install`) so a real workspace has few
 // of them, well within Slack's ephemeral-message budget.
 //
 // A server-side `type=tunnel` filter (tracked in #531) would let this
@@ -32,13 +32,13 @@ import (
 const listResourcesScanLimit = 100
 
 // listTunnelsEmptyMessage is the friendly empty-state copy for a
-// workspace with zero tunnels. `/qurl tunnel install` is admin-only,
+// workspace with zero tunnels. `/qurl-admin tunnel install` is admin-only,
 // so the copy names the command without imperatively telling every
 // member to run it — a non-admin reading this is routed implicitly to
 // their Slack admin. Post-revert of #234 (#459) `/qurl list` no longer
 // probes admin status, so there is a single empty-state for everyone
 // rather than the old admin/non-admin branch.
-const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl tunnel install <slug>`."
+const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl-admin tunnel install <slug>`."
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
 // Clicking it mints a one-time qURL for that row's tunnel — the same work
@@ -76,7 +76,7 @@ const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$slug` or
 // tunnel resources (type=tunnel only — URL/transit resources are
 // filtered out) so each line is a copy-paste-ready `$<slug>` token the
 // user can pipe into `/qurl get $<slug>` without a manual lookup. The
-// slug is the same stable handle `/qurl tunnel install <slug>` binds as
+// slug is the same stable handle `/qurl-admin tunnel install <slug>` binds as
 // a channel alias, so the listed token resolves directly in `/qurl get`.
 //
 // The listing is unscoped: every workspace member sees every tunnel,
@@ -237,7 +237,7 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 // tunnelToken returns the resource-intrinsic `$<token>` for a tunnel.
 // Precedence:
 //
-//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl tunnel
+//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin tunnel
 //     install <slug>` binds `$<slug>` as a channel alias, so the slug
 //     pastes straight into `/qurl get $<slug>`. This is the common case
 //     and the identifier we want to surface (never the opaque r_<id>).

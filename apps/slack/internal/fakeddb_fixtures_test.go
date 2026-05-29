@@ -41,6 +41,22 @@ func seedWorkspaceAdmin(teamID, ownerID, slackUserID string, configuredAt time.T
 	}
 }
 
+// seedWorkspaceAdmins is seedWorkspaceAdmin with more than one user on the
+// admin set. CheckAdmin only honors the admin SS (the owner is not
+// auto-admin), so the alias-gate helper needs both of its test callers
+// ("U_admin" and "U_alias_admin") listed here.
+func seedWorkspaceAdmins(teamID, ownerID string, adminUserIDs []string, configuredAt time.Time) map[string]ddbtypes.AttributeValue {
+	at := configuredAt.UTC().Format(time.RFC3339)
+	return map[string]ddbtypes.AttributeValue{
+		fAttrSlackTeamID:        stringMember(teamID),
+		fAttrOwnerID:            stringMember(ownerID),
+		fAttrSeedAdminSlackUser: stringMember(adminUserIDs[0]),
+		fAttrAdminSlackUserIDs:  &ddbtypes.AttributeValueMemberSS{Value: adminUserIDs},
+		fAttrCreatedAt:          stringMember(at),
+		fAttrUpdatedAt:          stringMember(at),
+	}
+}
+
 // seedWorkspaceNonAdmin returns a workspace_mappings row that
 // exists for `teamID` but does NOT name `slackUserID` as admin.
 // Used by the admin-check-no surfaces.

@@ -640,7 +640,7 @@ func TestTunnelInstallBareReportsInstallLinkWhenWorkspaceAndEnterpriseTokensMiss
 	for _, want := range []string{
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
-		"/qurl tunnel install",
+		"/qurl-admin tunnel install",
 	} {
 		if !strings.Contains(async, want) {
 			t.Fatalf("async reply = %q, missing %q", async, want)
@@ -661,10 +661,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	// `/qurl aliases` gates on AdminStore (wired here), so it must appear —
-	// the converse of TestHelpGatesAliasVerbsByBackingStore, which fences it
-	// hidden when AdminStore is nil.
-	for _, want := range []string{"/qurl get <$slug|$alias>`", "/qurl aliases`", "/qurl tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	for _, want := range []string{"/qurl-admin tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl-admin tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
@@ -676,7 +673,7 @@ func TestTunnelInstallUsageSplitsTypedEnvironmentExamples(t *testing.T) {
 
 	got := tunnelInstallUsage()
 	for _, want := range []string{
-		"Guided setup is exactly `/qurl tunnel install`",
+		"Guided setup is exactly `/qurl-admin tunnel install`",
 		"• Docker:",
 		"container:<name>|web_container:<name>",
 		"• Compose:",
@@ -714,7 +711,7 @@ func TestTunnelInstallBareWithoutTriggerIDFallsBackToTypedInstall(t *testing.T) 
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl tunnel install <slug>") {
+	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl-admin tunnel install <slug>") {
 		t.Fatalf("response = %q, want trigger_id fallback guidance", got)
 	}
 }
@@ -741,7 +738,7 @@ func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	for _, want := range []string{"Guided tunnel setup is not configured", "/qurl tunnel install <slug>", "port:8080"} {
+	for _, want := range []string{"Guided tunnel setup is not configured", "/qurl-admin tunnel install <slug>", "port:8080"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("response = %q, missing %q", got, want)
 		}
@@ -797,7 +794,7 @@ func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl tunnel install") {
+	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl-admin tunnel install") {
 		t.Fatalf("async reply = %q, want trigger-expiry retry copy", async)
 	}
 }
@@ -822,7 +819,7 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "Wait 2 seconds") || !strings.Contains(async, "/qurl tunnel install") {
+	if !strings.Contains(async, "Wait 2 seconds") || !strings.Contains(async, "/qurl-admin tunnel install") {
 		t.Fatalf("async reply = %q, want retry-after guidance", async)
 	}
 }
@@ -851,7 +848,7 @@ func TestTunnelInstallBareReportsSlackInstallLinkWhenWorkspaceBotTokenMissing(t 
 	for _, want := range []string{
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
-		"/qurl tunnel install",
+		"/qurl-admin tunnel install",
 	} {
 		if !strings.Contains(async, want) {
 			t.Fatalf("async reply = %q, missing %q", async, want)
@@ -962,7 +959,7 @@ func TestTunnelInstallBareSkipsOpenViewWhenTriggerWindowAlreadySpent(t *testing.
 	h.openTunnelInstallWizard(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, testSlackTriggerID, inv.responseU.URL, fixedNow)
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl tunnel install") {
+	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl-admin tunnel install") {
 		t.Fatalf("async reply = %q, want trigger-expiry retry copy", async)
 	}
 }
@@ -1048,7 +1045,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 		t.Fatal("OpenView context did not cancel within budget")
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "Slack did not respond") || !strings.Contains(async, "/qurl tunnel install") {
+	if !strings.Contains(async, "Slack did not respond") || !strings.Contains(async, "/qurl-admin tunnel install") {
 		t.Fatalf("async reply = %q, want deadline-expiry retry copy", async)
 	}
 }
@@ -1354,7 +1351,7 @@ func TestTunnelInstallModalRejectsDifferentSubmitterWithRetryCopy(t *testing.T) 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
-	for _, want := range []string{"Only the admin who opened this modal", "Run /qurl tunnel install again"} {
+	for _, want := range []string{"Only the admin who opened this modal", "Run /qurl-admin tunnel install again"} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("modal response = %s, want %q", w.Body.String(), want)
 		}

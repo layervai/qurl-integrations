@@ -168,13 +168,34 @@ func newAdminSlashInvokerOnChannel(t *testing.T, h *Handler, channelID string) *
 	return inv
 }
 
+// slashCommandForVerb picks which slash command (`/qurl` vs
+// `/qurl-admin`) a given verb text is invoked under, mirroring the
+// production dispatch split: user verbs (get / list / aliases / create /
+// setup) arrive on `/qurl`; everything else — the admin verbs plus the
+// admin-help and bare-`admin` cases — arrives on `/qurl-admin`. Centralized
+// here so the shared admin invoker drives both surfaces with the command
+// Slack would actually stamp, rather than hardcoding one and silently
+// exercising the wrong-surface redirect.
+//
+// Note `help` is deliberately not a user verb (isUserVerb("help") is false —
+// help is dispatched explicitly at the top of each surface, not via the verb
+// lists), so it routes to `/qurl-admin` here. That's intentional and harmless:
+// `help` renders on both surfaces, and the help tests that use this want the
+// admin help text.
+func slashCommandForVerb(text string) string {
+	if isUserVerb(text) {
+		return commandUser
+	}
+	return commandAdmin
+}
+
 // invokeAdmin issues a signed slash-command request and returns
 // (status, syncReplyText). Use this for sync verbs (allow, disallow,
 // status, revoke) — the rendered reply is in the sync body.
 func (a *adminSlashInvoker) invokeAdmin(text, teamID, userID string) (status int, replyText string) {
 	a.t.Helper()
 	body := url.Values{
-		"command":      {"/qurl"},
+		"command":      {slashCommandForVerb(text)},
 		"text":         {text},
 		"team_id":      {teamID},
 		"user_id":      {userID},

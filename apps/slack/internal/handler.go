@@ -23,7 +23,7 @@ import (
 
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
-	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. A workspace admin can run `/qurl setup` to connect it."
+	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup` to connect it."
 )
 
 // ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
@@ -108,6 +108,75 @@ const (
 	pathSlackEvents       = "/slack/events"
 	pathSlackInteractions = "/slack/interactions"
 )
+
+// Slash-command names. Both POST to pathSlackCommands with the same HMAC
+// signature gate; Slack stamps which command the user invoked in the
+// `command` form field, and handleSlashCommand dispatches on it. The
+// admin command is a deploy prerequisite — it must be registered in the
+// Slack app config pointing at the same request URL as commandUser, or
+// these literals never arrive (see the package README / PR notes).
+const (
+	commandUser  = "/qurl"
+	commandAdmin = "/qurl-admin"
+)
+
+// adminCommandSuffix is how every env names its admin slash command: the
+// user command plus this suffix (`/qurl`→`/qurl-admin`,
+// `/qurl-sandbox`→`/qurl-sandbox-admin`; see qurl-integrations-infra
+// slack-manifests/envs.json). handleSlashCommand classifies on the suffix
+// rather than the literal commandAdmin so a non-prod env whose commands
+// carry an env infix still reaches the admin surface instead of falling
+// through to the user one.
+//
+// SCOPE OF THE REWRITE: only the help text is rewritten to the invoked
+// command name (userHelpMessage / adminHelpMessage, via ReplaceAll). Static
+// error / usage / retry copy elsewhere (tunnelInstallUsage, the alias usage
+// strings, modal-error and rate-limit messages, empty-state hints) bakes in
+// the prod `/qurl-admin` / `/qurl` literal and is deliberately NOT rewritten.
+// That drift is accepted: non-prod (env-infix) installs are operator-only
+// internal sandboxes, where a retry hint naming the prod command is a
+// non-issue, and customer installs are always prod where the literals are
+// already correct. Threading the invoked command through every error site
+// isn't worth the churn for that audience.
+const adminCommandSuffix = "-admin"
+
+// isAdminCommand reports whether the invoked slash command is the admin
+// surface — any `/qurl-…-admin` command, not just the prod commandAdmin.
+// Scoped to the `/qurl-` command family (so `/qurl-admin`,
+// `/qurl-sandbox-admin` match but a stray `/qurlfoo-admin` or
+// `/some-other-admin` doesn't) — a foreign command can't route to admin
+// dispatch and then have userCommandName/help name a sibling that doesn't
+// exist.
+//
+// Classification is best-effort and assumes Slack only dispatches the
+// commands registered for this app (the `/qurl[-env][-admin]` family). An
+// unregistered shape like `/qurl-admin-extra` (suffix `-extra`, not `-admin`)
+// would fall through to the user surface and render its own name in help —
+// harmless, because Slack never sends a command that wasn't registered.
+func isAdminCommand(command string) bool {
+	return strings.HasPrefix(command, commandUser+"-") && strings.HasSuffix(command, adminCommandSuffix)
+}
+
+// userCommandName / adminCommandName return the sibling command names for
+// the invoked command, so wrong-surface redirects and help name the
+// command that actually exists in this workspace (e.g.
+// `/qurl-sandbox-admin`, not the prod `/qurl-admin`). Both are idempotent
+// on their own surface: userCommandName(commandUser)==commandUser and
+// adminCommandName(commandAdmin)==commandAdmin.
+//
+// The returned names are Slack-stamped command literals (a registered slash
+// command, never free-form user input), so the redirect/unknown-subcommand
+// replies interpolate them into backtick fences raw — only the user-typed
+// verb text is run through echoText. That keeps the no-op hygiene off trusted
+// literals; if Slack's command tokens ever stopped being backtick-free this
+// assumption (documented on isAdminCommand) would need revisiting.
+func userCommandName(command string) string {
+	return strings.TrimSuffix(command, adminCommandSuffix)
+}
+
+func adminCommandName(command string) string {
+	return userCommandName(command) + adminCommandSuffix
+}
 
 const (
 	// defaultMaxConcurrentAsync caps in-flight goroutines. A Slack-side
@@ -216,7 +285,7 @@ type Config struct {
 	// surfaces a friendly fallback in that case.
 	PostDM func(ctx context.Context, slackUserID, text string) error
 
-	// TunnelImage is the Docker image shown by `/qurl tunnel install`.
+	// TunnelImage is the Docker image shown by `/qurl-admin tunnel install`.
 	// Empty falls back to the public client image with the `latest` tag for
 	// dev/sandbox installs; production deploys should set an immutable tag or
 	// digest so Slack never instructs customers to run a floating image.
@@ -236,7 +305,7 @@ type Handler struct {
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
 	// aliasStore persists per-channel alias bindings for the
-	// `/qurl setalias` / `/qurl unsetalias` verbs. nil when not
+	// `/qurl-admin set-alias` / `/qurl-admin unset-alias` verbs. nil when not
 	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
 	// fast with an operator-visible ephemeral rather than silently
 	// dropping the write. See handler_alias.go for the interface
@@ -275,7 +344,7 @@ type Handler struct {
 }
 
 // SetAliasStore wires the per-channel alias persistence surface into
-// the /qurl setalias / /qurl unsetalias verbs. Must be called before
+// the /qurl-admin set-alias / /qurl-admin unset-alias verbs. Must be called before
 // `srv.Serve` — the field is read on the request hot path without
 // synchronization, and the only safe write window is before any
 // goroutine can observe it. The panic-on-double-wiring below catches
@@ -602,6 +671,89 @@ func slashSubcommand(text, command string) bool {
 	return matched
 }
 
+// adminVerbs are the leading verb words that belong to `/qurl-admin`.
+// Used to redirect a user who typed an admin verb on `/qurl` and to
+// classify the wrong-surface case. `set-alias`/`unset-alias` carry both
+// spellings because slashVerb accepts the dash-free historical form too.
+// `setup` is deliberately NOT here — it lives on `/qurl` (see handleSetup)
+// so the first claimant of an unbound workspace can reach it.
+//
+// Adding an admin verb touches three places that must stay in sync: this
+// list (wrong-surface classification), a dispatch case in
+// dispatchAdminCommand, and — if it's user-facing — adminHelpMessage.
+//
+// Immutable: read-only on the request hot path (slashVerb ranges it); a
+// var only because Go has no const slice. Do not mutate at runtime.
+var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-alias", "unsetalias"}
+
+// userVerbs are the leading verb words that belong to `/qurl`. Used to
+// redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
+// user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
+// redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
+var userVerbs = []string{"get", "list", "aliases", "create", "setup"}
+
+// isAdminVerb reports whether text's leading verb is an admin verb.
+func isAdminVerb(text string) bool {
+	matched, _ := slashVerb(text, adminVerbs...)
+	return matched
+}
+
+// isUserVerb reports whether text's leading verb is a user verb.
+func isUserVerb(text string) bool {
+	matched, _ := slashVerb(text, userVerbs...)
+	return matched
+}
+
+// firstWord returns the first whitespace-delimited token of text, or ""
+// when text has none. The wrong-surface redirects echo it as the verb
+// word — `admin <action>` collapses to `admin` so the redirect reads
+// `/qurl-admin admin list`, matching the retained sub-word grammar. It's
+// reached only on already-classified verb text, so the token is a
+// known-literal keyword; the redirects echoText-wrap it anyway to keep the
+// inline-code-fence safety local rather than by chained invariant.
+func firstWord(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// stripBackticks removes backticks from user-controlled text echoed into a
+// Slack inline-code span (the wrong-surface and unknown-subcommand replies).
+// A stray backtick in the echoed text would otherwise unbalance the `…` fence
+// and render the ephemeral reply garbled. Rendering hygiene, not a security
+// boundary — ephemerals are plain text, not markup-trusted.
+func stripBackticks(s string) string {
+	return strings.ReplaceAll(s, "`", "")
+}
+
+// maxEchoRunes caps how much user-typed command text the wrong-surface and
+// unknown-subcommand replies echo back. The echo is a copy-paste convenience,
+// not data; an unbounded paste would render an ungainly ephemeral (Slack also
+// truncates server-side, but at a less predictable point). 200 runes
+// comfortably fits any real command invocation.
+const maxEchoRunes = 200
+
+// echoText prepares user-controlled command text for echoing into a Slack
+// inline-code span: it strips backticks (so a stray one can't unbalance the
+// `…` fence) and caps the length (so an oversized paste renders predictably).
+func echoText(s string) string {
+	s = stripBackticks(s)
+	// Byte length is an upper bound on rune count, so a string within the cap
+	// by bytes is within it by runes too — skip the []rune conversion in the
+	// common short case.
+	if len(s) <= maxEchoRunes {
+		return s
+	}
+	if r := []rune(s); len(r) > maxEchoRunes {
+		return string(r[:maxEchoRunes]) + "…"
+	}
+	// Byte length exceeded the cap but rune count didn't (multi-byte text):
+	// within budget by runes, so return as-is rather than truncate.
+	return s
+}
+
 func slashVerb(text string, verbs ...string) (matched bool, rest string) {
 	for _, verb := range verbs {
 		if text == verb {
@@ -646,10 +798,56 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 
 	slog.Info("slash command", "command", command, "text", text)
 
+	// Normalize an empty command (malformed/synthetic payload) to the prod
+	// user literal once, here at the HTTP entry, so dispatch, help, and the
+	// wrong-surface redirect copy downstream never have to guard for it.
+	// Empty already routes to the user surface below (isAdminCommand("") is
+	// false), so this only fixes the rendered command name, not the routing.
+	if command == "" {
+		command = commandUser
+	}
+
+	// Both the user command and the admin command POST to the same request
+	// endpoint with the same HMAC gate; Slack stamps which one was invoked
+	// in the `command` field. Branch on it FIRST so the user surface and
+	// the admin surface stay cleanly separated: a verb typed on the wrong
+	// command gets a "that's a user command" / "that's an admin command"
+	// redirect rather than the bare "unknown subcommand" reply.
+	//
+	// Classification is by the `-admin` suffix (isAdminCommand), not the
+	// literal commandAdmin, so a non-prod env whose commands carry an infix
+	// (`/qurl-sandbox`, `/qurl-sandbox-admin`) routes admin verbs to the
+	// admin surface too. Matching the literal `/qurl-admin` would send
+	// `/qurl-sandbox-admin` down the user path, making every admin verb
+	// unreachable in that env.
+	if isAdminCommand(command) {
+		h.dispatchAdminCommand(w, command, text, values)
+	} else {
+		// The user command and any unrecognized command land here.
+		// Unrecognized is defensive — Slack only sends the commands the app
+		// registers — and the user surface is the safe default (it never
+		// mutates admin state). Cosmetic caveat: help/redirect copy echoes
+		// the invoked command name, so an unrecognized `command` (e.g.
+		// `/qurl-bogus`) would render help advertising `/qurl-bogus list`
+		// etc. — names that don't exist. We can't distinguish a bogus
+		// command from a valid non-prod env command (`/qurl-sandbox`)
+		// without a registry, so this is left as-is; it's unreachable given
+		// Slack only dispatches registered commands.
+		h.dispatchUserCommand(w, command, text, values)
+	}
+}
+
+// dispatchUserCommand routes the user-facing `/qurl` verbs: setup, get,
+// list, aliases, help. Admin verbs typed on `/qurl` get a redirect to
+// `/qurl-admin` instead of the generic unknown-subcommand reply, so an
+// admin who fat-fingers the command gets a direct correction.
+func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values) {
 	switch {
 	case text == "" || text == "help":
-		respondSlack(w, h.helpMessage())
+		respondSlack(w, h.userHelpMessage(command))
 	case text == "setup":
+		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
+		// see handleSetup for why it lives on the open user surface.
 		h.handleSetup(w, values)
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
@@ -674,28 +872,76 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		h.handleGet(w, values)
 	case text == "aliases":
 		h.handleAliases(w, values)
+	case isAdminVerb(text):
+		// An admin verb typed on `/qurl` — redirect to `/qurl-admin` rather
+		// than the generic unknown reply. firstWord(text) is the classified
+		// verb word; the full text is echoed (backticks stripped) so the
+		// correction is copy-pasteable without a stray backtick unbalancing
+		// the inline-code span in the ephemeral reply.
+		adminCmd := adminCommandName(command)
+		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), adminCmd, echoText(text), adminCmd))
+	default:
+		// Surfaced to telemetry so a workspace using a stale slash-command
+		// spec is visible in dashboards (rather than only via user reports).
+		slog.Info("unknown slash subcommand", "command", command, "text", text)
+		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), command))
+	}
+}
+
+// dispatchAdminCommand routes the admin-facing `/qurl-admin` verbs:
+// tunnel install, set-alias, unset-alias, admin add/remove/list/revoke,
+// and help. User verbs typed on `/qurl-admin` — including `setup`, which
+// is a `/qurl` verb (first-come-claims; see handleSetup) — get a redirect
+// to `/qurl` so a user who fat-fingers the command gets a direct
+// correction.
+//
+// The whole command is admin-scoped, so the historical `admin` sub-word
+// is retained on the membership verbs (`/qurl-admin admin list` etc.):
+// `list` already means "list the channel's tunnels" on `/qurl list`, and
+// keeping `admin list` distinct from that avoids two different "list"
+// surfaces reading the same. The verb-specific handlers and parser are
+// unchanged — they still see `admin <action>` text.
+func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text string, values url.Values) {
+	// Verb-match order is defensive, not load-bearing today: the
+	// admin/tunnel/alias sub-word matches come before the isUserVerb
+	// fall-through. slashVerb requires an exact token or a `verb ` prefix,
+	// so `admin list` doesn't match the user verb `list` regardless of
+	// order. Keeping admin matches first guards against a FUTURE user verb
+	// that would collide as the leading token of an admin sub-word grammar.
+	switch {
+	case text == "" || text == "help":
+		// help is intentionally NOT admin-gated, unlike every verb below it:
+		// it's discovery, not a privileged action. Gating it would obscure
+		// (a non-admin couldn't learn what exists) rather than protect — the
+		// roster it renders is the same public grammar carried in the user
+		// surface's `/qurl-admin help` pointer. The actual admin verbs each
+		// gate in their own handler (requireAdminSync).
+		respondSlack(w, h.adminHelpMessage(command))
 	case slashSubcommand(text, "admin"):
-		// All admin verbs (revoke / add / remove / list) route through
-		// the parse-then-dispatch handler. The retired `admin claim`
-		// verb surfaces as ErrUnknownAdminAction from the parser, so
-		// the user gets a helpful "unknown admin action" reply rather
-		// than a stale modal opener. Bare `admin` lands here so the
-		// parser emits the `missing admin action` error.
+		// All admin membership verbs (revoke / add / remove / list)
+		// route through the parse-then-dispatch handler. The retired
+		// `admin claim` verb surfaces as ErrUnknownAdminAction from the
+		// parser, so the user gets a helpful "unknown admin action"
+		// reply rather than a stale modal opener. Bare `admin` lands
+		// here so the parser emits the `missing admin action` error.
 		h.handleAdmin(w, values)
 	case slashSubcommand(text, "tunnel"):
 		h.handleTunnel(w, values)
 	case setAliasSubcommand(text):
-		// Bare `setalias` falls through too — parseAliasArgs renders
+		// Bare `set-alias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
 		// a separate "missing args" branch here.
 		h.handleSetAlias(w, values)
 	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
+	case isUserVerb(text):
+		// A user verb typed on the admin command — redirect to the user one.
+		// Echoed text has backticks stripped (see the /qurl-side redirect).
+		userCmd := userCommandName(command)
+		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), userCmd, userCmd, echoText(text), userCmd))
 	default:
-		// Surfaced to telemetry so a workspace using a stale slash-command
-		// spec is visible in dashboards (rather than only via user reports).
-		slog.Info("unknown slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
+		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
+		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", echoText(text), command))
 	}
 }
 
@@ -706,19 +952,26 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // (the alternative, taking team_id from an unsigned query param at
 // /start, was the workspace-rebind primitive flagged in PR review).
 //
-// Owner-only rebind gate: on fresh install (no workspace_mappings
-// row), any workspace user may run /setup — that user becomes the
-// workspace owner. First install is first-user-wins: if two members
+// Surface: setup is a `/qurl` (user) verb, NOT on the admin `/qurl-admin`
+// command. qURL is first-come-claims — on an unbound workspace the first
+// user to complete setup becomes its owner — so the command must be
+// reachable by any workspace member. Putting it on the admin-restricted
+// `/qurl-admin` command would lock out the very first claimant, who is by
+// definition not yet an admin of anything.
+//
+// It is still owner-gated against *rebind*: on fresh install (no
+// workspace_mappings row) any workspace user may run /setup and becomes
+// the workspace owner. First install is first-user-wins: if two members
 // race an unbound workspace, BindWorkspace's consistent read picks the
-// single winner (the loser gets the rebind-refused page). On
-// subsequent runs only the owner is permitted;
-// other workspace members (including admins added via /qurl admin
-// add) get a "owner-only" reply. Without this gate, any added admin
-// could complete OAuth against their own Auth0 account and silently
-// rotate the workspace's qURL credential — the OAuth callback's
-// BindWorkspace also rejects that case as a defense in depth, but
-// gating here means non-owners don't get a setup URL minted in their
-// name at all (cleaner audit, no half-completed OAuth flows).
+// single winner (the loser gets the rebind-refused page). On subsequent
+// runs only the owner is permitted; other workspace members (including
+// admins added via `/qurl-admin admin add`) get an "owner-only" reply.
+// Without this gate, any added admin could complete OAuth against their
+// own Auth0 account and silently rotate the workspace's qURL credential —
+// the OAuth callback's BindWorkspace pre-flight (see oauth.checkBindAllowed)
+// also rejects that case as a defense in depth, but gating here means
+// non-owners don't get a setup URL minted in their name at all (cleaner
+// audit, no half-completed OAuth flows).
 //
 // AdminStore=nil (sandbox / no-DDB) skips the owner gate — same posture
 // as every other admin verb; the caller falls through to mint as on a
@@ -790,8 +1043,8 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			// handleAdminList so a malformed value can't break out of
 			// the mention surface.
 			if looksLikeSlackUserID(ownerID) {
-				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID) //nolint:gosec // G706: slog escapes control bytes in attribute values; owner_user_id is shape-validated by looksLikeSlackUserID above.
-				respondSlack(w, fmt.Sprintf("`/qurl setup` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the other `/qurl admin` commands.", ownerID))
+				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
+				respondSlack(w, fmt.Sprintf("`/qurl setup` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
 				return
 			}
 			// Shape-bad owner_id → a pre-pivot Auth0 sub left behind by
@@ -802,7 +1055,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			// callback by reclaiming the orphaned row for this caller
 			// (first-come-claims, the same posture as an unbound
 			// workspace). Log loudly so the legacy reclaim is grep-able.
-			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID, legacy_owner_prefix is the bounded provider prefix, owner_id_len is an int.
+			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
 	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
@@ -845,25 +1098,32 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	respondJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
-// helpMessage renders the /qurl help text. Verbs that depend on
-// optional Config wiring are omitted when that wiring is nil — a
-// workspace without PostDM won't see the dm:true variant. The verbs
-// still dispatch if a user types them directly; the omission is just
-// so help text doesn't advertise a path that will reply with
-// ":warning: not configured".
-func (h *Handler) helpMessage() string {
-	// Two sections: user verbs anyone can run under *Commands:*, and the
-	// admin-gated setup/install/alias/admin verbs under *Admin
-	// commands:*. The conditional gating below mirrors what each verb
-	// actually does at runtime — a verb whose only reply would be
-	// ":warning: not configured" (PostDM, aliasStore, AdminStore,
-	// OpenView all nil on sandbox deploys) is omitted so help never
-	// advertises a path the user can't take.
+// userHelpMessage renders the `/qurl help` text — the user-facing verbs
+// only. Verbs that depend on optional Config wiring are omitted when that
+// wiring is nil — a workspace without PostDM won't see the dm:true
+// variant. The verbs still dispatch if a user types them directly; the
+// omission is just so help text doesn't advertise a path that will reply
+// with ":warning: not configured". The admin verbs live on `/qurl-admin`
+// (see [Handler.adminHelpMessage]); a pointer line routes admins there.
+func (h *Handler) userHelpMessage(command string) string {
+	// command is non-empty here — handleSlashCommand normalizes an empty
+	// payload to commandUser before dispatch — so the ReplaceAll below
+	// always has a non-empty base (an empty base would strip every `/qurl`).
 	lines := []string{
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
 	}
+	// setup is a user verb (first-come-claims), so it leads the user
+	// surface. The owner semantics only exist when AdminStore is wired; on
+	// the sandbox/no-DDB path the owner gate in handleSetup is skipped, so
+	// re-running /setup just mints again. Append the owner parenthetical
+	// only there so the help text matches the deployment's actual behavior.
+	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
+	if h.cfg.AdminStore != nil {
+		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
+	}
+	lines = append(lines, setupLine)
 	if h.cfg.AdminStore != nil {
 		// Glossary so the `$slug` / `$alias` tokens in the verbs and in
 		// `/qurl list` aren't unexplained. Only shown when AdminStore is
@@ -903,52 +1163,79 @@ func (h *Handler) helpMessage() string {
 	lines = append(lines,
 		"• `/qurl help` — Show this help message",
 		"",
-		"*Admin commands:*",
+		"Admins: run `/qurl-admin help` for tunnel install, alias, and admin commands.",
 	)
-	// The ownership semantics only exist when AdminStore is wired; on the
-	// sandbox/no-DDB path the owner gate is skipped, so re-running /setup
-	// just mints again. Append the owner parenthetical only there so the
-	// help text matches the actual behavior of the deployment.
-	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
-	if h.cfg.AdminStore != nil {
-		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
+	// The lines are authored with the prod command names (`/qurl`,
+	// `/qurl-admin`). Rewrite the `/qurl` prefix to the invoked user
+	// command so a non-prod env renders its own names — and because every
+	// admin literal here is `/qurl-admin` == `/qurl` + adminCommandSuffix,
+	// the same replace also fixes the admin pointer line
+	// (`/qurl-sandbox` → `/qurl-sandbox-admin help`). command is the user
+	// command on this surface, so the replacement is a no-op in prod.
+	//
+	// MAINTAINER INVARIANT: ReplaceAll is blind, so every `/qurl` substring
+	// in `lines` must be a command literal — keep non-command prose (URLs
+	// like `qurl.link`, `/qurl-foo` examples) free of the lowercase `/qurl`
+	// token, or a non-prod env rewrites them too.
+	// TestHelpMessagesContainOnlyCommandTokens guards this: a stray
+	// non-command slash token fails there.
+	return strings.ReplaceAll(strings.Join(lines, "\n"), commandUser, command)
+}
+
+// adminHelpMessage renders the `/qurl-admin help` text — the admin-gated
+// verbs only (setup is a user verb and lives in [Handler.userHelpMessage]).
+// The conditional gating mirrors what each verb actually does at runtime —
+// a verb whose only reply would be ":warning: not configured" (aliasStore,
+// AdminStore, OpenView all nil on sandbox deploys) is omitted so help never
+// advertises a path the user can't take. These commands are admin-only,
+// enforced in code: every admin verb runs requireAdminSync against the
+// qURL admin set (see handleSetAlias). The `/qurl-admin` registration
+// should also be marked admin-only in the Slack app config, but that is a
+// cosmetic picker hint — Slack does not gate slash-command invocation on
+// workspace-admin role — not the enforcement boundary.
+func (h *Handler) adminHelpMessage(command string) string {
+	// command is non-empty here (normalized in handleSlashCommand); see
+	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
+	lines := []string{
+		"*/qurl-admin* — Admin commands for qURL in Slack",
+		"",
+		"*Admin commands:*",
 	}
-	lines = append(lines, setupLine)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
-				"  Guided setup is enabled in this workspace; use bare `/qurl tunnel install` to choose a target environment.",
-				"• `/qurl tunnel install <slug> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<slug>` in this channel",
+				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
+				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
+				"• `/qurl-admin tunnel install <slug> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<slug>` in this channel",
 				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+				"• `/qurl-admin tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
 				"  Guided setup is not enabled in this deployment; use the typed installer form.",
 			)
 		}
 	}
 	if h.aliasStore != nil {
-		// setalias/unsetalias reply ":warning: not configured" on a
+		// set-alias/unset-alias reply ":warning: not configured" on a
 		// sandbox deploy without an aliasStore; mirror the PostDM gate
 		// above so help doesn't advertise verbs whose reply tells the
 		// user they can't be used. User-facing copy calls these
 		// "aliases" (not "shortcuts") even though the admin verbs retain
 		// their historical set-alias/unset-alias names.
 		//
-		// Gates on aliasStore (NOT AdminStore) by design: set-alias WRITES
-		// through the aliasStore and is admin-gated at the Slack manifest
-		// level (see handleSetAlias), so its runtime dependency is the
-		// aliasStore alone. `/qurl aliases` above gates on AdminStore
-		// because it READS channel_policies through it. The asymmetry is
-		// intentional — each verb is advertised exactly when its own
-		// backing store is wired. (The aliasStore-wired-but-AdminStore-nil
-		// shape, where set-alias would show without `/qurl aliases`, is not
-		// a real deployment: both come from the same QURL_*_TABLE env vars.)
+		// Gates on aliasStore (the store set-alias/unset-alias WRITE
+		// through). At runtime these verbs ALSO need AdminStore for the
+		// in-code requireAdminSync gate (see handleSetAlias), so aliasStore
+		// isn't the verb's only dependency — but aliasStore and AdminStore
+		// are wired in lockstep (both come from the same QURL_*_TABLE env
+		// vars; see cmd/main.go), so an aliasStore-wired-but-AdminStore-nil
+		// deploy doesn't arise and gating here on aliasStore is equivalent
+		// to gating on both. `/qurl aliases` above gates on AdminStore
+		// because it READS channel_policies through it.
 		lines = append(lines,
-			"• `/qurl set-alias $<alias> $<slug>` — Point an alias at a tunnel slug in this channel (admin only)",
-			"• `/qurl unset-alias $<alias>` — Remove an alias from this channel (admin only)",
+			"• `/qurl-admin set-alias $<alias> $<slug>` — Point an alias at a tunnel slug in this channel (admin only)",
+			"• `/qurl-admin unset-alias $<alias>` — Remove an alias from this channel (admin only)",
 		)
 	}
 	if h.cfg.AdminStore != nil {
@@ -959,13 +1246,23 @@ func (h *Handler) helpMessage() string {
 		// the same condition so the listing stays consistent with
 		// what the verbs will actually do.
 		lines = append(lines,
-			"• `/qurl admin add @user` — Promote a Slack user to bot admin (admin only)",
-			"• `/qurl admin remove @user` — Demote a Slack user from bot admin (admin only)",
-			"• `/qurl admin list` — List who connected qURL (the owner) and the current bot admins (admin only)",
-			"• `/qurl admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
+			"• `/qurl-admin admin add @user` — Promote a Slack user to bot admin (admin only)",
+			"• `/qurl-admin admin remove @user` — Demote a Slack user from bot admin (admin only)",
+			"• `/qurl-admin admin list` — List who connected qURL (the owner) and the current bot admins (admin only)",
+			"• `/qurl-admin admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
 		)
 	}
-	return strings.Join(lines, "\n")
+	// Always-present anchor: the optional blocks above are all gated on
+	// sandbox wiring, so without this line a no-store deploy would render
+	// just the header with no verbs. Mirrors the `/qurl help` line on the
+	// user surface.
+	lines = append(lines, "• `/qurl-admin help` — Show this help message")
+	// Authored with the prod admin command name; rewrite to the invoked
+	// admin command so a non-prod env renders its own (`/qurl-sandbox-admin`
+	// …). Every admin literal here is the full `/qurl-admin`, so a single
+	// replace covers them all; command is the admin command on this
+	// surface, so the replacement is a no-op in prod.
+	return strings.ReplaceAll(strings.Join(lines, "\n"), commandAdmin, command)
 }
 
 // respondMethodNotAllowed writes 405 with an RFC 7231 §6.5.5 Allow header.
