@@ -757,7 +757,14 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 		// ownerID=="" → workspace not yet bound → fresh install, allow.
 		// (CheckAdmin reads eventually-consistent, and BindWorkspace
 		// validates OwnerID != "" before PutItem, so an empty ownerID
-		// reliably means "no row yet" rather than a half-written one.)
+		// almost always means "no row yet" rather than a half-written
+		// one.) The one exception is a manually-edited row left with a
+		// blank owner_id: it also reads as "" here and slips past this
+		// gate, but BindWorkspace's consistent check refuses it (the
+		// caller lands on the rebind-refused page after the OAuth round-
+		// trip, and the empty-owner Warn there flags the bad row). That
+		// requires DDB tampering, so it isn't worth a second read to
+		// distinguish at the gate.
 		// ownerID==userID → idempotent rerun by owner (rotates the
 		// API key on OAuth-callback success), allow.
 		// otherwise → non-owner rebind attempt, refuse here so we
@@ -854,17 +861,16 @@ func (h *Handler) helpMessage() string {
 	lines = append(lines,
 		"• `/qurl get <url|$slug> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		"• `/qurl list` — List the tunnels available to you",
-		"• `/qurl setup` — Connect qURL to your Slack workspace (one-time setup; the runner becomes the workspace owner)",
 	)
+	// The ownership semantics only exist when AdminStore is wired; on the
+	// sandbox/no-DDB path the owner gate is skipped, so re-running /setup
+	// just mints again. Append the owner parenthetical only there so the
+	// help text matches the actual behavior of the deployment.
+	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
-		// The owner-only re-run gate only exists when AdminStore is
-		// wired (it's skipped on the sandbox/no-DDB path), so only
-		// advertise it there — matches how the admin verbs below
-		// render conditionally.
-		lines = append(lines,
-			"• Re-running `/qurl setup` is owner-only — only the workspace owner (whoever first connected qURL) can reconnect the account",
-		)
+		setupLine += " (one-time setup; the first runner becomes the workspace owner — only they can re-run it)"
 	}
+	lines = append(lines, setupLine)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,

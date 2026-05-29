@@ -278,6 +278,37 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 		}
 	})
 
+	t.Run("row exists with empty owner_id → refuse (no hijack to AlreadyBoundToCaller)", func(t *testing.T) {
+		// Operational-corruption guard: a manually edited / truncated row
+		// can exist with no owner_id. The owner comparison must NOT treat
+		// "" == "" as a same-owner match (which would hand the workspace to
+		// any caller via AlreadyBoundToCaller). It must refuse with the
+		// safe default, AlreadyBound. seedAdmin is always non-empty here,
+		// so the empty existingOwner can never equal it.
+		store := newStore(&stubDDB{
+			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			},
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					// owner_id intentionally absent (corrupt row).
+					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
+						Value: []string{testCallerSlackID},
+					},
+				}}, nil
+			},
+		})
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.Code != ErrCodeWorkspaceAlreadyBound {
+			t.Errorf("Code = %q, want %q (empty owner_id must not short-circuit to AlreadyBoundToCaller)", ae.Code, ErrCodeWorkspaceAlreadyBound)
+		}
+	})
+
 	// Fence round-19 cr #1: the post-CCFE disambiguation GetItem
 	// MUST use ConsistentRead=true. The CCFE confirms a row exists,
 	// but an eventually-consistent read on a stale replica could
