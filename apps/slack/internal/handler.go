@@ -884,7 +884,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
 		slog.Info("unknown slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), command))
+		// echoText(command) too here (not just text): this is the one branch
+		// reachable with an unregistered command — handleSlashCommand coerces
+		// an unknown command to the user surface, so `command` may be e.g.
+		// `/qurl-bogus`. Wrapping it drops the "Slack command tokens are
+		// backtick-free" dependence exactly where command is least trusted.
+		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), echoText(command)))
 	}
 }
 
@@ -941,7 +946,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), userCmd, userCmd, echoText(text), userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", echoText(text), command))
+		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", echoText(text), echoText(command)))
 	}
 }
 

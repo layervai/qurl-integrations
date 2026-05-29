@@ -334,6 +334,26 @@ func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
 			}
 		}
 	}
+
+	// Non-prod render: every command token must be rewritten to the invoked
+	// env-infix command — no prod `/qurl` or `/qurl-admin` literal may survive.
+	// Catches a help line whose literal the surface's ReplaceAll target doesn't
+	// cover: adminHelpMessage rewrites only `/qurl-admin`, so a bare `/qurl` in
+	// admin help would render as prod in a `/qurl-sandbox-admin` env (the prod
+	// token test above allows `/qurl`, so only this non-prod pass catches it).
+	for _, tc := range []struct {
+		surface  string
+		rendered string
+	}{
+		{"user", h.userHelpMessage("/qurl-sandbox")},
+		{"admin", h.adminHelpMessage("/qurl-sandbox-admin")},
+	} {
+		for _, tok := range tokenRe.FindAllString(tc.rendered, -1) {
+			if tok == commandUser || tok == commandAdmin {
+				t.Errorf("%s help (non-prod render) leaked prod command literal %q; its ReplaceAll target didn't cover this token", tc.surface, tok)
+			}
+		}
+	}
 }
 
 // TestDispatchSplit_NonProdCommandNamesRouteBySuffix fences env-prefix
