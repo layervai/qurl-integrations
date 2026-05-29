@@ -617,7 +617,10 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "/qurl get") {
+	// Assert on `/qurl help` — the unconditional help marker. (`/qurl get`
+	// is now gated on AdminStore, which this handler doesn't wire, so it's
+	// no longer a reliable "help rendered" signal here.)
+	if !strings.Contains(result["text"], "/qurl help") {
 		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }

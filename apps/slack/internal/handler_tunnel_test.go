@@ -664,7 +664,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	// `/qurl aliases` gates on AdminStore (wired here), so it must appear —
 	// the converse of TestHelpGatesAliasVerbsByBackingStore, which fences it
 	// hidden when AdminStore is nil.
-	for _, want := range []string{"/qurl aliases`", "/qurl tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	for _, want := range []string{"/qurl get <$slug|$alias>`", "/qurl aliases`", "/qurl tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}

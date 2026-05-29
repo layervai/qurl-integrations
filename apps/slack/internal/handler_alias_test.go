@@ -832,6 +832,12 @@ func TestHelpGatesAliasVerbsByBackingStore(t *testing.T) {
 	if strings.Contains(got, "/qurl aliases`") {
 		t.Errorf("/qurl help = %q, advertised /qurl aliases without AdminStore", got)
 	}
+	// get also gates on AdminStore: resolveTokenForGet fails closed without
+	// it post-tunnels-only (the URL form that worked without DDB is gone),
+	// so help must not advertise get on an AdminStore-nil deploy.
+	if strings.Contains(got, "/qurl get") {
+		t.Errorf("/qurl help = %q, advertised /qurl get without AdminStore", got)
+	}
 }
 
 // TestHelpHidesAliasVerbsWhenAliasStoreNil fences round-19 cr #2:

@@ -784,13 +784,25 @@ func (h *Handler) helpMessage() string {
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a `$alias` configured in this channel",
 	}
-	if h.cfg.PostDM != nil {
-		lines = append(lines, "• `/qurl get <$slug|$alias> dm:true` — DM the link to you instead of posting it in-channel")
+	if h.cfg.AdminStore != nil {
+		// get resolves its $slug/$alias token through resolveTokenForGet,
+		// which fails closed (":warning: not configured") when AdminStore is
+		// nil — the URL form that once let get work without DDB is gone
+		// post-tunnels-only. Gate the get verbs on AdminStore so help never
+		// advertises a verb whose only reply would be the not-configured
+		// error (same rule as `/qurl aliases` below).
+		lines = append(lines,
+			"• `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a `$alias` configured in this channel",
+		)
+		if h.cfg.PostDM != nil {
+			lines = append(lines, "• `/qurl get <$slug|$alias> dm:true` — DM the link to you instead of posting it in-channel")
+		}
+		lines = append(lines,
+			"• `/qurl get <$slug|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+		)
 	}
 	lines = append(lines,
-		"• `/qurl get <$slug|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		"• `/qurl list` — List the tunnels available to you",
 	)
 	if h.cfg.AdminStore != nil {
