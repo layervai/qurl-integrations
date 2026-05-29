@@ -786,19 +786,9 @@ func stripUnsetAliasPrefix(text string) string {
 	return rest
 }
 
-func setDisplayNameSubcommand(text string) bool {
-	matched, _ := slashVerb(text, "set-display-name")
-	return matched
-}
-
 func stripSetDisplayNamePrefix(text string) string {
 	_, rest := slashVerb(text, "set-display-name")
 	return rest
-}
-
-func unsetDisplayNameSubcommand(text string) bool {
-	matched, _ := slashVerb(text, "unset-display-name")
-	return matched
 }
 
 func stripUnsetDisplayNamePrefix(text string) string {
@@ -955,12 +945,18 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleSetAlias(w, values)
 	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
-	case setDisplayNameSubcommand(text):
+	// Use slashSubcommand directly here (unlike set-alias's dedicated
+	// helper): the verb has a single canonical spelling, and the
+	// cross-repo dispatcher-drift check (qurl-integrations-infra) only
+	// extracts the slashSubcommand and …AliasSubcommand case shapes — a
+	// …DisplayNameSubcommand helper would be invisible to it and keep the
+	// infra manifest drift check red even after this merges.
+	case slashSubcommand(text, "set-display-name"):
 		// Bare `set-display-name` falls through too — the handler renders
 		// the usage hint, so the user gets the right grammar without a
 		// separate "missing args" branch here.
 		h.handleSetDisplayName(w, values)
-	case unsetDisplayNameSubcommand(text):
+	case slashSubcommand(text, "unset-display-name"):
 		h.handleUnsetDisplayName(w, values)
 	case isUserVerb(text):
 		// A user verb typed on the admin command — redirect to the user one.
