@@ -33,6 +33,12 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "get with dm flag", text: "get $prod-db dm:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "get with reason flag", text: `get $prod-db reason:"on call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "on call"}},
 		{name: "get with both flags", text: `get $prod-db dm:true reason:"audit"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true", "reason": "audit"}},
+		// The three setalias rows below fence Parse()'s grammar ONLY:
+		// Parse copies the raw target token into cmd.Target regardless of
+		// shape, so a row accepting a URL/`r_<id>` target here does NOT
+		// mean that form is wired end-to-end. The tunnels-only policy
+		// (only `$slug` is bound) is enforced downstream in parseAliasArgs
+		// + handleSetAlias and fenced by TestParseAliasArgs_SetAlias.
 		{name: "setalias url", text: "setalias $prod-db https://internal.example.com", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		{name: "setalias resource_id", text: "setalias $prod-db r_abc123", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "r_abc123", wantFlags: map[string]string{}},
 		{name: "setalias tunnel slug", text: "setalias $prod-db $prod-dashboard", wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "$prod-dashboard", wantFlags: map[string]string{}},

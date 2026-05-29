@@ -26,6 +26,11 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 // values (repo convention).
 const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels."
 
+// unexpectedGetShapeMessage is the reply for getWork's defensive default
+// arm; it routes the user to their operator rather than looping them on a
+// retry. See that arm for why it's distinct from [commonGetMintFailedMessage].
+const unexpectedGetShapeMessage = "Couldn't process that command. Please contact your Slack admin for assistance."
+
 // tunnelDisabledMessage is shown when the qURL service returns the
 // `tunnel_disabled` error code (the workspace doesn't have
 // tunnel-resource minting enabled yet). Lifted because both alias
@@ -181,7 +186,11 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	// a form that populates neither; surface the usage hint rather than
 	// silently dispatching an unmintable command.
 	if cmd.Alias == "" && cmd.Resource.Kind != ResourceTokenResourceID {
-		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`, or a `$r_<id>` from `/qurl list`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
+		// Note: the `$r_<id>` resource-token form is also accepted by the
+		// parser but deliberately omitted from this hint — `/qurl list`
+		// renders slugs, never the opaque `r_<id>`, so there's no
+		// self-serve path to discover one (it's a power-user copy form).
+		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
 		return
 	}
 
@@ -290,9 +299,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		// token is either an alias or a resource-id, so one branch above
 		// always fires. Defensive only — a future parser change that adds
 		// a third form MUST wire its authorization here rather than fall
-		// through to an unauthenticated mint.
+		// through to an unauthenticated mint. Distinct internal-error copy
+		// (not the retry-friendly commonGetMintFailedMessage) so that if
+		// this ever does fire, the user's report correlates to the
+		// log.Error below instead of looping on "please try again".
 		log.Error("get: token resolved to neither alias nor resource-id form — refusing to mint", "raw", args.cmd.Raw)
-		return "", &userError{msg: commonGetMintFailedMessage}
+		return "", &userError{msg: unexpectedGetShapeMessage}
 	}
 
 	c, err := h.authenticatedClient(ctx, args.teamID)

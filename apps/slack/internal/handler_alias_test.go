@@ -182,9 +182,9 @@ func decodeSlackText(t *testing.T, raw []byte) string {
 
 func TestParseAliasArgs_SetAlias(t *testing.T) {
 	// notTunnelSub is the substring unique to msgAliasTargetNotTunnel
-	// (the well-formed-but-unsupported-target rejection), used to assert
-	// URL/resource-id targets get the uniform not-a-tunnel copy rather
-	// than the generic usage dump.
+	// (the not-a-`$slug` rejection), used to assert that any non-`$`
+	// target — a URL, an `r_<id>`, or a sigil-less typo — gets the
+	// uniform not-a-tunnel copy rather than the generic usage dump.
 	const notTunnelSub = "aren't supported"
 	cases := []struct {
 		name      string
@@ -193,10 +193,10 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		wantAlias string
 		wantTgt   string
 		// wantMsgSub, when set on a wantErr case, asserts which rejection
-		// copy fired — "URLs and resource IDs aren't supported"
-		// (msgAliasTargetNotTunnel) for a well-formed-but-unsupported
-		// target, vs the usage dump (msgAliasTargetInvalid) for a
-		// malformed alias/garbage. Empty skips the copy check.
+		// copy fired — the not-a-tunnel copy (msgAliasTargetNotTunnel)
+		// for any non-`$` target, vs the usage dump
+		// (msgAliasTargetInvalid) for a malformed alias or a `$`-prefixed
+		// token that fails the slug grammar. Empty skips the copy check.
 		wantMsgSub string
 	}{
 		// Tunnels-only: the sole accepted target shape is a tunnel `$slug`.

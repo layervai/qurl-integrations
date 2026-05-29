@@ -91,16 +91,17 @@ const (
 	msgAliasEmptyName     = reasonAliasEmptyName + "\n\n" + aliasUsage
 )
 
-// msgAliasTargetNotTunnel is the rejection surfaced when `/qurl
-// set-alias` is handed a well-formed but non-tunnel target — a raw URL
-// or an `r_<id>` resource id. set-alias only points an alias at a
+// msgAliasTargetNotTunnel is the rejection for a set-alias target that
+// isn't a `$<slug>` at all — a raw URL, an `r_<id>` resource id, or a
+// bare token missing the `$` sigil. set-alias only points an alias at a
 // tunnel `$slug` now (the slug→resource_id resolution is the admin act
-// that authorizes the resource for use in the channel); URL and
-// resource-id targets are no longer accepted. Distinct from
-// [msgAliasTargetInvalid] (a malformed/garbage target) so the admin
-// who typed a valid-but-unsupported target sees why it was refused
-// rather than a generic usage dump.
-const msgAliasTargetNotTunnel = "`/qurl set-alias` points an alias at a tunnel: `/qurl set-alias $<alias> $<slug>`. URLs and resource IDs aren't supported targets."
+// that authorizes the resource for use in the channel). The copy leads
+// with the tunnel-slug form so a sigil-less typo stays actionable, and
+// mentions URLs/resource-ids only parenthetically (the forms migrating
+// admins are most likely to try) rather than asserting the admin typed
+// one. Distinct from [msgAliasTargetInvalid], which fires once a
+// `$`-prefixed target fails the tunnel-slug grammar.
+const msgAliasTargetNotTunnel = "`/qurl set-alias` points an alias at a tunnel slug — `/qurl set-alias $<alias> $<slug>`. (Raw URLs and resource IDs aren't supported targets.)"
 
 // aliasArgs is the parsed shape of a `/qurl setalias $a <target>` or
 // `/qurl unsetalias $a` text body. Kept as a separate value type so
@@ -121,12 +122,13 @@ type aliasArgs struct {
 // ST1005 rejects on `error`-typed values.)
 //
 // Tunnels-only target: the only accepted setalias target is a tunnel
-// `$<slug>`. A raw URL or `r_<id>` is well-formed but unsupported and is
-// rejected here with [msgAliasTargetNotTunnel] (uniform copy — a valid
-// `r_<id>` and a `r_<typo>` read the same); a malformed/garbage token
-// gets [msgAliasTargetInvalid] + the usage dump. The `$<slug>` itself is
-// validated against the tunnel-slug grammar; the deeper "is this an
-// active tunnel?" check is the persistence/qurl-service layer's job.
+// `$<slug>`. Any target that doesn't start with `$` — a raw URL, an
+// `r_<id>`, or a sigil-less typo — is rejected with the uniform
+// [msgAliasTargetNotTunnel] copy (so a valid `r_<id>` and a `r_<typo>`
+// read the same). A `$`-prefixed token that then fails the tunnel-slug
+// grammar gets [msgAliasTargetInvalid] + the usage dump. The deeper "is
+// this an active tunnel?" check is the persistence/qurl-service layer's
+// job.
 func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg string) {
 	tokens := strings.Fields(text)
 	if wantTarget {
@@ -161,13 +163,13 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 			return nil, msgAliasTargetInvalid
 		}
 	}
-	// Tunnels-only: a tunnel `$slug` is the only accepted target. A raw
-	// URL or `r_<id>` is well-formed but unsupported — reject ALL
-	// non-`$` targets with the one not-a-tunnel message so the copy is
-	// uniform (a `r_<typo>` and a valid `r_<id>` should read the same).
-	// `$<slug>` then validates against the tunnel-slug grammar (which
-	// diverges from the alias grammar: slugs must start with a letter
-	// and be at least three characters).
+	// Tunnels-only: a tunnel `$slug` is the only accepted target. Reject
+	// ALL non-`$` targets — URLs, `r_<id>`s, and sigil-less typos alike —
+	// with the one not-a-tunnel message so the copy is uniform (a
+	// `r_<typo>` and a valid `r_<id>` should read the same). `$<slug>`
+	// then validates against the tunnel-slug grammar (which diverges from
+	// the alias grammar: slugs must start with a letter and be at least
+	// three characters).
 	if !strings.HasPrefix(tgt, "$") {
 		return nil, msgAliasTargetNotTunnel
 	}
