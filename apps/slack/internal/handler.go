@@ -652,12 +652,12 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	case text == "setup":
 		h.handleSetup(w, values)
 	case slashSubcommand(text, "create"):
-		// `/qurl create` is deprecated — its URL-form behavior is
-		// folded into `/qurl get <url>`, and the alias form was never
-		// promoted to a user-facing command. Surface a deprecation
-		// hint instead of an "unknown subcommand" so existing users
-		// hitting muscle memory get a direct redirect.
-		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <url>` instead.")
+		// `/qurl create` is deprecated. It minted for an arbitrary URL,
+		// which Slack no longer does — `/qurl get` mints for a tunnel
+		// `$slug` or a channel `$alias`. Surface a deprecation hint
+		// instead of an "unknown subcommand" so existing users hitting
+		// muscle memory get a direct redirect to the new shape.
+		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$slug|$alias>` instead — run `/qurl list` to see your tunnels.")
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
@@ -849,18 +849,52 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 // so help text doesn't advertise a path that will reply with
 // ":warning: not configured".
 func (h *Handler) helpMessage() string {
+	// Two sections: user verbs anyone can run under *Commands:*, and the
+	// admin-gated setup/install/alias/admin verbs under *Admin
+	// commands:*. The conditional gating below mirrors what each verb
+	// actually does at runtime — a verb whose only reply would be
+	// ":warning: not configured" (PostDM, aliasStore, AdminStore,
+	// OpenView all nil on sandbox deploys) is omitted so help never
+	// advertises a path the user can't take.
 	lines := []string{
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
 		"*Commands:*",
-		"• `/qurl get <url|$slug>` — Mint a one-time qURL for a URL, or a `$slug` (tunnel or shortcut) configured in this channel",
 	}
-	if h.cfg.PostDM != nil {
-		lines = append(lines, "• `/qurl get <url|$slug> dm:true` — DM the link to you instead of posting it in-channel")
+	if h.cfg.AdminStore != nil {
+		// get resolves its $slug/$alias token through resolveTokenForGet,
+		// which fails closed (":warning: not configured") when AdminStore is
+		// nil — the URL form that once let get work without DDB is gone
+		// post-tunnels-only. Gate the get verbs on AdminStore so help never
+		// advertises a verb whose only reply would be the not-configured
+		// error (same rule as `/qurl aliases` below).
+		lines = append(lines,
+			"• `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a `$alias` configured in this channel",
+		)
+		if h.cfg.PostDM != nil {
+			lines = append(lines, "• `/qurl get <$slug|$alias> dm:true` — DM the link to you instead of posting it in-channel")
+		}
+		lines = append(lines,
+			"• `/qurl get <$slug|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+		)
 	}
 	lines = append(lines,
-		"• `/qurl get <url|$slug> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		"• `/qurl list` — List the tunnels available to you",
+	)
+	if h.cfg.AdminStore != nil {
+		// aliases reads channel_policies through the AdminStore (NOT the
+		// aliasStore that set-alias/unset-alias write through), so it
+		// gates on AdminStore to match processAliases's own nil-check —
+		// otherwise help could advertise `/qurl aliases` on a deploy where
+		// it replies ":warning: not configured".
+		lines = append(lines,
+			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
+		)
+	}
+	lines = append(lines,
+		"• `/qurl help` — Show this help message",
+		"",
+		"*Admin commands:*",
 	)
 	// The ownership semantics only exist when AdminStore is wired; on the
 	// sandbox/no-DDB path the owner gate is skipped, so re-running /setup
@@ -887,16 +921,25 @@ func (h *Handler) helpMessage() string {
 		}
 	}
 	if h.aliasStore != nil {
-		// setalias/unsetalias/aliases reply ":warning: not configured"
-		// on a sandbox deploy without an aliasStore; mirror the
-		// PostDM gates above so help doesn't advertise verbs whose
-		// reply tells the user they can't be used. Keep user-facing copy
-		// on "shortcut" even though the admin verbs retain their
-		// historical set-alias/unset-alias names.
+		// setalias/unsetalias reply ":warning: not configured" on a
+		// sandbox deploy without an aliasStore; mirror the PostDM gate
+		// above so help doesn't advertise verbs whose reply tells the
+		// user they can't be used. Keep user-facing copy on "shortcut"
+		// even though the admin verbs retain their historical
+		// set-alias/unset-alias names.
+		//
+		// Gates on aliasStore (NOT AdminStore) by design: set-alias WRITES
+		// through the aliasStore and is admin-gated at the Slack manifest
+		// level (see handleSetAlias), so its runtime dependency is the
+		// aliasStore alone. `/qurl aliases` above gates on AdminStore
+		// because it READS channel_policies through it. The asymmetry is
+		// intentional — each verb is advertised exactly when its own
+		// backing store is wired. (The aliasStore-wired-but-AdminStore-nil
+		// shape, where set-alias would show without `/qurl aliases`, is not
+		// a real deployment: both come from the same QURL_*_TABLE env vars.)
 		lines = append(lines,
-			"• `/qurl set-alias $<shortcut> <url-or-$slug>` — Configure a qURL shortcut in this channel (admin only)",
-			"• `/qurl unset-alias $<shortcut>` — Remove a qURL shortcut in this channel (admin only)",
-			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
+			"• `/qurl set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
+			"• `/qurl unset-alias $<alias>` — Remove a qURL shortcut in this channel (admin only)",
 		)
 	}
 	if h.cfg.AdminStore != nil {
@@ -913,9 +956,6 @@ func (h *Handler) helpMessage() string {
 			"• `/qurl admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
 		)
 	}
-	lines = append(lines,
-		"• `/qurl help` — Show this help message",
-	)
 	return strings.Join(lines, "\n")
 }
 

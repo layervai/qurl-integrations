@@ -1,10 +1,14 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
+
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -18,10 +22,11 @@ import (
 // so the fixtures below are tunnel resources (testKeyType:
 // client.ResourceTypeTunnel) carrying a slug.
 const (
-	testListAliasProdDB = "prod-db"
-	testListAliasSecret = "secret"
-	testListAliasAlpha  = "alpha"
-	testListResIDProdDB = "r_prod_db_aa"
+	testListAliasProdDB  = "prod-db"
+	testListAliasSecret  = "secret"
+	testListAliasAlpha   = "alpha"
+	testListAliasGrafana = "grafana"
+	testListResIDProdDB  = "r_prod_db_aa"
 )
 
 // writeResourceListFixture writes a /v1/resources success envelope
@@ -65,7 +70,7 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "qURL Tunnels") {
+	if !strings.Contains(async, "Protected Tunnel Resources") {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	if !strings.Contains(async, "`$prod-db`") {
@@ -74,9 +79,143 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 	if !strings.Contains(async, "`$stage-db`") {
 		t.Errorf("async reply missing stage-db row: %q", async)
 	}
-	if !strings.Contains(async, "/qurl get $slug") {
+	if !strings.Contains(async, "/qurl get") {
 		t.Errorf("async reply missing copy-paste hint: %q", async)
 	}
+}
+
+// TestHandleList_ShowsBoundAliases fences the slug + bound-alias
+// rendering: a tunnel with several channel `$alias` shortcuts shows the
+// slug as the token and the OTHER aliases as "(also …)", sorted, with
+// the slug-binding itself excluded (the install flow binds `$<slug>` as
+// a channel alias, so it must not be repeated).
+func TestHandleList_ShowsBoundAliases(t *testing.T) {
+	const resID = "r_kktest01"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"kktest":          resID, // the install-bound slug alias
+		"kevin-dashboard": resID,
+		"ops":             resID,
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack tunnel install for kktest"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$kktest` (also `$kevin-dashboard`, `$ops`) → Slack tunnel install for kktest") {
+		t.Errorf("async reply missing slug + bound-aliases row: %q", async)
+	}
+}
+
+// TestFormatTunnelListLine fences the per-row rendering contract
+// directly so the slug-only and slug+description (no-alias) shapes are
+// pinned independently of the combined end-to-end TestHandleList_*
+// tests. In particular it locks the self-binding exclusion: the
+// install-flow binds `$<slug>` as a channel alias, and that name must
+// NOT re-appear in the "(also …)" extras.
+func TestFormatTunnelListLine(t *testing.T) {
+	tunnel := func(slug, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_" + slug,
+			Type:        client.ResourceTypeTunnel,
+			Slug:        slug,
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		want         string
+	}{
+		{name: "slug only, no aliases, no description", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "• `$prod-db`"},
+		{name: "slug + description, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` → Prod database"},
+		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "• `$prod-db` (also `$grafana`)"},
+		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (also `$grafana`) → Prod database"},
+		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
+		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
+		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no slug — ask your Slack admin to set one)"},
+		{name: "slug-less tunnel with bound aliases promotes first to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "• `$grafana` (also `$metrics`)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatTunnelListLine(tc.resource, tc.boundAliases); got != tc.want {
+				t.Errorf("formatTunnelListLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestChannelAliasesByResourceID fences the best-effort posture of the
+// alias-display helper DIRECTLY (TestHandleList_ShowsBoundAliases only
+// reaches it through the full happy path): the two short-circuits and the
+// fetch-error arm must each degrade to nil rather than panic, and the
+// happy path must group multiple aliases per resource and sort them.
+func TestChannelAliasesByResourceID(t *testing.T) {
+	t.Parallel()
+	log := slogTestLogger(t)
+	ctx := context.Background()
+
+	newH := func(t *testing.T, seed map[string]ddbtypes.AttributeValue) *Handler {
+		t.Helper()
+		names := defaultTestTableNames()
+		ddb := newFakeDDB(t, names, nil)
+		if seed != nil {
+			ddb.seedItem(t, names.channelPolicy, seed)
+		}
+		return &Handler{cfg: Config{AdminStore: newStoreFromFake(t, ddb, names, nil)}}
+	}
+
+	t.Run("nil AdminStore yields nil", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{}
+		if got := h.channelAliasesByResourceID(ctx, log, "T1", "C1"); got != nil {
+			t.Errorf("nil AdminStore: got %v, want nil", got)
+		}
+	})
+
+	t.Run("empty channelID short-circuits to nil before any fetch", func(t *testing.T) {
+		t.Parallel()
+		h := newH(t, nil)
+		if got := h.channelAliasesByResourceID(ctx, log, "T1", ""); got != nil {
+			t.Errorf("empty channelID: got %v, want nil", got)
+		}
+	})
+
+	t.Run("policy fetch error degrades to nil", func(t *testing.T) {
+		t.Parallel()
+		// GetChannelPolicy rejects an empty teamID (BadRequest);
+		// channelAliasesByResourceID only guards channelID, so this drives
+		// the err != nil arm (the closest reachable stand-in for a fetch
+		// failure with the current fake, which has no GetItem error hook).
+		h := newH(t, nil)
+		if got := h.channelAliasesByResourceID(ctx, log, "", "C1"); got != nil {
+			t.Errorf("fetch error: got %v, want nil", got)
+		}
+	})
+
+	t.Run("groups + sorts multiple aliases per resource", func(t *testing.T) {
+		t.Parallel()
+		const sharedRID = "r_shared0001" // two aliases point here
+		seed := seedChannelPolicyAliasBindings("T1", "C1", map[string]string{
+			"zed": sharedRID, "abe": sharedRID, "solo": "r_solo000001",
+		})
+		h := newH(t, seed)
+		got := h.channelAliasesByResourceID(ctx, log, "T1", "C1")
+		want := map[string][]string{
+			sharedRID:      {"abe", "zed"}, // grouped, lexically sorted
+			"r_solo000001": {"solo"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
 }
 
 // TestHandleList_UnscopedAcrossChannels pins the post-revert (#459)
@@ -252,9 +391,11 @@ func TestHandleList_TunnelAliasFallbackWhenNoSlug(t *testing.T) {
 }
 
 // TestHandleList_TunnelResourceIDFallback fences the last-resort
-// fallback: a legacy tunnel with neither a slug nor an alias renders
-// the raw resource_id as the token (better than an empty `$`), with no
-// `(tunnel)` label and no "(no alias set)" suffix.
+// rendering: a legacy tunnel with neither a slug nor an alias has no
+// usable `$<token>` (get is slug/alias-only), so it renders the bare
+// resource_id with a "(no slug — ask your Slack admin to set one)" marker —
+// NOT a `$r_<id>` get token a user would paste and have rejected — and no
+// `(tunnel)` label.
 func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -267,14 +408,14 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$r_tunnel_noa`") {
-		t.Errorf("async reply missing resource_id fallback token: %q", async)
+	if !strings.Contains(async, "`r_tunnel_noa` (no slug — ask your Slack admin to set one)") {
+		t.Errorf("async reply missing bare resource_id fallback: %q", async)
+	}
+	if strings.Contains(async, "`$r_tunnel_noa`") {
+		t.Errorf("slug-less tunnel rendered a `$r_<id>` get token (no longer mintable): %q", async)
 	}
 	if strings.Contains(async, "(tunnel)") {
 		t.Errorf("redundant (tunnel) label leaked: %q", async)
-	}
-	if strings.Contains(async, "(no alias set)") {
-		t.Errorf("legacy (no alias set) suffix leaked: %q", async)
 	}
 }
 
@@ -346,15 +487,14 @@ func TestHandleList_UpstreamError(t *testing.T) {
 }
 
 // TestHandleList_StableSortByToken fences the sort order: tunnel rows
-// are sorted by the displayed token (slug, else alias, else
-// resource_id) so two consecutive `/qurl list` calls render
-// identically.
+// are sorted by the displayed token (slug, else alias) so two consecutive
+// `/qurl list` calls render identically. A slug-less row has an empty
+// token (get is slug/alias-only), so it sorts ahead of the slugged rows.
 func TestHandleList_StableSortByToken(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		// Server returns in non-alphabetical order; the handler must
-		// sort. The slug-less row sorts by its resource_id.
+		// Server returns in non-alphabetical order; the handler must sort.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_zzz_aaaaa", testKeyType: client.ResourceTypeTunnel},
 			{testKeyResourceID: "r_aaa_xxxxx", testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasAlpha},
@@ -365,16 +505,16 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	// "alpha" < "middle" < "r_zzz_aaaaa" (alphabetical; the slug-less
-	// row sorts by resource_id).
+	// Legible tokens lead in order ("alpha" < "middle"); the tokenless
+	// slug-less row sorts to the END.
+	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no slug — ask your Slack admin to set one)")
 	alphaPos := strings.Index(async, "`$alpha`")
 	middlePos := strings.Index(async, "`$middle`")
-	zzzPos := strings.Index(async, "`$r_zzz_aaaaa`")
 	if alphaPos < 0 || middlePos < 0 || zzzPos < 0 {
 		t.Fatalf("missing rows in async reply: %q", async)
 	}
 	if alphaPos >= middlePos || middlePos >= zzzPos {
-		t.Errorf("rows not sorted by token: alpha=%d middle=%d zzz=%d in %q", alphaPos, middlePos, zzzPos, async)
+		t.Errorf("rows not sorted (legible tokens first, tokenless last): alpha=%d middle=%d zzz(no-slug)=%d in %q", alphaPos, middlePos, zzzPos, async)
 	}
 }
 
@@ -410,6 +550,47 @@ func TestHandleList_SortTiebreakerOnTokenCollision(t *testing.T) {
 	}
 }
 
+// TestHandleList_SlugLessTunnelsSortByPromotedAlias fences the sort/render
+// agreement for slug-less tunnels: each has no intrinsic token but a bound
+// channel alias that formatTunnelListLine promotes to the primary token. The
+// sort must key on that SAME promoted alias (via tunnelDisplayToken), not
+// fall back to resource_id. Here the row whose alias sorts first ("apple")
+// carries the lexicographically LARGER resource_id, so a resource_id-keyed
+// sort would order it last — the assertion passes only if the sort follows
+// the displayed alias.
+func TestHandleList_SlugLessTunnelsSortByPromotedAlias(t *testing.T) {
+	const (
+		appleRID = "r_zzz_apple0" // larger resource_id, smaller alias
+		zebraRID = "r_aaa_zebra0" // smaller resource_id, larger alias
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"apple": appleRID,
+		"zebra": zebraRID,
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		// Both slug-less (no slug, no resource-level alias); returned
+		// zebra-first to defeat any incidental upstream order.
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: zebraRID, testKeyType: client.ResourceTypeTunnel},
+			{testKeyResourceID: appleRID, testKeyType: client.ResourceTypeTunnel},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	applePos := strings.Index(async, "`$apple`")
+	zebraPos := strings.Index(async, "`$zebra`")
+	if applePos < 0 || zebraPos < 0 {
+		t.Fatalf("missing promoted-alias rows: %q", async)
+	}
+	if applePos >= zebraPos {
+		t.Errorf("slug-less rows not sorted by promoted alias (a resource_id-keyed sort would invert this): apple=%d zebra=%d in %q", applePos, zebraPos, async)
+	}
+}
+
 // TestTunnelToken pins the slug → alias → resource_id precedence of the
 // `$<token>` shown for a tunnel row, directly (not just via the rendered
 // list output), so a future refactor that reorders the fallback chain
@@ -425,7 +606,7 @@ func TestTunnelToken(t *testing.T) {
 	}{
 		{name: "slug wins over alias and resource_id", r: client.Resource{ResourceID: "r_one", Alias: "alias-one", Slug: "slug-one"}, want: "slug-one"},
 		{name: "alias used when no slug", r: client.Resource{ResourceID: "r_two", Alias: "alias-two"}, want: "alias-two"},
-		{name: "resource_id last resort when no slug or alias", r: client.Resource{ResourceID: "r_three"}, want: "r_three"},
+		{name: "empty when neither slug nor alias (slug-less tunnel)", r: client.Resource{ResourceID: "r_three"}, want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

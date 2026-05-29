@@ -135,8 +135,8 @@ func TestSlashCommandHelp(t *testing.T) {
 	}
 }
 
-func TestSlashCommandGetURL_AcksWithWorkingOnIt(t *testing.T) {
-	// Ack contract for /qurl get <url>: the synchronous response is
+func TestSlashCommandGetToken_AcksWithWorkingOnIt(t *testing.T) {
+	// Ack contract for /qurl get $<alias>: the synchronous response is
 	// the ephemeral working-on-it message. The actual qURL link is
 	// delivered later via response_url (covered in process_test.go).
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -158,13 +158,14 @@ func TestSlashCommandGetURL_AcksWithWorkingOnIt(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	h := newTestHandler(t, qurlSrv)
+	seedGetAliasBinding(t, h, "T123")
 	// Wire response_url to a local recorder so the async worker's
 	// follow-up POST stays in-process. The literal `hooks.slack.com`
 	// URL the migration left here would otherwise dial Slack on every
 	// CI run (postResponse's `Wait()` cleanup blocks for the goroutine,
 	// the recorder mock just captures and discards).
 	rec := newResponseURLRecorder(t)
-	body := getURLCommandBody("https://example.com", "T123", "trig-1", rec.URL)
+	body := getTokenCommandBody("T123", "trig-1", rec.URL)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
@@ -616,7 +617,10 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "/qurl get") {
+	// Assert on `/qurl help` — the unconditional help marker. (`/qurl get`
+	// is now gated on AdminStore, which this handler doesn't wire, so it's
+	// no longer a reliable "help rendered" signal here.)
+	if !strings.Contains(result["text"], "/qurl help") {
 		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }

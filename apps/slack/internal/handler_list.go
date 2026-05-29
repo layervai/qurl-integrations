@@ -68,6 +68,12 @@ func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) 
 func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, values url.Values) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
+	// The tunnel listing is workspace-wide (unscoped post-#459), but the
+	// per-row alias annotations are channel-scoped — channelAliasesByResourceID
+	// reads THIS channel's alias_bindings so each row can show the shortcuts
+	// that resolve here. Empty channelID (synthetic payload / DM) degrades to
+	// slug-only rows inside the helper.
+	channelID := values.Get(fieldChannelID)
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
@@ -93,28 +99,48 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return
 	}
 
+	// Map each tunnel's resource_id to its channel-bound `$alias`
+	// shortcuts so each row can show them next to the slug. Best-effort:
+	// a fetch failure renders slug-only. Built BEFORE the sort because the
+	// sort keys on [tunnelDisplayToken], which promotes a slug-less
+	// tunnel's first bound alias — the sort key must match what the row
+	// renders.
+	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+
+	// Precompute each row's display token once (keyed by resource_id)
+	// rather than recomputing it inside the O(n log n) comparator below.
+	displayTok := make(map[string]string, len(resources))
+	for i := range resources {
+		displayTok[resources[i].ResourceID] = tunnelDisplayToken(&resources[i], aliasMap[resources[i].ResourceID])
+	}
+
 	// Stable order for two-call idempotency at the Slack ephemeral
-	// surface — the server's pagination cursor implies an order but
-	// not a stable one across re-queries. Sort by the displayed token
-	// (the same slug→alias→resource_id precedence the rows render),
-	// with resource_id as a tiebreaker so two rows sharing a token
-	// (e.g. a slug == another row's alias) order deterministically
-	// rather than inheriting the unstable upstream order. BEFORE
-	// formatting.
+	// surface — the server's pagination cursor implies an order but not a
+	// stable one across re-queries. Tokenless rows (slug-less, alias-less —
+	// the bare-resource_id "(no slug …)" rows) sort to the END so the
+	// legible $slug/$alias tunnels lead rather than a wall of opaque
+	// r_<id>s. Within each cohort, sort by the displayed token with
+	// resource_id as a tiebreaker (so two rows sharing a token — a slug ==
+	// another row's alias, or two tokenless rows — order deterministically
+	// rather than inheriting the unstable upstream order). BEFORE formatting.
 	sort.SliceStable(resources, func(i, j int) bool {
-		ti, tj := tunnelToken(&resources[i]), tunnelToken(&resources[j])
+		ti, tj := displayTok[resources[i].ResourceID], displayTok[resources[j].ResourceID]
+		if (ti == "") != (tj == "") {
+			return ti != "" // non-empty (legible) token sorts first
+		}
 		if ti != tj {
 			return ti < tj
 		}
 		return resources[i].ResourceID < resources[j].ResourceID
 	})
+
 	lines := make([]string, 0, len(resources))
 	for i := range resources {
-		lines = append(lines, formatTunnelListLine(&resources[i]))
+		lines = append(lines, formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID]))
 	}
 
-	body := "*qURL Tunnels:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Copy any `$slug` and run `/qurl get $slug` to mint a one-time qURL link._"
+	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") +
+		"\n\n_Copy any `$slug` or `$alias` and run `/qurl get` on it to mint a one-time qURL link. Any `(also …)` aliases shown are specific to this channel._"
 	if page.HasMore {
 		// page.HasMore is a master-list signal — more resources of ANY
 		// type, not necessarily more tunnels — so this footer can fire
@@ -141,8 +167,8 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 	return out
 }
 
-// tunnelToken returns the `$<token>` identifier shown for a tunnel in
-// /qurl list — and the key rows sort by. Precedence:
+// tunnelToken returns the resource-intrinsic `$<token>` for a tunnel.
+// Precedence:
 //
 //  1. Slug — the stable, owner-scoped tunnel handle. `/qurl tunnel
 //     install <slug>` binds `$<slug>` as a channel alias, so the slug
@@ -150,40 +176,122 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 //     and the identifier we want to surface (never the opaque r_<id>).
 //  2. Resource-level alias — fallback when a tunnel somehow carries no
 //     slug but does have an alias.
-//  3. resource_id — last resort for a legacy slug-less, alias-less
-//     tunnel. Vanishingly rare (tunnels are created with a slug), but
-//     better than an empty `$` token, and `/qurl get $r_<id>` still
-//     resolves it via the channel allow-set.
+//  3. "" — a slug-less, resource-alias-less tunnel has no intrinsic
+//     `$<token>` the user can `get` (get is slug/alias-only now).
+//     Vanishingly rare (tunnels are created with a slug). This function
+//     stops at ""; the channel-alias promotion and the bare-resource_id
+//     fallback both live downstream — in [tunnelDisplayToken] and
+//     [formatTunnelListLine] respectively, not here.
 func tunnelToken(r *client.Resource) string {
 	if r.Slug != "" {
 		return r.Slug
 	}
-	if r.Alias != "" {
-		return r.Alias
+	return r.Alias // "" when the tunnel has neither a slug nor an alias
+}
+
+// tunnelDisplayToken is the `$<token>` shown for a tunnel in /qurl list AND
+// the key rows sort by — both go through this one function so the sort order
+// matches what each row actually renders. It extends [tunnelToken] with
+// channel-alias promotion: when a tunnel has no intrinsic token (slug-less,
+// resource-alias-less) but a channel `$alias` binds to it, the first
+// (lexically sorted) bound alias becomes the token. Returns "" only when
+// there is no token at all — formatTunnelListLine then renders the bare
+// resource_id.
+//
+// Surprise to note: because promotion picks the lexically-first bound alias,
+// a slug-less tunnel's displayed identity can change if an admin later binds
+// an alphabetically-earlier alias (e.g. `$zebra` → `$aardvark`). Rare —
+// installs come with a slug — but documented so the flip isn't a mystery.
+func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
+	if t := tunnelToken(r); t != "" {
+		return t
 	}
-	return r.ResourceID
+	if len(boundAliases) > 0 {
+		return boundAliases[0] // sorted by channelAliasesByResourceID
+	}
+	return ""
 }
 
 // formatTunnelListLine renders one tunnel resource as a single text
 // line in /qurl list output:
 //
-//   - No description:   • `$<slug>`
-//   - With description: • `$<slug>` → <description>
+//   - Slug only:           • `$<slug>`
+//   - With bound aliases:  • `$<slug>` (also `$<alias>`, `$<alias2>`)
+//   - With description:    • `$<slug>` → <description>
 //
-// The token is [tunnelToken] (slug-first; never the opaque r_<id> in
-// the common case). The token-in-backticks shape lets Slack render it
-// as inline code (easy click-to-copy) while keeping the line
-// plaintext-greppable. There is no `(tunnel)` label or `[slug:...]`
-// fragment — the whole list is tunnels and the token IS the slug, so
-// both would be redundant noise. The arrow joins the slug to its
-// human-readable description when one is set; an undescribed tunnel
-// renders just the token.
-func formatTunnelListLine(r *client.Resource) string {
-	line := "• `$" + tunnelToken(r) + "`"
+// The primary token is [tunnelDisplayToken] (slug-first; never the opaque
+// r_<id>). `boundAliases` are the channel `$alias` shortcuts that resolve
+// to this tunnel in `/qurl get` — a tunnel can have several. They render
+// as "(also …)" so the user sees every name that works, EXCLUDING the
+// primary token itself (the install flow binds `$<slug>` as a channel
+// alias, so the slug would otherwise appear twice). The token-in-backticks
+// shape lets Slack render each as inline code. There is no `(tunnel)` label
+// or `[slug:...]` fragment — the whole list is tunnels and the token IS the
+// slug. The arrow joins to the human-readable description when one is set.
+//
+// A slug-less, resource-alias-less tunnel with a bound channel `$alias` has
+// that alias promoted to the primary token (by [tunnelDisplayToken]) so the
+// row shows a name the user can `get` against — rather than a bare
+// resource_id labeled "(no slug set)" sitting next to an "(also `$alias`)"
+// that advertises a usable token. With no bound alias either, the tunnel has
+// no token `/qurl get` can accept at all (the opaque resource_id isn't an
+// alias-shaped token), so the row renders the bare resource_id WITHOUT a `$`
+// sigil and spells out that it's not usable from Slack until an admin sets a
+// slug — keeping the "copy a token and get it" promise honest.
+func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
+	token := tunnelDisplayToken(r, boundAliases)
+	var line string
+	if token == "" {
+		line = "• `" + r.ResourceID + "` (no slug — ask your Slack admin to set one)"
+	} else {
+		line = "• `$" + token + "`"
+	}
+	extras := make([]string, 0, len(boundAliases))
+	for _, a := range boundAliases {
+		if a != token {
+			extras = append(extras, "`$"+a+"`")
+		}
+	}
+	if len(extras) > 0 {
+		line += " (also " + strings.Join(extras, ", ") + ")"
+	}
 	if r.Description != "" {
 		line += " → " + r.Description
 	}
 	return line
+}
+
+// channelAliasesByResourceID builds resource_id → sorted channel-bound
+// `$alias` shortcuts from the channel's policy entries, so /qurl list
+// can show every alias that resolves to each tunnel. Best-effort:
+// AdminStore-nil, empty channel, or a fetch failure yields nil (rows
+// render slug-only) — the listing must still render.
+//
+// Cost: one GetChannelPolicy (GetItem) per /qurl list, purely for the
+// cosmetic alias display. Post-#459 the list is unscoped — the admin
+// gate / channel-policy filter (scopeResourcesForUser) was removed — so
+// there's no longer an allow-set read on this path to fold this into;
+// it's a standalone read. Acceptable for the discovery surface.
+func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
+	if h.cfg.AdminStore == nil || channelID == "" {
+		return nil
+	}
+	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
+	if err != nil {
+		log.Debug("list: channel-policy fetch for alias display failed — rendering slug-only",
+			"error", err, "team_id", teamID, "channel_id", channelID)
+		return nil
+	}
+	out := make(map[string][]string)
+	for i := range entries {
+		if entries[i].Alias != "" && entries[i].ResourceID != "" {
+			out[entries[i].ResourceID] = append(out[entries[i].ResourceID], entries[i].Alias)
+		}
+	}
+	for id := range out {
+		sort.Strings(out[id])
+	}
+	return out
 }
 
 // mapListResourcesError surfaces a friendly user-facing error for

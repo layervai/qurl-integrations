@@ -23,6 +23,7 @@ import (
 
 const (
 	testTunnelSlug         = "prod-dashboard"
+	testTunnelAliasDash    = "dash" // sample channel alias used across get/tunnel tests
 	testTunnelResourceID   = "r_prod_dash01"
 	testTunnelInstallVerb  = "install"
 	testTunnelWizardCmd    = "tunnel " + testTunnelInstallVerb
@@ -110,8 +111,8 @@ func TestParseTunnelInstall(t *testing.T) {
 	}{
 		{name: "minimal", text: testTunnelInstallCmd, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
 		{name: "slug with alias sigil", text: "tunnel install $" + testTunnelSlug, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
-		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: 9090},
-		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: "dash", wantPort: defaultTunnelLocalPort},
+		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: testTunnelAliasDash, wantPort: 9090},
+		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: testTunnelAliasDash, wantPort: defaultTunnelLocalPort},
 		{name: "docker environment", text: testTunnelInstallCmd + " env:docker", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
 		{name: "environment", text: testTunnelInstallCmd + " env:ecs-fargate", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvECSFargate},
 		{name: "compose alias and service", text: testTunnelInstallCmd + " env:compose service:" + testTunnelComposeWeb, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWebRef: testTunnelComposeWeb},
@@ -660,7 +661,10 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	// `/qurl aliases` gates on AdminStore (wired here), so it must appear —
+	// the converse of TestHelpGatesAliasVerbsByBackingStore, which fences it
+	// hidden when AdminStore is nil.
+	for _, want := range []string{"/qurl get <$slug|$alias>`", "/qurl aliases`", "/qurl tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
