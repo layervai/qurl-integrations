@@ -109,25 +109,29 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 
 	// "D…" is a Slack DM channel ID; the others are a policy-bearing and
 	// a policy-free regular channel. All must render the full listing.
+	// Subtests so -run can target a single branch and PASS/FAIL is
+	// reported per channel.
 	for _, channelID := range []string{"C_with_policy", "C_no_policy_here", "D_direct_msg_1to1"} {
-		inv := newAdminSlashInvokerOnChannel(t, h, channelID)
-		_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-		if !strings.Contains(async, "`$prod-db`") {
-			t.Errorf("channel %q: non-admin should see prod-db tunnel (listing is unscoped post-revert): %q", channelID, async)
-		}
-		if !strings.Contains(async, "`$secret`") {
-			t.Errorf("channel %q: non-admin should see the secret tunnel (no per-channel filter post-revert): %q", channelID, async)
-		}
-		// Negative fence: a filter reintroduced on only one branch would
-		// surface the empty-state or the (removed) non-admin
-		// pagination-gap copy for this non-admin caller, even if another
-		// branch still rendered rows.
-		if strings.Contains(async, "No tunnels found") {
-			t.Errorf("channel %q: empty-state copy fired — a channel filter may have dropped the listing: %q", channelID, async)
-		}
-		if strings.Contains(async, "past the first page") {
-			t.Errorf("channel %q: removed non-admin pagination-gap copy reappeared: %q", channelID, async)
-		}
+		t.Run(channelID, func(t *testing.T) {
+			inv := newAdminSlashInvokerOnChannel(t, h, channelID)
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+			if !strings.Contains(async, "`$prod-db`") {
+				t.Errorf("non-admin should see prod-db tunnel (listing is unscoped post-revert): %q", async)
+			}
+			if !strings.Contains(async, "`$secret`") {
+				t.Errorf("non-admin should see the secret tunnel (no per-channel filter post-revert): %q", async)
+			}
+			// Negative fence: a filter reintroduced on only one branch
+			// would surface the empty-state or the (removed) non-admin
+			// pagination-gap copy for this non-admin caller, even if
+			// another branch still rendered rows.
+			if strings.Contains(async, "No tunnels found") {
+				t.Errorf("empty-state copy fired — a channel filter may have dropped the listing: %q", async)
+			}
+			if strings.Contains(async, "past the first page") {
+				t.Errorf("removed non-admin pagination-gap copy reappeared: %q", async)
+			}
+		})
 	}
 }
 
