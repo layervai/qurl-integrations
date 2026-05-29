@@ -144,10 +144,11 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 	h.finishGet(log, responseURL, text, err)
 }
 
-// findListCreateQurlAction returns the "Create qURL" list-row button from
-// a block_actions payload's actions array (Slack sends one entry per
-// clicked element). Matches on action_id so an unrelated button on a
-// future message doesn't trigger a mint.
+// findListCreateQurlAction returns the first "Create qURL" list-row button
+// from a block_actions payload's actions array. Slack sends one entry per
+// clicked element, so a single button click yields exactly one match and
+// taking the first is correct for that contract. Matches on action_id so
+// an unrelated button on a future message doesn't trigger a mint.
 func findListCreateQurlAction(actions []interactionAction) (interactionAction, bool) {
 	for _, a := range actions {
 		if a.ActionID == listCreateQurlActionID {

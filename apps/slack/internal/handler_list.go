@@ -47,13 +47,15 @@ const listCreateButtonLabel = "Create qURL"
 
 // listCreateButtonMaxRows caps how many tunnel rows /qurl list renders as
 // interactive section+button blocks. Slack rejects a message with more
-// than 50 blocks; reserving the header, footer, and optional has-more
-// note, 45 rows stays comfortably under that ceiling. A workspace with
-// more tunnels than this degrades to the plain-text listing (every tunnel
-// still visible — the text path has no block ceiling — just without the
-// per-row button) rather than a message Slack would refuse to render.
-// Tunnels are created deliberately (via `/qurl tunnel install`), so a real
-// workspace is far below this; see [listResourcesScanLimit].
+// than 50 blocks; the rendered shape is header (1) + N row sections +
+// footer (1) + optional has-more note (1), so 45 rows tops out at 48 —
+// 2 blocks of deliberate headroom against a future non-row block. A
+// workspace with more tunnels than this degrades to the plain-text
+// listing (every tunnel still visible — the text path has no block
+// ceiling — just without the per-row button) rather than a message Slack
+// would refuse to render. Tunnels are created deliberately (via `/qurl
+// tunnel install`), so a real workspace is far below this; see
+// [listResourcesScanLimit].
 const listCreateButtonMaxRows = 45
 
 // listFooterText is the guidance line under /qurl list when rendered as
