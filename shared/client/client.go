@@ -276,8 +276,8 @@ type AccessPolicy struct {
 type CreateInput struct {
 	TargetURL string `json:"target_url,omitempty"`
 	// ResourceID, when set, mints a qURL bound to an existing resource
-	// (e.g. an existing tunnel resource). Mutually
-	// exclusive with TargetURL on the wire.
+	// (e.g. an existing tunnel resource). Mutually exclusive with
+	// TargetURL on the wire.
 	ResourceID   string        `json:"resource_id,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	ExpiresIn    string        `json:"expires_in,omitempty"`
@@ -914,11 +914,10 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	if !input.hasAnyFieldSet() {
 		return nil, ErrUpdateResourceNoFieldsSet
 	}
-	// Trim *input.Alias for symmetry with the resourceID trim
-	// contract. Shallow-copy input so the
-	// trim doesn't mutate the caller's struct, then re-point Alias at
-	// the trimmed value. The trimmed string is what hits the wire and
-	// what the empty-pointer guard below sees.
+	// Trim *input.Alias for symmetry with the resourceID trim contract.
+	// Shallow-copy input so the trim doesn't mutate the caller's struct,
+	// then re-point Alias at the trimmed value. The trimmed string is
+	// what hits the wire and what the empty-pointer guard below sees.
 	//
 	// Note: this is a shallow copy — pointer fields like AccessPolicy
 	// still alias the caller's data. Today only Alias gets retargeted;

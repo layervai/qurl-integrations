@@ -91,16 +91,32 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	// fetch covers every group, joined by resource_id. Best-effort: a
 	// failed fetch degrades each row to its channel aliases alone (never
 	// the opaque resource_id).
-	byID := resourcesByResourceID(ctx, log, c)
+	byID, hasMore := resourcesByResourceID(ctx, log, c)
 	lines := make([]string, 0, len(groups))
+	unresolved := 0
 	for i := range groups {
-		// Unresolved (fetch failed or resource_id absent from the page)
-		// yields a zero-value Resource — empty Slug/TargetURL, which
-		// formatAliasGroupLine degrades to the alias-only row.
-		r := byID[groups[i].resourceID]
+		// nil-map (fetch failed) and missing-key (resource_id absent from
+		// the scanned page) both yield a zero-value Resource — empty
+		// Slug/TargetURL, which formatAliasGroupLine degrades to the
+		// alias-only row. A group with a resource_id we couldn't resolve
+		// is a candidate for the pagination gap below.
+		r, ok := byID[groups[i].resourceID]
+		if groups[i].resourceID != "" && !ok {
+			unresolved++
+		}
 		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, groups[i].aliases))
 	}
 	sort.Strings(lines)
+
+	if hasMore && unresolved > 0 {
+		// Some bound tunnel resolved to alias-only AND the workspace has
+		// resources past the scanned page — so the missing slug may just
+		// be paginated out (not gone). One triage line for "why doesn't
+		// `$foo` show its slug?"; arms the #555 follow-up. Additive only —
+		// the rows already rendered above are unchanged.
+		log.Warn("aliases: listing may be incomplete — unresolved bindings with more resources past the scanned page",
+			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "channel_id", channelID)
+	}
 
 	body := "*Aliases configured for this channel:*\n" +
 		"_Format: `$<slug>` → the aliases that resolve to it. Run `/qurl get` with the slug or any alias._\n" +
@@ -114,23 +130,25 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 // per-id `GET /v1/resources/{id}` path does NOT return the tunnel slug;
 // the list path does, so a workspace-list join is the reliable resolver.
 //
-// Best-effort: a fetch failure yields a nil map and the caller degrades
-// every row to its channel aliases alone (a nil-map lookup returns the
-// zero-value Resource). Bounded to one [listResourcesScanLimit] page — a
-// resource past the first page won't resolve (same cap as /qurl list;
-// the /qurl aliases incomplete-listing follow-up is tracked in #555,
-// which depends on the #531 server-side type=tunnel filter).
-func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) map[string]client.Resource {
+// Best-effort: a fetch failure yields a nil map (and hasMore=false) and
+// the caller degrades every row to its channel aliases alone (a nil-map
+// lookup returns the zero-value Resource). Bounded to one
+// [listResourcesScanLimit] page — a resource past the first page won't
+// resolve; hasMore reports page.HasMore so the caller can flag that an
+// unresolved binding may simply be paginated out. (Same cap as /qurl
+// list; the /qurl aliases incomplete-listing follow-up is tracked in
+// #555, which depends on the #531 server-side type=tunnel filter.)
+func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) (map[string]client.Resource, bool) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
 		log.Warn("aliases: list resources for slug resolution failed — rendering alias-only", "error", err)
-		return nil
+		return nil, false
 	}
 	out := make(map[string]client.Resource, len(page.Resources))
 	for i := range page.Resources {
 		out[page.Resources[i].ResourceID] = page.Resources[i]
 	}
-	return out
+	return out, page.HasMore
 }
 
 // aliasGroup collects every channel alias bound to one resource, so

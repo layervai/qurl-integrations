@@ -1,7 +1,12 @@
 package internal
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -133,6 +138,75 @@ func TestHandleAliases_ListResourcesFailureDegradesToAliasOnly(t *testing.T) {
 	// Best-effort, not fatal: the header still renders.
 	if !strings.Contains(async, "Aliases configured for this channel") {
 		t.Errorf("async reply missing header on resolver failure: %q", async)
+	}
+}
+
+// runProcessAliasesCapturingLogs calls processAliases directly with an
+// injected logger so a test can assert on operator-facing log lines —
+// the incomplete-listing triage warning isn't visible in the response
+// body. The response_url points at a 200-only sink.
+func runProcessAliasesCapturingLogs(t *testing.T, h *Handler, channelID string) string {
+	t.Helper()
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(sink.Close)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	h.processAliases(context.Background(), log, url.Values{
+		fieldResponseURL: {sink.URL},
+		fieldTeamID:      {testAdminTeamID},
+		fieldChannelID:   {channelID},
+	})
+	return logs.String()
+}
+
+// TestHandleAliases_IncompleteListingLogsTriageWarning fences the #555
+// arming signal: when the workspace has more resources past the scanned
+// page (page.HasMore) AND a bound tunnel's resource_id wasn't on that
+// page, the handler emits one operator-facing warning so "why doesn't
+// `$foo` show its slug?" is triageable from logs. The user-facing rows
+// are unchanged (still alias-only); only the log differs.
+func TestHandleAliases_IncompleteListingLogsTriageWarning(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": "r_paginated01",
+	})
+	// The page carries a DIFFERENT resource and signals more past it, so
+	// the bound r_paginated01 degrades to alias-only via the pagination gap.
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_other01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "other"},
+		}, "next-cursor", true)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	logs := runProcessAliasesCapturingLogs(t, h, "C_test")
+	if !strings.Contains(logs, "listing may be incomplete") {
+		t.Errorf("expected incomplete-listing warning, got logs: %q", logs)
+	}
+	if !strings.Contains(logs, "unresolved_groups=1") {
+		t.Errorf("expected unresolved_groups=1 in warning, got logs: %q", logs)
+	}
+}
+
+// TestHandleAliases_CompleteListingLogsNoWarning fences the converse:
+// when every bound resource resolves on the scanned page, the warning
+// must NOT fire even though page.HasMore is true — has_more there only
+// reflects OTHER (non-bound) resources, not a missing binding.
+func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": "r_resolved01",
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_resolved01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "resolved"},
+		}, "next-cursor", true)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	logs := runProcessAliasesCapturingLogs(t, h, "C_test")
+	if strings.Contains(logs, "listing may be incomplete") {
+		t.Errorf("incomplete-listing warning fired when every binding resolved: %q", logs)
 	}
 }
 
