@@ -159,7 +159,6 @@ body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem 
 h1{margin:0 0 .5rem;font-size:1.5rem}
 p{color:#374151;font-size:.95rem;line-height:1.5}
 .warn{color:#b91c1c;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 </style>
 </head>
 <body>
