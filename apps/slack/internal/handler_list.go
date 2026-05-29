@@ -116,13 +116,18 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 
 	// Stable order for two-call idempotency at the Slack ephemeral
 	// surface — the server's pagination cursor implies an order but not a
-	// stable one across re-queries. Sort by the displayed token, with
-	// resource_id as a tiebreaker so two rows sharing a token (e.g. a slug
-	// == another row's alias, or two slug-less rows with no bound alias)
-	// order deterministically rather than inheriting the unstable upstream
-	// order. BEFORE formatting.
+	// stable one across re-queries. Tokenless rows (slug-less, alias-less —
+	// the bare-resource_id "(no slug …)" rows) sort to the END so the
+	// legible $slug/$alias tunnels lead rather than a wall of opaque
+	// r_<id>s. Within each cohort, sort by the displayed token with
+	// resource_id as a tiebreaker (so two rows sharing a token — a slug ==
+	// another row's alias, or two tokenless rows — order deterministically
+	// rather than inheriting the unstable upstream order). BEFORE formatting.
 	sort.SliceStable(resources, func(i, j int) bool {
 		ti, tj := displayTok[resources[i].ResourceID], displayTok[resources[j].ResourceID]
+		if (ti == "") != (tj == "") {
+			return ti != "" // non-empty (legible) token sorts first
+		}
 		if ti != tj {
 			return ti < tj
 		}

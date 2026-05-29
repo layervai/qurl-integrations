@@ -229,15 +229,18 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// ErrUnexpectedArgument rather than the misleading
 		// "invalid flag" message applyFlag would otherwise return.
 		{name: "get with non-flag trailing positional rejected", text: "get $prod-db junk", wantErr: ErrUnexpectedArgument},
-		// get is slug/alias-only: EVERY `$r_…` token is rejected with
-		// ErrInvalidAlias because the `_` fails the alias charset
-		// (parseAliasToken). A well-formed resource ID is rejected just
-		// like a malformed one — there is no resource-id get form.
-		{name: "valid resource-id rejected (get is slug/alias-only)", text: "get $r_abc123def01", wantErr: ErrInvalidAlias},
-		{name: "resource-id-shaped token rejected", text: "get $r_short", wantErr: ErrInvalidAlias},
-		{name: "resource-id uppercase rejected", text: "get $r_TOOMANYCHARS", wantErr: ErrInvalidAlias},
-		// `$` byte anywhere in the body fails the alias charset too.
-		{name: "dollar-in-body rejected", text: "get $r_aaa$bbbccc", wantErr: ErrInvalidAlias},
+		// get is slug/alias-only: EVERY `$r_…` token is caught by the
+		// dedicated `$r_` prefix branch in parseGet and rejected with
+		// ErrResourceIDNotSupportedGet (so the handler can redirect to the
+		// `$slug`), well-formed or not — there is no resource-id get form.
+		{name: "valid resource-id rejected (get is slug/alias-only)", text: "get $r_abc123def01", wantErr: ErrResourceIDNotSupportedGet},
+		{name: "resource-id-shaped token rejected", text: "get $r_short", wantErr: ErrResourceIDNotSupportedGet},
+		{name: "resource-id uppercase rejected", text: "get $r_TOOMANYCHARS", wantErr: ErrResourceIDNotSupportedGet},
+		// The `$r_` prefix wins even with junk in the body (caught before
+		// the charset check).
+		{name: "resource-id with dollar-in-body rejected", text: "get $r_aaa$bbbccc", wantErr: ErrResourceIDNotSupportedGet},
+		// `$` byte anywhere in a non-r_ alias body still fails the charset.
+		{name: "dollar-in-body rejected", text: "get $ab$cd", wantErr: ErrInvalidAlias},
 		// A typo-class URL paste (`get $alias https://x.example:8080`)
 		// contains `:` but is plainly not a flag; the
 		// http://-and-https://-aware looksLikeFlag check routes it to
@@ -626,6 +629,7 @@ func FuzzParse(f *testing.F) {
 		ErrUnexpectedArgument,
 		ErrInvalidFlag,
 		ErrURLNotSupportedGet,
+		ErrResourceIDNotSupportedGet,
 	}
 	f.Fuzz(func(t *testing.T, in string) {
 		cmd, err := Parse(in)

@@ -238,6 +238,33 @@ func TestHandleGet_URLRejected(t *testing.T) {
 	}
 }
 
+// TestHandleGet_ResourceIDRejected fences the friendly `$r_<id>` redirect:
+// a user pasting a resource-id token (which pre-tunnels-only `/qurl list`
+// surfaced) gets the resource-id-specific copy pointing them at the `$slug`,
+// NOT the generic invalid-alias error, and the mint is never reached.
+func TestHandleGet_ResourceIDRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	status, ack := inv.invokeAdmin("get $r_abc123def01", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "not a resource ID") {
+		t.Errorf("ack missing resource-id-rejection copy: %q", ack)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached on a rejected resource id (hits = %d)", mintHits.Load())
+	}
+}
+
 // TestHandleGet_LegacyURLBindingRefused fences the read-side guard for
 // bindings created by the pre-tunnels-only `/qurl set-alias`, which
 // stored a raw URL verbatim in alias_bindings. Those rows survive this
