@@ -283,6 +283,20 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 	return
 }
 
+// requireAliasAdminGate is the in-code admin gate shared by set-alias and
+// unset-alias: Slack does not restrict a slash command to workspace admins,
+// so the `/qurl-admin` registration can't be the gate. It checks AdminStore
+// is wired (requireAdminStoreSync — guarantees AdminStore, == aliasStore in
+// prod per cmd/main.go SetAliasStore, is non-nil for CheckAdmin) and that
+// the caller is a qURL admin (requireAdminSync). Returns false (and has
+// written the reply) when either fails; callers `if !h.requireAliasAdminGate(...) { return }`.
+func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, values url.Values, action AdminAction) bool {
+	if !h.requireAdminStoreSync(w) {
+		return false
+	}
+	return h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), action)
+}
+
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
 //
 // **Admin restriction:** Enforced in code via requireAdminSync (a
@@ -326,17 +340,11 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	// Admin gate, in code (see the doc comment): Slack does not restrict a
-	// slash command to workspace admins, so the `/qurl-admin` registration
-	// can't be the gate. Runs after aliasValidate (which only reads the
-	// team/channel IDs and checks the store is wired) but before the slug
-	// resolve + DDB bind, so a non-admin is denied before any resource
-	// interaction. requireAdminStoreSync guarantees AdminStore (== aliasStore
-	// in prod; see cmd/main.go SetAliasStore) is non-nil for CheckAdmin.
-	if !h.requireAdminStoreSync(w) {
-		return
-	}
-	if !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminAction("set_alias")) {
+	// Admin gate, in code (see requireAliasAdminGate). Runs after
+	// aliasValidate (team/channel IDs + store-wired check) but before the
+	// slug resolve + DDB bind, so a non-admin is denied before any resource
+	// interaction.
+	if !h.requireAliasAdminGate(w, teamID, values, AdminAction("set_alias")) {
 		return
 	}
 	slug := strings.TrimPrefix(args.Target, "$")
@@ -457,15 +465,10 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	}
 	defer cancel()
 
-	// Admin gate, in code — same posture as handleSetAlias (the
-	// `/qurl-admin` registration is not an admin gate; Slack doesn't
-	// restrict slash commands by role). Runs after aliasPreamble (IDs +
-	// store-wired check) but before UnbindChannelAlias, so a non-admin is
-	// denied before any store write.
-	if !h.requireAdminStoreSync(w) {
-		return
-	}
-	if !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminAction("unset_alias")) {
+	// Admin gate, in code (see requireAliasAdminGate). Runs after
+	// aliasPreamble (IDs + store-wired check) but before UnbindChannelAlias,
+	// so a non-admin is denied before any store write.
+	if !h.requireAliasAdminGate(w, teamID, values, AdminAction("unset_alias")) {
 		return
 	}
 
