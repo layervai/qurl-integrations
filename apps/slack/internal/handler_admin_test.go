@@ -112,7 +112,7 @@ func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 		inv := newAdminSlashInvoker(t, h)
 
 		_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(reply, "re-run `/qurl-admin setup`") {
+		if !strings.Contains(reply, "re-run `/qurl setup`") {
 			t.Errorf("status %d: reply missing rotate-hint: %q", status, reply)
 		}
 	}

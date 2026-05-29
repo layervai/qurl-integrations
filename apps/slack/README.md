@@ -8,19 +8,23 @@ share the same signature verification — Slack stamps which command was
 invoked in the `command` field, and the bot dispatches on it. **Deploy
 prerequisite:** `/qurl-admin` must be registered as a slash command in the
 Slack app config pointing at the **same request URL** as `/qurl` (and
-restricted to workspace admins). The code is inert until that registration
-exists.
+restricted to workspace admins). The admin verbs are inert until that
+registration exists. `setup` is deliberately **not** an admin verb — it
+stays on `/qurl` so the first user to connect an unbound workspace can
+reach it (qURL is first-come-claims); the overwrite guard for an
+already-bound workspace lives at the OAuth-callback bind layer.
 
 Customer onboarding is install-first:
 
 1. Install the qURL Slack app from the install link your operator provided (`https://<SLACK_BASE_URL host>/oauth/slack/install`).
-2. Run `/qurl-admin setup` in Slack.
+2. Run `/qurl setup` in Slack.
 3. Use `/qurl-admin tunnel install` or `/qurl get`.
 
 ## Features
 
 ### User commands (`/qurl`)
 
+- `/qurl setup` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; first-come-claims — the first user to run it becomes the workspace's qURL admin)
 - `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a channel `$alias` (raw URLs are not supported)
 - `/qurl list` — List the protected tunnel resources available to you (with their bound channel shortcuts)
 - `/qurl aliases` — List the qURL shortcuts configured in the current channel
@@ -28,7 +32,6 @@ Customer onboarding is install-first:
 
 ### Admin commands (`/qurl-admin`)
 
-- `/qurl-admin setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
 - `/qurl-admin set-alias $<alias> $<slug>` — Point a channel shortcut at a tunnel slug (admin-only)
 - `/qurl-admin unset-alias $<alias>` — Remove a channel shortcut binding (admin-only)
 - `/qurl-admin tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install with `views:write`)
@@ -47,7 +50,7 @@ modifiers enabled by the current bot deployment.
 - **Runtime:** AWS Fargate (arm64, distroless container) behind an
   ALB that terminates TLS and routes `/slack/*`, `/oauth/slack/*`,
   `/oauth/qurl/*`, and `/health`.
-- **Auth:** Per-workspace qURL API key, minted via `/qurl-admin setup` →
+- **Auth:** Per-workspace qURL API key, minted via `/qurl setup` →
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
@@ -143,7 +146,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the bot |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
-| `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl-admin setup` URLs. |
+| `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl-admin tunnel install`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
@@ -158,7 +161,7 @@ fallback, but customers cannot self-install the bot.
 
 The `OAuth` group is required only when the bot needs to serve the
 `/oauth/qurl/{start,callback}` surface. Boots without these vars still
-serve `/slack/*` and `/health`; `/qurl-admin setup` replies "OAuth is not
+serve `/slack/*` and `/health`; `/qurl setup` replies "OAuth is not
 configured" until the OAuth env vars are populated.
 
 For customer Slack installs, configure the Slack app with:

@@ -173,27 +173,39 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	if !strings.Contains(userHelp, "/qurl get") || !strings.Contains(userHelp, "/qurl list") {
 		t.Errorf("/qurl help missing user verbs: %q", userHelp)
 	}
+	// setup is a user verb (first-come-claims) — the user surface must
+	// advertise it so the first claimant of an unbound workspace can find
+	// it.
+	if !strings.Contains(userHelp, "/qurl setup") {
+		t.Errorf("/qurl help missing setup verb: %q", userHelp)
+	}
 	if !strings.Contains(userHelp, "/qurl-admin help") {
 		t.Errorf("/qurl help should route admins to /qurl-admin help: %q", userHelp)
 	}
 	// User help must NOT advertise admin verbs as runnable commands —
 	// they live on /qurl-admin. Check for the command-line forms (the
-	// `/qurl-admin setup` advert and the `/qurl set-alias` bullet),
-	// not bare words: the "Admins: run /qurl-admin help …" pointer line
-	// legitimately mentions "setup"/"tunnel install" in prose.
-	for _, leaked := range []string{"/qurl-admin setup", "/qurl-admin tunnel install", "/qurl set-alias", "/qurl-admin admin"} {
+	// `/qurl-admin tunnel install` advert and the `/qurl set-alias`
+	// bullet), not bare words: the "Admins: run /qurl-admin help …"
+	// pointer line legitimately mentions "tunnel install"/"alias" in prose.
+	for _, leaked := range []string{"/qurl-admin tunnel install", "/qurl set-alias", "/qurl-admin admin", "/qurl-admin set-alias"} {
 		if strings.Contains(userHelp, leaked) {
 			t.Errorf("/qurl help leaked admin command %q: %q", leaked, userHelp)
 		}
 	}
 
 	adminHelp := slashReply(t, h, commandAdmin, "help")
-	if !strings.Contains(adminHelp, "/qurl-admin setup") {
-		t.Errorf("/qurl-admin help missing setup verb: %q", adminHelp)
+	// The always-present admin-help line (the optional verb blocks are
+	// gated on sandbox wiring, which newTestHandler doesn't supply).
+	if !strings.Contains(adminHelp, "/qurl-admin help") {
+		t.Errorf("/qurl-admin help missing its own help line: %q", adminHelp)
 	}
-	// Admin help must NOT advertise the user mint verbs.
-	if strings.Contains(adminHelp, "/qurl get") {
-		t.Errorf("/qurl-admin help leaked user verb /qurl get: %q", adminHelp)
+	// Admin help must NOT advertise the setup verb (it's a user verb now)
+	// or the user mint verbs. Match the command forms — bare "setup" would
+	// false-positive on the "Guided tunnel setup" copy.
+	for _, leaked := range []string{"/qurl-admin setup", "/qurl setup", "/qurl get"} {
+		if strings.Contains(adminHelp, leaked) {
+			t.Errorf("/qurl-admin help leaked user verb %q: %q", leaked, adminHelp)
+		}
 	}
 }
 
@@ -204,16 +216,18 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 
-	// Admin verbs on /qurl → redirect to /qurl-admin.
-	for _, text := range []string{"setup", "tunnel install foo", "set-alias $a $b", "unset-alias $a", "admin list"} {
+	// Admin verbs on /qurl → redirect to /qurl-admin. (setup is NOT here:
+	// it's a user verb now, so `/qurl setup` is handled, not redirected.)
+	for _, text := range []string{"tunnel install foo", "set-alias $a $b", "unset-alias $a", "admin list"} {
 		reply := slashReply(t, h, commandUser, text)
 		if !strings.Contains(reply, "admin command") || !strings.Contains(reply, "/qurl-admin") {
 			t.Errorf("/qurl %q: want admin-command redirect, got %q", text, reply)
 		}
 	}
 
-	// User verbs on /qurl-admin → redirect to /qurl.
-	for _, text := range []string{"get $prod-db", "list", "aliases"} {
+	// User verbs on /qurl-admin → redirect to /qurl. setup is included:
+	// `/qurl-admin setup` points the user back at `/qurl setup`.
+	for _, text := range []string{"get $prod-db", "list", "aliases", "setup"} {
 		reply := slashReply(t, h, commandAdmin, text)
 		if !strings.Contains(reply, "`/qurl` command") || !strings.Contains(reply, "/qurl ") {
 			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)
@@ -614,7 +628,7 @@ func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
 	// /qurl setup uses to mint state.
 
 	body := url.Values{
-		"command": {"/qurl-admin"},
+		"command": {"/qurl"},
 		"text":    {"setup"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},
@@ -679,7 +693,7 @@ func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	// SetOAuthSetup deliberately NOT called → oauthSetup == nil.
 	body := url.Values{
-		"command": {"/qurl-admin"},
+		"command": {"/qurl"},
 		"text":    {"setup"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},

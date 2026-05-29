@@ -206,15 +206,15 @@ func run() error {
 			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
 		})
-		// Operator reminder: /qurl-admin setup runs whichever Slack user
-		// invokes it. Workspace identity comes from the signature-
-		// verified payload, but ROLE is not enforced in this binary.
-		// The Slack app manifest must restrict /qurl-admin to workspace
-		// admins; without that gate, any user could initiate a flow that
-		// overwrites the workspace's qURL key against their own Auth0
-		// account. The /qurl-admin slash command must also be registered
-		// in the Slack app config pointing at the same request URL as
-		// /qurl, or the admin verbs never arrive.
+		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
+		// install, set-alias, admin add/remove/list/revoke). It must be
+		// registered in the Slack app config pointing at the same request
+		// URL as /qurl — or those verbs never arrive — and restricted to
+		// workspace admins, since ROLE is not enforced in this binary.
+		// /qurl setup is NOT on /qurl-admin and is intentionally open to
+		// any workspace member (first-come-claims); the overwrite guard
+		// for an already-bound workspace is the OAuth-callback bind check,
+		// not this manifest gate.
 		slog.Info("CONFIGURATION REMINDER: /qurl-admin must be registered in the Slack app config (same request URL as /qurl) and restricted to workspace admins by manifest, not by code — verify both before rollout")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var

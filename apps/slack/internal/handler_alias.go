@@ -304,14 +304,15 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
 //
 // **Admin restriction:** This handler is admin-gated at the Slack app
-// config level — the whole `/qurl-admin` command must be declared
-// admin-only in the install config. The same posture is used for
-// `/qurl-admin setup` (see handleSetup) — gating in the app config
-// avoids an extra Slack API round-trip per invocation. The CR feedback
-// on the old #230 (claude-bot review id 2026-05-10) flagged "admin gate
-// before alias resolution" as an info-disclosure surface. Moving the
-// gate to the app config closes that gap structurally: a non-admin's
-// command never reaches this handler.
+// config level — the whole `/qurl-admin` command (which carries every
+// admin verb except setup) must be declared admin-only in the install
+// config. Gating in the app config avoids an extra Slack API round-trip
+// per invocation. The CR feedback on the old #230 (claude-bot review id
+// 2026-05-10) flagged "admin gate before alias resolution" as an
+// info-disclosure surface. Moving the gate to the app config closes that
+// gap structurally: a non-admin's command never reaches this handler.
+// (setup is different — it lives on the open `/qurl` command and is
+// guarded at the OAuth-callback bind layer instead; see handleSetup.)
 //
 // **Target contract:** the only accepted target is a tunnel `$slug`.
 // A raw URL or an `r_<id>` resource id is rejected synchronously with

@@ -852,9 +852,9 @@ func TestHelpHidesAliasVerbsWhenAliasStoreNil(t *testing.T) {
 		t.Errorf("/qurl-admin help = %q, leaked unset-alias verb on unwired aliasStore", got)
 	}
 	// The admin help itself MUST still render — the gate only hides the
-	// alias-bearing verbs, not the always-present setup line.
-	if !strings.Contains(got, "/qurl-admin setup") {
-		t.Errorf("/qurl-admin help = %q, missing setup line", got)
+	// alias-bearing verbs, not the always-present `/qurl-admin help` line.
+	if !strings.Contains(got, "/qurl-admin help") {
+		t.Errorf("/qurl-admin help = %q, missing help line", got)
 	}
 }
 

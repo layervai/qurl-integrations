@@ -33,7 +33,7 @@ func Start(cfg Config) http.HandlerFunc {
 		stateParam := r.URL.Query().Get("state")
 		if stateParam == "" {
 			slog.Warn("oauth/start rejected: missing state")
-			http.Error(w, "missing state parameter — start setup from the /qurl-admin setup slash command", http.StatusBadRequest)
+			http.Error(w, "missing state parameter — start setup from the /qurl setup slash command", http.StatusBadRequest)
 			return
 		}
 		if _, err := VerifyState(cfg.OAuthStateSecret, stateParam, now()); err != nil {
@@ -54,7 +54,7 @@ func Start(cfg Config) http.HandlerFunc {
 			// surface the misleading "setup must be completed in the
 			// same browser" error rather than re-running setup cleanly.
 			clearStateCookie(w)
-			http.Error(w, "invalid or expired setup link — run /qurl-admin setup again", http.StatusBadRequest)
+			http.Error(w, "invalid or expired setup link — run /qurl setup again", http.StatusBadRequest)
 			return
 		}
 		// Cookie MUST be set before the 302 — once we write the Location
