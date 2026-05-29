@@ -209,13 +209,17 @@ func run() error {
 		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
 		// install, set-alias, admin add/remove/list/revoke). It must be
 		// registered in the Slack app config pointing at the same request
-		// URL as /qurl — or those verbs never arrive — and restricted to
-		// workspace admins, since ROLE is not enforced in this binary.
-		// /qurl setup is NOT on /qurl-admin and is intentionally open to
-		// any workspace member (first-come-claims); the overwrite guard
-		// for an already-bound workspace is the OAuth-callback bind check,
-		// not this manifest gate.
-		slog.Info("CONFIGURATION REMINDER: /qurl-admin must be registered in the Slack app config (same request URL as /qurl) and restricted to workspace admins by manifest, not by code — verify both before rollout")
+		// URL as /qurl — or those verbs never arrive. Admin enforcement is
+		// in-code: every admin verb runs requireAdminSync against the qURL
+		// admin set (admin_slack_user_ids), so the AdminStore must be
+		// wired. The "admins only" restriction on the /qurl-admin
+		// registration is a cosmetic Slack-picker hint, NOT the
+		// enforcement boundary — Slack does not gate slash-command
+		// invocation on workspace-admin role. /qurl setup is NOT on
+		// /qurl-admin and is intentionally open to any workspace member
+		// (first-come-claims); the overwrite guard for an already-bound
+		// workspace is the OAuth-callback bind check.
+		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.

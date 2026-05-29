@@ -726,6 +726,15 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 
 	slog.Info("slash command", "command", command, "text", text)
 
+	// Normalize an empty command (malformed/synthetic payload) to the prod
+	// user literal once, here at the HTTP entry, so dispatch, help, and the
+	// wrong-surface redirect copy downstream never have to guard for it.
+	// Empty already routes to the user surface below (isAdminCommand("") is
+	// false), so this only fixes the rendered command name, not the routing.
+	if command == "" {
+		command = commandUser
+	}
+
 	// Both the user command and the admin command POST to the same request
 	// endpoint with the same HMAC gate; Slack stamps which one was invoked
 	// in the `command` field. Branch on it FIRST so the user surface and
@@ -787,10 +796,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		h.handleAliases(w, values)
 	case isAdminVerb(text):
 		// An admin verb typed on `/qurl` — redirect to `/qurl-admin`
-		// rather than the generic unknown reply. The verb word is the
-		// first token; echo it inside a code span (it's a known-literal
-		// admin keyword, not arbitrary input) so the correction is
-		// concrete.
+		// rather than the generic unknown reply. firstWord(text) is the
+		// classified verb word (a known-literal keyword); the full text is
+		// echoed too so the correction is copy-pasteable. Both are safe to
+		// embed because this is an ephemeral plain-text reply to the
+		// typing user — Slack renders it as text, not markup — not because
+		// the full text is a known literal (it isn't).
 		adminCmd := adminCommandName(command)
 		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", firstWord(text), adminCmd, text, adminCmd))
 	default:
@@ -925,12 +936,9 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
 // (see [Handler.adminHelpMessage]); a pointer line routes admins there.
 func (h *Handler) userHelpMessage(command string) string {
-	// Empty command (malformed/empty payload routes here defensively) →
-	// render the canonical prod name rather than stripping the `/qurl`
-	// prefix to nothing in the ReplaceAll below.
-	if command == "" {
-		command = commandUser
-	}
+	// command is non-empty here — handleSlashCommand normalizes an empty
+	// payload to commandUser before dispatch — so the ReplaceAll below
+	// always has a non-empty base (an empty base would strip every `/qurl`).
 	lines := []string{
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
@@ -967,6 +975,11 @@ func (h *Handler) userHelpMessage(command string) string {
 	// the same replace also fixes the admin pointer line
 	// (`/qurl-sandbox` → `/qurl-sandbox-admin help`). command is the user
 	// command on this surface, so the replacement is a no-op in prod.
+	//
+	// MAINTAINER INVARIANT: ReplaceAll is blind, so every `/qurl` substring
+	// in `lines` must be a command literal — keep non-command prose (URLs
+	// like `qurl.link`, `/qurl-foo` examples) free of the lowercase `/qurl`
+	// token, or a non-prod env rewrites them too with no test to catch it.
 	return strings.ReplaceAll(strings.Join(lines, "\n"), commandUser, command)
 }
 
@@ -975,15 +988,15 @@ func (h *Handler) userHelpMessage(command string) string {
 // The conditional gating mirrors what each verb actually does at runtime —
 // a verb whose only reply would be ":warning: not configured" (aliasStore,
 // AdminStore, OpenView all nil on sandbox deploys) is omitted so help never
-// advertises a path the user can't take. These commands are admin-only;
-// that gate lives in the Slack app config (the `/qurl-admin` command should
-// be admin-restricted), not in code — see handleSetAlias's doc comment.
+// advertises a path the user can't take. These commands are admin-only,
+// enforced in code: every admin verb runs requireAdminSync against the
+// qURL admin set (see handleSetAlias). The `/qurl-admin` registration
+// should also be marked admin-only in the Slack app config, but that is a
+// cosmetic picker hint — Slack does not gate slash-command invocation on
+// workspace-admin role — not the enforcement boundary.
 func (h *Handler) adminHelpMessage(command string) string {
-	// Empty command → render the canonical prod admin name (see
-	// userHelpMessage for why the ReplaceAll below needs a non-empty base).
-	if command == "" {
-		command = commandAdmin
-	}
+	// command is non-empty here (normalized in handleSlashCommand); see
+	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
 	lines := []string{
 		"*/qurl-admin* — Admin commands for qURL in Slack",
 		"",

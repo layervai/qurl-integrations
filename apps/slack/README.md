@@ -7,9 +7,14 @@ User commands live under `/qurl`; admin commands live under a separate
 share the same signature verification — Slack stamps which command was
 invoked in the `command` field, and the bot dispatches on it. **Deploy
 prerequisite:** `/qurl-admin` must be registered as a slash command in the
-Slack app config pointing at the **same request URL** as `/qurl` (and
-restricted to workspace admins). The admin verbs are inert until that
-registration exists. `setup` is deliberately **not** an admin verb — it
+Slack app config pointing at the **same request URL** as `/qurl`. The admin
+verbs are inert until that registration exists. Admin enforcement is
+**in-code** — every admin verb checks the qURL admin set
+(`admin_slack_user_ids`) via `requireAdminSync`, so the AdminStore must be
+wired; the "admins only" restriction on the `/qurl-admin` registration is a
+cosmetic Slack-picker hint, not the enforcement boundary (Slack does not
+gate slash-command invocation on workspace-admin role). `setup` is
+deliberately **not** an admin verb — it
 stays on `/qurl` so the first user to connect an unbound workspace can
 reach it (qURL is first-come-claims); the overwrite guard for an
 already-bound workspace lives at the OAuth-callback bind layer.
