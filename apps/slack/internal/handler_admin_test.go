@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
@@ -973,4 +976,219 @@ func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleSetup_OwnerGate exercises the slash-command-level owner
+// gate on `/qurl setup`. Three branches: fresh install (no workspace
+// row → anyone allowed), owner reruns setup (idempotent → URL minted),
+// non-owner attempts setup (refuse with friendly copy mentioning the
+// owner).
+//
+// AdminStore-backed: the gate calls AdminStore.CheckAdmin to read the
+// stored owner_id. Uses newAdminTestServers + newAdminTestHandler so
+// the underlying DDB row reflects what the handler reads.
+func TestHandleSetup_OwnerGate(t *testing.T) {
+	const (
+		// Use the test-suite constants from admin_test_helpers_test.go.
+		owner    = testAdminOwnerID // UOWNER001 (matches looksLikeSlackUserID).
+		stranger = "USTRANGER000"   // Different Slack user — non-owner caller.
+		team     = testAdminTeamID  // T_team
+	)
+	const slackBaseURL = "https://slack-bot.example"
+	stateSecret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes.
+
+	wireSetup := func(t *testing.T, h *Handler) {
+		t.Helper()
+		h.SetOAuthSetup(oauth.SetupConfig{
+			StateSecret:  stateSecret,
+			SlackBaseURL: slackBaseURL,
+		})
+	}
+
+	const setupText = "setup"
+	invokeSetup := func(t *testing.T, h *Handler, userID string) string {
+		t.Helper()
+		body := url.Values{
+			fieldCommand: {testSlashCmd},
+			fieldText:    {setupText},
+			fieldTeamID:  {team},
+			fieldUserID:  {userID},
+		}.Encode()
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+		if w.Code != http.StatusOK {
+			t.Fatalf("/qurl setup status: %d body=%s", w.Code, w.Body.String())
+		}
+		return parseSlackText(t, w.Body.Bytes())
+	}
+
+	t.Run("fresh install: no workspace row → anyone allowed", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// No seedAdmin / seedWorkspace — workspace_mappings table is
+		// empty. CheckAdmin returns ("", "", nil); the gate falls
+		// through to mint.
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, stranger)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Errorf("fresh install: expected setup URL, got: %q", got)
+		}
+	})
+
+	t.Run("AdminStore nil (sandbox/no-DDB): owner gate skipped, setup URL minted", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+		// Sandbox / no-DDB posture: with AdminStore unset the owner gate
+		// is skipped entirely and /setup mints unconditionally, same as a
+		// fresh install. Null the store after construction to exercise that
+		// short-circuit (mirrors the sandbox cmd/main.go wiring). Even a
+		// non-owner (stranger) must get a URL since the gate never runs.
+		h.cfg.AdminStore = nil
+
+		got := invokeSetup(t, h, stranger)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Errorf("AdminStore nil: expected setup URL (owner gate must be skipped), got: %q", got)
+		}
+	})
+
+	t.Run("owner reruns setup (owner on the admin set): setup URL minted", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Realistic post-bind state: owner_id IS the sole admin —
+		// BindWorkspace seeds the owner onto admin_slack_user_ids at first
+		// bind. Seed it explicitly (not via seedAdmin, which puts a
+		// *different* user on the admin set) so this case genuinely diverges
+		// from the "owner not on admin set" subtest below: together they
+		// prove the gate keys off owner_id regardless of admin-set membership.
+		ts.seedWorkspace(t, team, owner, owner, testWorkspaceConfiguredAt)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, owner)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Errorf("owner rerun: expected setup URL, got: %q", got)
+		}
+	})
+
+	t.Run("non-owner reruns setup: refused with owner mention", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Workspace is bound to UOWNER001. The caller is USTRANGER000
+		// — not on the admin set, definitely not the owner. Gate
+		// rejects upfront with a copy that mentions the existing owner.
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, stranger)
+		if strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("non-owner: setup URL was minted (should be refused): %q", got)
+		}
+		// The reply must mention the existing owner so the requester
+		// knows whom to ask. The mention syntax `<@U…>` is what Slack
+		// renders into a clickable user reference.
+		if !strings.Contains(got, "<@"+owner+">") {
+			t.Errorf("non-owner: reply missing owner mention <@%s>, got: %q", owner, got)
+		}
+		if !strings.Contains(got, "owner") {
+			t.Errorf("non-owner: reply missing 'owner' word for clarity, got: %q", got)
+		}
+	})
+
+	t.Run("shape-bad owner_id (pre-pivot Auth0 sub): refused without broken mention", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Migration-day state: a pre-pivot row whose owner_id holds the
+		// Auth0 id_token sub, not a Slack ID. A non-owner rerun must be
+		// refused WITHOUT interpolating the sub into a `<@…>` mention
+		// (which Slack would render visibly broken). Seed the row
+		// directly since BindWorkspace now only ever writes Slack IDs.
+		const auth0Sub = "auth0|653fpre-pivot-subxyz"
+		ts.ddb.seedItem(t, ts.tableNames.workspace, map[string]ddbtypes.AttributeValue{
+			fAttrSlackTeamID:       stringMember(team),
+			fAttrOwnerID:           stringMember(auth0Sub),
+			fAttrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testAdminUserID}},
+			fAttrCreatedAt:         stringMember(testWorkspaceConfiguredAt.UTC().Format(time.RFC3339)),
+		})
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, stranger)
+		if strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("shape-bad owner: setup URL was minted (should be refused): %q", got)
+		}
+		if strings.Contains(got, auth0Sub) {
+			t.Errorf("shape-bad owner: reply leaked the raw Auth0 sub (anywhere, incl. the mention surface): %q", got)
+		}
+		if strings.Contains(got, "<@") {
+			t.Errorf("shape-bad owner: reply rendered a mention surface instead of the malformed-record fallback: %q", got)
+		}
+		if !strings.Contains(got, "malformed") {
+			t.Errorf("shape-bad owner: reply missing the malformed-record fallback copy, got: %q", got)
+		}
+	})
+
+	t.Run("owner not on admin set: setup URL still minted (gate keys off owner_id, not admin membership)", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Regression guard: the owner gate must consult owner_id ALONE,
+		// never admin_slack_user_ids membership. Seed a row whose owner_id
+		// is the caller (UOWNER001) but whose admin set does NOT include
+		// them (only UADMIN001) — the state after an owner is dropped from
+		// the admin set via /qurl admin remove. /setup must still mint for
+		// the owner. If a future change re-coupled the gate to admin-set
+		// membership (the pre-PR BindWorkspace behavior), this fails.
+		ts.ddb.seedItem(t, ts.tableNames.workspace, map[string]ddbtypes.AttributeValue{
+			fAttrSlackTeamID:       stringMember(team),
+			fAttrOwnerID:           stringMember(owner),
+			fAttrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testAdminUserID}},
+			fAttrCreatedAt:         stringMember(testWorkspaceConfiguredAt.UTC().Format(time.RFC3339)),
+		})
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, owner)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Errorf("owner-not-on-admin-set: expected setup URL (gate must key off owner_id alone), got: %q", got)
+		}
+	})
+
+	t.Run("CheckAdmin error: fail-closed, no setup URL minted", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Workspace is bound, but the owner-gate's CheckAdmin read
+		// fails (transient DDB). The gate is security-relevant, so it
+		// must fail CLOSED: surface the upstream-error reply and do NOT
+		// fall through to mint a setup URL. Mirrors
+		// TestHandleAdminRevoke_CheckAdminError for the admin verbs.
+		ts.seedAdmin(t)
+		ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, owner)
+		if strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("CheckAdmin error: setup URL was minted (must fail closed): %q", got)
+		}
+		if !strings.Contains(got, "could not verify workspace ownership") {
+			t.Errorf("CheckAdmin error: reply missing the upstream-error surface, got: %q", got)
+		}
+	})
+
+	t.Run("added admin (not owner) reruns setup: refused", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// seedAdmin binds owner=UOWNER001 and seeds UADMIN001 on the
+		// admin set. UADMIN001 is an "admin" (can run /qurl admin
+		// list/add/remove/revoke + tunnel etc.) but is NOT the owner.
+		// /setup must refuse them — this is the load-bearing
+		// safeguard against admins rotating the workspace credential.
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, testAdminUserID)
+		if strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("added admin: setup URL was minted (should be refused — owner-only): %q", got)
+		}
+		if !strings.Contains(got, "<@"+owner+">") {
+			t.Errorf("added admin: reply missing owner mention <@%s>, got: %q", owner, got)
+		}
+	})
 }

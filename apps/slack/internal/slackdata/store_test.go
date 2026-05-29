@@ -20,6 +20,22 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// Slack-shaped test user IDs — kept in real Slack-ID shape (U-prefix
+// + uppercase-alphanumeric, matching `looksLikeSlackUserID`) so these
+// fixtures mirror production owner_id/admin values rather than ad-hoc
+// strings. These tests assert at the store boundary (BindWorkspace
+// classification), not the handler renderer, but matching the
+// production shape keeps the fixtures honest and copy-safe. The paired
+// fixtures (testCallerSlackID for the BindWorkspace caller,
+// testOtherSlackID for a different Slack user holding the workspace)
+// let a same-caller rebind assert AlreadyBoundToCaller while a
+// different-caller rebind asserts AlreadyBound.
+const (
+	testCallerSlackID = "UCALLER01"
+	testOtherSlackID  = "UOTHER001"
+	testOwnerSlackID  = "UOWNER001"
+)
+
 // stubDDB is a minimal in-package DynamoDBClient that returns
 // pre-canned responses keyed by op. Just enough for the package-
 // boundary tests below — the cross-handler integration tests have a
@@ -170,15 +186,16 @@ func TestBindWorkspace_ValidationGuards(t *testing.T) {
 // the two-branch 409 mapping that the handler's `surfaceBindError`
 // branches on via `ae.Code`:
 //
-//   - row exists, admin_slack_user_ids contains the caller →
-//     ErrCodeWorkspaceAlreadyBoundToCaller
-//   - row exists, admin_slack_user_ids does not contain the caller →
-//     ErrCodeWorkspaceAlreadyBound
+//   - row exists, owner_id matches the caller's seedAdmin →
+//     ErrCodeWorkspaceAlreadyBoundToCaller (idempotent rerun by owner)
+//   - row exists, owner_id is a different Slack user (including added
+//     admins) → ErrCodeWorkspaceAlreadyBound (refuse — owner-only
+//     rebind, the rest of the admin verbs gate via admin_set instead)
 //
 // Drift either constant or invert the branch and the handler's
 // user-copy will desynchronize from the actual workspace state.
 func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
-	t.Run("same caller already bound", func(t *testing.T) {
+	t.Run("owner reruns setup → idempotent", func(t *testing.T) {
 		store := newStore(&stubDDB{
 			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
@@ -186,13 +203,14 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
 					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrOwnerID:     &ddbtypes.AttributeValueMemberS{Value: testCallerSlackID},
 					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
-						Value: []string{"U_caller", "U_other"},
+						Value: []string{testCallerSlackID, testOtherSlackID},
 					},
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, "U_caller")
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -205,6 +223,36 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 		}
 	})
 
+	t.Run("added admin reruns setup → refuse (owner-only rebind)", func(t *testing.T) {
+		// Admin set contains the caller (they were /qurl admin add'd
+		// after first bind), but they're NOT the owner. Pre-owner-gate
+		// this returned AlreadyBoundToCaller (idempotent); post-gate
+		// it must return AlreadyBound (refuse) so the added admin
+		// can't rotate the workspace credential to their own Auth0.
+		store := newStore(&stubDDB{
+			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			},
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrOwnerID:     &ddbtypes.AttributeValueMemberS{Value: testOwnerSlackID},
+					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
+						Value: []string{testOwnerSlackID, testCallerSlackID},
+					},
+				}}, nil
+			},
+		})
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.Code != ErrCodeWorkspaceAlreadyBound {
+			t.Errorf("Code = %q, want %q", ae.Code, ErrCodeWorkspaceAlreadyBound)
+		}
+	})
+
 	t.Run("different admin holds workspace", func(t *testing.T) {
 		store := newStore(&stubDDB{
 			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
@@ -213,19 +261,51 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
 					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrOwnerID:     &ddbtypes.AttributeValueMemberS{Value: testOtherSlackID},
 					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
-						Value: []string{"U_other"},
+						Value: []string{testOtherSlackID},
 					},
 				}}, nil
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, "U_caller")
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
 		}
 		if ae.Code != ErrCodeWorkspaceAlreadyBound {
 			t.Errorf("Code = %q, want %q", ae.Code, ErrCodeWorkspaceAlreadyBound)
+		}
+	})
+
+	t.Run("row exists with empty owner_id → refuse (no hijack to AlreadyBoundToCaller)", func(t *testing.T) {
+		// Operational-corruption guard: a manually edited / truncated row
+		// can exist with no owner_id. The owner comparison must NOT treat
+		// "" == "" as a same-owner match (which would hand the workspace to
+		// any caller via AlreadyBoundToCaller). It must refuse with the
+		// safe default, AlreadyBound. seedAdmin is always non-empty here,
+		// so the empty existingOwner can never equal it.
+		store := newStore(&stubDDB{
+			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			},
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					// owner_id intentionally absent (corrupt row).
+					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
+						Value: []string{testCallerSlackID},
+					},
+				}}, nil
+			},
+		})
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.Code != ErrCodeWorkspaceAlreadyBound {
+			t.Errorf("Code = %q, want %q (empty owner_id must not short-circuit to AlreadyBoundToCaller)", ae.Code, ErrCodeWorkspaceAlreadyBound)
 		}
 	})
 
@@ -245,11 +325,11 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				disambigConsistent = aws.ToBool(in.ConsistentRead)
 				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
 					attrSlackTeamID:       &ddbtypes.AttributeValueMemberS{Value: "T"},
-					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{"U_other"}},
+					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testOtherSlackID}},
 				}}, nil
 			},
 		})
-		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, "U_caller")
+		_ = store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
 		if !disambigConsistent {
 			t.Errorf("disambig GetItem ConsistentRead = false, want true (regression would replay the eventual-consistency race)")
 		}
@@ -271,7 +351,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 				return nil, errors.New("transport blip")
 			},
 		})
-		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, "U_caller")
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
 		var ae *Error
 		if !errors.As(err, &ae) {
 			t.Fatalf("got %v, want *Error", err)
@@ -334,7 +414,7 @@ func TestBindWorkspace_TransportErrorMapsTo503(t *testing.T) {
 			return nil, errors.New("dial tcp: timeout")
 		},
 	})
-	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, "U_caller")
+	err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: "u_owner"}, testCallerSlackID)
 	var ae *Error
 	if !errors.As(err, &ae) {
 		t.Fatalf("got %v, want *Error", err)

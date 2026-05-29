@@ -248,11 +248,18 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		userID:    userID,
 		triggerID: triggerID,
 	})
+	h.finishGet(log, responseURL, text, err)
+}
+
+// finishGet posts a [Handler.getWork] outcome to response_url as an
+// ephemeral: the rendered link on success, or the [*userError] message
+// (prefixed with `:warning:`) on failure. A non-userError leak is a
+// programmer mistake — log it loud and surface the generic catch-all so
+// internals never reach Slack. Shared by the `/qurl get` slash path
+// ([Handler.processGet]) and the `/qurl list` "Create qURL" button
+// ([Handler.processButtonGet]) so both render identical replies.
+func (h *Handler) finishGet(log *slog.Logger, responseURL, text string, err error) {
 	if err != nil {
-		// All errors from getWork are *userError today; surface the
-		// message verbatim. If a non-userError ever leaks through
-		// (programmer mistake), surface the generic catch-all so we
-		// don't leak internals.
 		var ue *userError
 		if errors.As(err, &ue) {
 			_ = h.postResponse(log, responseURL, ":warning: "+ue.msg)

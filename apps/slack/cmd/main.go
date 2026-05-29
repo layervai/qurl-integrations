@@ -216,10 +216,15 @@ func run() error {
 		// registration is a cosmetic Slack-picker hint, NOT the
 		// enforcement boundary — Slack does not gate slash-command
 		// invocation on workspace-admin role. /qurl setup is NOT on
-		// /qurl-admin and is intentionally open to any workspace member
-		// (first-come-claims); the overwrite guard for an already-bound
-		// workspace is the OAuth-callback bind check.
-		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims), and an admin-only /qurl would lock out the first claimant of an unbound workspace")
+		// /qurl-admin and is intentionally open to any workspace member so
+		// the first claimant of an unbound workspace can reach it
+		// (first-come-claims). Setup re-runs are still owner-only, enforced
+		// in code in handleSetup via AdminStore, with the OAuth-callback
+		// BindWorkspace check as the structural backstop. The remaining
+		// exposure is the first-install claim: restrict who can reach the
+		// command at install time (Slack app manifest / onboarding) if
+		// first-claim ownership matters for this deployment.
+		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims) so the first claimant can reach it — though setup re-runs are owner-only (enforced in code) — and an admin-only /qurl would lock out the first claimant of an unbound workspace")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
@@ -767,6 +772,15 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
 		scopes = slackinstall.NormalizeScopes([]string{raw})
+		// Strip unsupported scopes (see slackinstall.DropUnsupportedScopes) from
+		// operator overrides before Validate: a stale SLACK_BOT_SCOPES with
+		// surviving valid scopes then warns instead of aborting startup. (An
+		// override of only unsupported scopes strips to empty and Validate still
+		// rejects it.)
+		if kept, dropped := slackinstall.DropUnsupportedScopes(scopes); len(dropped) > 0 {
+			scopes = kept
+			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. SLACK_BOT_SCOPES must still include commands.")
+		}
 	}
 	cfg := slackinstall.Config{
 		ClientID:     clientID,

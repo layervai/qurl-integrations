@@ -422,7 +422,7 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 		BotUserID:    "U_BOT",
 		AppID:        "A_APP",
 		EnterpriseID: "E_GRID",
-		Scopes:       []string{"views:write", "commands", "views:write"},
+		Scopes:       []string{"chat:write", "commands", "chat:write"},
 	})
 	if err != nil {
 		t.Fatalf("SetSlackBotToken: %v", err)
@@ -437,7 +437,7 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 	if v, ok := values[":dk"].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != passthroughWrappedKey {
 		t.Errorf("slack token data key wrong: %v", values[":dk"])
 	}
-	if v, ok := values[":scopes"].(*ddbtypes.AttributeValueMemberSS); !ok || strings.Join(v.Value, ",") != "commands,views:write" {
+	if v, ok := values[":scopes"].(*ddbtypes.AttributeValueMemberSS); !ok || strings.Join(v.Value, ",") != "chat:write,commands" {
 		t.Errorf("scopes should be sorted/deduped: %v", values[":scopes"])
 	}
 	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "slack_bot_installed_at = if_not_exists(slack_bot_installed_at, :now)") {

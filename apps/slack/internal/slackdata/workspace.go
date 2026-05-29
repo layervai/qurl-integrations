@@ -156,13 +156,22 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 // seedAdmin becomes the only entry in admin_slack_user_ids;
 // additional admins are added later via /qurl-admin admin add.
 //
+// OwnerID is the Slack user ID of the first /setup invoker — written
+// once at first bind, never mutated by /qurl admin add. Only the
+// owner can re-run /setup; other admins can run the rest of the
+// admin verbs but cannot rotate the workspace's qURL credential.
+//
 // Returns 409 (via *Error) if the row already exists. Two sub-cases:
-//   - caller is already on the admin set → ErrCodeWorkspaceAlreadyBoundToCaller.
-//     The callback treats this as idempotent success and continues
-//     to mint, rotating the API key without mutating the admin set.
-//   - a different admin holds the workspace → ErrCodeWorkspaceAlreadyBound.
+//   - the existing row's owner_id matches the caller's seedAdmin →
+//     ErrCodeWorkspaceAlreadyBoundToCaller. The callback treats this
+//     as idempotent success and continues to mint, rotating the API
+//     key without mutating the admin set. Only the OWNER short-
+//     circuits this way — admins added via /qurl admin add cannot
+//     re-run /setup, by design (prevents them from rotating the
+//     workspace credential to a different Auth0 account).
+//   - any other caller (admin or non-admin) → ErrCodeWorkspaceAlreadyBound.
 //     The callback renders a rebind-refused page; no key is minted
-//     so there's nothing to revoke and the existing admin's
+//     so there's nothing to revoke and the existing owner's
 //     workspace_keys row stays intact.
 //
 // Surfacing same-owner as 409 (instead of silently overwriting) is
@@ -198,6 +207,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// would clobber later-added admins. Both deserve the 409 signal;
 	// the post-CCFE disambiguation read below distinguishes the two
 	// cases so the callback can branch idempotent vs. rebind-refused.
+	// owner_id and seed_admin_slack_user_id are equal by construction at
+	// first bind (the callback passes verified.UserID for both), not by
+	// coincidence. They're kept distinct because their long-term roles
+	// diverge: owner_id is the mutable-someday gate anchor (the #539
+	// transfer verb would rewrite it), while seed_admin_slack_user_id is
+	// the write-once forensic record of who originally claimed the workspace.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Item: map[string]ddbtypes.AttributeValue{
@@ -261,31 +276,45 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		}
 	}
 	if len(check.Item) > 0 {
-		for _, u := range readStringSet(check.Item, attrAdminSlackUserIDs) {
-			if u == seedAdmin {
-				return &Error{
-					StatusCode: http.StatusConflict,
-					Code:       ErrCodeWorkspaceAlreadyBoundToCaller,
-					Title:      "BindWorkspace: caller is already on this workspace's admin set",
-				}
+		// Compare against the row's owner_id directly. Owner-only
+		// rebind: any caller whose Slack ID isn't the owner gets the
+		// "different admin" branch, including admins added via
+		// /qurl admin add. This is the load-bearing safeguard — a
+		// non-owner admin re-running /setup would otherwise rotate
+		// the workspace's qURL credential to their own Auth0 account,
+		// silently locking the original owner out at the qurl-service
+		// layer (workspace_keys reassigned to a different auth0_subject).
+		existingOwner := readString(check.Item, attrOwnerID)
+		if existingOwner == seedAdmin {
+			return &Error{
+				StatusCode: http.StatusConflict,
+				Code:       ErrCodeWorkspaceAlreadyBoundToCaller,
+				Title:      "BindWorkspace: caller is the existing workspace owner",
 			}
 		}
+		if existingOwner == "" {
+			// A row exists but carries no owner_id. This shouldn't happen —
+			// every BindWorkspace PutItem writes a non-empty OwnerID — so it
+			// means a manually edited / truncated row. We still refuse (fall
+			// through to AlreadyBound, the safe default), but log so the
+			// malformed row is grep-able rather than silently routing to the
+			// generic rebind-refused page.
+			slog.Warn("BindWorkspace: row exists but owner_id is empty — likely a manually edited row; refusing rebind (AlreadyBound)", "team_id", m.TeamID, "admin_count", len(readStringSet(check.Item, attrAdminSlackUserIDs)))
+		}
 	}
-	// ErrCodeWorkspaceAlreadyBound covers two structurally distinct
-	// conflicts: (a) the existing row's owner_id matches m.OwnerID
-	// (same qURL account holder reinstalling) but the OAuth state
-	// names a Slack user who isn't on the admin set, and (b) the
-	// existing row's owner_id is a DIFFERENT qURL account entirely
-	// (a fresh /qurl setup from a different Auth0 identity). Both
-	// produce the same "different admin claims this workspace" user
-	// copy because the user signal is the same — they cannot become
-	// admin via the OAuth path regardless of which mismatch fired.
-	// Operators who need the distinction read the workspace_mappings
-	// row directly.
+	// ErrCodeWorkspaceAlreadyBound fires for every non-owner rebind
+	// attempt — added admins, random workspace members, anyone whose
+	// Slack ID doesn't equal the stored OwnerID. The callback renders
+	// a rebind-refused page with the existing owner's mention so the
+	// caller knows whom to ask if they need to re-OAuth. Operators
+	// debugging persistent rebind-refused on a fresh install should
+	// check whether the workspace_mappings row carries a stale OwnerID
+	// from a deleted Slack user; manual row delete + re-run /setup is
+	// the recovery.
 	return &Error{
 		StatusCode: http.StatusConflict,
 		Code:       ErrCodeWorkspaceAlreadyBound,
-		Title:      "BindWorkspace: workspace is already claimed by a different admin",
+		Title:      "BindWorkspace: workspace is owned by a different Slack user",
 	}
 }
 

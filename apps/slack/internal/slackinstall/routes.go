@@ -45,7 +45,6 @@ const (
 	slackOAuthBodyLimit         = 16 << 10
 	slackInstallFlow            = "slack-install"
 	botScopeCommands            = "commands"
-	botScopeViewsWrite          = "views:write"
 	slackOAuthErrorBadRedirect  = "bad_redirect_uri"
 	slackOAuthErrorUnrecognized = "unrecognized"
 )
@@ -98,9 +97,33 @@ type TokenStore interface {
 	SetSlackBotToken(ctx context.Context, workspaceID string, install *auth.SlackBotTokenInstall) error
 }
 
-// DefaultBotScopes returns the minimum Slack bot scopes needed by qURL.
+// DefaultBotScopes returns the minimum Slack bot scopes the install flow
+// requests. Only `commands` is needed: the captured per-workspace token is
+// used solely for views.open (see apps/slack/cmd/main.go), which requires no
+// scope (https://docs.slack.dev/reference/methods/views.open), and `commands`
+// is the minimal scope to install this slash-command app into a workspace.
+// Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
+// at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
-	return []string{botScopeCommands, botScopeViewsWrite}
+	return []string{botScopeCommands}
+}
+
+// DropUnsupportedScopes removes scope strings that are not real Slack OAuth
+// scopes (currently just views:write — see DefaultBotScopes) from an
+// operator-supplied scope set, returning the kept and dropped scopes. Slack
+// rejects such scopes at authorize with invalid_scope, so callers strip them
+// from SLACK_BOT_SCOPES overrides — keeping installs working off the valid
+// scopes — and surface the dropped scopes to the operator. Matching is
+// case-insensitive because NormalizeScopes does not lowercase.
+func DropUnsupportedScopes(scopes []string) (kept, dropped []string) {
+	for _, s := range scopes {
+		if strings.EqualFold(s, "views:write") {
+			dropped = append(dropped, s)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept, dropped
 }
 
 // RegisterRoutes wires the Slack install OAuth endpoints onto mux.
@@ -144,6 +167,13 @@ func (c *Config) Validate() error {
 	scopes := NormalizeScopes(c.BotScopes)
 	if len(scopes) == 0 {
 		return errors.New("at least one bot scope is required")
+	}
+	// Direct callers (and a regression in DefaultBotScopes) bypass the
+	// cmd-layer strip, so reject unsupported scopes here too. The env path
+	// strips them before Validate is reached, so operators still get the
+	// non-fatal strip-and-warn; only programmatic misuse reaches this error.
+	if _, dropped := DropUnsupportedScopes(scopes); len(dropped) > 0 {
+		return fmt.Errorf("bot scopes include scope(s) Slack rejects with invalid_scope: %s", strings.Join(dropped, ","))
 	}
 	if missing := missingRequiredScopes(scopes); len(missing) > 0 {
 		return fmt.Errorf("bot scopes missing required scope(s): %s", strings.Join(missing, ","))
