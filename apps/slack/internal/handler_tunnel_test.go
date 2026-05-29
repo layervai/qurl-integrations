@@ -1783,7 +1783,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	}
 }
 
-// TestRenderTunnelInstall_ShowsDisplayName fences the install
+// TestRenderTunnelInstall_ShowsDisplayNameOnReinstall fences the install
 // confirmation's id line: it shows the tunnel's Display Name (resource
 // description, always set in production) next to the id; the empty-guard
 // case (defensive — a blank description) shows just the id with no

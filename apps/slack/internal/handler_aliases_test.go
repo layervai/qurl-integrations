@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
@@ -76,9 +77,9 @@ func TestHandleAliases_ShowsDisplayName(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources/"+resID, func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID:  resID,
-			testKeyType:        "tunnel",
+			testKeyType:        client.ResourceTypeTunnel,
 			testKeySlug:        "ops-bastion",
-			testKeyStatus:      "active",
+			testKeyStatus:      client.StatusActive,
 			testKeyDescription: "Ops jump host",
 		})
 	})
