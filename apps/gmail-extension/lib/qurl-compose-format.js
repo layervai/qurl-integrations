@@ -116,10 +116,15 @@
   function buildLinkPlainText(results) {
     if (!results || results.length === 0) return '';
 
+    // Apply the same https-only validation as buildLinkHtml so the clipboard fallback
+    // cannot carry a non-https (e.g. javascript:) link the HTML path would have dropped.
     return results.map(function (result) {
       const filename = result.filename || getUnnamedFileLabel();
-      const link = result.link || '';
-      return filename + ': ' + link + buildExpirySuffix(result.expiry);
+      const safeLink = normalizeAllowedLink(result.link);
+      const suffix = buildExpirySuffix(result.expiry);
+      return safeLink
+        ? filename + ': ' + safeLink + suffix
+        : filename + suffix;
     }).join('\n');
   }
 

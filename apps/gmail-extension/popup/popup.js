@@ -29,9 +29,14 @@ const configHint = document.getElementById('configHint');
 const copyArea = document.getElementById('copyArea');
 const copyBtn = document.getElementById('copyBtn');
 const footer = document.querySelector('.footer');
-// Keep the popup budget above the full relay path:
-// ping (3s) -> reinject -> ping (3s) -> INSERT_LINKS relay (9s).
-const RUNTIME_MESSAGE_TIMEOUT_MS = 16000;
+// Keep the popup budget above the background relay's worst-case path:
+//   ping (3s) -> content-script reinject (chrome.scripting.executeScript) -> ping (3s)
+//   -> INSERT_LINKS relay (9s).
+// On a cold Gmail tab the reinject (loading three scripts) can take several seconds. The
+// fixed legs sum to 15s; budgeting 25s leaves ~10s of reinject headroom so a slow reinject
+// does not surface a (non-retryable) timeout while the insertion still completes — which
+// would push the user to retry manually and duplicate links. Keep in sync with background.js.
+const RUNTIME_MESSAGE_TIMEOUT_MS = 25000;
 const RUNTIME_MESSAGE_RETRY_DELAY_MS = 250;
 const SETTINGS_PANEL_AUTO_CLOSE_MS = 1200;
 const COPY_BUTTON_REVERT_MS = 1500;
@@ -492,10 +497,13 @@ function showResults(results, errors, insertionError) {
     errorArea.classList.remove('hidden');
     const title = document.createElement('div');
     title.className = 'error-title';
-    title.textContent = errors.length === 1 && !insertionError
-      ? getMessage('result_one_error', '1 file failed to upload')
-      : insertionError && errors.length === 0
+    // Pick the title by upload-error count; the insertion failure (if any) is always listed
+    // as its own bullet below. The singular case must not depend on insertionError, or one
+    // failed upload alongside an insertion failure renders the ungrammatical "1 files…".
+    title.textContent = insertionError && errors.length === 0
       ? getMessage('result_insertion_only_failed', 'Uploaded successfully, but Gmail draft insertion failed')
+      : errors.length === 1
+      ? getMessage('result_one_error', '1 file failed to upload')
       : getMessage('result_n_errors', '$1 files failed to upload', [String(errors.length)]);
     errorArea.appendChild(title);
 
@@ -700,17 +708,20 @@ function isRetryableRuntimeMessageError(err) {
   return Boolean(err && err.qurlRetryable);
 }
 
-function escapeHtml(str) {
-  if (window.QURLComposeFormatter && typeof window.QURLComposeFormatter.escapeHtml === 'function') {
-    return window.QURLComposeFormatter.escapeHtml(str);
+// escapeHtml and normalizeAllowedLink delegate to the single implementation in
+// lib/qurl-compose-format.js (loaded before this script in popup.html). Keeping one copy
+// prevents the security-sensitive HTML-escaping and https-only URL logic from drifting
+// between two places. The formatter is a hard dependency, so fail loudly if it is missing
+// rather than silently falling back to a second, potentially weaker, implementation.
+function getComposeFormatter() {
+  if (!window.QURLComposeFormatter) {
+    throw new Error('QURLComposeFormatter is not loaded — check the script order in popup.html.');
   }
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return window.QURLComposeFormatter;
+}
+
+function escapeHtml(str) {
+  return getComposeFormatter().escapeHtml(str);
 }
 
 function formatFileSize(bytes) {
@@ -721,34 +732,15 @@ function formatFileSize(bytes) {
 }
 
 function buildCopyHtml(results) {
-  if (window.QURLComposeFormatter) {
-    return window.QURLComposeFormatter.buildLinkHtml(results);
-  }
-  return '';
+  return getComposeFormatter().buildLinkHtml(results);
 }
 
 function buildCopyText(results) {
-  if (window.QURLComposeFormatter) {
-    return window.QURLComposeFormatter.buildLinkPlainText(results);
-  }
-  return '';
+  return getComposeFormatter().buildLinkPlainText(results);
 }
 
 function normalizeAllowedLink(link) {
-  if (window.QURLComposeFormatter && typeof window.QURLComposeFormatter.normalizeAllowedLink === 'function') {
-    return window.QURLComposeFormatter.normalizeAllowedLink(link);
-  }
-
-  if (!link) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(String(link));
-    return parsed.protocol === 'https:' ? parsed.toString() : null;
-  } catch (_err) {
-    return null;
-  }
+  return getComposeFormatter().normalizeAllowedLink(link);
 }
 
 async function writeRichClipboard(html, text) {

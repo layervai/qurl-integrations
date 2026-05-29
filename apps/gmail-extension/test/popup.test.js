@@ -208,6 +208,15 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
     buildLinkPlainText() {
       return '';
     },
+    escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    },
     formatExpiry() {
       return null;
     },
@@ -299,7 +308,7 @@ test('sendRuntimeMessageWithRetry does not retry non-retryable timeout failures'
     },
     {
       setTimeout(callback, delay) {
-        if (delay === 16000) {
+        if (delay === popup.RUNTIME_MESSAGE_TIMEOUT_MS) {
           callback();
         }
         return delay;

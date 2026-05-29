@@ -29,9 +29,9 @@ Upload local files to qURL directly from Gmail's compose window. After upload, s
 Open the extension popup and set the **qURL server** field.
 
 - If you save a custom URL, uploads use that URL
-- If you leave it empty, uploads fall back to the built-in default: `https://getqurllink.layerv.xyz/`
+- If you leave it empty, uploads use the built-in default: `https://getqurllink.layerv.ai/` (the qURL production upload connector)
 - You can paste either the server base URL or a full `/api/upload` URL; the client normalizes it automatically
-- If you want packaged `release/` or `dist/` builds to default to a different server, set `QURL_API_BASE` in `.env` before running the build scripts
+- The built-in default lives in one place — `lib/qurl-config.js`. To point packaged `release/` or `dist/` builds at a non-production server (e.g. a sandbox such as `https://getqurllink.layerv.xyz`), set `QURL_API_BASE` in `.env` before running the build scripts; the build regenerates `lib/qurl-config.js` and the manifest host permission together
 
 ### Step 2 — Load the Extension in Chrome
 

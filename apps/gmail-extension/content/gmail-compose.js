@@ -13,8 +13,17 @@
   if (window.__QURL_COMPOSE_INJECTED__) return;
   window.__QURL_COMPOSE_INJECTED__ = true;
   const INSERT_REQUEST_CACHE_TTL_MS = 30000;
+  // Soft cap: prune is attempted past this, but completed entries younger than
+  // INSERT_REQUEST_RETAIN_MS (below) are exempt. Because RETAIN equals the TTL, completed
+  // entries are normally only removed by their TTL timer; under load the map rides up to the
+  // hard cap (INSERT_REQUEST_PENDING_MAX_ENTRIES) rather than evicting entries a retry needs.
   const INSERT_REQUEST_CACHE_MAX_ENTRIES = 32;
   const INSERT_REQUEST_PENDING_MAX_ENTRIES = 64;
+  // A completed entry must survive long enough that a same-requestId retry (SDK-level
+  // sendRuntimeMessageWithRetry, which may fire only after the popup's message timeout)
+  // replays the cached response instead of triggering a SECOND insertion. Below this age a
+  // done entry is exempt from soft-cap eviction; the hard cap still bounds total memory.
+  const INSERT_REQUEST_RETAIN_MS = 30000;
   const INSERT_REQUEST_PENDING_TIMEOUT_MS = 8000;
   const COMPOSE_BODY_DISCOVERY_TIMEOUT_MS = 4000;
   const COMPOSE_BODY_SELECTORS = [
@@ -89,12 +98,16 @@
   }
 
   function pruneInsertRequestState() {
+    const now = Date.now();
     while (insertRequestState.size > INSERT_REQUEST_CACHE_MAX_ENTRIES) {
       let evictedRequestId = null;
       let evictedEntry = null;
 
       for (const [requestId, entry] of insertRequestState.entries()) {
-        if (entry.status === 'done') {
+        // Only evict completed entries old enough that any in-flight retry has settled.
+        // Evicting a freshly-completed entry would let a retried requestId re-run insertion
+        // and duplicate links in the draft — the exact case this cache exists to prevent.
+        if (entry.status === 'done' && (now - (entry.doneAt || 0)) >= INSERT_REQUEST_RETAIN_MS) {
           evictedRequestId = requestId;
           evictedEntry = entry;
           break;
@@ -111,7 +124,9 @@
       // memory growth from a misbehaving caller flooding requests during the timeout window.
       if (!evictedRequestId) {
         if (insertRequestState.size > INSERT_REQUEST_PENDING_MAX_ENTRIES) {
-          // Evict the oldest pending entry (first in insertion order).
+          // Hard cap reached: evict the oldest entry (first in insertion order) regardless of
+          // status or age. Memory safety wins here; reaching this requires a flood that the
+          // INSERT_LINKS trust boundary already makes implausible for the legitimate popup.
           const oldestPending = insertRequestState.entries().next().value;
           if (oldestPending) {
             evictedRequestId = oldestPending[0];
@@ -119,6 +134,8 @@
           }
         }
         if (!evictedRequestId) {
+          // Between the soft and hard caps with only freshly-completed entries: let the map
+          // grow rather than evict an entry a retry may still need.
           break;
         }
       }
@@ -159,6 +176,7 @@
 
     entry.status = 'done';
     entry.response = response;
+    entry.doneAt = Date.now();
     const callbacks = entry.callbacks.slice();
     entry.callbacks.length = 0;
 

@@ -440,7 +440,7 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
   assert.equal(execInsertCount, 1);
 });
 
-test('duplicate request cache evicts the oldest completed entries when it exceeds the cap', async function () {
+test('completed requests are retained past the soft cap so retries replay instead of re-inserting', async function () {
   let messageListener = null;
   let execInsertCount = 0;
   const selectionHarness = createSelectionHarness();
@@ -550,16 +550,21 @@ test('duplicate request cache evicts the oldest completed entries when it exceed
     assert.equal(response.success, true);
   }
 
+  assert.equal(execInsertCount, 33);
+
+  // req-0 completed only moments ago, so even though the map exceeded the soft cap it must
+  // NOT have been evicted. A retry with the same requestId replays the cached response
+  // synchronously (listener returns false) and does NOT trigger a second insertion.
   const replayed = await new Promise(function (resolve) {
     assert.equal(messageListener({
       type: 'INSERT_LINKS',
       requestId: 'req-0',
       results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
-    }, null, resolve), true);
+    }, null, resolve), false);
   });
 
   assert.equal(replayed.success, true);
-  assert.equal(execInsertCount, 34);
+  assert.equal(execInsertCount, 33);
 });
 
 test('Selection API fallback inserts at the end when execCommand is unavailable', async function () {

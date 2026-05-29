@@ -154,7 +154,7 @@ async function uploadFile(fileBuffer, filename, contentType)
 
 **Filename sanitization** — `_sanitizeFilename()` strips `"`, `\`, `\r`, `\n` from filenames to prevent multipart header injection.
 
-**Build-time default override** — `scripts/build-release.js` optionally reads `QURL_API_BASE` from the shell environment or `.env`, rewrites `release/lib/qurl-api.js`, and updates the release manifest's default host permission to match.
+**Build-time default override** — `scripts/build-release.js` optionally reads `QURL_API_BASE` from the shell environment or `.env`, regenerates `release/lib/qurl-config.js` (the single source of truth for the default base URL), and updates the release manifest's default host permission to match. The host permission is derived from the hostname only, since Chrome match patterns reject ports.
 Quoted `.env` values are accepted, but only simple wrapping quotes are stripped; shell-style escaping is intentionally out of scope.
 
 ### content/gmail-compose.js
@@ -255,7 +255,7 @@ The client accepts both wrapped (`{success, data: {...}}`) and flat (`{success, 
 
 | Variable | File | Default | Description |
 |---|---|---|---|
-| `DEFAULT_QURL_API_BASE` | `lib/qurl-api.js` | `https://getqurllink.layerv.xyz/` | Built-in fallback QURL server base URL |
+| `DEFAULT_QURL_API_BASE` | `lib/qurl-config.js` | `https://getqurllink.layerv.ai/` | Built-in default QURL server base URL — single source of truth (production upload connector). Build-time configurable via `QURL_API_BASE`; the build regenerates this file and the manifest host permission together |
 | `qurlApiBase` | `chrome.storage.local` | unset | User-configured override for the QURL server base URL |
 | `host_permissions` | `manifest.json` | Gmail + default QURL origin | Always-allowed origins bundled with the extension |
 | `optional_host_permissions` | `manifest.json` | `https://*/*` | Additional HTTPS origins that may be requested one origin at a time for custom QURL servers |

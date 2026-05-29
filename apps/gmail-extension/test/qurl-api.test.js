@@ -103,7 +103,7 @@ test('_buildMultipartBody produces a valid multipart payload', async function ()
   assert.match(text, /--BOUNDARY--/);
 });
 
-test('_buildMultipartBody strips CRLF characters from synthetic content types', async function () {
+test('_buildMultipartBody rejects synthetic content types that try to inject headers', async function () {
   const body = qurlApi._buildMultipartBody(
     'BOUNDARY',
     new Uint8Array([65]),
@@ -113,8 +113,18 @@ test('_buildMultipartBody strips CRLF characters from synthetic content types', 
 
   const text = await body.text();
 
-  assert.match(text, /Content-Type: text\/plainX-Injected: yes/);
-  assert.doesNotMatch(text, /\r\nX-Injected: yes\r\n/);
+  // The line-break is stripped and the result is no longer a valid MIME token, so the
+  // sanitizer falls back to the generic type rather than emitting attacker-controlled text.
+  assert.match(text, /Content-Type: application\/octet-stream/);
+  assert.doesNotMatch(text, /X-Injected: yes/);
+});
+
+test('_sanitizeContentType preserves valid parameterized MIME types', function () {
+  assert.equal(qurlApi._sanitizeContentType('text/plain; charset="utf-8"'), 'text/plain; charset="utf-8"');
+  assert.equal(qurlApi._sanitizeContentType('image/png'), 'image/png');
+  // A stray token (space, not a valid MIME separator) fails the grammar → generic fallback.
+  assert.equal(qurlApi._sanitizeContentType('text/plain evil'), 'application/octet-stream');
+  assert.equal(qurlApi._sanitizeContentType(''), 'application/octet-stream');
 });
 
 test('_buildMultipartBody accepts ArrayBuffer input without changing the payload', async function () {
@@ -165,34 +175,33 @@ test('_get returns the first populated candidate key', function () {
   assert.equal(qurlApi._get({ a: Infinity, b: 'ok' }, 'a', 'b'), 'ok');
 });
 
-test('resolveDefaultQurlApiConfig falls back when the bundled default is malformed', function () {
-  const originalConsoleError = console.error;
-  const errors = [];
-  console.error = function (...args) {
-    errors.push(args.join(' '));
-  };
+test('resolveDefaultQurlApiConfig normalizes the centralized default and throws when it is malformed', function () {
+  assert.deepEqual(qurlApi.resolveDefaultQurlApiConfig('https://getqurllink.layerv.ai/'), {
+    normalized: 'https://getqurllink.layerv.ai',
+    origin: 'https://getqurllink.layerv.ai',
+  });
 
-  try {
-    const config = qurlApi.resolveDefaultQurlApiConfig('http://bad.example.com');
-    assert.deepEqual(config, {
-      normalized: 'https://getqurllink.layerv.xyz',
-      origin: 'https://getqurllink.layerv.xyz',
-    });
-  } finally {
-    console.error = originalConsoleError;
-  }
-
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /Invalid bundled qURL API base URL/);
+  // The default is the single source of truth (lib/qurl-config.js); a malformed value is a
+  // build error, so fail loudly rather than silently uploading to an unexpected host.
+  assert.throws(function () {
+    qurlApi.resolveDefaultQurlApiConfig('http://bad.example.com');
+  }, /https:\/\//i);
 });
 
-test('getQurlHostPermissionPattern and isDefaultQurlOrigin use normalized origins', function () {
+test('getQurlHostPermissionPattern drops the port and isDefaultQurlOrigin uses normalized origins', function () {
   assert.equal(
     qurlApi.getQurlHostPermissionPattern('https://example.com/custom/path'),
     'https://example.com/*'
   );
 
-  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.xyz/custom/path'), true);
+  // Chrome match patterns reject ports, so a ported base must yield a port-less pattern.
+  assert.equal(
+    qurlApi.getQurlHostPermissionPattern('https://self.hosted.example:8443/base'),
+    'https://self.hosted.example/*'
+  );
+
+  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.ai/custom/path'), true);
+  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.xyz'), false);
   assert.equal(qurlApi.isDefaultQurlOrigin('https://example.com'), false);
 });
 
@@ -208,7 +217,7 @@ test('ensureQurlHostPermission skips chrome.permissions for the bundled default 
     },
   };
 
-  const granted = await qurlApi.ensureQurlHostPermission('https://getqurllink.layerv.xyz', false);
+  const granted = await qurlApi.ensureQurlHostPermission('https://getqurllink.layerv.ai', false);
 
   assert.equal(granted, true);
   assert.equal(containsCalled, false);
@@ -260,7 +269,7 @@ test('getStoredQurlApiBase ignores malformed stored values', async function () {
 test('uploadFile returns parsed success payload', async function () {
   global.chrome = undefined;
   global.fetch = async function (url, options) {
-    assert.equal(url, 'https://getqurllink.layerv.xyz/api/upload');
+    assert.equal(url, 'https://getqurllink.layerv.ai/api/upload');
     assert.equal(options.method, 'POST');
     assert.match(options.headers['Content-Type'], /^multipart\/form-data; boundary=/);
 
@@ -473,8 +482,13 @@ test('uploadFile localizes invalid JSON and payload errors when messages are ava
 
 test('uploadFile aborts when the request timeout elapses', async function () {
   global.chrome = undefined;
-  global.setTimeout = function (callback) {
-    callback();
+  // Fire only the upload-abort timer; leave the pre-flight timeout pending so the pre-flight
+  // resolves normally (it completes in ms in production). Firing every timer immediately would
+  // trip the pre-flight guard instead of exercising the fetch-abort path under test.
+  global.setTimeout = function (callback, delay) {
+    if (delay === qurlApi.UPLOAD_REQUEST_TIMEOUT_MS) {
+      callback();
+    }
     return 1;
   };
   global.clearTimeout = function () {};

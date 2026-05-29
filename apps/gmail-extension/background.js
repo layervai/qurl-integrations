@@ -13,9 +13,10 @@ if (typeof importScripts === 'function') {
 
 const TAB_MESSAGE_TIMEOUT_MS = 3000;
 // The full relay path from popup to content script is:
-// ping (TAB_MESSAGE_TIMEOUT_MS) -> reinject -> ping (TAB_MESSAGE_TIMEOUT_MS) -> INSERT_LINKS relay.
-// popup/popup.js:RUNTIME_MESSAGE_TIMEOUT_MS must exceed this worst-case budget.
-// Keep these values in sync — see the matching comment in popup.js.
+// ping (TAB_MESSAGE_TIMEOUT_MS) -> reinject (chrome.scripting.executeScript, variable on a
+// cold tab) -> ping (TAB_MESSAGE_TIMEOUT_MS) -> INSERT_LINKS relay (INSERT_LINKS_TAB_MESSAGE_TIMEOUT_MS).
+// popup/popup.js:RUNTIME_MESSAGE_TIMEOUT_MS must exceed this worst-case budget INCLUDING the
+// reinject. Keep these values in sync — see the matching comment in popup.js.
 const INSERT_LINKS_TAB_MESSAGE_TIMEOUT_MS = 9000;
 
 function isGmailTab(tab) {

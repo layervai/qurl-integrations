@@ -58,7 +58,7 @@ Click the extension icon in the Chrome toolbar to open the popup.
 
 In the popup, you can configure the QURL upload service address. If you do not change it, the extension uses the built-in default server:
 
-`https://getqurllink.layerv.xyz/`
+`https://getqurllink.layerv.ai/`
 
 You can save either:
 
