@@ -206,14 +206,17 @@ func run() error {
 			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
 		})
-		// Operator reminder: /qurl setup runs whichever Slack user
-		// invokes it. Workspace identity comes from the signature-
-		// verified payload, but ROLE is not enforced in this binary.
-		// The Slack app manifest must restrict /qurl setup to
-		// workspace admins; without that gate, any user could
-		// initiate a flow that overwrites the workspace's qURL key
-		// against their own Auth0 account.
-		slog.Info("CONFIGURATION REMINDER: /qurl setup is workspace-admin-only by manifest, not by code — verify the Slack app manifest restricts the command")
+		// Operator note: /qurl setup re-runs are now gated in code —
+		// the first user to complete setup on an unbound workspace
+		// becomes its owner, and only that owner can re-run setup
+		// afterward (enforced in handleSetup via AdminStore, with
+		// BindWorkspace as the structural backstop). The remaining
+		// exposure is the first-install claim: any workspace member
+		// can be the first to run /qurl setup and thereby claim
+		// ownership. Restrict who can reach the command at install
+		// time (Slack app manifest / onboarding) if first-claim
+		// ownership matters for this deployment.
+		slog.Info("CONFIGURATION NOTE: /qurl setup re-runs are owner-only (enforced in code); first install is first-user-wins — restrict command availability at install time if first-claim ownership matters")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
