@@ -1052,12 +1052,15 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
-	t.Run("owner reruns setup: setup URL minted", func(t *testing.T) {
+	t.Run("owner reruns setup (owner on the admin set): setup URL minted", func(t *testing.T) {
 		ts := newAdminTestServers(t)
-		// seedAdmin binds the workspace with owner=UOWNER001 and the
-		// same user on the admin set. The gate compares the invoker
-		// (UOWNER001) to ownerID and short-circuits to mint.
-		ts.seedAdmin(t)
+		// Realistic post-bind state: owner_id IS the sole admin —
+		// BindWorkspace seeds the owner onto admin_slack_user_ids at first
+		// bind. Seed it explicitly (not via seedAdmin, which puts a
+		// *different* user on the admin set) so this case genuinely diverges
+		// from the "owner not on admin set" subtest below: together they
+		// prove the gate keys off owner_id regardless of admin-set membership.
+		ts.seedWorkspace(t, team, owner, owner, testWorkspaceConfiguredAt)
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)
 
