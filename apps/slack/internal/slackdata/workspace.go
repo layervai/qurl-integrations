@@ -286,6 +286,15 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 				Title:      "BindWorkspace: caller is the existing workspace owner",
 			}
 		}
+		if existingOwner == "" {
+			// A row exists but carries no owner_id. This shouldn't happen —
+			// every BindWorkspace PutItem writes a non-empty OwnerID — so it
+			// means a manually edited / truncated row. We still refuse (fall
+			// through to AlreadyBound, the safe default), but log so the
+			// malformed row is grep-able rather than silently routing to the
+			// generic rebind-refused page.
+			slog.Warn("BindWorkspace: row exists but owner_id is empty — likely a manually edited row; refusing rebind (AlreadyBound)", "team_id", m.TeamID)
+		}
 	}
 	// ErrCodeWorkspaceAlreadyBound fires for every non-owner rebind
 	// attempt — added admins, random workspace members, anyone whose

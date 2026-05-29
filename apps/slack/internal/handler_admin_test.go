@@ -1035,6 +1035,23 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
+	t.Run("AdminStore nil (sandbox/no-DDB): owner gate skipped, setup URL minted", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+		// Sandbox / no-DDB posture: with AdminStore unset the owner gate
+		// is skipped entirely and /setup mints unconditionally, same as a
+		// fresh install. Null the store after construction to exercise that
+		// short-circuit (mirrors the sandbox cmd/main.go wiring). Even a
+		// non-owner (stranger) must get a URL since the gate never runs.
+		h.cfg.AdminStore = nil
+
+		got := invokeSetup(t, h, stranger)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Errorf("AdminStore nil: expected setup URL (owner gate must be skipped), got: %q", got)
+		}
+	})
+
 	t.Run("owner reruns setup: setup URL minted", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		// seedAdmin binds the workspace with owner=UOWNER001 and the

@@ -708,7 +708,10 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 //
 // Owner-only rebind gate: on fresh install (no workspace_mappings
 // row), any workspace user may run /setup — that user becomes the
-// workspace owner. On subsequent runs only the owner is permitted;
+// workspace owner. First install is first-user-wins: if two members
+// race an unbound workspace, BindWorkspace's consistent read picks the
+// single winner (the loser gets the rebind-refused page). On
+// subsequent runs only the owner is permitted;
 // other workspace members (including admins added via /qurl admin
 // add) get a "owner-only" reply. Without this gate, any added admin
 // could complete OAuth against their own Auth0 account and silently
@@ -738,7 +741,10 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	// it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
 	// is irrelevant for /setup specifically (added admins can't rerun
-	// /setup, only the owner can).
+	// /setup, only the owner can). Times the read off h.baseCtx (not the
+	// request ctx) so a Slack-side connection-close can't truncate the
+	// gate read mid-flight; adminGateBudget is the only bound — same
+	// posture as requireAdminSync.
 	if h.cfg.AdminStore != nil {
 		gateCtx, gateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 		defer gateCancel()
