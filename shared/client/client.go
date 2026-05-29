@@ -586,13 +586,10 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 
 // --- Resources ---
 //
-// These methods target the post-PR-3a.2 surface in qurl-service: alias
-// fields on `Resource` and `clear_alias` on `PATCH /v1/resources/{id}`.
-// The OpenAPI schema for PR-3a.2 has not shipped at the time this client
-// method set lands — they are added here so the Slack `setalias`/`get`
-// flows in PR-3c.3+ have a stable Go surface to call against. Until
-// PR-3a.2 ships in qurl-service, these methods will return 404/400 from
-// the API.
+// These methods target the resource surface in qurl-service: alias
+// fields on `Resource`, the `GET /v1/resources/{id}` lookup, and
+// `clear_alias` on `PATCH /v1/resources/{id}`. That schema has shipped;
+// the Slack `setalias`/`get`/`aliases` flows call against it.
 
 // Resource represents a qURL resource (the durable object behind a qURL link).
 //

@@ -254,7 +254,9 @@ func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 	// All three should be alias-only fallbacks because ctx is canceled
 	// before any worker dispatched — never the opaque resource_id.
 	for i, l := range lines {
-		if !strings.Contains(l, "`$") || strings.Contains(l, "r_") {
+		// Match the backtick-prefixed `r_ shape a leaked id would take, not
+		// a bare "r_" that a future alias could legitimately contain.
+		if !strings.Contains(l, "`$") || strings.Contains(l, "`r_") {
 			t.Errorf("line[%d] = %q, want alias-only fallback (no resource_id)", i, l)
 		}
 	}
@@ -345,20 +347,22 @@ func TestFanoutAliasGroups_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 		}
 	}
 	// The upstream never resolved a slug (it only ever 503'd or was
-	// ctx-canceled), so every line must be an alias-only fallback — and
-	// the opaque resource_id must never leak. Count the fallbacks and pin
-	// that none carry an `r_` id.
+	// ctx-canceled), so every line — dispatched and un-dispatched alike —
+	// must be an alias-only fallback, and the opaque resource_id must
+	// never leak. Match the backtick-prefixed `r_ shape formatAliasGroupLine
+	// would emit for a leaked id, so an alias that merely contains "r_"
+	// can't false-positive.
 	fallbacks := 0
 	for _, l := range lines {
-		if strings.Contains(l, "r_") {
+		if strings.Contains(l, "`r_") {
 			t.Errorf("line leaked opaque resource_id: %q", l)
 		}
 		if strings.Contains(l, "`$alias-") {
 			fallbacks++
 		}
 	}
-	if fallbacks < numEntries-aliasesResourceFanoutLimit {
-		t.Errorf("alias-only fallback count = %d, want ≥%d (un-dispatched rows must fall back)", fallbacks, numEntries-aliasesResourceFanoutLimit)
+	if fallbacks != numEntries {
+		t.Errorf("alias-only fallback count = %d, want %d (every row falls back under a failing upstream)", fallbacks, numEntries)
 	}
 }
 
