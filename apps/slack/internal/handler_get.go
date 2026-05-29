@@ -27,12 +27,12 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 // The breadcrumb points only at `/qurl list` (not `/qurl aliases`): list is
 // ungated and now renders each tunnel's channel `$alias` shortcuts inline, so
 // it's the single surface that always works and shows both slugs and aliases.
-const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels and their channel aliases."
+const urlNotSupportedGetMessage = "`/qurl get` only works with a `$name` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels and their channel aliases."
 
 // resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
 // `/qurl get` (the resource-id form is gone). Same terse-sentinel
 // ([ErrResourceIDNotSupportedGet]) → rich-handler-copy split as the URL case.
-const resourceIDNotSupportedGetMessage = "`/qurl get` takes a tunnel `$slug` or a channel `$alias`, not a resource ID. Run `/qurl list` and copy the `$slug` instead."
+const resourceIDNotSupportedGetMessage = "`/qurl get` takes a tunnel `$name` or a channel `$alias`, not a resource ID. Run `/qurl list` and copy the `$name` instead."
 
 // unexpectedGetShapeMessage is the reply for getWork's defensive
 // empty-alias arm; it routes the user to their operator rather than
@@ -128,7 +128,7 @@ func legacyAliasBindingMessage(alias string) string {
 	if !aliasCharsetPattern.MatchString(alias) {
 		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias`."
 	}
-	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<slug>`.", alias, alias)
+	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<name>`.", alias, alias)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key
@@ -214,7 +214,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	// change adds a form that leaves Alias empty; surface the usage hint
 	// rather than silently dispatching an unmintable command.
 	if cmd.Alias == "" {
-		respondSlack(w, ":warning: Usage: `/qurl get <$slug|$alias>` to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
+		respondSlack(w, ":warning: Usage: `/qurl get <$name|$alias>` to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
 		return
 	}
 
