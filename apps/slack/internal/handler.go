@@ -635,23 +635,12 @@ func isUserVerb(text string) bool {
 	return matched
 }
 
-// adminVerbWord returns the leading verb word of an admin-verb text for
-// echoing in the wrong-surface redirect. `admin <action>` collapses to
-// `admin` so the redirect reads `/qurl-admin admin list`, matching the
-// retained sub-word grammar.
-func adminVerbWord(text string) string {
-	return firstWord(text)
-}
-
-// userVerbWord returns the leading verb word of a user-verb text for
-// echoing in the wrong-surface redirect.
-func userVerbWord(text string) string {
-	return firstWord(text)
-}
-
 // firstWord returns the first whitespace-delimited token of text, or ""
-// when text has none. Used only on already-classified verb text, so the
-// token is a known-literal keyword rather than arbitrary user input.
+// when text has none. The wrong-surface redirects echo it as the verb
+// word — `admin <action>` collapses to `admin` so the redirect reads
+// `/qurl-admin admin list`, matching the retained sub-word grammar. Used
+// only on already-classified verb text, so the token is a known-literal
+// keyword rather than arbitrary user input.
 func firstWord(text string) string {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
@@ -760,7 +749,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// first token; echo it inside a code span (it's a known-literal
 		// admin keyword, not arbitrary input) so the correction is
 		// concrete.
-		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `/qurl-admin %s` instead, or run `/qurl-admin help`.", adminVerbWord(text), text))
+		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `/qurl-admin %s` instead, or run `/qurl-admin help`.", firstWord(text), text))
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -805,7 +794,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleUnsetAlias(w, values)
 	case isUserVerb(text):
 		// A user verb typed on `/qurl-admin` — redirect to `/qurl`.
-		respondSlack(w, fmt.Sprintf("`%s` is a `/qurl` command. Use `/qurl %s` instead, or run `/qurl help`.", userVerbWord(text), text))
+		respondSlack(w, fmt.Sprintf("`%s` is a `/qurl` command. Use `/qurl %s` instead, or run `/qurl help`.", firstWord(text), text))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
 		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `/qurl-admin help`.", text))
