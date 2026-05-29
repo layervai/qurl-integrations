@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -144,19 +145,24 @@ func TestHandleAliases_ListResourcesFailureDegradesToAliasOnly(t *testing.T) {
 // runProcessAliasesCapturingLogs calls processAliases directly with an
 // injected logger so a test can assert on operator-facing log lines —
 // the incomplete-listing triage warning isn't visible in the response
-// body. The response_url points at a 200-only sink.
-func runProcessAliasesCapturingLogs(t *testing.T, h *Handler, channelID string) string {
+// body. Returns the captured logs and the rendered response_url body.
+// processAliases POSTs synchronously when called directly (not via the
+// async worker), so the body is complete on return.
+func runProcessAliasesCapturingLogs(t *testing.T, h *Handler, channelID string) (logs, rendered string) {
 	t.Helper()
-	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	var body []byte
+	sink := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+	}))
 	t.Cleanup(sink.Close)
-	var logs bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	h.processAliases(context.Background(), log, url.Values{
 		fieldResponseURL: {sink.URL},
 		fieldTeamID:      {testAdminTeamID},
 		fieldChannelID:   {channelID},
 	})
-	return logs.String()
+	return buf.String(), parseSlackText(t, body)
 }
 
 // TestHandleAliases_IncompleteListingLogsTriageWarning fences the #555
@@ -179,7 +185,7 @@ func TestHandleAliases_IncompleteListingLogsTriageWarning(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	logs := runProcessAliasesCapturingLogs(t, h, "C_test")
+	logs, _ := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if !strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("expected incomplete-listing warning, got logs: %q", logs)
 	}
@@ -204,9 +210,50 @@ func TestHandleAliases_CompleteListingLogsNoWarning(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	logs := runProcessAliasesCapturingLogs(t, h, "C_test")
+	logs, _ := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("incomplete-listing warning fired when every binding resolved: %q", logs)
+	}
+}
+
+// TestHandleAliases_PartialUnresolvedCompletePageNoWarning fences the
+// stale-binding case, distinct from pagination: when some bindings
+// resolve on the page and others point at resource_ids the workspace no
+// longer lists, the resolved rows still render their slug, the stale
+// rows degrade to alias-only — and because the page is complete
+// (has_more=false) the triage warning does NOT fire. The warning means
+// "incomplete listing," not "any degraded row."
+func TestHandleAliases_PartialUnresolvedCompletePageNoWarning(t *testing.T) {
+	ts := newAdminTestServers(t)
+	const (
+		liveRID  = "r_live01"
+		staleRID = "r_deleted01" // bound, but the workspace no longer lists it
+	)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"live":  liveRID,
+		"stale": staleRID,
+	})
+	// Complete page (has_more=false): only the live tunnel is returned.
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: liveRID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "live-tunnel"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
+	if !strings.Contains(rendered, "`$live-tunnel` → `$live`") {
+		t.Errorf("resolved binding did not render its slug: %q", rendered)
+	}
+	if !strings.Contains(rendered, "• `$stale`") {
+		t.Errorf("stale binding did not degrade to alias-only: %q", rendered)
+	}
+	if strings.Contains(rendered, liveRID) || strings.Contains(rendered, staleRID) {
+		t.Errorf("rendered output leaked an opaque resource_id: %q", rendered)
+	}
+	// Page complete → a stale/deleted binding is not a pagination gap.
+	if strings.Contains(logs, "listing may be incomplete") {
+		t.Errorf("triage warning fired on a complete page (stale binding is not pagination): %q", logs)
 	}
 }
 

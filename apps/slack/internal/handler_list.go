@@ -14,7 +14,9 @@ import (
 )
 
 // listResourcesScanLimit is the page size for the single
-// `/v1/resources` fetch backing `/qurl list`. `/qurl list` shows only
+// `/v1/resources` fetch backing both `/qurl list` and `/qurl aliases`
+// (the latter joins the page against the channel's alias_bindings by
+// resource_id — see [resourcesByResourceID]). `/qurl list` shows only
 // tunnel resources, but the API has no server-side type filter, so the
 // tunnel filter runs client-side on the fetched page. We over-fetch
 // (the server's max) rather than page to a small display target: a
@@ -23,12 +25,14 @@ import (
 // generous page keeps the command single-request while making the
 // client-side tunnel filter reliable; tunnel resources are created
 // deliberately (via `/qurl-admin tunnel install`) so a real workspace has few
-// of them, well within Slack's ephemeral-message budget.
+// of them, well within Slack's ephemeral-message budget. Bumping this
+// affects both commands.
 //
 // A server-side `type=tunnel` filter (tracked in #531) would let this
 // drop to a normal page size and make `page.HasMore` mean "more
 // tunnels" rather than "more resources of any type" — see the footer
-// caveat in [Handler.processListResources].
+// caveat in [Handler.processListResources] and the same caveat on the
+// `/qurl aliases` triage warning in [Handler.processAliases].
 const listResourcesScanLimit = 100
 
 // listTunnelsEmptyMessage is the friendly empty-state copy for a
