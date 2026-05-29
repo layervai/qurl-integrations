@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -272,6 +273,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	enterpriseID := strings.TrimSpace(values.Get(fieldEnterpriseID))
 	userID := strings.TrimSpace(values.Get(fieldUserID))
 	channelID := strings.TrimSpace(values.Get(fieldChannelID))
 	if channelID == "" {
@@ -286,13 +288,14 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	log := slog.With(
 		"command", "tunnel_install_wizard",
 		"team_id", teamID,
+		"enterprise_id", enterpriseID,
 		"channel_id", channelID,
 		"user_id", userID,
 		"trigger_id", triggerID,
 	)
 	triggerReceivedAt := h.now()
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.openTunnelInstallWizard(ctx, log, teamID, channelID, userID, triggerID, values.Get(fieldResponseURL), triggerReceivedAt)
+		h.openTunnelInstallWizard(ctx, log, teamID, enterpriseID, channelID, userID, triggerID, values.Get(fieldResponseURL), triggerReceivedAt)
 	}) {
 		respondSlack(w, ackBusy)
 		return
@@ -306,7 +309,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	respondSlack(w, ackWorkingOnIt)
 }
 
-func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
+func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
 	triggerElapsed := h.now().Sub(triggerReceivedAt)
 	if triggerElapsed < 0 {
 		triggerElapsed = 0
@@ -367,12 +370,13 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	}
 	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
 	defer openCancel()
-	if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+	if err := h.openTunnelInstallView(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 		log.Error("tunnel install wizard views.open failed",
 			"error", err,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
 			"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
 			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
 		)
 		switch {
 		case errors.Is(err, ErrSlackTriggerExpired):
@@ -381,12 +385,37 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 			_ = h.postErrorResponse(log, responseURL, "Slack did not respond before the setup window expired. Run `/qurl tunnel install` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
 			_ = h.postErrorResponse(log, responseURL, tunnelInstallRateLimitMessage(err), true)
+		case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
+			_ = h.postErrorResponse(log, responseURL, h.guidedTunnelSlackAppInstallMessage(), true)
 		default:
 			_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
 		}
 		return
 	}
 	_ = h.deleteOriginalResponse(log, responseURL)
+}
+
+func (h *Handler) openTunnelInstallView(ctx context.Context, log *slog.Logger, teamID, enterpriseID, triggerID string, view []byte) error {
+	err := h.cfg.OpenView(ctx, teamID, triggerID, view)
+	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+		return err
+	}
+	if enterpriseID == "" || enterpriseID == teamID {
+		return err
+	}
+	log.Warn("workspace Slack bot token missing; retrying guided modal with Enterprise Grid install token",
+		"team_id", teamID,
+		"enterprise_id", enterpriseID,
+	)
+	return h.cfg.OpenView(ctx, enterpriseID, triggerID, view)
+}
+
+func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
+	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
+	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
+		return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl tunnel install` again."
+	}
+	return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl tunnel install` again."
 }
 
 func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {

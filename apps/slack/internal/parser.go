@@ -117,8 +117,10 @@ type Command struct {
 	// *caller* — the user who typed the command); this field holds the
 	// *target* of the verb (the user being added or removed).
 	UserID string
-	// Flags holds optional `key:value` flags. Only `dm`, `once`, and
-	// `reason` are recognized today (on `get`).
+	// Flags holds optional `key:value` flags. Only `dm` and `reason`
+	// are recognized today (on `get`). One-time use is unconditional
+	// for `get` — there is no `once` flag (the link always burns on
+	// first redemption), so it isn't a flag here.
 	Flags map[string]string
 	// Raw is the original trimmed text, kept for diagnostics.
 	Raw string
@@ -130,18 +132,6 @@ func (c *Command) DM() bool {
 		return false
 	}
 	v, ok := c.Flags["dm"]
-	if !ok {
-		return false
-	}
-	return strings.EqualFold(v, "true")
-}
-
-// Once returns the parsed value of the `once:true` flag on `get`.
-func (c *Command) Once() bool {
-	if c == nil {
-		return false
-	}
-	v, ok := c.Flags[flagKeyOnce]
 	if !ok {
 		return false
 	}
@@ -209,11 +199,6 @@ var ErrInvalidQURLID = errors.New("invalid qurl_id")
 // positional arguments receives one (e.g. `admin policies extra`).
 // Catches user-facing typos earlier than the handler dispatch.
 var ErrUnexpectedArgument = errors.New("unexpected argument")
-
-// flagKeyOnce is the canonical key for the `once:` strict-boolean
-// flag. Constant rather than literal because goconst flags `"once"`
-// at its 3-occurrence threshold on `--new-from-rev`.
-const flagKeyOnce = "once"
 
 // ErrInvalidFlag is the sentinel wrapped by every [applyFlag] error
 // path (unknown key, missing-key-before-colon, empty value,
@@ -784,7 +769,7 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 }
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
-// the recognized keys (`dm`, `once`, `reason`) survive — unknown keys
+// the recognized keys (`dm`, `reason`) survive — unknown keys
 // are an error so a typo doesn't silently no-op. The key half is
 // case-folded so `DM:true` and `Reason:foo` work the way users on
 // mobile clients (with auto-capitalize) expect; the value half is
@@ -793,15 +778,14 @@ func hasASCIIPrefixFold(s, prefix string) bool {
 // in PR-3c.3+ should be able to distinguish "flag unset" from "flag
 // set to empty" by absence in [Command.Flags] alone.
 //
-// Per-key validation is strict-posture: `dm` and `once` accept only
-// the boolean strings `true` / `false` (case-folded), so a user
-// typing `dm:yes` or `once:1` sees a friendly error rather than the
-// silent-falsey behavior the unvalidated form would have produced
-// ([Command.DM] / [Command.Once] case-equal against "true", so any
-// non-"true" value silently returns false — exactly the typo class
-// the rest of the parser rejects). `reason` accepts any non-empty
-// prose because the handler in PR-3c.3+ uses it for audit text where
-// the user's exact wording is the point.
+// Per-key validation is strict-posture: `dm` accepts only the boolean
+// strings `true` / `false` (case-folded), so a user typing `dm:yes`
+// sees a friendly error rather than the silent-falsey behavior the
+// unvalidated form would have produced ([Command.DM] case-equals
+// against "true", so any non-"true" value silently returns false —
+// exactly the typo class the rest of the parser rejects). `reason`
+// accepts any non-empty prose because the handler in PR-3c.3+ uses it
+// for audit text where the user's exact wording is the point.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx < 0 {
@@ -849,16 +833,16 @@ func applyFlag(cmd *Command, tok string) error {
 		}
 		cmd.Flags[key] = val
 		return nil
-	case flagKeyOnce:
-		// Strict-boolean gate — same shape as `dm` above.
-		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
-			return fmt.Errorf("%w: once:%q (use once:true or omit the flag)", ErrInvalidFlag, val)
-		}
-		cmd.Flags[key] = val
-		return nil
 	case "reason":
 		cmd.Flags[key] = val
 		return nil
+	case "once":
+		// `once` was removed — one-time use is now the unconditional
+		// default for `/qurl get`. Still reject (strict-flag posture),
+		// but with a transitional hint instead of the generic
+		// "unknown flag", since some users have `once:true` in saved
+		// slash-command recipes and deserve to know it's now redundant.
+		return fmt.Errorf("%w: `once` is no longer needed — every `/qurl get` link is one-time use by default", ErrInvalidFlag)
 	default:
 		return fmt.Errorf("%w: unknown flag %q", ErrInvalidFlag, key)
 	}

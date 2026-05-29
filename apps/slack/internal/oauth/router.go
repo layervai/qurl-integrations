@@ -11,10 +11,10 @@
 // JWKS, mints a workspace-scoped qURL API key via POST /v1/api-keys,
 // persists it via DDBProvider, and DMs the admin.
 //
-// The Slack handler is HTTP-only — no Slack-app-distribution OAuth (the
-// Slack workspace install side) is handled here; the API key it stores
-// is the qURL key the bot uses to call qurl-service on the workspace's
-// behalf.
+// The Slack workspace install side is handled by apps/slack/internal/slackinstall's
+// /oauth/slack/install routes. This package owns the qURL account connection
+// only: the API key it stores is the qURL key the bot uses to call qurl-service
+// on the workspace's behalf.
 package oauth
 
 import (
