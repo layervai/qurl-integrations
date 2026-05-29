@@ -45,7 +45,6 @@ const (
 	slackOAuthBodyLimit         = 16 << 10
 	slackInstallFlow            = "slack-install"
 	botScopeCommands            = "commands"
-	botScopeViewsWrite          = "views:write"
 	slackOAuthErrorBadRedirect  = "bad_redirect_uri"
 	slackOAuthErrorUnrecognized = "unrecognized"
 )
@@ -98,9 +97,15 @@ type TokenStore interface {
 	SetSlackBotToken(ctx context.Context, workspaceID string, install *auth.SlackBotTokenInstall) error
 }
 
-// DefaultBotScopes returns the minimum Slack bot scopes needed by qURL.
+// DefaultBotScopes returns the minimum Slack bot scopes the install flow
+// requests. Only `commands` is needed: the captured per-workspace token is
+// used solely for views.open (see apps/slack/cmd/main.go), which requires no
+// scope (https://docs.slack.dev/reference/methods/views.open), and `commands`
+// is the minimal scope to install this slash-command app into a workspace.
+// An earlier revision also requested `views:write`, which is not a real Slack
+// scope — Slack rejects it at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
-	return []string{botScopeCommands, botScopeViewsWrite}
+	return []string{botScopeCommands}
 }
 
 // RegisterRoutes wires the Slack install OAuth endpoints onto mux.

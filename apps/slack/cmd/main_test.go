@@ -482,7 +482,7 @@ func TestBuildSlackInstallConfigHappyPath(t *testing.T) {
 	if string(cfg.StateSecret) != validStateSecret {
 		t.Fatalf("StateSecret not threaded through")
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands,views:write" {
+	if strings.Join(cfg.BotScopes, ",") != "commands" {
 		t.Fatalf("default bot scopes = %v", cfg.BotScopes)
 	}
 	if cfg.TokenStore == nil {
@@ -526,13 +526,13 @@ func TestBuildSlackInstallConfigMissingVar(t *testing.T) {
 
 func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	env := validSlackInstallEnv()
-	env[envSlackBotScopes] = "commands views:write,chat:write"
+	env[envSlackBotScopes] = "commands chat:write,im:write"
 	applySlackInstallEnv(t, env)
 	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands,views:write,chat:write" {
+	if strings.Join(cfg.BotScopes, ",") != "commands,chat:write,im:write" {
 		t.Fatalf("custom scopes = %v", cfg.BotScopes)
 	}
 }
