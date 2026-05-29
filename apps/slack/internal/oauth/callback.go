@@ -508,9 +508,10 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(mintCtx, accessToken,
 		keyName, apiKeyScopes())
 	if err != nil {
+		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
-		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID, "api_key_limit", errors.Is(err, ErrAPIKeyLimitReached))
-		if errors.Is(err, ErrAPIKeyLimitReached) {
+		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID, "api_key_limit_reached", limitReached)
+		if limitReached {
 			// Quota is a precondition the admin must clear themselves —
 			// retrying does nothing (the old "run setup again" advice was
 			// actively wrong here). 409 so an automated retry surfaces the
@@ -585,17 +586,27 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 }
 
-// renderRebindRefused writes the rebind-refused page. Same defense-in-
-// depth headers as the success page — the only differences are the body
-// template and a 409 status code (so an automated retry surfaces the
-// conflict rather than silently looping).
-func renderRebindRefused(w http.ResponseWriter, teamID string) {
+// setOAuthPageSecurityHeaders writes the defense-in-depth header set shared
+// by every OAuth-callback HTML response (success, rebind-refused, error).
+// These pages render post-redirect, so they shouldn't be framable
+// (clickjacking), shouldn't leak the callback URL via Referer to anything
+// they link to, and shouldn't load any off-origin resources beyond the
+// inline style.
+func setOAuthPageSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// renderRebindRefused writes the rebind-refused page. Same defense-in-
+// depth headers as the success page — the only differences are the body
+// template and a 409 status code (so an automated retry surfaces the
+// conflict rather than silently looping).
+func renderRebindRefused(w http.ResponseWriter, teamID string) {
+	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(http.StatusConflict)
 	if err := rebindRefusedPageTemplate.Execute(w, rebindRefusedPageData{TeamID: teamID}); err != nil {
 		slog.Warn("oauth/callback rebind-refused page write failed", "error", err)
@@ -607,12 +618,7 @@ func renderRebindRefused(w http.ResponseWriter, teamID string) {
 // renders human-readable, actionable guidance instead of a blank page with
 // raw text. Same defense-in-depth headers as renderRebindRefused.
 func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(status)
 	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Message: message}); err != nil {
 		slog.Warn("oauth/callback error-page write failed", "error", err)
@@ -624,16 +630,7 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 	// keyPrefix comes from qurl-service's JSON response; email is JWKS-
 	// verified — but the template's context-aware auto-escape is the
 	// load-bearing XSS defense here.
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	// Defense-in-depth headers: success page is rendered post-auth so it
-	// shouldn't be framable (clickjacking), shouldn't leak the URL via
-	// Referer to anything the page links to, and shouldn't load any
-	// off-origin resources beyond the inline style.
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	if err := successPageTemplate.Execute(w, successPageData{
 		TeamID:    teamID,

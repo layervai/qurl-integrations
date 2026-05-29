@@ -199,6 +199,30 @@ func callbackRequest(state string) *http.Request {
 	return req
 }
 
+// assertSecurityHeaders checks the defense-in-depth header set every OAuth-
+// callback HTML response must carry. renderSuccess, renderRebindRefused, and
+// renderOAuthErrorPage all set the same six; centralizing the assertion means
+// a render path that silently drops one fails here instead of slipping past a
+// status-and-body-only test.
+func assertSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	want := map[string]string{
+		"Content-Type":           "text/html; charset=utf-8",
+		"Cache-Control":          "no-store",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+		"X-Content-Type-Options": "nosniff",
+	}
+	for h, v := range want {
+		if got := rec.Header().Get(h); got != v {
+			t.Errorf("%s: got %q want %q", h, got, v)
+		}
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("CSP missing default-src 'none': %q", csp)
+	}
+}
+
 func TestCallbackHappyPath(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 
@@ -224,18 +248,7 @@ func TestCallbackHappyPath(t *testing.T) {
 		t.Errorf("success body missing email: %s", body)
 	}
 	// Defense-in-depth headers are required on the success page.
-	if rec.Header().Get("X-Frame-Options") != "DENY" {
-		t.Errorf("X-Frame-Options: got %q want DENY", rec.Header().Get("X-Frame-Options"))
-	}
-	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
-		t.Errorf("CSP missing default-src 'none': %q", rec.Header().Get("Content-Security-Policy"))
-	}
-	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
-		t.Errorf("Referrer-Policy: got %q want no-referrer", rec.Header().Get("Referrer-Policy"))
-	}
-	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Errorf("X-Content-Type-Options: got %q want nosniff", rec.Header().Get("X-Content-Type-Options"))
-	}
+	assertSecurityHeaders(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -401,6 +414,14 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("got %d want 502 (mint failure → 502)", rec.Code)
 	}
+	// The non-limit failure now renders a styled HTML page, not bare
+	// http.Error — lock the heading + headers so a regression back to plain
+	// text is caught. ("connect qURL" avoids the apostrophe in "Couldn't",
+	// which html/template escapes to &#39;.)
+	if body := rec.Body.String(); !strings.Contains(body, "connect qURL") {
+		t.Errorf("502 body should render the styled error page; got: %q", body)
+	}
+	assertSecurityHeaders(t, rec)
 	// Give any spurious revoke goroutine a window to fire.
 	time.Sleep(50 * time.Millisecond)
 	minter.revokeMu.Lock()
@@ -427,10 +448,11 @@ func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("got %d want 409 (api-key limit → 409)", rec.Code)
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "limit") || !strings.Contains(strings.ToLower(body), "revoke") {
-		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", body)
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
+		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", rec.Body.String())
 	}
+	assertSecurityHeaders(t, rec)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
