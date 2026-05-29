@@ -744,7 +744,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 		defer gateCancel()
 		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 		if err != nil {
-			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "user_id", userID)
+			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
 			respondSlack(w, ":warning: could not verify workspace ownership (upstream error; see logs). Try again in a moment.")
 			return
 		}
