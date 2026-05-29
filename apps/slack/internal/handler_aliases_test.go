@@ -3,6 +3,7 @@ package internal
 import (
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -73,7 +74,9 @@ func TestHandleAliases_MultipleAliasesOneTunnelCollapse(t *testing.T) {
 		"dashboard":       "r_kktest01",
 		"kevin-dashboard": "r_kktest01",
 	})
+	var fetches atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_kktest01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "team-dash"},
 		}, "", false)
@@ -84,6 +87,52 @@ func TestHandleAliases_MultipleAliasesOneTunnelCollapse(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "`$team-dash` → `$dashboard`, `$kevin-dashboard`") {
 		t.Errorf("aliases reply did not collapse both aliases onto one slug line: %q", async)
+	}
+	// Regression guard for the headline simplification: grouping + a
+	// single ListResources page replaced the old per-alias by-id fanout.
+	// Two aliases on the same tunnel must cost exactly ONE upstream
+	// resource fetch — not one per alias. (Replaces the deleted
+	// fanout test's `fetches.Load() != 1` invariant at this layer.)
+	if got := fetches.Load(); got != 1 {
+		t.Errorf("ListResources hit %d times, want exactly 1 (no per-alias fanout)", got)
+	}
+}
+
+// TestHandleAliases_ListResourcesFailureDegradesToAliasOnly fences the
+// best-effort resolver contract: when the workspace ListResources fetch
+// fails, every bound row still renders as its channel aliases alone
+// (`• $<alias>`), the opaque resource_id never leaks, and the listing
+// header still renders (failure is non-fatal). This is the failure
+// surface the removed fanout cancellation tests used to cover.
+func TestHandleAliases_ListResourcesFailureDegradesToAliasOnly(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Tunnel-backed binding: the only way to show its `$<slug>` is to
+	// resolve it from the list — so a failed fetch is the case that must
+	// degrade to alias-only rather than leak the opaque resource_id.
+	const unresolvedRID = "r_unlisted01"
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": unresolvedRID,
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"title":"Internal Server Error","detail":"boom","code":"internal","status":500}}`))
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	// Slug unresolved (fetch failed) → the row degrades to alias-only.
+	if !strings.Contains(async, "• `$bastion`") {
+		t.Errorf("expected alias-only row on resolver failure, got: %q", async)
+	}
+	// The opaque resource_id MUST NOT leak even when resolution fails —
+	// the whole reason #552/#554 exist.
+	if strings.Contains(async, unresolvedRID) {
+		t.Errorf("aliases reply leaked opaque resource_id on resolver failure: %q", async)
+	}
+	// Best-effort, not fatal: the header still renders.
+	if !strings.Contains(async, "Aliases configured for this channel") {
+		t.Errorf("async reply missing header on resolver failure: %q", async)
 	}
 }
 

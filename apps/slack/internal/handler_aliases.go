@@ -94,11 +94,11 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	byID := resourcesByResourceID(ctx, log, c)
 	lines := make([]string, 0, len(groups))
 	for i := range groups {
-		target, slug := "", ""
-		if r := byID[groups[i].resourceID]; r != nil {
-			target, slug = r.TargetURL, r.Slug
-		}
-		lines = append(lines, formatAliasGroupLine(target, slug, groups[i].aliases))
+		// Unresolved (fetch failed or resource_id absent from the page)
+		// yields a zero-value Resource — empty Slug/TargetURL, which
+		// formatAliasGroupLine degrades to the alias-only row.
+		r := byID[groups[i].resourceID]
+		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, groups[i].aliases))
 	}
 	sort.Strings(lines)
 
@@ -114,19 +114,21 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 // per-id `GET /v1/resources/{id}` path does NOT return the tunnel slug;
 // the list path does, so a workspace-list join is the reliable resolver.
 //
-// Best-effort: a fetch failure yields nil and the caller degrades every
-// row to its channel aliases alone. Bounded to one [listResourcesScanLimit]
-// page — a resource past the first page won't resolve (same cap as
-// /qurl list; tracked in #531).
-func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) map[string]*client.Resource {
+// Best-effort: a fetch failure yields a nil map and the caller degrades
+// every row to its channel aliases alone (a nil-map lookup returns the
+// zero-value Resource). Bounded to one [listResourcesScanLimit] page — a
+// resource past the first page won't resolve (same cap as /qurl list;
+// the /qurl aliases incomplete-listing follow-up is tracked in #555,
+// which depends on the #531 server-side type=tunnel filter).
+func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) map[string]client.Resource {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
 		log.Warn("aliases: list resources for slug resolution failed — rendering alias-only", "error", err)
 		return nil
 	}
-	out := make(map[string]*client.Resource, len(page.Resources))
+	out := make(map[string]client.Resource, len(page.Resources))
 	for i := range page.Resources {
-		out[page.Resources[i].ResourceID] = &page.Resources[i]
+		out[page.Resources[i].ResourceID] = page.Resources[i]
 	}
 	return out
 }
