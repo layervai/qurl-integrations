@@ -181,50 +181,57 @@ func decodeSlackText(t *testing.T, raw []byte) string {
 // --- parser unit tests ---------------------------------------------------
 
 func TestParseAliasArgs_SetAlias(t *testing.T) {
+	// notTunnelSub is the substring unique to msgAliasTargetNotTunnel
+	// (the well-formed-but-unsupported-target rejection), used to assert
+	// URL/resource-id targets get the uniform not-a-tunnel copy rather
+	// than the generic usage dump.
+	const notTunnelSub = "aren't supported"
 	cases := []struct {
 		name      string
 		input     string
 		wantErr   bool
 		wantAlias string
 		wantTgt   string
+		// wantMsgSub, when set on a wantErr case, asserts which rejection
+		// copy fired — "URLs and resource IDs aren't supported"
+		// (msgAliasTargetNotTunnel) for a well-formed-but-unsupported
+		// target, vs the usage dump (msgAliasTargetInvalid) for a
+		// malformed alias/garbage. Empty skips the copy check.
+		wantMsgSub string
 	}{
-		{name: "happy URL", input: "$staging https://example.com", wantAlias: testAliasName, wantTgt: testAliasURL},
-		{name: "happy resource id", input: "$staging r_abc123", wantAlias: testAliasName, wantTgt: "r_abc123"},
-		{name: "single-char alias allowed", input: "$a https://x.example", wantAlias: "a", wantTgt: "https://x.example"},
-		{name: "internal dashes allowed", input: "$demo-grafana https://x.example", wantAlias: "demo-grafana", wantTgt: "https://x.example"},
+		// Tunnels-only: the sole accepted target shape is a tunnel `$slug`.
 		{name: "happy tunnel slug", input: "$staging $prod-dashboard", wantAlias: testAliasName, wantTgt: "$prod-dashboard"},
+		{name: "single-char alias allowed with slug target", input: "$a $prod-dashboard", wantAlias: "a", wantTgt: "$prod-dashboard"},
+		{name: "internal dashes allowed in alias", input: "$demo-grafana $prod-dashboard", wantAlias: "demo-grafana", wantTgt: "$prod-dashboard"},
 
+		// URL / resource-id targets are well-formed but unsupported now —
+		// uniform not-a-tunnel copy (a valid r_<id> and a r_<typo> read
+		// the same; the URL too).
+		{name: "URL target rejected as not-a-tunnel", input: "$staging https://example.com", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "localhost URL target rejected as not-a-tunnel", input: "$staging http://localhost:3000", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "resource id target rejected as not-a-tunnel", input: "$staging r_abc123", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "bare r_ target rejected as not-a-tunnel", input: "$staging r_", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "garbage non-url target rejected as not-a-tunnel", input: "$staging not-a-url", wantErr: true, wantMsgSub: notTunnelSub},
+		{name: "non-http scheme target rejected as not-a-tunnel", input: "$staging ftp://example.com", wantErr: true, wantMsgSub: notTunnelSub},
+
+		// Alias-name / arity errors → usage dump.
 		{name: "missing target", input: "$staging", wantErr: true},
 		{name: "missing alias", input: testAliasURL, wantErr: true},
-		{name: "no sigil", input: "staging https://example.com", wantErr: true},
-		{name: "empty alias after sigil", input: "$ https://example.com", wantErr: true},
-		{name: "uppercase rejected", input: "$Staging https://example.com", wantErr: true},
-		{name: "trailing dash rejected", input: "$staging- https://example.com", wantErr: true},
-		{name: "leading dash rejected", input: "$-staging https://example.com", wantErr: true},
-		{name: "extra args rejected", input: "$staging https://example.com extra", wantErr: true},
-		{name: "non-http target rejected", input: "$staging ftp://example.com", wantErr: true},
-		{name: "garbage target rejected", input: "$staging not-a-url", wantErr: true},
-		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " https://x.example", wantErr: true},
-		{name: "bare r_ sigil rejected", input: "$staging r_", wantErr: true},
-		// Backtick in target would break the Slack inline-code fence
-		// the success-copy interpolates the target into. Rejected at
-		// parse time so the response renders cleanly.
-		{name: "backtick in r_ target rejected", input: "$staging r_abc`bad", wantErr: true},
-		{name: "backtick in URL target rejected", input: "$staging https://example.com/`x", wantErr: true},
-		// Non-printable runes in target garble the audit log line and
-		// the Slack response. Rejected at parse time alongside the
-		// backtick guard so the success-copy + slog.Info surfaces
-		// remain hygienic.
-		{name: "control byte in r_ target rejected", input: "$staging r_abc\x01bad", wantErr: true},
-		{name: "control byte in URL target rejected", input: "$staging https://example.com/\x01x", wantErr: true},
-
-		// Fence: http://localhost is currently ACCEPTED. The parser
-		// stays scheme-permissive because qurl-service is the
-		// authoritative validator on target reachability. The
-		// public-host gate follow-up is tracked in #350; when that
-		// lands, flip this row to wantErr and the test starts
-		// enforcing the new contract.
-		{name: "localhost target ACCEPTED (see #350: SSRF gate)", input: "$staging http://localhost:3000", wantAlias: "staging", wantTgt: "http://localhost:3000"},
+		{name: "no sigil", input: "staging $prod-dashboard", wantErr: true},
+		{name: "empty alias after sigil", input: "$ $prod-dashboard", wantErr: true},
+		{name: "uppercase alias rejected", input: "$Staging $prod-dashboard", wantErr: true},
+		{name: "trailing dash alias rejected", input: "$staging- $prod-dashboard", wantErr: true},
+		{name: "leading dash alias rejected", input: "$-staging $prod-dashboard", wantErr: true},
+		{name: "extra args rejected", input: "$staging $prod-dashboard extra", wantErr: true},
+		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " $prod-dashboard", wantErr: true},
+		// A `$slug` target that fails the tunnel-slug grammar → usage
+		// dump (it passed the `$`-prefix gate but isn't a valid slug).
+		{name: "slug target too short rejected", input: "$staging $ab", wantErr: true, wantMsgSub: "tunnel slug"},
+		{name: "slug target uppercase rejected", input: "$staging $Prod", wantErr: true, wantMsgSub: "tunnel slug"},
+		// Backtick / control byte in the target token are rejected before
+		// the slug check so the success-copy fence + audit log stay clean.
+		{name: "backtick in slug target rejected", input: "$staging $prod`bad", wantErr: true},
+		{name: "control byte in slug target rejected", input: "$staging $prod\x01bad", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -232,6 +239,9 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 			if tc.wantErr {
 				if userMsg == "" {
 					t.Fatalf("expected rejection, got %+v", got)
+				}
+				if tc.wantMsgSub != "" && !strings.Contains(userMsg, tc.wantMsgSub) {
+					t.Errorf("rejection copy = %q, want substring %q", userMsg, tc.wantMsgSub)
 				}
 				return
 			}

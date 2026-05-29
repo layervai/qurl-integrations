@@ -179,10 +179,14 @@ var ErrMissingTarget = errors.New("missing target argument")
 
 // ErrURLNotSupportedGet is returned when `/qurl get` is handed a raw
 // URL. The Slack bot only mints links for tunnel resources now, reached
-// by their `$slug` or a channel `$alias` — never an arbitrary URL. The
-// message is user-facing (surfaced via the `:warning:` ack), so it
-// names the fix rather than the internal reason.
-var ErrURLNotSupportedGet = errors.New("`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels")
+// by their `$slug` or a channel `$alias` — never an arbitrary URL.
+//
+// The text is a terse sentinel like the other parser errors; the
+// rich, user-facing copy that names the fix lives in the handler
+// ([Handler.handleGet] maps this sentinel via errors.Is), matching the
+// repo convention that keeps multi-sentence prose out of `error`-typed
+// values (see the parseAliasArgs doc comment).
+var ErrURLNotSupportedGet = errors.New("raw URL not supported by get")
 
 // ErrMissingUserMention is returned when `admin add` / `admin remove`
 // are invoked without a `<@U…>` Slack user mention.

@@ -19,6 +19,13 @@ import (
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 
+// urlNotSupportedGetMessage is the user-facing copy for a raw-URL
+// `/qurl get`. The parser flags the case with the terse
+// [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
+// renders so multi-sentence prose stays out of the parser's error
+// values (repo convention).
+const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels."
+
 // tunnelDisabledMessage is shown when the qURL service returns the
 // `tunnel_disabled` error code (the workspace doesn't have
 // tunnel-resource minting enabled yet). Lifted because both alias
@@ -150,6 +157,14 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
 	if err != nil {
+		// ErrURLNotSupportedGet is a terse parser sentinel; the handler
+		// owns the rich, fix-naming user copy (the parser keeps prose out
+		// of error values). Every other parse error's terse text is fine
+		// to surface verbatim.
+		if errors.Is(err, ErrURLNotSupportedGet) {
+			respondSlack(w, ":warning: "+urlNotSupportedGetMessage)
+			return
+		}
 		respondSlack(w, ":warning: "+err.Error())
 		return
 	}
@@ -289,11 +304,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// Rate-limit gate. Both reachable arms above (alias-form via
 	// resolveTokenForGet, resource-id form via authorizeResourceIDForGet)
 	// already fail closed with errAdminStoreNotConfigured when AdminStore
-	// is nil, so this nil-check is defensive: by here AdminStore is
-	// guaranteed non-nil on every minting path. Kept (rather than calling
-	// CheckRateLimit unconditionally) so a future form that legitimately
-	// mints without an AdminStore can't silently skip the gate — it would
-	// fail the nil-check here instead.
+	// is nil, so by here AdminStore is non-nil on every minting path and
+	// the gate always runs today. The nil-check is belt-and-suspenders:
+	// if a future minting arm regressed its own AdminStore guard, this
+	// would skip the rate-limit rather than nil-panic — qurl-service's
+	// per-key quota stays the backstop. (It is NOT a forward fence that
+	// refuses such an arm; that arm would need to add its own guard.)
 	if h.cfg.AdminStore != nil {
 		ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 		if err != nil {

@@ -49,11 +49,6 @@ type AliasStore interface {
 
 var errTunnelSlugNotFound = errors.New("tunnel slug not found")
 
-// resourceIDPrefix is the wire prefix on every qurl-service resource
-// id. setalias discriminates URL targets from resource-id targets on
-// this prefix (raw URLs vs `r_…`).
-const resourceIDPrefix = "r_"
-
 // aliasMaxLen caps alias length at the qurl-service schema's bound
 // (mirrors qurl-service `qurl_resources.alias` GSI key length, nhp
 // #1825). Parsing rejects above-cap aliases so the user sees a
@@ -73,14 +68,6 @@ var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 // is invoked with an obvious typo. Centralized so the parser-rejection
 // path and the missing-arg path share the same copy.
 const aliasUsage = "Usage:\n• `/qurl set-alias $<alias> $<slug>`\n• `/qurl unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
-
-// URL scheme constants. Lifted so the parser, validator, and any
-// future caller can't drift on the literal string match — and so
-// goconst's "3+ occurrences" rule stays clean as the parser grows.
-const (
-	schemeHTTP  = "http"
-	schemeHTTPS = "https"
-)
 
 // Parser-rejection user copy. These strings are returned via
 // [parseAliasArgs] as the second return value (a user-facing message)
@@ -120,7 +107,7 @@ const msgAliasTargetNotTunnel = "`/qurl set-alias` points an alias at a tunnel: 
 // the parser is unit-testable without spinning a full handler.
 type aliasArgs struct {
 	Alias  string // sigil stripped (no leading `$`)
-	Target string // URL or `r_…` resource id; empty for unsetalias
+	Target string // tunnel `$<slug>` (sigil kept); empty for unsetalias
 }
 
 // parseAliasArgs validates the trailing-arg shape of setalias /
@@ -133,15 +120,13 @@ type aliasArgs struct {
 // to propagate. (User-facing copy carries sentence punctuation that
 // ST1005 rejects on `error`-typed values.)
 //
-// Target validation here is only well-formedness, not policy: a `r_…`
-// prefix routes through the resource-id branch, a `$slug` through the
-// tunnel-slug branch, and anything else must parse as an http/https
-// URL. The tunnels-only POLICY gate (rejecting URL and `r_…` targets)
-// lives in [Handler.handleSetAlias], not here — this parser still
-// accepts all three shapes so the handler can reject the unsupported
-// two with a specific message rather than a generic usage dump. The
-// deeper "is this an active resource?" check is the persistence layer's
-// job.
+// Tunnels-only target: the only accepted setalias target is a tunnel
+// `$<slug>`. A raw URL or `r_<id>` is well-formed but unsupported and is
+// rejected here with [msgAliasTargetNotTunnel] (uniform copy — a valid
+// `r_<id>` and a `r_<typo>` read the same); a malformed/garbage token
+// gets [msgAliasTargetInvalid] + the usage dump. The `$<slug>` itself is
+// validated against the tunnel-slug grammar; the deeper "is this an
+// active tunnel?" check is the persistence/qurl-service layer's job.
 func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg string) {
 	tokens := strings.Fields(text)
 	if wantTarget {
@@ -165,8 +150,8 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 
 	tgt := tokens[1]
 	// Reject backticks and any non-printable rune before any further
-	// parsing. The handler echoes the target into a Slack inline-code
-	// fence (\`<tgt>\`) on the success-copy path, and the audit log
+	// parsing. The handler echoes the slug into a Slack inline-code
+	// fence (\`$<slug>\`) on the success-copy path, and the audit log
 	// emits it on the happy path — backticks break the fence, control
 	// bytes garble the log line, and both are footguns we close at
 	// the parser rather than at the response. The admin-gate trust
@@ -176,33 +161,21 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 			return nil, msgAliasTargetInvalid
 		}
 	}
-	if strings.HasPrefix(tgt, resourceIDPrefix) {
-		// `r_…` short-circuit. We don't enforce a deeper character set
-		// here — qurl-service's resource-id validator is the
-		// authoritative gate — but we DO reject the bare `r_` sigil
-		// before writing it, so a junk DDB row never lands.
-		if len(tgt) == len(resourceIDPrefix) {
-			return nil, msgAliasTargetInvalid
-		}
-		out.Target = tgt
-		return out, ""
+	// Tunnels-only: a tunnel `$slug` is the only accepted target. A raw
+	// URL or `r_<id>` is well-formed but unsupported — reject ALL
+	// non-`$` targets with the one not-a-tunnel message so the copy is
+	// uniform (a `r_<typo>` and a valid `r_<id>` should read the same).
+	// `$<slug>` then validates against the tunnel-slug grammar (which
+	// diverges from the alias grammar: slugs must start with a letter
+	// and be at least three characters).
+	if !strings.HasPrefix(tgt, "$") {
+		return nil, msgAliasTargetNotTunnel
 	}
-	if strings.HasPrefix(tgt, "$") {
-		slug, msg := requireAlias(tgt)
-		// Alias and tunnel-slug grammars intentionally diverge:
-		// aliases may start with a digit, while tunnel slugs must
-		// start with a letter and be at least three characters.
-		if msg != "" || !tunnelSlugPattern.MatchString(slug) {
-			return nil, msgAliasTargetInvalid
-		}
-		out.Target = "$" + slug
-		return out, ""
-	}
-	u, err := url.Parse(tgt)
-	if err != nil || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.Host == "" {
+	slug, msg := requireAlias(tgt)
+	if msg != "" || !tunnelSlugPattern.MatchString(slug) {
 		return nil, msgAliasTargetInvalid
 	}
-	out.Target = tgt
+	out.Target = "$" + slug
 	return out, ""
 }
 
@@ -323,20 +296,14 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	rest := stripSetAliasPrefix(text)
 
+	// parseAliasArgs enforces the tunnels-only target gate: it accepts
+	// only a tunnel `$slug` and rejects URL / `r_<id>` targets with
+	// msgAliasTargetNotTunnel (and malformed targets with the usage
+	// dump). So args.Target here is always `$<slug>`, and the only act
+	// left is to resolve the slug and bind.
 	args, userMsg := parseAliasArgs(rest, true)
 	if userMsg != "" {
 		respondSlack(w, userMsg)
-		return
-	}
-
-	// Tunnels-only target gate: set-alias points an alias at a tunnel
-	// `$slug`. A well-formed URL or `r_<id>` parses cleanly above but is
-	// no longer an accepted target — reject it with the specific
-	// not-a-tunnel copy (vs the generic usage dump a malformed target
-	// gets). The slug→resource_id resolution that follows is the admin
-	// act that authorizes the resource in this channel.
-	if !strings.HasPrefix(args.Target, "$") {
-		respondSlack(w, msgAliasTargetNotTunnel)
 		return
 	}
 
