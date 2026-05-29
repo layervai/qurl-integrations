@@ -33,7 +33,6 @@
     "extension_pages": "script-src 'self'; object-src 'self';"
   },
   "permissions": [
-    "activeTab",
     "scripting",
     "storage"
   ],

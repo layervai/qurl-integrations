@@ -772,11 +772,10 @@ function copyViaExecCommand(html, text) {
   try {
     copied = document.execCommand('copy');
   } finally {
-    // Ensure listener is removed even if execCommand throws before dispatching
-    // the copy event (in which case { once: true } would not have fired).
-    if (!copied) {
-      document.removeEventListener('copy', listener);
-    }
+    // Always remove the listener (no-op if { once: true } already fired). Covers the rare
+    // case where execCommand returns true without dispatching a copy event, which would
+    // otherwise leak the listener for the popup's lifetime.
+    document.removeEventListener('copy', listener);
   }
   if (!copied) {
     throw new Error('Copy command was rejected.');

@@ -4,11 +4,12 @@
  * SINGLE SOURCE OF TRUTH for the default qURL server base URL. Every other module
  * (lib/qurl-api.js, the popup, the release build) reads the default from here.
  *
- * Build-time configurable: scripts/build-release.js regenerates this ENTIRE file
- * from the QURL_API_BASE env var (or apps/gmail-extension/.env) when packaging a
- * release — e.g. a sandbox build sets QURL_API_BASE=https://getqurllink.layerv.xyz.
- * The whole file is rewritten from a template, so there is no fragile in-place
- * source rewrite and no duplicate "fallback" constant to keep in lockstep.
+ * Build-time configurable: scripts/build-release.js rewrites the marked DEFAULT_QURL_API_BASE
+ * declaration below (see the marker comment) from the QURL_API_BASE env var (or
+ * apps/gmail-extension/.env) when packaging a release — e.g. a sandbox build sets
+ * QURL_API_BASE=https://getqurllink.layerv.xyz. Confining the value to this tiny, dedicated
+ * file keeps the rewrite low-risk (small surface, one marked line) and removes the duplicate
+ * "fallback" constant the old in-place rewrite of the 600-line API client needed.
  *
  * Runtime configurable: users may override the server per-install via the popup
  * settings (persisted under chrome.storage.local "qurlApiBase"); see lib/qurl-api.js.

@@ -156,7 +156,10 @@ function normalizeBuildQurlApiBase(value) {
 }
 
 // Chrome match patterns reject a port in the host, so derive the host permission from the
-// hostname only. Mirrors lib/qurl-api.js:getQurlHostPermissionPattern.
+// hostname only. Mirrors lib/qurl-api.js:getQurlHostPermissionPattern — kept as a small local
+// copy rather than imported, because requiring qurl-api.js would run its import-time
+// resolveDefaultQurlApiConfig() and pull in qurl-i18n.js, coupling the build to the extension
+// runtime. Keep the two in lockstep.
 function hostPermissionPattern(base) {
   const parsed = new URL(base);
   return `${parsed.protocol}//${parsed.hostname}/*`;
@@ -166,10 +169,10 @@ function qurlConfigPath(targetReleaseRoot) {
   return path.join(targetReleaseRoot || releaseRoot, 'lib', 'qurl-config.js');
 }
 
-// Regenerate the single source of truth (lib/qurl-config.js) by replacing the marked
-// declaration. The config is a tiny, purpose-built module — far less fragile than the
-// previous in-place rewrite of the 600-line API client, and there is no second "fallback"
-// constant to keep in sync.
+// Point the single source of truth (lib/qurl-config.js) at the override by rewriting its one
+// marked DEFAULT_QURL_API_BASE declaration. Still an in-place regex rewrite, but confined to a
+// tiny purpose-built module (one marked line) instead of the 600-line API client, and with no
+// second "fallback" constant to keep in sync. The marker comment in qurl-config.js must stay.
 function writeDefaultApiBaseConfig(normalizedBase, targetReleaseRoot) {
   const configPath = qurlConfigPath(targetReleaseRoot);
   const source = fs.readFileSync(configPath, 'utf8');
