@@ -1019,10 +1019,21 @@ func (h *Handler) adminHelpMessage(command string) string {
 	}
 	if h.aliasStore != nil {
 		// set-alias/unset-alias reply ":warning: not configured" on a
-		// sandbox deploy without an aliasStore; mirror the gate above so
-		// help doesn't advertise verbs whose reply tells the user they
-		// can't be used. Keep user-facing copy on "shortcut" even though
-		// the verbs retain their historical set-alias/unset-alias names.
+		// sandbox deploy without an aliasStore; mirror the PostDM gate
+		// above so help doesn't advertise verbs whose reply tells the
+		// user they can't be used. Keep user-facing copy on "shortcut"
+		// even though the admin verbs retain their historical
+		// set-alias/unset-alias names.
+		//
+		// Gates on aliasStore (NOT AdminStore) by design: set-alias WRITES
+		// through the aliasStore and is admin-gated in code via
+		// requireAdminSync (see handleSetAlias), so its runtime dependency
+		// is the aliasStore alone. `/qurl aliases` above gates on AdminStore
+		// because it READS channel_policies through it. The asymmetry is
+		// intentional — each verb is advertised exactly when its own
+		// backing store is wired. (The aliasStore-wired-but-AdminStore-nil
+		// shape, where set-alias would show without `/qurl aliases`, is not
+		// a real deployment: both come from the same QURL_*_TABLE env vars.)
 		lines = append(lines,
 			"• `/qurl-admin set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
 			"• `/qurl-admin unset-alias $<alias>` — Remove a qURL shortcut in this channel (admin only)",

@@ -272,18 +272,18 @@ func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
 	}
 }
 
-// TestGetWork_DefaultArmRefusesUnknownShape locks the unreachable
-// default arm of getWork's dispatch: a Command that parseGet cannot
+// TestGetWork_EmptyAliasRefusesToMint locks the unreachable
+// empty-alias guard in getWork: a Command that parseGet cannot
 // actually produce (neither an alias nor a resource-id token) must hit
 // the "refuse to mint" guard and return the distinct internal-error
-// copy — NOT fall through to an unauthenticated mint. Drives the arm
+// copy — NOT fall through to an unauthenticated mint. Drives the guard
 // directly since the parser guarantees it can't be reached end-to-end.
-func TestGetWork_DefaultArmRefusesUnknownShape(t *testing.T) {
+func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 	t.Parallel()
 	h := &Handler{}
 	args := getWorkArgs{
-		// Alias == "" and Resource.Kind != ResourceTokenResourceID, so
-		// both dispatch branches are skipped and the default arm fires.
+		// Alias == "" (a shape parseGet can't produce), so getWork's
+		// empty-alias guard fires instead of resolving and minting.
 		cmd:       &Command{Subcommand: SubcmdGet},
 		teamID:    "T1",
 		channelID: "C1",
@@ -576,96 +576,6 @@ func TestMapMintError_Unmapped5xx(t *testing.T) {
 	}
 }
 
-// testResourceIDFallback is an 11-char-suffix resource ID that
-// satisfies [resourceIDPattern] on the `$r_<id>` parser path.
-// `testResourceIDFix` (`r_prod_db`) is too short to match the regex
-// — it's the legacy fixture used by alias-form tests where the
-// resource ID is set via DDB binding and never user-typed.
-const testResourceIDFallback = "r_abc123def01"
-
-// mintByFallbackResourcePath is the resource-scoped mint endpoint
-// `client.Create` hits when given a `ResourceID = testResourceIDFallback`.
-// Mirrors [mintByTestResourcePath] from handler_test_helpers_test.go
-// but for the 11-char-suffix ID used by the `$r_<id>` parser-shape
-// fixtures.
-const mintByFallbackResourcePath = "/v1/resources/" + testResourceIDFallback + "/qurls"
-
-// TestHandleGet_DollarResourceIDAllowedSet fences the canonical
-// non-admin `/qurl get $r_<id>` flow: the resource ID is in the
-// channel's allowed-set (union of `alias_bindings.values()` and
-// `allowed_resource_ids`), the mint reaches the resource-scoped
-// `POST /v1/resources/{id}/qurls` endpoint, and the response_url
-// returns the qURL link. Closes the round-trip gap that `/qurl list`
-// rendered `$r_<id>` rows for but `/qurl get` couldn't consume.
-//
-// The ID rides in the URL path (#454 cutover), so the body must NOT
-// carry `resource_id` — the assertion below pins that contract.
-func TestHandleGet_DollarResourceIDAllowedSet(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{testResourceIDFallback})
-	var bodyHadResourceID bool
-	ts.addCustomer("POST", mintByFallbackResourcePath, func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		_, bodyHadResourceID = body[testKeyResourceID]
-		writeCreateFixture(t, w, "https://qurl.link/by-id", testResourceIDFallback)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
-	if bodyHadResourceID {
-		t.Errorf("mint request body carried resource_id field — should be in URL path only after #454")
-	}
-	if !strings.Contains(async, "https://qurl.link/by-id") {
-		t.Errorf("async reply missing qURL link: %q", async)
-	}
-}
-
-// TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin fences the
-// channel-scoped gate on the `$r_<id>` path for non-admins: a
-// resource ID that isn't in the channel's allow-set (union of
-// `alias_bindings` + `allowed_resource_ids`) must surface the
-// "not allowed in this channel" copy without ever reaching the
-// customer mint. Post-revert of #234, `/qurl list` is workspace-wide,
-// so this surface routes straight to the admin rather than a
-// self-serve breadcrumb — see [notAllowedInChannelMessage] godoc and
-// TODO(#460).
-func TestHandleGet_DollarResourceIDNotInAllowedSetNonAdmin(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// Seed a different ID into the allow-set so the requested one is
-	// definitively absent (empty allow-set would also work; this
-	// shape pins that lookup-then-membership is the gate, not
-	// "row missing").
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
-	var mintHits atomic.Int32
-	ts.addCustomer("POST", mintByFallbackResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		mintHits.Add(1)
-		writeCreateFixture(t, w, "https://qurl.link/should-not-be-minted", testResourceIDFallback)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "is not allowed in this channel") {
-		t.Errorf("async reply missing not-allowed copy: %q", async)
-	}
-	if !strings.Contains(async, "Contact your Slack admin") {
-		t.Errorf("async reply missing admin-escalation pointer: %q", async)
-	}
-	// Post-revert of #234 the `/qurl list` breadcrumb is gone — the
-	// list is workspace-wide and pointing the user back at it would
-	// just surface the same row they pasted from. See TODO(#460).
-	if strings.Contains(async, "`/qurl list`") {
-		t.Errorf("async reply re-introduces misleading `/qurl list` breadcrumb: %q", async)
-	}
-	if mintHits.Load() != 0 {
-		t.Errorf("mint reached despite resource-id not-in-allow-set (hits = %d)", mintHits.Load())
-	}
-}
-
 // addTunnelSlugResource registers a GET /v1/resources handler that
 // resolves testTunnelSlug → testResourceIDFix as an active tunnel — the
 // upstream half of the `/qurl get $<slug>` slug-fallback path.
@@ -702,6 +612,34 @@ func TestHandleGet_DollarSlugAllowedSetNonAdmin(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "https://qurl.link/by-slug") {
 		t.Errorf("slug round-trip failed — async reply missing link: %q", async)
+	}
+}
+
+// TestHandleGet_DollarSlugMintsAfterAliasBound is the regression fence
+// for "couldn't /qurl get $<slug> after set-alias $x $<slug>": an admin
+// binds an alias (`$dash`) to a tunnel slug, which puts the tunnel's
+// resource_id in the channel allow-set via alias_bindings.values().
+// Getting by the SLUG (whose name is NOT itself a bound alias) must still
+// mint — the lookup misses the binding, falls back to slug resolution,
+// and the resolved resource_id passes the allow-set gate precisely
+// because the alias binding put it there. Uses a non-admin so the mint
+// proves the allow-set path (an admin would bypass it).
+func TestHandleGet_DollarSlugMintsAfterAliasBound(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	// `set-alias $dash $<slug>` binds `dash` → the tunnel's resource_id;
+	// the slug name itself is NOT a bound alias.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testTunnelAliasDash: testResourceIDFix})
+	addTunnelSlugResource(t, ts)
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/slug-after-alias", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/slug-after-alias") {
+		t.Errorf("get-by-slug after aliasing the slug failed to mint: %q", async)
 	}
 }
 
@@ -802,56 +740,5 @@ func TestHandleGet_DollarSlugAdminBypassesAllowedSet(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "https://qurl.link/admin-slug") {
 		t.Errorf("admin slug round-trip failed: %q", async)
-	}
-}
-
-// TestHandleGet_DollarResourceIDAdminBypassesAllowedSet fences the
-// admin asymmetry resolution: a workspace admin can mint `$r_<id>`
-// without the resource being in the current channel's allow-set,
-// matching `/qurl list`'s unfiltered admin view. Without this
-// bypass, the list footer's copy-paste promise ("Copy any `$slug`
-// and run `/qurl get $slug`") breaks for admins on cross-channel
-// resources.
-func TestHandleGet_DollarResourceIDAdminBypassesAllowedSet(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	// Admin can mint resources NOT in this channel's allow-set —
-	// seed a row whose allow-set excludes the target ID.
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
-	ts.addCustomer("POST", mintByFallbackResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		writeCreateFixture(t, w, "https://qurl.link/admin-bypass", testResourceIDFallback)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "https://qurl.link/admin-bypass") {
-		t.Errorf("admin failed to mint resource outside channel allow-set: %q", async)
-	}
-}
-
-// TestHandleGet_DollarResourceIDAdminStoreNil fences the
-// AdminStore-nil short-circuit on the `$r_<id>` path. Same
-// fail-closed posture as the alias-form: no allow-set lookup
-// possible → refuse with the user-facing "admin features not
-// configured" copy that points the user at their Slack admin.
-// Mint MUST NOT be reached.
-func TestHandleGet_DollarResourceIDAdminStoreNil(t *testing.T) {
-	ts := newAdminTestServers(t)
-	var mintHits atomic.Int32
-	ts.addCustomer("POST", "/v1/qurls", func(w http.ResponseWriter, _ *http.Request) {
-		mintHits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	})
-	h := newAdminTestHandler(t, ts)
-	h.cfg.AdminStore = nil
-	inv := newAdminSlashInvoker(t, h)
-
-	_, _, async := inv.invokeAdminAsync("get $"+testResourceIDFallback, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "admin features are not yet configured") {
-		t.Errorf("async reply missing not-configured copy: %q", async)
-	}
-	if mintHits.Load() != 0 {
-		t.Errorf("mint reached despite nil AdminStore on resource-id form (hits = %d)", mintHits.Load())
 	}
 }

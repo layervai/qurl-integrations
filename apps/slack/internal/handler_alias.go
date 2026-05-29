@@ -268,6 +268,11 @@ func (h *Handler) aliasValidate(w http.ResponseWriter, values url.Values, verb s
 // verb. Returns (ctx, cancel, teamID, channelID, ok); on !ok the helper
 // has already written the response and cancel is a callable no-op so
 // caller-side `defer cancel()` is unconditional.
+//
+// set-alias does NOT use this: a slug target resolves through
+// qurl-service before the DDB write, so it runs on [runAsync]'s own ctx
+// (~25s) and calls [aliasValidate] directly — it never needs the sync
+// timer this helper layers on.
 func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
 	cancel = func() {}
 	teamID, channelID, ok = h.aliasValidate(w, values, verb)
