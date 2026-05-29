@@ -717,9 +717,11 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // gating here means non-owners don't get a setup URL minted in their
 // name at all (cleaner audit, no half-completed OAuth flows).
 //
-// AdminStore=nil (sandbox / no-DDB) skips the gate — same posture as
-// every other admin verb. The reply on missing AdminStore stays the
-// pre-existing "qURL OAuth is not configured" branch.
+// AdminStore=nil (sandbox / no-DDB) skips the owner gate — same posture
+// as every other admin verb; the caller falls through to mint as on a
+// fresh install. That is a separate short-circuit from the oauthSetup==nil
+// check below, which is the branch that returns "qURL OAuth is not
+// configured" (and which fires first, before AdminStore is consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
@@ -854,7 +856,7 @@ func (h *Handler) helpMessage() string {
 		// advertise it there — matches how the admin verbs below
 		// render conditionally.
 		lines = append(lines,
-			"• Only the workspace owner can re-run `/qurl setup`; added admins use the other `/qurl admin` verbs but can't reconnect the qURL account",
+			"• Re-running `/qurl setup` is owner-only — only the workspace owner (whoever first connected qURL) can reconnect the account",
 		)
 	}
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
