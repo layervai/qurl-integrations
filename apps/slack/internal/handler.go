@@ -130,9 +130,12 @@ const (
 const adminCommandSuffix = "-admin"
 
 // isAdminCommand reports whether the invoked slash command is the admin
-// surface — any `*-admin` command, not just the prod commandAdmin.
+// surface — any `/qurl…-admin` command, not just the prod commandAdmin.
+// Scoped to the `/qurl` command family (HasPrefix commandUser) so a stray
+// unregistered `*-admin` command can't route to admin dispatch and then
+// have userCommandName/help name a sibling command that doesn't exist.
 func isAdminCommand(command string) bool {
-	return strings.HasSuffix(command, adminCommandSuffix)
+	return strings.HasPrefix(command, commandUser) && strings.HasSuffix(command, adminCommandSuffix)
 }
 
 // userCommandName / adminCommandName return the sibling command names for
@@ -648,6 +651,10 @@ func slashSubcommand(text, command string) bool {
 // spellings because slashVerb accepts the dash-free historical form too.
 // `setup` is deliberately NOT here — it lives on `/qurl` (see handleSetup)
 // so the first claimant of an unbound workspace can reach it.
+//
+// Adding an admin verb touches three places that must stay in sync: this
+// list (wrong-surface classification), a dispatch case in
+// dispatchAdminCommand, and — if it's user-facing — adminHelpMessage.
 var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-alias", "unsetalias"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
@@ -674,6 +681,15 @@ func isUserVerb(text string) bool {
 // `/qurl-admin admin list`, matching the retained sub-word grammar. Used
 // only on already-classified verb text, so the token is a known-literal
 // keyword rather than arbitrary user input.
+// stripBackticks removes backticks from user-controlled text echoed into a
+// Slack inline-code span (the wrong-surface redirects). A stray backtick in
+// the echoed text would otherwise unbalance the `…` fence and render the
+// ephemeral reply garbled. Rendering hygiene, not a security boundary —
+// ephemerals are plain text, not markup-trusted.
+func stripBackticks(s string) string {
+	return strings.ReplaceAll(s, "`", "")
+}
+
 func firstWord(text string) string {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
@@ -795,15 +811,13 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 	case text == "aliases":
 		h.handleAliases(w, values)
 	case isAdminVerb(text):
-		// An admin verb typed on `/qurl` — redirect to `/qurl-admin`
-		// rather than the generic unknown reply. firstWord(text) is the
-		// classified verb word (a known-literal keyword); the full text is
-		// echoed too so the correction is copy-pasteable. Both are safe to
-		// embed because this is an ephemeral plain-text reply to the
-		// typing user — Slack renders it as text, not markup — not because
-		// the full text is a known literal (it isn't).
+		// An admin verb typed on `/qurl` — redirect to `/qurl-admin` rather
+		// than the generic unknown reply. firstWord(text) is the classified
+		// verb word; the full text is echoed (backticks stripped) so the
+		// correction is copy-pasteable without a stray backtick unbalancing
+		// the inline-code span in the ephemeral reply.
 		adminCmd := adminCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", firstWord(text), adminCmd, text, adminCmd))
+		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", firstWord(text), adminCmd, stripBackticks(text), adminCmd))
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -826,11 +840,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 // surfaces reading the same. The verb-specific handlers and parser are
 // unchanged — they still see `admin <action>` text.
 func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text string, values url.Values) {
-	// Verb-match order is load-bearing: the admin/tunnel/alias sub-word
-	// matches MUST precede the isUserVerb fall-through. The `admin` sub-word
-	// grammar (`admin list`) collides with the bare user verb `list`, so a
-	// user-verb check first would mis-route `admin list` to the wrong-surface
-	// redirect. Keep new admin verbs above the isUserVerb case.
+	// Verb-match order is defensive, not load-bearing today: the
+	// admin/tunnel/alias sub-word matches come before the isUserVerb
+	// fall-through. slashVerb requires an exact token or a `verb ` prefix,
+	// so `admin list` doesn't match the user verb `list` regardless of
+	// order. Keeping admin matches first guards against a FUTURE user verb
+	// that would collide as the leading token of an admin sub-word grammar.
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, h.adminHelpMessage(command))
@@ -853,8 +868,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleUnsetAlias(w, values)
 	case isUserVerb(text):
 		// A user verb typed on the admin command — redirect to the user one.
+		// Echoed text has backticks stripped (see the /qurl-side redirect).
 		userCmd := userCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` is a `%s` command. Use `%s %s` instead, or run `%s help`.", firstWord(text), userCmd, userCmd, text, userCmd))
+		respondSlack(w, fmt.Sprintf("`%s` is a `%s` command. Use `%s %s` instead, or run `%s help`.", firstWord(text), userCmd, userCmd, stripBackticks(text), userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
 		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", text, command))
