@@ -148,7 +148,7 @@ For customer Slack installs, configure the Slack app with:
 - Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: at least `commands` (`views.open` itself requires no scope)
+- Bot scopes: `commands` (the captured token is used only for `views.open`, which requires no scope of its own)
 - Installation mode: workspace-level installs or Enterprise Grid org-level
   installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
   workspace setup and admin checks still use workspace `team_id`.
