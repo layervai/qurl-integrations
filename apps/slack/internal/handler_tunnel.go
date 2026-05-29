@@ -228,7 +228,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if h.aliasStore == nil {
-		respondSlack(w, "Channel shortcut storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Channel alias storage is not configured on this Slack bot deployment. Contact the operator.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -265,7 +265,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	if h.aliasStore == nil {
-		respondSlack(w, "Channel shortcut storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Channel alias storage is not configured on this Slack bot deployment. Contact the operator.")
 		return
 	}
 	if h.cfg.OpenView == nil {
@@ -578,9 +578,9 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 	}
 	if found {
 		if existing == resourceID {
-			return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
+			return fmt.Sprintf("qURL alias `$%s` is ready in this channel.", alias), nil
 		}
-		return fmt.Sprintf("qURL shortcut `$%s` is already used in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different shortcut.", alias, alias), slackdata.ErrAliasAlreadyBound
+		return fmt.Sprintf("qURL alias `$%s` is already used in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), slackdata.ErrAliasAlreadyBound
 	}
 	if err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID); err != nil {
 		if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
@@ -589,12 +589,12 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 			// conflict to the admin.
 			existing, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 			if lookupErr == nil && found && existing == resourceID {
-				return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
+				return fmt.Sprintf("qURL alias `$%s` is ready in this channel.", alias), nil
 			}
 		}
-		return ":warning: failed to bind the channel shortcut; no bootstrap key was minted.", err
+		return ":warning: failed to bind the channel alias; no bootstrap key was minted.", err
 	}
-	return fmt.Sprintf("qURL shortcut `$%s` is ready in this channel.", alias), nil
+	return fmt.Sprintf("qURL alias `$%s` is ready in this channel.", alias), nil
 }
 
 type preparedTunnelInstallMessage struct {

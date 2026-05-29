@@ -27,7 +27,7 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 // The breadcrumb points only at `/qurl list` (not `/qurl aliases`): list is
 // ungated and now renders each tunnel's channel `$alias` shortcuts inline, so
 // it's the single surface that always works and shows both slugs and aliases.
-const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels and their channel shortcuts."
+const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels and their channel aliases."
 
 // resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
 // `/qurl get` (the resource-id form is gone). Same terse-sentinel
@@ -126,7 +126,7 @@ func noResourceForAliasMessage(alias string) string {
 // caller can't reopen the Slack-fence-escaping surface the parser guards.
 func legacyAliasBindingMessage(alias string) string {
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "That channel shortcut points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias`."
+		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias`."
 	}
 	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<slug>`.", alias, alias)
 }

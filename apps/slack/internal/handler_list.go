@@ -64,13 +64,13 @@ const listCreateButtonMaxRows = 45
 // [listCreateButtonMaxRows]). It names the typed path and the
 // one-time-use default; the button path is named only in
 // [listFooterButtons], shown when the buttons are actually present.
-const listFooterText = "Copy any `$slug` or `$alias` and run `/qurl get` to mint a link. Every qURL is one-time use — it opens access once, then expires. Any `(also …)` shortcuts shown are specific to this channel."
+const listFooterText = "Each `$<slug>` is a tunnel's name; the `(alias: …)` names are alternate names for it in this channel. Copy a slug or an alias and run `/qurl get` on it to mint a one-time qURL link — it opens access once, then expires."
 
 // listFooterButtons is the guidance line beneath the interactive /qurl
 // list (the version with a per-row Create qURL button). It names BOTH
 // ways to mint — tapping the button and the typed command — and the
 // one-time-use default.
-const listFooterButtons = "Tap *Create qURL* on any tunnel, or run `/qurl get $slug` (or `$alias`), to mint a link. Every qURL is one-time use — it opens access once, then expires. Any `(also …)` shortcuts shown are specific to this channel."
+const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$slug` or `$alias` and run `/qurl get`, to mint a one-time qURL link — it opens access once, then expires. A `$slug` is a tunnel's name; the `(alias: …)` names are alternate names for it in this channel."
 
 // handleListResources implements `/qurl list`. It lists the workspace's
 // tunnel resources (type=tunnel only — URL/transit resources are
@@ -283,15 +283,15 @@ func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 // line in /qurl list output:
 //
 //   - Slug only:           • `$<slug>`
-//   - With bound aliases:  • `$<slug>` (also `$<alias>`, `$<alias2>`)
+//   - With bound aliases:  • `$<slug>` (aliases: `$<alias>`, `$<alias2>`)
 //   - With description:    • `$<slug>` → <description>
 //
 // The primary token is [tunnelDisplayToken] (slug-first; never the opaque
-// r_<id>). `boundAliases` are the channel `$alias` shortcuts that resolve
+// r_<id>). `boundAliases` are the channel `$alias` names that resolve
 // to this tunnel in `/qurl get` — a tunnel can have several. They render
-// as "(also …)" so the user sees every name that works, EXCLUDING the
-// primary token itself (the install flow binds `$<slug>` as a channel
-// alias, so the slug would otherwise appear twice). The token-in-backticks
+// as "(alias: …)" / "(aliases: …)" so the user sees every name that works,
+// EXCLUDING the primary token itself (the install flow binds `$<slug>` as a
+// channel alias, so the slug would otherwise appear twice). The token-in-backticks
 // shape lets Slack render each as inline code. There is no `(tunnel)` label
 // or `[slug:...]` fragment — the whole list is tunnels and the token IS the
 // slug. The arrow joins to the human-readable description when one is set.
@@ -320,7 +320,11 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 		}
 	}
 	if len(extras) > 0 {
-		line += " (also " + strings.Join(extras, ", ") + ")"
+		label := "aliases: "
+		if len(extras) == 1 {
+			label = "alias: "
+		}
+		line += " (" + label + strings.Join(extras, ", ") + ")"
 	}
 	if r.Description != "" {
 		line += " → " + r.Description

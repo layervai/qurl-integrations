@@ -182,7 +182,7 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 }
 
 func validateChannelShortcutToken(tok string) (alias, reason string) {
-	return validateAliasTokenForNoun(tok, "Channel shortcut", "channel shortcut")
+	return validateAliasTokenForNoun(tok, "Channel alias", "channel alias")
 }
 
 func validateAliasTokenForNoun(tok, noun, nounLower string) (alias, reason string) {
