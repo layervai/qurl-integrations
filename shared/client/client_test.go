@@ -2009,8 +2009,8 @@ func TestUpdateResourceNilInputRejected(t *testing.T) {
 	}
 }
 
-func TestGetResourceByAlias(t *testing.T) {
-	const wantPath = "/v1/resources/by-alias/" + testAlias
+func TestGetResource(t *testing.T) {
+	const wantPath = "/v1/resources/" + testResourceIDAlt
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
@@ -2020,38 +2020,39 @@ func TestGetResourceByAlias(t *testing.T) {
 		}
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": testResourceIDAlt,
-			"alias":       testAlias,
-			"target_url":  testTargetURL,
-			"type":        ResourceTypeURL,
+			"slug":        testTunnelSlug,
+			"type":        ResourceTypeTunnel,
 			"status":      StatusActive,
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.GetResourceByAlias(context.Background(), testAlias)
+	got, err := c.GetResource(context.Background(), testResourceIDAlt)
 	if err != nil {
-		t.Fatalf("GetResourceByAlias: %v", err)
+		t.Fatalf("GetResource: %v", err)
 	}
 	if got.ResourceID != testResourceIDAlt {
 		t.Errorf("got ResourceID %q", got.ResourceID)
 	}
-	if got.Alias != testAlias {
-		t.Errorf("got Alias %q, want %q", got.Alias, testAlias)
+	// Slug decode is the contract this method exists for — /qurl aliases
+	// renders the tunnel slug resolved here, never the opaque resource_id.
+	if got.Slug != testTunnelSlug {
+		t.Errorf("got Slug %q, want %q", got.Slug, testTunnelSlug)
 	}
 	// Pin response-side decode of Type and Status — the schema is
 	// the contract, and round-tripping these fields catches future
 	// JSON-tag regressions on the response side.
-	if got.Type != ResourceTypeURL {
-		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeURL)
+	if got.Type != ResourceTypeTunnel {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeTunnel)
 	}
 	if got.Status != StatusActive {
 		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
 	}
 }
 
-func TestGetResourceByAliasEscapesPathSegment(t *testing.T) {
-	// Aliases are validated server-side as `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`
+func TestGetResourceEscapesPathSegment(t *testing.T) {
+	// Resource IDs are validated server-side as `^r_[a-z0-9_-]{11}$`
 	// (no `/`, no `%`), so reserved bytes won't reach this method via the
 	// Slack/Discord parsers. But the client method should still escape its
 	// input — defensive for direct programmatic callers and to keep a future
@@ -2066,17 +2067,17 @@ func TestGetResourceByAliasEscapesPathSegment(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.GetResourceByAlias(context.Background(), "weird/alias"); err != nil {
-		t.Fatalf("GetResourceByAlias: %v", err)
+	if _, err := c.GetResource(context.Background(), "weird/id"); err != nil {
+		t.Fatalf("GetResource: %v", err)
 	}
-	const want = "/v1/resources/by-alias/weird%2Falias"
+	const want = "/v1/resources/weird%2Fid"
 	if gotEscapedPath != want {
-		t.Errorf("alias path-escape: got %q, want %q", gotEscapedPath, want)
+		t.Errorf("resourceID path-escape: got %q, want %q", gotEscapedPath, want)
 	}
 }
 
 // TestUpdateResourceEscapesIDPathSegment is the symmetric path-escape
-// pin for UpdateResource (mirror of TestGetResourceByAliasEscapesPathSegment).
+// pin for UpdateResource (mirror of TestGetResourceEscapesPathSegment).
 // Server-side resource_id format is `^r_[a-z0-9_-]{11}$` so reserved
 // bytes won't reach this method via normal flows; the test is
 // defensive for direct programmatic callers and keeps a future
@@ -2102,30 +2103,30 @@ func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {
 	}
 }
 
-func TestGetResourceByAliasEmptyRejected(t *testing.T) {
+func TestGetResourceEmptyRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.GetResourceByAlias(context.Background(), "")
-	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
-		t.Fatalf("expected ErrGetResourceByAliasEmpty, got %v", err)
+	_, err := c.GetResource(context.Background(), "")
+	if !errors.Is(err, ErrGetResourceEmptyID) {
+		t.Fatalf("expected ErrGetResourceEmptyID, got %v", err)
 	}
 }
 
-// TestGetResourceByAliasWhitespaceRejected pins the strings.TrimSpace
-// guard — a whitespace-only alias would hit the wire as
-// `/v1/resources/by-alias/%20%20` and 400 server-side. Companion to
-// TestGetResourceByAliasEmptyRejected.
-func TestGetResourceByAliasWhitespaceRejected(t *testing.T) {
+// TestGetResourceWhitespaceRejected pins the strings.TrimSpace
+// guard — a whitespace-only ID would hit the wire as
+// `/v1/resources/%20%20` and 400 server-side. Companion to
+// TestGetResourceEmptyRejected.
+func TestGetResourceWhitespaceRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.GetResourceByAlias(context.Background(), "   ")
-	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
-		t.Fatalf("expected ErrGetResourceByAliasEmpty on whitespace, got %v", err)
+	_, err := c.GetResource(context.Background(), "   ")
+	if !errors.Is(err, ErrGetResourceEmptyID) {
+		t.Fatalf("expected ErrGetResourceEmptyID on whitespace, got %v", err)
 	}
 }
 
-// TestGetResourceByAliasTrimsSurroundingWhitespace pins the
-// "trim then validate AND send" contract for the alias path
+// TestGetResourceTrimsSurroundingWhitespace pins the
+// "trim then validate AND send" contract for the resource-id path
 // (mirror of TestUpdateResourceTrimsSurroundingWhitespace).
-func TestGetResourceByAliasTrimsSurroundingWhitespace(t *testing.T) {
+func TestGetResourceTrimsSurroundingWhitespace(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -2134,16 +2135,16 @@ func TestGetResourceByAliasTrimsSurroundingWhitespace(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.GetResourceByAlias(context.Background(), "  "+testAlias+"  "); err != nil {
-		t.Fatalf("GetResourceByAlias: %v", err)
+	if _, err := c.GetResource(context.Background(), "  "+testResourceIDAlt+"  "); err != nil {
+		t.Fatalf("GetResource: %v", err)
 	}
-	wantPath := "/v1/resources/by-alias/" + testAlias
+	wantPath := "/v1/resources/" + testResourceIDAlt
 	if gotPath != wantPath {
 		t.Errorf("trimmed value should hit the wire: got %q, want %q", gotPath, wantPath)
 	}
 }
 
-func TestGetResourceByAliasNotFound(t *testing.T) {
+func TestGetResourceNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
@@ -2151,8 +2152,8 @@ func TestGetResourceByAliasNotFound(t *testing.T) {
 			"error": map[string]any{
 				"title":  "Not Found",
 				"status": 404,
-				"detail": "alias not found",
-				"code":   "alias_not_found",
+				"detail": "resource not found",
+				"code":   "not_found",
 			},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -2162,7 +2163,7 @@ func TestGetResourceByAliasNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.GetResourceByAlias(context.Background(), "missing-alias")
+	_, err := c.GetResource(context.Background(), "r_missing0001")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -2173,15 +2174,15 @@ func TestGetResourceByAliasNotFound(t *testing.T) {
 	if apiErr.StatusCode != http.StatusNotFound {
 		t.Errorf("got status %d, want 404", apiErr.StatusCode)
 	}
-	if apiErr.Code != "alias_not_found" {
-		t.Errorf("got code %q, want alias_not_found", apiErr.Code)
+	if apiErr.Code != "not_found" {
+		t.Errorf("got code %q, want not_found", apiErr.Code)
 	}
 }
 
 // TestCreateResourceAliasInUse pins the typed *APIError shape on the
 // `alias_in_use` 409 path documented in CreateResourceInput's doc comment
 // (alias attempted on an already-existing resource missing an alias).
-// Symmetric with TestGetResourceByAliasNotFound — pins the error envelope
+// Symmetric with TestGetResourceNotFound — pins the error envelope
 // for the second new resource method.
 func TestCreateResourceAliasInUse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
