@@ -615,6 +615,34 @@ func TestHandleGet_DollarSlugAllowedSetNonAdmin(t *testing.T) {
 	}
 }
 
+// TestHandleGet_DollarSlugMintsAfterAliasBound is the regression fence
+// for "couldn't /qurl get $<slug> after set-alias $x $<slug>": an admin
+// binds an alias (`$dash`) to a tunnel slug, which puts the tunnel's
+// resource_id in the channel allow-set via alias_bindings.values().
+// Getting by the SLUG (whose name is NOT itself a bound alias) must still
+// mint — the lookup misses the binding, falls back to slug resolution,
+// and the resolved resource_id passes the allow-set gate precisely
+// because the alias binding put it there. Uses a non-admin so the mint
+// proves the allow-set path (an admin would bypass it).
+func TestHandleGet_DollarSlugMintsAfterAliasBound(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	// `set-alias $dash $<slug>` binds `dash` → the tunnel's resource_id;
+	// the slug name itself is NOT a bound alias.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{"dash": testResourceIDFix})
+	addTunnelSlugResource(t, ts)
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/slug-after-alias", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "https://qurl.link/slug-after-alias") {
+		t.Errorf("get-by-slug after aliasing the slug failed to mint: %q", async)
+	}
+}
+
 // TestHandleGet_DollarSlugNotAllowedNonAdmin fences the slug-fallback
 // authorization gate AND its anti-enumeration posture: a non-admin
 // pasting a tunnel slug whose resource isn't in the channel allow-set
