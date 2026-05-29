@@ -284,6 +284,17 @@ func TestDispatchSplit_EmptyCommandDefaultsToUserHelp(t *testing.T) {
 	}
 }
 
+// TestCommandNameConstantsStayInSync pins the invariant the help-text
+// ReplaceAll rewrite leans on: the admin command is exactly the user command
+// plus adminCommandSuffix. A rename of either constant that desynced this
+// would silently break adminCommandName and the non-prod help rewrite — fail
+// here first.
+func TestCommandNameConstantsStayInSync(t *testing.T) {
+	if commandAdmin != commandUser+adminCommandSuffix {
+		t.Errorf("commandAdmin %q != commandUser %q + adminCommandSuffix %q", commandAdmin, commandUser, adminCommandSuffix)
+	}
+}
+
 // TestHelpMessagesContainOnlyCommandTokens guards the MAINTAINER INVARIANT
 // documented on userHelpMessage / adminHelpMessage: the help lines are
 // authored with prod command names and rewritten to the invoked command via

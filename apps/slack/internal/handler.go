@@ -749,6 +749,8 @@ func echoText(s string) string {
 	if r := []rune(s); len(r) > maxEchoRunes {
 		return string(r[:maxEchoRunes]) + "…"
 	}
+	// Byte length exceeded the cap but rune count didn't (multi-byte text):
+	// within budget by runes, so return as-is rather than truncate.
 	return s
 }
 
