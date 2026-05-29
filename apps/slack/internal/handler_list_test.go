@@ -505,15 +505,16 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	// Empty token (slug-less row) < "alpha" < "middle".
+	// Legible tokens lead in order ("alpha" < "middle"); the tokenless
+	// slug-less row sorts to the END.
 	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no slug — ask your Slack admin to set one)")
 	alphaPos := strings.Index(async, "`$alpha`")
 	middlePos := strings.Index(async, "`$middle`")
 	if alphaPos < 0 || middlePos < 0 || zzzPos < 0 {
 		t.Fatalf("missing rows in async reply: %q", async)
 	}
-	if zzzPos >= alphaPos || alphaPos >= middlePos {
-		t.Errorf("rows not sorted by token: zzz(no-slug)=%d alpha=%d middle=%d in %q", zzzPos, alphaPos, middlePos, async)
+	if alphaPos >= middlePos || middlePos >= zzzPos {
+		t.Errorf("rows not sorted (legible tokens first, tokenless last): alpha=%d middle=%d zzz(no-slug)=%d in %q", alphaPos, middlePos, zzzPos, async)
 	}
 }
 

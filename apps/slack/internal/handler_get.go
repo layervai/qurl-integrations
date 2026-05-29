@@ -24,7 +24,15 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 // [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
 // renders so multi-sentence prose stays out of the parser's error
 // values (repo convention).
-const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels (or `/qurl aliases` for this channel's shortcuts)."
+// The breadcrumb points only at `/qurl list` (not `/qurl aliases`): list is
+// ungated and now renders each tunnel's channel `$alias` shortcuts inline, so
+// it's the single surface that always works and shows both slugs and aliases.
+const urlNotSupportedGetMessage = "`/qurl get` only works with a `$slug` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels and their channel shortcuts."
+
+// resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
+// `/qurl get` (the resource-id form is gone). Same terse-sentinel
+// ([ErrResourceIDNotSupportedGet]) → rich-handler-copy split as the URL case.
+const resourceIDNotSupportedGetMessage = "`/qurl get` takes a tunnel `$slug` or a channel `$alias`, not a resource ID. Run `/qurl list` and copy the `$slug` instead."
 
 // unexpectedGetShapeMessage is the reply for getWork's defensive
 // empty-alias arm; it routes the user to their operator rather than
@@ -185,6 +193,10 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		// to surface verbatim.
 		if errors.Is(err, ErrURLNotSupportedGet) {
 			respondSlack(w, ":warning: "+urlNotSupportedGetMessage)
+			return
+		}
+		if errors.Is(err, ErrResourceIDNotSupportedGet) {
+			respondSlack(w, ":warning: "+resourceIDNotSupportedGetMessage)
 			return
 		}
 		respondSlack(w, ":warning: "+err.Error())

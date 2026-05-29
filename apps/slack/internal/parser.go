@@ -156,6 +156,15 @@ var ErrMissingTarget = errors.New("missing target argument")
 // values (see the parseAliasArgs doc comment).
 var ErrURLNotSupportedGet = errors.New("raw URL not supported by get")
 
+// ErrResourceIDNotSupportedGet is returned when `/qurl get` is handed a
+// `$r_<id>` resource-id token. The resource-id get form is gone (slug/alias
+// only), but pre-tunnels-only `/qurl list` surfaced `$r_<id>` tokens, so a
+// user mid-migration may still paste one. Distinct from [ErrInvalidAlias] so
+// the handler's copy can name resource IDs and redirect to the `$slug`,
+// rather than reporting the generic alias-charset rule the `_` would trip.
+// Same terse-sentinel / rich-handler-copy split as [ErrURLNotSupportedGet].
+var ErrResourceIDNotSupportedGet = errors.New("resource id not supported by get")
+
 // ErrMissingUserMention is returned when `admin add` / `admin remove`
 // are invoked without a `<@U…>` Slack user mention.
 var ErrMissingUserMention = errors.New("missing @user mention")
@@ -420,6 +429,15 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 		// Raw URLs are no longer mintable through Slack — get takes a
 		// tunnel `$slug` or a channel `$alias` only.
 		return nil, ErrURLNotSupportedGet
+	}
+	if strings.HasPrefix(rest[0], "$r_") {
+		// A `$r_<id>` paste: the resource-id get form is gone. Redirect to
+		// the `$slug` rather than falling through to the generic
+		// ErrInvalidAlias (the `_` trips the alias charset), which wouldn't
+		// explain that resource IDs are deliberately unsupported now. A real
+		// alias can never start with `r_` — `_` isn't in the alias charset —
+		// so this never shadows a valid token.
+		return nil, ErrResourceIDNotSupportedGet
 	}
 	alias, err := parseAliasToken(rest[0])
 	if err != nil {
