@@ -63,6 +63,18 @@ const (
 	AdminList AdminAction = "list"
 )
 
+// Admin-gate audit labels. Unlike the parser-enumerated actions above
+// (which come from parsing `admin <action>`), these name the verb being
+// gated when a handler calls requireAdminSync / requireAliasAdminGate.
+// They surface only as the `action` telemetry field on the admin-gate log
+// lines; naming them keeps a typo from becoming a silent mislabel in the
+// audit trail.
+const (
+	AdminActionSetAlias      AdminAction = "set_alias"
+	AdminActionUnsetAlias    AdminAction = "unset_alias"
+	AdminActionTunnelInstall AdminAction = "tunnel_install"
+)
+
 // Command is the parsed shape of a `/qurl …` slash command.
 type Command struct {
 	// Subcommand is the first word (or [SubcmdHelp] when text is empty).
@@ -522,7 +534,7 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	action := AdminAction(strings.ToLower(verb))
 	cmd.AdminAction = action
 	tail := rest[1:]
-	switch action {
+	switch action { //nolint:exhaustive // parser produces only these actions; gate-audit labels aren't parseable, default returns ErrUnknownAdminAction
 	case AdminRevoke:
 		// `revoke` takes a single positional `q_<id>` qurl_id (no
 		// `$` sigil). A `$alias` token here surfaces an

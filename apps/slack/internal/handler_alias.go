@@ -344,7 +344,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// aliasValidate (team/channel IDs + store-wired check) but before the
 	// slug resolve + DDB bind, so a non-admin is denied before any resource
 	// interaction.
-	if !h.requireAliasAdminGate(w, teamID, values, AdminAction("set_alias")) {
+	if !h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias) {
 		return
 	}
 	slug := strings.TrimPrefix(args.Target, "$")
@@ -468,7 +468,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 	// Admin gate, in code (see requireAliasAdminGate). Runs after
 	// aliasPreamble (IDs + store-wired check) but before UnbindChannelAlias,
 	// so a non-admin is denied before any store write.
-	if !h.requireAliasAdminGate(w, teamID, values, AdminAction("unset_alias")) {
+	if !h.requireAliasAdminGate(w, teamID, values, AdminActionUnsetAlias) {
 		return
 	}
 
@@ -478,12 +478,12 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if err != nil {
-		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
+		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
 		respondSlack(w, "Failed to clear alias. Please try again.")
 		return
 	}
 	// Admin-verb audit trail: counterpart to the setalias "alias bound"
 	// audit line. team/channel/alias are validated upstream.
-	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; values are validated upstream.
+	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
 	respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
 }

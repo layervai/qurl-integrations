@@ -146,6 +146,11 @@ func newAliasTestHandler(t *testing.T) (*Handler, *fakeAliasStore) {
 	// wire an AdminStore where the test callers are admins so the verb
 	// bodies are reachable. Harmless for the few callers that return
 	// before the gate (parser error, missing-id guard, help).
+	//
+	// Note this wires AdminStore unconditionally, so a test that needs the
+	// AdminStore-nil path must build the handler directly rather than through
+	// this helper (see TestUserHelpGatesGetAndAliasesOnAdminStore and
+	// TestHelpListsAliasVerbsWhenAliasStoreWired).
 	seedAliasAdminGate(t, h, testAliasTeamID)
 	return h, store
 }

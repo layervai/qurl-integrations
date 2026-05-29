@@ -238,7 +238,7 @@ func (h *Handler) handleTunnel(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, ":warning: missing channel_id in slash command payload")
 		return
 	}
-	if !h.requireAdminSync(w, teamID, userID, AdminAction("tunnel_install")) {
+	if !h.requireAdminSync(w, teamID, userID, AdminActionTunnelInstall) {
 		return
 	}
 

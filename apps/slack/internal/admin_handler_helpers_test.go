@@ -176,6 +176,12 @@ func newAdminSlashInvokerOnChannel(t *testing.T, h *Handler, channelID string) *
 // here so the shared admin invoker drives both surfaces with the command
 // Slack would actually stamp, rather than hardcoding one and silently
 // exercising the wrong-surface redirect.
+//
+// Note `help` is deliberately not a user verb (isUserVerb("help") is false —
+// help is dispatched explicitly at the top of each surface, not via the verb
+// lists), so it routes to `/qurl-admin` here. That's intentional and harmless:
+// `help` renders on both surfaces, and the help tests that use this want the
+// admin help text.
 func slashCommandForVerb(text string) string {
 	if isUserVerb(text) {
 		return commandUser

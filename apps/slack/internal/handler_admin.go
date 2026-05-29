@@ -58,7 +58,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	switch cmd.AdminAction {
+	switch cmd.AdminAction { //nolint:exhaustive // dispatch handles only parser-producible actions; gate-audit labels never reach here, default covers the rest
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:

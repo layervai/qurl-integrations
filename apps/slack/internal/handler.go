@@ -657,12 +657,15 @@ func slashSubcommand(text, command string) bool {
 // Adding an admin verb touches three places that must stay in sync: this
 // list (wrong-surface classification), a dispatch case in
 // dispatchAdminCommand, and — if it's user-facing — adminHelpMessage.
+//
+// Immutable: read-only on the request hot path (slashVerb ranges it); a
+// var only because Go has no const slice. Do not mutate at runtime.
 var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-alias", "unsetalias"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
-// redirects here to `/qurl setup`.
+// redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
 var userVerbs = []string{"get", "list", "aliases", "create", "setup"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
@@ -682,8 +685,8 @@ func isUserVerb(text string) bool {
 // word — `admin <action>` collapses to `admin` so the redirect reads
 // `/qurl-admin admin list`, matching the retained sub-word grammar. It's
 // reached only on already-classified verb text, so the token is a
-// known-literal keyword; the redirects stripBackticks-wrap it anyway to
-// keep the inline-code-fence safety local rather than by chained invariant.
+// known-literal keyword; the redirects echoText-wrap it anyway to keep the
+// inline-code-fence safety local rather than by chained invariant.
 func firstWord(text string) string {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
@@ -693,12 +696,36 @@ func firstWord(text string) string {
 }
 
 // stripBackticks removes backticks from user-controlled text echoed into a
-// Slack inline-code span (the wrong-surface redirects). A stray backtick in
-// the echoed text would otherwise unbalance the `…` fence and render the
-// ephemeral reply garbled. Rendering hygiene, not a security boundary —
-// ephemerals are plain text, not markup-trusted.
+// Slack inline-code span (the wrong-surface and unknown-subcommand replies).
+// A stray backtick in the echoed text would otherwise unbalance the `…` fence
+// and render the ephemeral reply garbled. Rendering hygiene, not a security
+// boundary — ephemerals are plain text, not markup-trusted.
 func stripBackticks(s string) string {
 	return strings.ReplaceAll(s, "`", "")
+}
+
+// maxEchoRunes caps how much user-typed command text the wrong-surface and
+// unknown-subcommand replies echo back. The echo is a copy-paste convenience,
+// not data; an unbounded paste would render an ungainly ephemeral (Slack also
+// truncates server-side, but at a less predictable point). 200 runes
+// comfortably fits any real command invocation.
+const maxEchoRunes = 200
+
+// echoText prepares user-controlled command text for echoing into a Slack
+// inline-code span: it strips backticks (so a stray one can't unbalance the
+// `…` fence) and caps the length (so an oversized paste renders predictably).
+func echoText(s string) string {
+	s = stripBackticks(s)
+	// Byte length is an upper bound on rune count, so a string within the cap
+	// by bytes is within it by runes too — skip the []rune conversion in the
+	// common short case.
+	if len(s) <= maxEchoRunes {
+		return s
+	}
+	if r := []rune(s); len(r) > maxEchoRunes {
+		return string(r[:maxEchoRunes]) + "…"
+	}
+	return s
 }
 
 func slashVerb(text string, verbs ...string) (matched bool, rest string) {
@@ -826,12 +853,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// correction is copy-pasteable without a stray backtick unbalancing
 		// the inline-code span in the ephemeral reply.
 		adminCmd := adminCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", stripBackticks(firstWord(text)), adminCmd, stripBackticks(text), adminCmd))
+		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), adminCmd, echoText(text), adminCmd))
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
 		slog.Info("unknown slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", stripBackticks(text), command))
+		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), command))
 	}
 }
 
@@ -879,10 +906,10 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// A user verb typed on the admin command — redirect to the user one.
 		// Echoed text has backticks stripped (see the /qurl-side redirect).
 		userCmd := userCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", stripBackticks(firstWord(text)), userCmd, userCmd, stripBackticks(text), userCmd))
+		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), userCmd, userCmd, echoText(text), userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", stripBackticks(text), command))
+		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", echoText(text), command))
 	}
 }
 
@@ -1108,7 +1135,9 @@ func (h *Handler) userHelpMessage(command string) string {
 	// MAINTAINER INVARIANT: ReplaceAll is blind, so every `/qurl` substring
 	// in `lines` must be a command literal — keep non-command prose (URLs
 	// like `qurl.link`, `/qurl-foo` examples) free of the lowercase `/qurl`
-	// token, or a non-prod env rewrites them too with no test to catch it.
+	// token, or a non-prod env rewrites them too.
+	// TestHelpMessagesContainOnlyCommandTokens guards this: a stray
+	// non-command slash token fails there.
 	return strings.ReplaceAll(strings.Join(lines, "\n"), commandUser, command)
 }
 

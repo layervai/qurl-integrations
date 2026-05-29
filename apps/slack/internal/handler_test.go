@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -270,6 +272,46 @@ func TestDispatchSplit_EmptyCommandDefaultsToUserHelp(t *testing.T) {
 	}
 	if !strings.Contains(reply, "/qurl list") {
 		t.Errorf("empty command did not render the prod /qurl command name: %q", reply)
+	}
+}
+
+// TestHelpMessagesContainOnlyCommandTokens guards the MAINTAINER INVARIANT
+// documented on userHelpMessage / adminHelpMessage: the help lines are
+// authored with prod command names and rewritten to the invoked command via
+// a blind strings.ReplaceAll, so every `/qurl…` token in the rendered help
+// must be a real command literal (`/qurl` or `/qurl-admin`). A future help
+// line introducing a non-command slash token — a `/qurl-docs` link, a
+// `/qurl-foo` example — would be silently mangled in a non-prod env (where
+// the command is named e.g. `/qurl-sandbox`). Fail here instead of shipping
+// a garbled help message.
+func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
+	// Fully wire the handler (aliasStore + AdminStore + OpenView) so every
+	// gated help line renders — maximizes the set of tokens under test.
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	// Matches a leading-slash command token plus any trailing command-name
+	// characters (the lowercase/digit/hyphen alphabet of `/qurl-admin` and
+	// non-prod names). It stops at the first space/backtick/other byte, so
+	// `/qurl-admin help` yields `/qurl-admin`, not the rest of the line.
+	tokenRe := regexp.MustCompile(`/qurl[a-z0-9-]*`)
+	allowed := map[string]bool{commandUser: true, commandAdmin: true}
+
+	for _, tc := range []struct {
+		surface  string
+		rendered string
+	}{
+		{"user", h.userHelpMessage(commandUser)},
+		{"admin", h.adminHelpMessage(commandAdmin)},
+	} {
+		for _, tok := range tokenRe.FindAllString(tc.rendered, -1) {
+			if !allowed[tok] {
+				t.Errorf("%s help contains non-command slash token %q; the blind ReplaceAll rewrite would mangle it in a non-prod env (see the MAINTAINER INVARIANT on userHelpMessage)", tc.surface, tok)
+			}
+		}
 	}
 }
 
