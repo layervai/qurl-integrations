@@ -161,3 +161,9 @@ The local unpacked test is considered successful when all of the following are t
 4. Files upload successfully to the configured qURL service
 5. Generated links are inserted into the Gmail draft automatically, or can be pasted manually using the copy fallback
 6. The inserted links open the uploaded image or PDF resources correctly
+
+> **Run this against the current Gmail UI before every release.** Draft insertion's first-choice
+> selector depends on Gmail's obfuscated CSS classes (`.Am.Al.editable`; see the
+> `TODO(gmail-frontend-classes)` marker in `content/gmail-compose.js`). Unit tests can't catch a
+> Gmail-side class rename, so a manual smoke test of steps 6–9 on live Gmail is part of the
+> release checklist.

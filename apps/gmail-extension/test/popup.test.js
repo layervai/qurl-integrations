@@ -624,5 +624,15 @@ test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay',
     }
   );
 
-  assert.equal(popup.RUNTIME_MESSAGE_TIMEOUT_MS >= 16000, true);
+  // Assert the documented budget inequality against background's own constants so the chain
+  // can't silently drift: popup budget must exceed the fixed relay legs (two pings + the
+  // INSERT_LINKS relay) with real headroom left over for the cold-tab content-script reinject.
+  const background = require('../background.js');
+  const fixedLegs = (2 * background.TAB_MESSAGE_TIMEOUT_MS) + background.INSERT_LINKS_TAB_MESSAGE_TIMEOUT_MS;
+  assert.ok(
+    popup.RUNTIME_MESSAGE_TIMEOUT_MS > fixedLegs,
+    `popup budget ${popup.RUNTIME_MESSAGE_TIMEOUT_MS} must exceed fixed relay legs ${fixedLegs}`
+  );
+  // At least a few seconds of reinject headroom (executeScript on a cold tab loads three files).
+  assert.ok(popup.RUNTIME_MESSAGE_TIMEOUT_MS - fixedLegs >= 5000);
 });

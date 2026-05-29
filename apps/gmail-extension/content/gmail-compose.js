@@ -122,7 +122,8 @@
       }
 
       // No completed entry to drop — evict the oldest entry overall (a pending one) so the map
-      // stays bounded, notifying its callers below rather than leaving them hanging.
+      // stays bounded, notifying its callers below rather than leaving them hanging. "Oldest"
+      // here means first-inserted (Map iteration order), not oldest-by-status.
       if (!evictedRequestId) {
         const oldest = insertRequestState.entries().next().value;
         if (!oldest) {
@@ -141,6 +142,11 @@
       // Notify pending callbacks before eviction so callers receive immediate feedback
       // instead of hanging until their own timeout fires.
       if (evictedEntry && evictedEntry.status === 'pending' && evictedEntry.callbacks.length > 0) {
+        // Like the late-completion race in finishTrackedInsertRequest, the insertion this entry
+        // started is still scheduled: it may complete and update the draft after we've already
+        // reported an error here. Warn so that "draft updated despite an error" is observable.
+        console.warn('[qURL] Evicted a pending INSERT_LINKS under cache pressure; '
+          + 'its insertion may still complete and update the draft after this error.');
         const evictionError = {
           success: false,
           error: getMessage(
