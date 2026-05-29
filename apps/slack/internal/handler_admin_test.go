@@ -1106,6 +1106,30 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
+	t.Run("owner not on admin set: setup URL still minted (gate keys off owner_id, not admin membership)", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		// Regression guard: the owner gate must consult owner_id ALONE,
+		// never admin_slack_user_ids membership. Seed a row whose owner_id
+		// is the caller (UOWNER001) but whose admin set does NOT include
+		// them (only UADMIN001) — the state after an owner is dropped from
+		// the admin set via /qurl admin remove. /setup must still mint for
+		// the owner. If a future change re-coupled the gate to admin-set
+		// membership (the pre-PR BindWorkspace behavior), this fails.
+		ts.ddb.seedItem(t, ts.tableNames.workspace, map[string]ddbtypes.AttributeValue{
+			fAttrSlackTeamID:       stringMember(team),
+			fAttrOwnerID:           stringMember(owner),
+			fAttrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testAdminUserID}},
+			fAttrCreatedAt:         stringMember(testWorkspaceConfiguredAt.UTC().Format(time.RFC3339)),
+		})
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		got := invokeSetup(t, h, owner)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Errorf("owner-not-on-admin-set: expected setup URL (gate must key off owner_id alone), got: %q", got)
+		}
+	})
+
 	t.Run("CheckAdmin error: fail-closed, no setup URL minted", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		// Workspace is bound, but the owner-gate's CheckAdmin read

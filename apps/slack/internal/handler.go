@@ -739,8 +739,8 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	// /setup, only the owner can).
 	if h.cfg.AdminStore != nil {
 		gateCtx, gateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		defer gateCancel()
 		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
-		gateCancel()
 		if err != nil {
 			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "user_id", userID)
 			respondSlack(w, ":warning: could not verify workspace ownership (upstream error; see logs). Try again in a moment.")
@@ -848,7 +848,7 @@ func (h *Handler) helpMessage() string {
 		// advertise it there — matches how the admin verbs below
 		// render conditionally.
 		lines = append(lines,
-			"• Re-running `/qurl setup` is owner-only — added admins (via `/qurl admin add`) can use the other admin verbs but cannot reconnect this workspace's qURL account",
+			"• Only the workspace owner can re-run `/qurl setup`; added admins use the other `/qurl admin` verbs but can't reconnect the qURL account",
 		)
 	}
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
