@@ -61,6 +61,42 @@ func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 	}
 }
 
+// TestHandleAliases_MultipleAliasesOneTunnelCollapse fences change #2's
+// headline behavior: several aliases pointing at the SAME tunnel
+// collapse onto one line — `$<slug> (tunnel) → $<a1>, $<a2>` — with the
+// aliases sorted and a single resource fetch for the group (one lookup
+// via the first alias, not one per alias).
+func TestHandleAliases_MultipleAliasesOneTunnelCollapse(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Two aliases bound to the same tunnel resource_id.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"dashboard":       "r_kktest01",
+		"kevin-dashboard": "r_kktest01",
+	})
+	// The group resolves via its first (sorted) alias — "dashboard". One
+	// fetch covers the whole group; assert a second per-alias fetch never
+	// fires by failing if the kevin-dashboard endpoint is hit.
+	var fetches atomic.Int32
+	ts.addCustomer("GET", "/v1/resources/by-alias/dashboard", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		writeTunnelResourceFixture(t, w, "r_kktest01", "dashboard", "kktest")
+	})
+	ts.addCustomer("GET", "/v1/resources/by-alias/kevin-dashboard", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		writeTunnelResourceFixture(t, w, "r_kktest01", "kevin-dashboard", "kktest")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$kktest` (tunnel) → `$dashboard`, `$kevin-dashboard`") {
+		t.Errorf("aliases reply did not collapse both aliases onto one slug line: %q", async)
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Errorf("resource fetches = %d, want 1 (one fetch per tunnel group, not per alias)", got)
+	}
+}
+
 // TestHandleAliases_MultiAliasChannelDisplaysAllBindings fences the
 // post-pivot multi-binding behavior: a channel with three
 // alias_bindings emits a PolicyEntry per binding, and `/qurl

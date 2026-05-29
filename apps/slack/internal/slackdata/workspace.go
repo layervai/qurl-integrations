@@ -244,17 +244,8 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// transfer verb would rewrite it), while seed_admin_slack_user_id is
 	// the write-once forensic record of who originally claimed the workspace.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(s.WorkspaceMappingsName),
-		Item: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:        stringAttr(m.TeamID),
-			attrOwnerID:            stringAttr(m.OwnerID),
-			attrSeedAdminSlackUser: stringAttr(seedAdmin),
-			attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
-				Value: []string{seedAdmin},
-			},
-			attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
-			attrUpdatedAt: stringAttr(nowISO),
-		},
+		TableName:           aws.String(s.WorkspaceMappingsName),
+		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, nowISO),
 		ConditionExpression: aws.String("attribute_not_exists(slack_team_id)"),
 	})
 	if err == nil {
@@ -362,6 +353,24 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	}
 }
 
+// workspaceMappingItem builds the workspace_mappings DDB item written by
+// both the initial conditional bind and the legacy-row reclaim — the two
+// differ only in their ConditionExpression, so the item shape lives in
+// one place. See BindWorkspace for why owner_id and
+// seed_admin_slack_user_id are kept as distinct attributes.
+func workspaceMappingItem(teamID, ownerID, seedAdmin string, created time.Time, nowISO string) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		attrSlackTeamID:        stringAttr(teamID),
+		attrOwnerID:            stringAttr(ownerID),
+		attrSeedAdminSlackUser: stringAttr(seedAdmin),
+		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
+			Value: []string{seedAdmin},
+		},
+		attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
+		attrUpdatedAt: stringAttr(nowISO),
+	}
+}
+
 // reclaimLegacyWorkspace overwrites a pre-pivot workspace_mappings row
 // whose owner_id is a shape-bad Auth0 sub (detected by BindWorkspace).
 // The caller becomes the new owner and sole admin — identical to a
@@ -381,17 +390,8 @@ func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping,
 		created = now
 	}
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(s.WorkspaceMappingsName),
-		Item: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:        stringAttr(m.TeamID),
-			attrOwnerID:            stringAttr(m.OwnerID),
-			attrSeedAdminSlackUser: stringAttr(seedAdmin),
-			attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
-				Value: []string{seedAdmin},
-			},
-			attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
-			attrUpdatedAt: stringAttr(nowISO),
-		},
+		TableName:           aws.String(s.WorkspaceMappingsName),
+		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, nowISO),
 		ConditionExpression: aws.String("owner_id = :legacy"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":legacy": stringAttr(legacyOwner),
