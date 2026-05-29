@@ -76,9 +76,7 @@ func testStateHTTPCookie(value string) *http.Cookie {
 
 func TestConfigValidateRequiresCommandsScope(t *testing.T) {
 	cfg := testConfig(&fakeTokenStore{})
-	// `commands` alone is sufficient: views.open (the only consumer of the
-	// captured token) requires no scope, so the install flow no longer
-	// requests the nonexistent views:write scope.
+	// `commands` alone is sufficient (see DefaultBotScopes for why).
 	cfg.BotScopes = []string{botScopeCommands}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate error = %v, want nil for commands-only scopes", err)
