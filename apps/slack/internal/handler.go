@@ -773,7 +773,13 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// The user command and any unrecognized command land here.
 		// Unrecognized is defensive — Slack only sends the commands the app
 		// registers — and the user surface is the safe default (it never
-		// mutates admin state).
+		// mutates admin state). Cosmetic caveat: help/redirect copy echoes
+		// the invoked command name, so an unrecognized `command` (e.g.
+		// `/qurl-bogus`) would render help advertising `/qurl-bogus list`
+		// etc. — names that don't exist. We can't distinguish a bogus
+		// command from a valid non-prod env command (`/qurl-sandbox`)
+		// without a registry, so this is left as-is; it's unreachable given
+		// Slack only dispatches registered commands.
 		h.dispatchUserCommand(w, command, text, values)
 	}
 }
@@ -825,7 +831,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
 		slog.Info("unknown slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", text, command))
+		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", stripBackticks(text), command))
 	}
 }
 
@@ -876,7 +882,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", stripBackticks(firstWord(text)), userCmd, userCmd, stripBackticks(text), userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", text, command))
+		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", stripBackticks(text), command))
 	}
 }
 
