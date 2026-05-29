@@ -197,6 +197,11 @@ func tunnelToken(r *client.Resource) string {
 // (lexically sorted) bound alias becomes the token. Returns "" only when
 // there is no token at all — formatTunnelListLine then renders the bare
 // resource_id.
+//
+// Surprise to note: because promotion picks the lexically-first bound alias,
+// a slug-less tunnel's displayed identity can change if an admin later binds
+// an alphabetically-earlier alias (e.g. `$zebra` → `$aardvark`). Rare —
+// installs come with a slug — but documented so the flip isn't a mystery.
 func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 	if t := tunnelToken(r); t != "" {
 		return t
