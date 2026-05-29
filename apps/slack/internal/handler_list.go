@@ -160,18 +160,15 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 //     and the identifier we want to surface (never the opaque r_<id>).
 //  2. Resource-level alias — fallback when a tunnel somehow carries no
 //     slug but does have an alias.
-//  3. resource_id — last resort for a legacy slug-less, alias-less
-//     tunnel. Vanishingly rare (tunnels are created with a slug), but
-//     better than an empty `$` token, and `/qurl get $r_<id>` still
-//     resolves it via the channel allow-set.
+//  3. "" — a legacy slug-less, alias-less tunnel has no `$<token>` the
+//     user can `get` (get is slug/alias-only now). Vanishingly rare
+//     (tunnels are created with a slug). formatTunnelListLine renders the
+//     bare resource_id for visibility rather than a broken `$<token>`.
 func tunnelToken(r *client.Resource) string {
 	if r.Slug != "" {
 		return r.Slug
 	}
-	if r.Alias != "" {
-		return r.Alias
-	}
-	return r.ResourceID
+	return r.Alias // "" when the tunnel has neither a slug nor an alias
 }
 
 // formatTunnelListLine renders one tunnel resource as a single text
@@ -182,18 +179,26 @@ func tunnelToken(r *client.Resource) string {
 //   - With description:    • `$<slug>` → <description>
 //
 // The primary token is [tunnelToken] (slug-first; never the opaque
-// r_<id> in the common case). `boundAliases` are the channel `$alias`
-// shortcuts that resolve to this tunnel in `/qurl get` — a tunnel can
-// have several. They render as "(also …)" so the user sees every name
-// that works, EXCLUDING the primary token itself (the install flow
-// binds `$<slug>` as a channel alias, so the slug would otherwise
-// appear twice). The token-in-backticks shape lets Slack render each as
-// inline code. There is no `(tunnel)` label or `[slug:...]` fragment —
-// the whole list is tunnels and the token IS the slug. The arrow joins
-// to the human-readable description when one is set.
+// r_<id>). `boundAliases` are the channel `$alias` shortcuts that resolve
+// to this tunnel in `/qurl get` — a tunnel can have several. They render
+// as "(also …)" so the user sees every name that works, EXCLUDING the
+// primary token itself (the install flow binds `$<slug>` as a channel
+// alias, so the slug would otherwise appear twice). The token-in-backticks
+// shape lets Slack render each as inline code. There is no `(tunnel)` label
+// or `[slug:...]` fragment — the whole list is tunnels and the token IS the
+// slug. The arrow joins to the human-readable description when one is set.
+//
+// A slug-less, alias-less tunnel ([tunnelToken] == "") has no usable
+// `$<token>` — get is slug/alias-only — so it renders the bare resource_id
+// (no `$` sigil, so it's not advertised as a get token) for visibility.
 func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	token := tunnelToken(r)
-	line := "• `$" + token + "`"
+	var line string
+	if token == "" {
+		line = "• `" + r.ResourceID + "` (no slug set)"
+	} else {
+		line = "• `$" + token + "`"
+	}
 	extras := make([]string, 0, len(boundAliases))
 	for _, a := range boundAliases {
 		if a != token {
