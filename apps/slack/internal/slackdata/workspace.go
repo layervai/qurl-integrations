@@ -207,6 +207,12 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// would clobber later-added admins. Both deserve the 409 signal;
 	// the post-CCFE disambiguation read below distinguishes the two
 	// cases so the callback can branch idempotent vs. rebind-refused.
+	// owner_id and seed_admin_slack_user_id are equal by construction at
+	// first bind (the callback passes verified.UserID for both), not by
+	// coincidence. They're kept distinct because their long-term roles
+	// diverge: owner_id is the mutable-someday gate anchor (the #539
+	// transfer verb would rewrite it), while seed_admin_slack_user_id is
+	// the write-once forensic record of who originally claimed the workspace.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Item: map[string]ddbtypes.AttributeValue{

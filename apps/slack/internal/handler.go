@@ -868,7 +868,7 @@ func (h *Handler) helpMessage() string {
 	// help text matches the actual behavior of the deployment.
 	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
-		setupLine += " (one-time setup; the first runner becomes the workspace owner — only they can re-run it)"
+		setupLine += " (the first runner becomes the workspace owner; only they can re-run it)"
 	}
 	lines = append(lines, setupLine)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
