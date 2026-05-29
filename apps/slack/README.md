@@ -156,7 +156,7 @@ For customer Slack installs, configure the Slack app with:
   shapes defensively, but qURL does not request or persist Slack refresh tokens
   yet, so rotation-enabled apps need refresh support before production use.
 
-When moving to per-workspace token storage, existing customer workspaces must
+With per-workspace token storage in place, existing customer workspaces must
 reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
 token. New installs through `/oauth/slack/install` store that token
 automatically, and guided `/qurl tunnel install` uses it for `views.open`
