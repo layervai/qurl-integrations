@@ -88,7 +88,7 @@ func seedChannelPolicyDualShape(teamID, channelID, alias, resourceID string) map
 
 // seedChannelPolicySet returns a channel_policies row carrying an
 // allowed_resource_ids SS attribute. Used for the multi-resource
-// ResolvePolicy gate (`/qurl get`).
+// AllowedResourceIDsForChannel gate (`/qurl get $r_<id>`).
 //
 // `alias_bindings` and `allowed_resource_ids` are orthogonal surfaces
 // (see slackdata/policies.go preamble), so this helper attaches both

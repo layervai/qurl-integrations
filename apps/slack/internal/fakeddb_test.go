@@ -73,7 +73,7 @@ type fakeDDB struct {
 
 // SetGetItemErr injects an error returned on every GetItem against
 // `table`. Used to simulate transport failures from the admin gate
-// (workspace_mappings) or the ResolvePolicy path (channel_policies).
+// (workspace_mappings) or the channel-policy reads (channel_policies).
 func (f *fakeDDB) SetGetItemErr(table string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

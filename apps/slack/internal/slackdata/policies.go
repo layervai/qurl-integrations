@@ -39,33 +39,40 @@ const (
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
-// (teamID, channelID) channel_policies row exposes to non-admin
-// `/qurl list`. The set is the union of two orthogonal surfaces on
-// the same row:
+// (teamID, channelID) channel_policies row authorizes for non-admin
+// mint via the `$r_<id>` get path (handler_get.go's
+// resourceAllowedForUser). The set is the union of two orthogonal
+// surfaces on the same row:
 //
 //   - `allowed_resource_ids` SS — the legacy multi-resource gate
 //     hand-seeded or carried over from pre-pivot rows. `/qurl get
-//     $r_<id>` checks via [ResolvePolicy].
+//     $r_<id>` checks membership here.
 //   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl setalias` / `/qurl unsetalias` mutate;
-//     `/qurl get $alias` checks via [ResolveAlias].
+//     surface `/qurl setalias` / `/qurl unsetalias` mutate; the
+//     binding's resource_id is also accepted on the `$r_<id>` path so
+//     an aliased resource is mintable by its raw ID too.
 //
-// Either surface allows the row to mint, so `/qurl list` must show
-// resources visible via EITHER — surfacing only the alias-bindings
-// values would hide legacy allow-set resources from non-admin
-// listings even though `/qurl get $r_<id>` would mint them.
-// Single-row GetItem; no pagination needed.
+// Either surface allows the row to mint. The `/qurl list` consumer of
+// this set was removed in #459 (revert of #234): `/qurl list` is now
+// workspace-wide and unfiltered, so this function survives only as the
+// mint-time channel gate. Single-row GetItem; no pagination needed.
 //
 // Known asymmetry vs [ResolvePolicy]: this function does NOT read the
 // legacy scalar `resource_id` attribute. ResolvePolicy falls back to
 // the scalar so a hand-seeded pre-pivot row still resolves at `get`;
-// the same row will not appear in `/qurl list`. The asymmetry is
-// intentional for now — `/qurl list` is being phased toward the
+// the same row will not be mintable via this set. The asymmetry is
+// intentional for now — the mint gate is being phased toward the
 // post-pivot Map/SS shapes, and unioning the scalar here would
 // re-expose pre-pivot rows that policies-migration is meant to drain.
 // Revisit when the migration completes.
 //
 // Missing row → empty set (no policy = no access, fail-closed).
+//
+// TODO(#464): rename when next touched. The name dates from an era
+// where both `/qurl list` (non-admin disclosure) and `/qurl get
+// $r_<id>` (mint-time capability) consumed it; post-revert of #234 in
+// #459 only the latter survives, so a name like
+// `ChannelMintableResourceIDs` would better reflect today's role.
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{
