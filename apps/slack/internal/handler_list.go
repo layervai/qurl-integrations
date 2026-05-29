@@ -107,6 +107,13 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// renders.
 	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
 
+	// Precompute each row's display token once (keyed by resource_id)
+	// rather than recomputing it inside the O(n log n) comparator below.
+	displayTok := make(map[string]string, len(resources))
+	for i := range resources {
+		displayTok[resources[i].ResourceID] = tunnelDisplayToken(&resources[i], aliasMap[resources[i].ResourceID])
+	}
+
 	// Stable order for two-call idempotency at the Slack ephemeral
 	// surface — the server's pagination cursor implies an order but not a
 	// stable one across re-queries. Sort by the displayed token, with
@@ -115,8 +122,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// order deterministically rather than inheriting the unstable upstream
 	// order. BEFORE formatting.
 	sort.SliceStable(resources, func(i, j int) bool {
-		ti := tunnelDisplayToken(&resources[i], aliasMap[resources[i].ResourceID])
-		tj := tunnelDisplayToken(&resources[j], aliasMap[resources[j].ResourceID])
+		ti, tj := displayTok[resources[i].ResourceID], displayTok[resources[j].ResourceID]
 		if ti != tj {
 			return ti < tj
 		}
@@ -129,7 +135,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	}
 
 	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Copy any `$slug` or `$alias` and run `/qurl get` on it to mint a one-time qURL link._"
+		"\n\n_Copy any `$slug` or `$alias` and run `/qurl get` on it to mint a one-time qURL link. Any `(also …)` aliases shown are specific to this channel._"
 	if page.HasMore {
 		// page.HasMore is a master-list signal — more resources of ANY
 		// type, not necessarily more tunnels — so this footer can fire
@@ -216,14 +222,16 @@ func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 // that alias promoted to the primary token (by [tunnelDisplayToken]) so the
 // row shows a name the user can `get` against — rather than a bare
 // resource_id labeled "(no slug set)" sitting next to an "(also `$alias`)"
-// that advertises a usable token. With no bound alias either, it falls back
-// to the bare resource_id (no `$` sigil, so it's not advertised as a get
-// token) for visibility.
+// that advertises a usable token. With no bound alias either, the tunnel has
+// no token `/qurl get` can accept at all (the opaque resource_id isn't an
+// alias-shaped token), so the row renders the bare resource_id WITHOUT a `$`
+// sigil and spells out that it's not usable from Slack until an admin sets a
+// slug — keeping the "copy a token and get it" promise honest.
 func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	token := tunnelDisplayToken(r, boundAliases)
 	var line string
 	if token == "" {
-		line = "• `" + r.ResourceID + "` (no slug set)"
+		line = "• `" + r.ResourceID + "` (no slug — ask your Slack admin to set one)"
 	} else {
 		line = "• `$" + token + "`"
 	}

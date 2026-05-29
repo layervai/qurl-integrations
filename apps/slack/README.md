@@ -11,7 +11,7 @@ Customer onboarding is install-first:
 ## Features
 
 - `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
-- `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a channel `$alias` (raw URLs are not supported)
+- `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a channel `$alias` (raw URLs aren't supported)
 - `/qurl set-alias $<alias> $<slug>` — Point a channel shortcut at a tunnel slug (admin-only)
 - `/qurl unset-alias $<alias>` — Remove a channel shortcut binding (admin-only)
 - `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install with `views:write`)

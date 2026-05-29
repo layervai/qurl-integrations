@@ -140,7 +140,7 @@ func TestFormatTunnelListLine(t *testing.T) {
 		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (also `$grafana`) → Prod database"},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
 		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
-		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no slug set)"},
+		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no slug — ask your Slack admin to set one)"},
 		{name: "slug-less tunnel with bound aliases promotes first to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "• `$grafana` (also `$metrics`)"},
 	}
 	for _, tc := range cases {
@@ -393,8 +393,9 @@ func TestHandleList_TunnelAliasFallbackWhenNoSlug(t *testing.T) {
 // TestHandleList_TunnelResourceIDFallback fences the last-resort
 // rendering: a legacy tunnel with neither a slug nor an alias has no
 // usable `$<token>` (get is slug/alias-only), so it renders the bare
-// resource_id with a "(no slug set)" marker — NOT a `$r_<id>` get token a
-// user would paste and have rejected — and no `(tunnel)` label.
+// resource_id with a "(no slug — ask your Slack admin to set one)" marker —
+// NOT a `$r_<id>` get token a user would paste and have rejected — and no
+// `(tunnel)` label.
 func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -407,7 +408,7 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`r_tunnel_noa` (no slug set)") {
+	if !strings.Contains(async, "`r_tunnel_noa` (no slug — ask your Slack admin to set one)") {
 		t.Errorf("async reply missing bare resource_id fallback: %q", async)
 	}
 	if strings.Contains(async, "`$r_tunnel_noa`") {
@@ -505,7 +506,7 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
 	// Empty token (slug-less row) < "alpha" < "middle".
-	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no slug set)")
+	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no slug — ask your Slack admin to set one)")
 	alphaPos := strings.Index(async, "`$alpha`")
 	middlePos := strings.Index(async, "`$middle`")
 	if alphaPos < 0 || middlePos < 0 || zzzPos < 0 {
