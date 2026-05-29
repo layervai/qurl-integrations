@@ -109,9 +109,11 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	sort.Strings(lines)
 
 	if hasMore && unresolved > 0 {
-		// Some bound tunnel resolved to alias-only AND the workspace has
-		// resources past the scanned page — so the missing slug may just
-		// be paginated out (not gone). One triage line for "why doesn't
+		// A bound tunnel resolved to alias-only AND the page reports more
+		// resources past it — so the missing slug may just be paginated
+		// out (not gone). This also covers a short/empty list returned
+		// with has_more set: the listing is incomplete relative to the
+		// channel's bindings either way. One triage line for "why doesn't
 		// `$foo` show its slug?"; arms the #555 follow-up. Additive only —
 		// the rows already rendered above are unchanged.
 		log.Warn("aliases: listing may be incomplete — unresolved bindings with more resources past the scanned page",
@@ -124,20 +126,18 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	_ = h.postResponse(log, responseURL, body)
 }
 
-// resourcesByResourceID fetches the workspace's resources in a single
-// page and indexes them by resource_id, so /qurl aliases can resolve
-// each bound tunnel's slug from the SAME source /qurl list uses. The
-// per-id `GET /v1/resources/{id}` path does NOT return the tunnel slug;
-// the list path does, so a workspace-list join is the reliable resolver.
+// resourcesByResourceID fetches one page of the workspace's resources
+// and indexes them by resource_id for the slug join in processAliases
+// (see the call site for why the list path, not the per-id path, is the
+// reliable slug source).
 //
-// Best-effort: a fetch failure yields a nil map (and hasMore=false) and
-// the caller degrades every row to its channel aliases alone (a nil-map
-// lookup returns the zero-value Resource). Bounded to one
-// [listResourcesScanLimit] page — a resource past the first page won't
-// resolve; hasMore reports page.HasMore so the caller can flag that an
-// unresolved binding may simply be paginated out. (Same cap as /qurl
-// list; the /qurl aliases incomplete-listing follow-up is tracked in
-// #555, which depends on the #531 server-side type=tunnel filter.)
+// Best-effort: a fetch failure yields (nil, false) — a nil-map lookup
+// returns the zero-value Resource, so the caller degrades each row to
+// alias-only. Bounded to one [listResourcesScanLimit] page; hasMore
+// reports page.HasMore so the caller can flag a binding that may simply
+// be paginated out. (Same cap as /qurl list; the incomplete-listing
+// follow-up is tracked in #555, which depends on the #531 server-side
+// type=tunnel filter.)
 func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) (map[string]client.Resource, bool) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
