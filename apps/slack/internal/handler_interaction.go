@@ -222,7 +222,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		return
 	}
 	if h.aliasStore == nil {
-		respondTunnelInstallModalError(w, "Channel shortcut storage is not configured on this Slack bot deployment.")
+		respondTunnelInstallModalError(w, "Channel alias storage is not configured on this Slack bot deployment.")
 		return
 	}
 

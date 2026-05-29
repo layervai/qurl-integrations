@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,6 +364,128 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 			t.Errorf("Code = %q, want %q (disambig read failed → 'couldn't confirm' variant)", ae.Code, ErrCodeWorkspaceBindUnverified)
 		}
 	})
+}
+
+// TestBindWorkspace_ReclaimsLegacyAuth0SubRow fences the self-heal path
+// for a pre-pivot row whose owner_id is an Auth0 sub (not a Slack ID).
+// No Slack user can ever match it, so the workspace would be permanently
+// locked; BindWorkspace must reclaim the orphaned row for the caller via
+// a compare-and-swap on the exact legacy owner_id.
+func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
+	const legacyAuth0Sub = "auth0|653fpre-pivot-subxyz"
+	const legacyCreatedAt = "2026-05-01T00:00:00Z"
+
+	t.Run("shape-bad owner_id is reclaimed for the caller", func(t *testing.T) {
+		var putCalls int
+		var reclaimPut *dynamodb.PutItemInput
+		store := newStore(&stubDDB{
+			putItemFn: func(in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+				putCalls++
+				if putCalls == 1 {
+					// Initial conditional bind: the row already exists.
+					return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+				}
+				// Second PutItem is the reclaim CAS.
+				reclaimPut = in
+				return &dynamodb.PutItemOutput{}, nil
+			},
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrOwnerID:     &ddbtypes.AttributeValueMemberS{Value: legacyAuth0Sub},
+					attrCreatedAt:   &ddbtypes.AttributeValueMemberS{Value: legacyCreatedAt},
+				}}, nil
+			},
+		})
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		if err != nil {
+			t.Fatalf("BindWorkspace reclaim: got %v, want nil (legacy row should be reclaimed)", err)
+		}
+		if putCalls != 2 {
+			t.Fatalf("PutItem calls = %d, want 2 (initial conditional bind + reclaim CAS)", putCalls)
+		}
+		if reclaimPut == nil {
+			t.Fatal("reclaim PutItem not captured")
+		}
+		// The reclaim must be a CAS on the exact legacy owner_id so a
+		// concurrent reclaim can't double-write.
+		if got := aws.ToString(reclaimPut.ConditionExpression); got != "owner_id = :legacy" {
+			t.Errorf("reclaim ConditionExpression = %q, want %q", got, "owner_id = :legacy")
+		}
+		legacyVal, ok := reclaimPut.ExpressionAttributeValues[":legacy"].(*ddbtypes.AttributeValueMemberS)
+		if !ok || legacyVal.Value != legacyAuth0Sub {
+			t.Errorf("reclaim CAS :legacy = %+v, want %q", reclaimPut.ExpressionAttributeValues[":legacy"], legacyAuth0Sub)
+		}
+		// The reclaimed row's owner_id must be the caller's Slack ID.
+		newOwner, ok := reclaimPut.Item[attrOwnerID].(*ddbtypes.AttributeValueMemberS)
+		if !ok || newOwner.Value != testCallerSlackID {
+			t.Errorf("reclaim new owner_id = %+v, want %q", reclaimPut.Item[attrOwnerID], testCallerSlackID)
+		}
+		// The orphaned row's original created_at must be preserved (the
+		// durable "predates #510" signal), not overwritten with `now`.
+		gotCreated, ok := reclaimPut.Item[attrCreatedAt].(*ddbtypes.AttributeValueMemberS)
+		if !ok || gotCreated.Value != legacyCreatedAt {
+			t.Errorf("reclaim created_at = %+v, want preserved %q", reclaimPut.Item[attrCreatedAt], legacyCreatedAt)
+		}
+	})
+
+	t.Run("reclaim loses the race → AlreadyBound", func(t *testing.T) {
+		var putCalls int
+		store := newStore(&stubDDB{
+			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+				putCalls++
+				// Both the initial bind and the reclaim CAS hit a CCFE:
+				// a concurrent caller already replaced the legacy owner_id
+				// with a valid Slack owner.
+				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}
+			},
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrOwnerID:     &ddbtypes.AttributeValueMemberS{Value: legacyAuth0Sub},
+				}}, nil
+			},
+		})
+		err := store.BindWorkspace(context.Background(), &WorkspaceMapping{TeamID: "T", OwnerID: testCallerSlackID}, testCallerSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.Code != ErrCodeWorkspaceAlreadyBound {
+			t.Errorf("Code = %q, want %q (lost reclaim race must refuse)", ae.Code, ErrCodeWorkspaceAlreadyBound)
+		}
+		if putCalls != 2 {
+			t.Errorf("PutItem calls = %d, want 2 (initial bind + reclaim attempt)", putCalls)
+		}
+	})
+}
+
+// TestLooksLikeSlackUserID fences the shape predicate that both the
+// handler (mention-surface guard) and BindWorkspace (legacy-reclaim
+// detection) depend on — a pre-pivot Auth0 sub must read as invalid so
+// the reclaim path fires, and real Slack IDs must read as valid so a
+// healthy owner_id is never mistaken for a legacy one.
+func TestLooksLikeSlackUserID(t *testing.T) {
+	valid := []string{
+		"UCALLER01", "WENTERPRISE01", "U012345678",
+		"U" + strings.Repeat("A", 8),  // 9 chars — lower length bound.
+		"U" + strings.Repeat("A", 63), // 64 chars — upper length bound.
+	}
+	invalid := []string{
+		"", "auth0|653fpre-pivot-subxyz", "google-oauth2|123", "u012345678", "U12", "UABCDEF!1",
+		"U" + strings.Repeat("A", 7),  // 8 chars — one under the lower bound.
+		"U" + strings.Repeat("A", 64), // 65 chars — one over the upper bound.
+	}
+	for _, s := range valid {
+		if !LooksLikeSlackUserID(s) {
+			t.Errorf("LooksLikeSlackUserID(%q) = false, want true", s)
+		}
+	}
+	for _, s := range invalid {
+		if LooksLikeSlackUserID(s) {
+			t.Errorf("LooksLikeSlackUserID(%q) = true, want false", s)
+		}
+	}
 }
 
 // TestBindWorkspace_WritesSeedAdminAttribute fences the forensic-

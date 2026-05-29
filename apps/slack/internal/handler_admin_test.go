@@ -491,7 +491,7 @@ func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin("admin remove <@"+testAdminOwnerID+">", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "workspace owner") {
+	if !strings.Contains(reply, "connected qURL to this workspace") {
 		t.Errorf("reply missing owner-remove guard: %q", reply)
 	}
 }
@@ -529,7 +529,7 @@ func TestHandleAdminList_HappyPath(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "Owner: <@"+testAdminOwnerID+">") {
+	if !strings.Contains(reply, "Owner (connected qURL): <@"+testAdminOwnerID+">") {
 		t.Errorf("reply missing owner line: %q", reply)
 	}
 	if !strings.Contains(reply, "Admins:") {
@@ -573,7 +573,7 @@ func TestHandleAdminList_OwnerOnAdminSet(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminOwnerID)
-	if !strings.Contains(reply, "Owner: <@"+testAdminOwnerID+">") {
+	if !strings.Contains(reply, "Owner (connected qURL): <@"+testAdminOwnerID+">") {
 		t.Errorf("reply missing owner line: %q", reply)
 	}
 	// Both non-owner admins must appear on the Admins line.
@@ -605,7 +605,7 @@ func TestHandleAdminList_OwnerOnly(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminOwnerID)
-	if !strings.Contains(reply, "Owner: <@"+testAdminOwnerID+">") {
+	if !strings.Contains(reply, "Owner (connected qURL): <@"+testAdminOwnerID+">") {
 		t.Errorf("reply missing owner line: %q", reply)
 	}
 	if strings.Contains(reply, "Admins:") {
@@ -617,7 +617,7 @@ func TestHandleAdminList_OwnerOnly(t *testing.T) {
 // storage-corruption render path: when workspace_mappings is
 // missing owner_id (impossible today via readStringSet but
 // defensive against a future contract change), the reply renders
-// the explicit "(unknown — workspace owner record is missing;
+// the explicit "(unknown — the qURL setup record is missing;
 // contact support)" copy instead of a malformed `Owner: <@>`
 // mrkdwn link. User-visible copy omits the internal table name;
 // the slog.Error carries it for triage.
@@ -637,7 +637,7 @@ func TestHandleAdminList_EmptyOwnerCorruption(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "workspace owner record is missing") {
+	if !strings.Contains(reply, "qURL setup record is missing") {
 		t.Errorf("reply missing storage-corruption surface: %q", reply)
 	}
 	if strings.Contains(reply, "Owner: <@>") {
@@ -1083,24 +1083,29 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		if strings.Contains(got, "/oauth/qurl/start?state=") {
 			t.Fatalf("non-owner: setup URL was minted (should be refused): %q", got)
 		}
-		// The reply must mention the existing owner so the requester
-		// knows whom to ask. The mention syntax `<@U…>` is what Slack
-		// renders into a clickable user reference.
+		// The reply must mention the person who connected qURL so the
+		// requester knows whom to ask. The mention syntax `<@U…>` is what
+		// Slack renders into a clickable user reference.
 		if !strings.Contains(got, "<@"+owner+">") {
 			t.Errorf("non-owner: reply missing owner mention <@%s>, got: %q", owner, got)
 		}
-		if !strings.Contains(got, "owner") {
-			t.Errorf("non-owner: reply missing 'owner' word for clarity, got: %q", got)
+		// Copy names who can re-run setup ("the person who first connected
+		// qURL") rather than the ambiguous "workspace owner" — guard the
+		// new framing stays.
+		if !strings.Contains(got, "connected qURL") {
+			t.Errorf("non-owner: reply missing 'connected qURL' framing for clarity, got: %q", got)
 		}
 	})
 
-	t.Run("shape-bad owner_id (pre-pivot Auth0 sub): refused without broken mention", func(t *testing.T) {
+	t.Run("shape-bad owner_id (pre-pivot Auth0 sub): setup allowed so the legacy row can be reclaimed", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		// Migration-day state: a pre-pivot row whose owner_id holds the
-		// Auth0 id_token sub, not a Slack ID. A non-owner rerun must be
-		// refused WITHOUT interpolating the sub into a `<@…>` mention
-		// (which Slack would render visibly broken). Seed the row
-		// directly since BindWorkspace now only ever writes Slack IDs.
+		// Auth0 id_token sub, not a Slack ID. No Slack user can ever match
+		// it, so the gate must NOT dead-end — it falls through to mint the
+		// setup URL, and BindWorkspace self-heals on the callback by
+		// reclaiming the orphaned row for the caller (first-come-claims).
+		// The reply must not leak the raw Auth0 sub. Seed the row directly
+		// since BindWorkspace now only ever writes Slack IDs.
 		const auth0Sub = "auth0|653fpre-pivot-subxyz"
 		ts.ddb.seedItem(t, ts.tableNames.workspace, map[string]ddbtypes.AttributeValue{
 			fAttrSlackTeamID:       stringMember(team),
@@ -1112,17 +1117,14 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		wireSetup(t, h)
 
 		got := invokeSetup(t, h, stranger)
-		if strings.Contains(got, "/oauth/qurl/start?state=") {
-			t.Fatalf("shape-bad owner: setup URL was minted (should be refused): %q", got)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("shape-bad owner: expected setup URL so the legacy row can be reclaimed, got: %q", got)
 		}
 		if strings.Contains(got, auth0Sub) {
-			t.Errorf("shape-bad owner: reply leaked the raw Auth0 sub (anywhere, incl. the mention surface): %q", got)
+			t.Errorf("shape-bad owner: reply leaked the raw Auth0 sub: %q", got)
 		}
 		if strings.Contains(got, "<@") {
-			t.Errorf("shape-bad owner: reply rendered a mention surface instead of the malformed-record fallback: %q", got)
-		}
-		if !strings.Contains(got, "malformed") {
-			t.Errorf("shape-bad owner: reply missing the malformed-record fallback copy, got: %q", got)
+			t.Errorf("shape-bad owner: reply rendered a mention surface (should be the plain setup-URL copy): %q", got)
 		}
 	})
 
@@ -1166,7 +1168,7 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		if strings.Contains(got, "/oauth/qurl/start?state=") {
 			t.Fatalf("CheckAdmin error: setup URL was minted (must fail closed): %q", got)
 		}
-		if !strings.Contains(got, "could not verify workspace ownership") {
+		if !strings.Contains(got, "could not verify who connected qURL") {
 			t.Errorf("CheckAdmin error: reply missing the upstream-error surface, got: %q", got)
 		}
 	})

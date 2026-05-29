@@ -751,7 +751,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 		_, ownerID, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
 		if err != nil {
 			slog.Error("/qurl setup: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
-			respondSlack(w, ":warning: could not verify workspace ownership (upstream error; see logs). Try again in a moment.")
+			respondSlack(w, ":warning: could not verify who connected qURL to this workspace (upstream error; see logs). Try again in a moment.")
 			return
 		}
 		// ownerID=="" → workspace not yet bound → fresh install, allow.
@@ -786,20 +786,23 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			// into a `<@%s>` mention. BindWorkspace writes owner_id
 			// from the OAuth callback (a different code path than the
 			// parser), and a pre-pivot row holds an Auth0 sub, not a
-			// Slack ID — exactly the case the migration runbook calls
-			// out. Mirrors the looksLikeSlackUserID guard in
+			// Slack ID. Mirrors the looksLikeSlackUserID guard in
 			// handleAdminList so a malformed value can't break out of
-			// the mention surface. Branch the whole reply so the
-			// shape-bad copy reads cleanly rather than "the current
-			// owner is the existing workspace owner".
+			// the mention surface.
 			if looksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID) //nolint:gosec // G706: slog escapes control bytes in attribute values; owner_user_id is shape-validated by looksLikeSlackUserID above.
-				respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is <@%s>. Ask them to re-run setup. For admin actions that don't need workspace ownership, use the other `/qurl admin` commands.", ownerID))
-			} else {
-				slog.Error("/qurl setup: rebind refused; stored owner_id is shape-bad — likely a pre-pivot Auth0 sub. Operator must delete the workspace_mappings row to recover.", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID and owner_id_len is an int.
-				respondSlack(w, "Only the workspace owner can re-run `/qurl setup`, but this workspace's stored owner record is malformed and can't be displayed (likely a legacy record). Please contact support to recover access.")
+				respondSlack(w, fmt.Sprintf("`/qurl setup` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the other `/qurl admin` commands.", ownerID))
+				return
 			}
-			return
+			// Shape-bad owner_id → a pre-pivot Auth0 sub left behind by
+			// the #510 owner-model migration. No Slack user can ever
+			// match it, so this workspace is locked for everyone unless
+			// we let setup recover it. DON'T dead-end here — fall through
+			// to mint the setup URL; BindWorkspace self-heals on the
+			// callback by reclaiming the orphaned row for this caller
+			// (first-come-claims, the same posture as an unbound
+			// workspace). Log loudly so the legacy reclaim is grep-able.
+			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID, legacy_owner_prefix is the bounded provider prefix, owner_id_len is an int.
 		}
 	}
 	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
@@ -862,6 +865,10 @@ func (h *Handler) helpMessage() string {
 		"*Commands:*",
 	}
 	if h.cfg.AdminStore != nil {
+		// Glossary so the `$slug` / `$alias` tokens in the verbs and in
+		// `/qurl list` aren't unexplained. Only shown when AdminStore is
+		// wired — that's the only deploy where aliases exist.
+		//
 		// get resolves its $slug/$alias token through resolveTokenForGet,
 		// which fails closed (":warning: not configured") when AdminStore is
 		// nil — the URL form that once let get work without DDB is gone
@@ -869,6 +876,8 @@ func (h *Handler) helpMessage() string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
+			"_A tunnel's `$slug` is its name. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one slug. Use either with `/qurl get`._",
+			"",
 			"• `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a `$alias` configured in this channel",
 		)
 		if h.cfg.PostDM != nil {
@@ -888,7 +897,7 @@ func (h *Handler) helpMessage() string {
 		// otherwise help could advertise `/qurl aliases` on a deploy where
 		// it replies ":warning: not configured".
 		lines = append(lines,
-			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
+			"• `/qurl aliases` — List this channel's aliases and the tunnel each one points to",
 		)
 	}
 	lines = append(lines,
@@ -902,7 +911,7 @@ func (h *Handler) helpMessage() string {
 	// help text matches the actual behavior of the deployment.
 	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
-		setupLine += " (the first runner becomes the workspace owner; only they can re-run it)"
+		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
 	}
 	lines = append(lines, setupLine)
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
@@ -924,9 +933,9 @@ func (h *Handler) helpMessage() string {
 		// setalias/unsetalias reply ":warning: not configured" on a
 		// sandbox deploy without an aliasStore; mirror the PostDM gate
 		// above so help doesn't advertise verbs whose reply tells the
-		// user they can't be used. Keep user-facing copy on "shortcut"
-		// even though the admin verbs retain their historical
-		// set-alias/unset-alias names.
+		// user they can't be used. User-facing copy calls these
+		// "aliases" (not "shortcuts") even though the admin verbs retain
+		// their historical set-alias/unset-alias names.
 		//
 		// Gates on aliasStore (NOT AdminStore) by design: set-alias WRITES
 		// through the aliasStore and is admin-gated at the Slack manifest
@@ -938,8 +947,8 @@ func (h *Handler) helpMessage() string {
 		// shape, where set-alias would show without `/qurl aliases`, is not
 		// a real deployment: both come from the same QURL_*_TABLE env vars.)
 		lines = append(lines,
-			"• `/qurl set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
-			"• `/qurl unset-alias $<alias>` — Remove a qURL shortcut in this channel (admin only)",
+			"• `/qurl set-alias $<alias> $<slug>` — Point an alias at a tunnel slug in this channel (admin only)",
+			"• `/qurl unset-alias $<alias>` — Remove an alias from this channel (admin only)",
 		)
 	}
 	if h.cfg.AdminStore != nil {
@@ -952,7 +961,7 @@ func (h *Handler) helpMessage() string {
 		lines = append(lines,
 			"• `/qurl admin add @user` — Promote a Slack user to bot admin (admin only)",
 			"• `/qurl admin remove @user` — Demote a Slack user from bot admin (admin only)",
-			"• `/qurl admin list` — List the workspace owner and current bot admins (admin only)",
+			"• `/qurl admin list` — List who connected qURL (the owner) and the current bot admins (admin only)",
 			"• `/qurl admin revoke <qurl_id>` — Revoke a single qURL (admin only)",
 		)
 	}

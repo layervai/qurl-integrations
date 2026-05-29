@@ -28,7 +28,9 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	if !strings.Contains(async, "Aliases configured for this channel") {
 		t.Errorf("async reply missing header: %q", async)
 	}
-	if !strings.Contains(async, "`$prod-db` → https://prod.example.com") {
+	// Legacy URL binding: the alias points at a raw URL (no slug), so the
+	// line reads "<url> (URL) → `$<alias>`".
+	if !strings.Contains(async, "https://prod.example.com (URL) → `$prod-db`") {
 		t.Errorf("async reply missing prod-db line: %q", async)
 	}
 }
@@ -49,11 +51,49 @@ func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$bastion` → `$ops-bastion`") {
-		t.Errorf("aliases reply missing alias→slug mapping: %q", async)
+	// Tunnel-backed: the slug is the canonical name (left of the arrow,
+	// labeled "(tunnel)") and the alias is its alternate name.
+	if !strings.Contains(async, "`$ops-bastion` (tunnel) → `$bastion`") {
+		t.Errorf("aliases reply missing slug→alias mapping: %q", async)
 	}
 	if strings.Contains(async, "r_bastion01") {
 		t.Errorf("aliases reply leaked opaque resource_id instead of slug: %q", async)
+	}
+}
+
+// TestHandleAliases_MultipleAliasesOneTunnelCollapse fences change #2's
+// headline behavior: several aliases pointing at the SAME tunnel
+// collapse onto one line — `$<slug> (tunnel) → $<a1>, $<a2>` — with the
+// aliases sorted and a single resource fetch for the group (one lookup
+// via the first alias, not one per alias).
+func TestHandleAliases_MultipleAliasesOneTunnelCollapse(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Two aliases bound to the same tunnel resource_id.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"dashboard":       "r_kktest01",
+		"kevin-dashboard": "r_kktest01",
+	})
+	// The group resolves via its first (sorted) alias — "dashboard". One
+	// fetch covers the whole group; assert a second per-alias fetch never
+	// fires by failing if the kevin-dashboard endpoint is hit.
+	var fetches atomic.Int32
+	ts.addCustomer("GET", "/v1/resources/by-alias/dashboard", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		writeTunnelResourceFixture(t, w, "r_kktest01", "dashboard", "kktest")
+	})
+	ts.addCustomer("GET", "/v1/resources/by-alias/kevin-dashboard", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		writeTunnelResourceFixture(t, w, "r_kktest01", "kevin-dashboard", "kktest")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$kktest` (tunnel) → `$dashboard`, `$kevin-dashboard`") {
+		t.Errorf("aliases reply did not collapse both aliases onto one slug line: %q", async)
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Errorf("resource fetches = %d, want 1 (one fetch per tunnel group, not per alias)", got)
 	}
 }
 
@@ -145,19 +185,57 @@ func TestHandleAliases_AdminStoreNil(t *testing.T) {
 	}
 }
 
-// TestFanoutAliasRows_RespectsCtxCancellation fences the dispatcher
+// TestGroupAliasEntriesByResource fences the grouping helper behind
+// /qurl aliases: aliases sharing a resource_id collapse into one group
+// (sorted), distinct resources stay separate, and resource-less rows
+// (the defensive empty-resource_id case) are keyed per-alias so they
+// don't merge into each other.
+func TestGroupAliasEntriesByResource(t *testing.T) {
+	groups := groupAliasEntriesByResource([]slackdata.PolicyEntry{
+		{Alias: "zeta", ResourceID: "r_one"},
+		{Alias: "alpha", ResourceID: "r_one"},
+		{Alias: "solo", ResourceID: "r_two"},
+		{Alias: "ghostA", ResourceID: ""},
+		{Alias: "ghostB", ResourceID: ""},
+	})
+	if len(groups) != 4 {
+		t.Fatalf("group count = %d, want 4 (r_one collapses 2 aliases, r_two, + 2 distinct resource-less)", len(groups))
+	}
+	byKey := map[string][]string{}
+	for i := range groups {
+		// Resource-less rows share resourceID "" — key the assertion map
+		// by the first alias so they stay distinguishable.
+		key := groups[i].resourceID
+		if key == "" {
+			key = groups[i].aliases[0]
+		}
+		byKey[key] = groups[i].aliases
+	}
+	if got := byKey["r_one"]; len(got) != 2 || got[0] != "alpha" || got[1] != "zeta" {
+		t.Errorf("r_one aliases = %v, want sorted [alpha zeta]", got)
+	}
+	if got := byKey["r_two"]; len(got) != 1 || got[0] != "solo" {
+		t.Errorf("r_two aliases = %v, want [solo]", got)
+	}
+	if len(byKey["ghostA"]) != 1 || len(byKey["ghostB"]) != 1 {
+		t.Errorf("resource-less rows merged: ghostA=%v ghostB=%v", byKey["ghostA"], byKey["ghostB"])
+	}
+}
+
+// TestFanoutAliasGroups_RespectsCtxCancellation fences the dispatcher
 // loop's ctx-aware semaphore acquire: a canceled ctx during dispatch
-// fills un-dispatched rows with id-only fallbacks (no goroutine
+// fills un-dispatched groups with id-only fallbacks (no goroutine
 // leaks, no deadlock).
-func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
+func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel so the dispatcher bails on first iteration.
 
-	entries := []slackdata.PolicyEntry{
+	// Distinct resource_ids → one group per entry.
+	groups := groupAliasEntriesByResource([]slackdata.PolicyEntry{
 		{Alias: "a", ResourceID: "r_a", ChannelID: "C"},
 		{Alias: "b", ResourceID: "r_b", ChannelID: "C"},
 		{Alias: "c", ResourceID: "r_c", ChannelID: "C"},
-	}
+	})
 
 	var hits atomic.Int32
 	ts := newAdminTestServers(t)
@@ -172,7 +250,7 @@ func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
 	}
 	log := slogTestLogger(t)
 
-	lines := fanoutAliasRows(ctx, log, c, entries, 1)
+	lines := fanoutAliasGroups(ctx, log, c, groups, 1)
 	if len(lines) != 3 {
 		t.Fatalf("lines len = %d, want 3", len(lines))
 	}
@@ -204,11 +282,11 @@ func TestFanoutAliasRows_RespectsCtxCancellation(t *testing.T) {
 //     `$alias` → `r_xxx` lines instead of `$alias` → https://...).
 //
 // Without this fence, a refactor that swallows ctx in
-// [fanoutAliasRows]'s per-row goroutine (e.g., dropping the
+// [fanoutAliasGroups]'s per-group goroutine (e.g., dropping the
 // ctx-canceled branch in the error switch) would leave the
 // dispatcher waiting on wg.Wait() past the response_url deadline,
 // silently failing the entire `/qurl aliases` reply.
-func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
+func TestFanoutAliasGroups_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 	const numEntries = 80
 	entries := make([]slackdata.PolicyEntry, numEntries)
 	for i := range entries {
@@ -218,6 +296,8 @@ func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 			ChannelID:  "C",
 		}
 	}
+	// Distinct resource_ids → one group per entry.
+	groups := groupAliasEntriesByResource(entries)
 
 	ts := newAdminTestServers(t)
 	// Every resource fetch blocks until ctx is canceled — simulates a
@@ -246,7 +326,7 @@ func TestFanoutAliasRows_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	lines := fanoutAliasRows(ctx, log, c, entries, aliasesResourceFanoutLimit)
+	lines := fanoutAliasGroups(ctx, log, c, groups, aliasesResourceFanoutLimit)
 	elapsed := time.Since(start)
 
 	if len(lines) != numEntries {
