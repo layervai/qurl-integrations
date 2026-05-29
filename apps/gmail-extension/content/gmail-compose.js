@@ -412,7 +412,7 @@
   // ==================== Draft Insertion ====================
 
   /**
-   * Inserts QURL link HTML into the active Gmail compose draft.
+   * Inserts qURL link HTML into the active Gmail compose draft.
    *
    * @param {Array<{filename: string, link: string, expiry: string|null}>} results
    * @param {function} callback - called with (boolean) success

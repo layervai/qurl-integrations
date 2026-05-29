@@ -1,4 +1,4 @@
-# QURL Gmail Chrome Extension Local Unpacked Test Guide
+# qURL Gmail Chrome Extension Local Unpacked Test Guide
 
 This document explains how to build the extension with `scripts/package-all.sh`, load the unpacked `release/` directory into Google Chrome, and verify the end-to-end upload flow in Gmail without using the ZIP package.
 
@@ -13,7 +13,7 @@ This document explains how to build the extension with `scripts/package-all.sh`,
 
 - Google Chrome with access to `chrome://extensions`
 - A Gmail account
-- A running QURL upload service
+- A running qURL upload service
 - The project root at `qurl-gmail-chrome-extension/`
 
 ## 1. Build the Unpacked Release
@@ -50,13 +50,13 @@ Expected output:
 
 Open Gmail and create a new draft before using the extension.
 
-This matters because the content script inserts generated QURL links into the active compose body. If no compose window is open, the upload can still succeed, but draft insertion may fail and the popup will fall back to manual copy.
+This matters because the content script inserts generated qURL links into the active compose body. If no compose window is open, the upload can still succeed, but draft insertion may fail and the popup will fall back to manual copy.
 
 ## 4. Open the Extension Popup
 
 Click the extension icon in the Chrome toolbar to open the popup.
 
-In the popup, you can configure the QURL upload service address. If you do not change it, the extension uses the built-in default server:
+In the popup, you can configure the qURL upload service address. If you do not change it, the extension uses the built-in default server:
 
 `https://getqurllink.layerv.ai/`
 
@@ -83,25 +83,25 @@ Expected behavior:
 
 ## 6. Start the Upload
 
-Click **Upload to QURL** to begin uploading.
+Click **Upload to qURL** to begin uploading.
 
 Expected behavior:
 
 - A per-file progress state is shown in the popup
-- Each file is uploaded to the configured QURL service using `POST {QURL_API_BASE}/api/upload`
+- Each file is uploaded to the configured qURL service using `POST {QURL_API_BASE}/api/upload`
 - The popup waits for all files to finish before attempting Gmail draft insertion
 
 ![Start Upload](./images/patch-3.png)
 
 ## 7. Verify Upload Success and Draft Insertion
 
-After a successful upload, the extension attempts to insert the generated QURL links into the currently open Gmail draft.
+After a successful upload, the extension attempts to insert the generated qURL links into the currently open Gmail draft.
 
 Expected behavior:
 
 - Successful uploads are listed in the popup
 - The Gmail draft is updated automatically with the uploaded file links
-- Each inserted item includes the file name, the QURL link, and the expiry time when available
+- Each inserted item includes the file name, the qURL link, and the expiry time when available
 
 If automatic insertion fails:
 
@@ -122,7 +122,7 @@ Check the Gmail draft content after insertion.
 
 Expected behavior:
 
-- The draft shows the generated QURL links
+- The draft shows the generated qURL links
 - Each item includes a clickable link
 - Each item includes the validity or expiry time returned by the service
 
@@ -132,13 +132,13 @@ This is the final state that the recipient will see in the email draft.
 
 ## 9. Verify the Uploaded Link
 
-Click one of the inserted QURL links in the Gmail draft.
+Click one of the inserted qURL links in the Gmail draft.
 
 Expected behavior:
 
 - The link opens successfully in the browser
 - The uploaded file can be viewed or downloaded
-- Image files and PDF files should be directly accessible through the QURL link
+- Image files and PDF files should be directly accessible through the qURL link
 
 ![Open the Uploaded Resource](./images/patch-6.png)
 
@@ -147,8 +147,8 @@ Expected behavior:
 The following behaviors are expected based on the current code logic:
 
 - If no Gmail compose window is open, upload may succeed but draft insertion can fail
-- If the configured QURL server is unreachable or returns an error, the popup shows a file-level upload failure
-- If a custom QURL server is used, Chrome may request host permission when the server is saved
+- If the configured qURL server is unreachable or returns an error, the popup shows a file-level upload failure
+- If a custom qURL server is used, Chrome may request host permission when the server is saved
 - If draft insertion fails, manual copy remains available from the popup
 
 ## 11. Pass Criteria
@@ -158,6 +158,6 @@ The local unpacked test is considered successful when all of the following are t
 1. `./scripts/package-all.sh 1.0.0` generates `release/` successfully
 2. Chrome loads `release/` through **Load unpacked**
 3. The popup opens normally in Gmail
-4. Files upload successfully to the configured QURL service
+4. Files upload successfully to the configured qURL service
 5. Generated links are inserted into the Gmail draft automatically, or can be pasted manually using the copy fallback
 6. The inserted links open the uploaded image or PDF resources correctly

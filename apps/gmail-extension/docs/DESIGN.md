@@ -1,10 +1,10 @@
-# QURL Gmail Chrome Extension — Design Document
+# qURL Gmail Chrome Extension — Design Document
 
 ## Overview
 
-The QURL Gmail Chrome Extension is a Chrome Manifest V3 (MV3) extension that lets users upload local files directly to a QURL upload server and automatically insert secure, expiring access links into an active Gmail compose draft.
+The qURL Gmail Chrome Extension is a Chrome Manifest V3 (MV3) extension that lets users upload local files directly to a qURL upload server and automatically insert secure, expiring access links into an active Gmail compose draft.
 
-The core goal: replace Gmail's built-in attachment flow (which uploads to Google's servers) with an upload to a self-controlled QURL server, inserting only a short link into the email — keeping emails small, bypass attachment limits, and enabling time-limited or permission-controlled file access.
+The core goal: replace Gmail's built-in attachment flow (which uploads to Google's servers) with an upload to a self-controlled qURL server, inserting only a short link into the email — keeping emails small, bypass attachment limits, and enabling time-limited or permission-controlled file access.
 
 ---
 
@@ -28,7 +28,7 @@ The extension consists of four cooperating runtime pieces:
 │  └──────────┬──────────┘                                        │    │
 │             │ POST /api/upload                                  │    │
 │             ▼                                                   │    │
-│         QURL Server                              chrome.tabs.sendMessage /
+│         qURL Server                              chrome.tabs.sendMessage /
 │                                                  chrome.scripting.executeScript
 │                                                                   │
 │                                                                   ▼
@@ -62,7 +62,7 @@ qurl-gmail-chrome-extension/
 ├── content/
 │   └── gmail-compose.js      # Gmail DOM manipulation content script
 ├── lib/
-│   ├── qurl-api.js           # QURL upload API client
+│   ├── qurl-api.js           # qURL upload API client
 │   └── qurl-compose-format.js # Shared formatter for HTML/plain-text link output
 ├── icons/                    # SVG source + generated PNG icons
 ├── _locales/
@@ -91,9 +91,9 @@ Declares the extension using Chrome Manifest V3. Key declarations:
 - **`default_locale: "en"`** — English as the default and only locale.
 - **`action.default_popup`** — Popup entry point.
 - **`content_scripts`** — Preloads `lib/qurl-compose-format.js` and `gmail-compose.js` into `https://mail.google.com/*` pages at `document_start`.
-- **`host_permissions`** — Always grants Gmail and the built-in default QURL server origin.
-- **`optional_host_permissions`** — Declared as `https://*/*` so Chrome can show a per-origin runtime prompt for any user-entered HTTPS QURL server. The extension never auto-grants broad host access: `ensureQurlHostPermission()` requests only the single saved origin, and only after the user explicitly saves that server URL. This broad declaration exists to satisfy MV3 runtime permission mechanics and should be kept narrowly justified for Chrome Web Store review.
-- **`permissions`** — `activeTab`, `scripting`, and `storage`.
+- **`host_permissions`** — Always grants Gmail and the built-in default qURL server origin.
+- **`optional_host_permissions`** — Declared as `https://*/*` so Chrome can show a per-origin runtime prompt for any user-entered HTTPS qURL server. The extension never auto-grants broad host access: `ensureQurlHostPermission()` requests only the single saved origin, and only after the user explicitly saves that server URL. This broad declaration exists to satisfy MV3 runtime permission mechanics and should be kept narrowly justified for Chrome Web Store review.
+- **`permissions`** — `scripting` and `storage`.
 
 ### background.js
 
@@ -115,27 +115,27 @@ The popup is the user-facing interface. State: `selectedFiles[]`.
 
 **User flow:**
 1. User clicks "Browse files" → hidden `<input type="file">` triggers `change` event → files stored in `selectedFiles[]` → `renderFileList()` displays them.
-2. User clicks "Upload to QURL" → for each file: read as `ArrayBuffer`, call `uploadFile()`, push result → `insertIntoGmailDraft(results)`.
+2. User clicks "Upload to qURL" → for each file: read as `ArrayBuffer`, call `uploadFile()`, push result → `insertIntoGmailDraft(results)`.
 3. `insertIntoGmailDraft()` sends successful results to the background relay.
 4. `showResults()` renders success rows, upload failures, and Gmail insertion failures.
 5. If Gmail insertion fails, the popup enables a manual **Copy inserted content** fallback using HTML and plain-text clipboard payloads.
 
 **Key decisions:**
 - Files are read as `ArrayBuffer` (not base64) — efficient for large files.
-- Uploads run sequentially (not in parallel) — keeps UI state simple and avoids overwhelming the QURL server.
-- Custom QURL server configuration is stored in `chrome.storage.local`.
+- Uploads run sequentially (not in parallel) — keeps UI state simple and avoids overwhelming the qURL server.
+- Custom qURL server configuration is stored in `chrome.storage.local`.
 - Fallback text is English; primary strings come from `chrome.i18n.getMessage()`.
 
 ### lib/qurl-api.js
 
-The QURL API client. Exposes a single async function:
+The qURL API client. Exposes a single async function:
 
 ```js
 async function uploadFile(fileBuffer, filename, contentType)
 // → { success, resource_id, qurl_link, resource_url, expires_at, error }
 ```
 
-**Host permission handling** — Before upload, `ensureQurlHostPermission()` checks whether the chosen QURL origin is already allowed. The built-in default origin is always permitted; custom HTTPS origins are requested dynamically when saved.
+**Host permission handling** — Before upload, `ensureQurlHostPermission()` checks whether the chosen qURL origin is already allowed. The built-in default origin is always permitted; custom HTTPS origins are requested dynamically when saved.
 
 **Base URL normalization** — `normalizeQurlApiBase()` accepts either a bare server URL or a full `/api/upload` URL, strips the endpoint suffix, removes query/hash fragments, and enforces `https://`.
 
@@ -204,7 +204,7 @@ Sent from popup → background → content script.
   results: [
     {
       filename: string,
-      link: string,        // QURL access URL
+      link: string,        // qURL access URL
       expiry: string|null  // ISO date string or null
     }
   ]
@@ -255,10 +255,10 @@ The client accepts both wrapped (`{success, data: {...}}`) and flat (`{success, 
 
 | Variable | File | Default | Description |
 |---|---|---|---|
-| `DEFAULT_QURL_API_BASE` | `lib/qurl-config.js` | `https://getqurllink.layerv.ai/` | Built-in default QURL server base URL — single source of truth (production upload connector). Build-time configurable via `QURL_API_BASE`; the build regenerates this file and the manifest host permission together |
-| `qurlApiBase` | `chrome.storage.local` | unset | User-configured override for the QURL server base URL |
-| `host_permissions` | `manifest.json` | Gmail + default QURL origin | Always-allowed origins bundled with the extension |
-| `optional_host_permissions` | `manifest.json` | `https://*/*` | Additional HTTPS origins that may be requested one origin at a time for custom QURL servers |
+| `DEFAULT_QURL_API_BASE` | `lib/qurl-config.js` | `https://getqurllink.layerv.ai/` | Built-in default qURL server base URL — single source of truth (production upload connector). Build-time configurable via `QURL_API_BASE`; the build regenerates this file and the manifest host permission together |
+| `qurlApiBase` | `chrome.storage.local` | unset | User-configured override for the qURL server base URL |
+| `host_permissions` | `manifest.json` | Gmail + default qURL origin | Always-allowed origins bundled with the extension |
+| `optional_host_permissions` | `manifest.json` | `https://*/*` | Additional HTTPS origins that may be requested one origin at a time for custom qURL servers |
 
 ---
 
@@ -267,7 +267,7 @@ The client accepts both wrapped (`{success, data: {...}}`) and flat (`{success, 
 1. **No sensitive data stored in extension.** API credentials (if any) should be handled server-side. The extension only sends file bytes and receives public URLs.
 2. **HTML insertion is controlled.** Link labels and URLs are escaped before rendering. Shared formatting lives in `lib/qurl-compose-format.js`.
 3. **Multipart header sanitization.** Filenames are stripped of `"`, `\r`, `\n` before inclusion in `Content-Disposition` headers.
-4. **Custom server access is explicit.** Additional origins are requested only when the user saves a custom HTTPS QURL server.
+4. **Custom server access is explicit.** Additional origins are requested only when the user saves a custom HTTPS qURL server.
 
 ---
 

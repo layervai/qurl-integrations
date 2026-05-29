@@ -209,7 +209,7 @@ function rewriteManifestHostPermission(normalizedBase, targetReleaseRoot) {
 
   if (matchIndex === -1) {
     throw new Error(
-      `Could not locate the bundled QURL host permission in release/manifest.json. ` +
+      `Could not locate the bundled qURL host permission in release/manifest.json. ` +
       `Expected "${expectedCurrentPattern}" but found: [${hostPermissions.join(', ')}]`
     );
   }

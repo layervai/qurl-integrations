@@ -254,7 +254,7 @@
     "description": "Shown when a pending insertion request is evicted; the insertion may have succeeded"
   },
   "expiry_suffix": {
-    "message": " (Expires: $1)",
+    "message": " (Expires: $EXPIRY$)",
     "description": "Suffix shown after a link when the server returns an expiry timestamp",
     "placeholders": {
       "expiry": {
