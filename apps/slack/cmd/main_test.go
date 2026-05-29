@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -539,18 +537,13 @@ func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	}
 }
 
-// A stale `views:write` in a SLACK_BOT_SCOPES override is dropped (not
-// forwarded, not rejected) so customer installs keep working off the valid
-// scopes while the operator is warned to patch their runbook: forwarding it
-// would fail every install at Slack with invalid_scope, and rejecting it in
-// Validate() would abort bot startup. Mixed case also exercises the
-// case-insensitive match.
-func TestBuildSlackInstallConfigStripsAndWarnsViewsWrite(t *testing.T) {
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
+// A stale `views:write` in a SLACK_BOT_SCOPES override is stripped at config
+// load (see slackinstall.DropUnsupportedScopes), so the install flow keeps
+// working off the valid scopes instead of breaking every install with
+// invalid_scope or aborting startup. Mixed case confirms the wiring uses the
+// case-insensitive helper; the drop decision itself is unit-tested in the
+// slackinstall package.
+func TestBuildSlackInstallConfigStripsViewsWriteOverride(t *testing.T) {
 	env := validSlackInstallEnv()
 	env[envSlackBotScopes] = "commands,Views:Write"
 	applySlackInstallEnv(t, env)
@@ -560,9 +553,6 @@ func TestBuildSlackInstallConfigStripsAndWarnsViewsWrite(t *testing.T) {
 	}
 	if strings.Join(cfg.BotScopes, ",") != "commands" {
 		t.Fatalf("scopes = %v, want views:write stripped", cfg.BotScopes)
-	}
-	if !strings.Contains(logs.String(), "views:write") {
-		t.Fatalf("expected a warning naming views:write, got %q", logs.String())
 	}
 }
 

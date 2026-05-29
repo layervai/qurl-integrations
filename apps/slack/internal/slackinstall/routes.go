@@ -108,6 +108,24 @@ func DefaultBotScopes() []string {
 	return []string{botScopeCommands}
 }
 
+// DropUnsupportedScopes removes scope strings that are not real Slack OAuth
+// scopes (currently just views:write — see DefaultBotScopes) from an
+// operator-supplied scope set, returning the kept and dropped scopes. Slack
+// rejects such scopes at authorize with invalid_scope, so callers strip them
+// from SLACK_BOT_SCOPES overrides — keeping installs working off the valid
+// scopes — and surface the dropped scopes to the operator. Matching is
+// case-insensitive because NormalizeScopes does not lowercase.
+func DropUnsupportedScopes(scopes []string) (kept, dropped []string) {
+	for _, s := range scopes {
+		if strings.EqualFold(s, "views:write") {
+			dropped = append(dropped, s)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept, dropped
+}
+
 // RegisterRoutes wires the Slack install OAuth endpoints onto mux.
 func RegisterRoutes(mux *http.ServeMux, cfg *Config) error {
 	if cfg == nil {

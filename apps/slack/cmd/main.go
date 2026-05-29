@@ -764,23 +764,15 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
 		scopes = slackinstall.NormalizeScopes([]string{raw})
-		// Strip a stale `views:write` (not a real Slack scope, see
-		// slackinstall.DefaultBotScopes) from operator overrides rather than
-		// forward or reject it: forwarding makes every customer install fail at
-		// Slack's authorize step with invalid_scope until the SLACK_BOT_SCOPES
-		// runbook is patched, while rejecting it in Validate() would abort bot
-		// startup. Stripping keeps installs working off the valid scopes and
-		// warns the operator. EqualFold because NormalizeScopes does not lowercase.
-		kept := make([]string, 0, len(scopes))
-		for _, s := range scopes {
-			if strings.EqualFold(s, "views:write") {
-				continue
-			}
-			kept = append(kept, s)
-		}
-		if len(kept) != len(scopes) {
+		// Strip a stale views:write from operator overrides (see
+		// slackinstall.DropUnsupportedScopes) rather than forward or reject it:
+		// forwarding makes every customer install fail at Slack's authorize step
+		// with invalid_scope until the SLACK_BOT_SCOPES runbook is patched, while
+		// rejecting it in Validate() would abort bot startup. Stripping keeps
+		// installs working off the valid scopes and warns the operator.
+		if kept, dropped := slackinstall.DropUnsupportedScopes(scopes); len(dropped) > 0 {
 			scopes = kept
-			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. The install flow needs only commands.")
+			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. SLACK_BOT_SCOPES must still include commands.", "stripped_scope", "views:write")
 		}
 	}
 	cfg := slackinstall.Config{

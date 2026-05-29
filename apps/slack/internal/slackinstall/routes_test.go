@@ -88,6 +88,31 @@ func TestConfigValidateRequiresCommandsScope(t *testing.T) {
 	}
 }
 
+func TestDropUnsupportedScopes(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          []string
+		wantKept    string
+		wantDropped string
+	}{
+		{"nothing unsupported", []string{"commands", "chat:write"}, "commands,chat:write", ""},
+		{"strips views:write", []string{"commands", "views:write"}, "commands", "views:write"},
+		{"case-insensitive", []string{"commands", "Views:Write"}, "commands", "Views:Write"},
+		{"only views:write leaves empty", []string{"views:write"}, "", "views:write"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kept, dropped := DropUnsupportedScopes(tt.in)
+			if strings.Join(kept, ",") != tt.wantKept {
+				t.Errorf("kept = %v, want %q", kept, tt.wantKept)
+			}
+			if strings.Join(dropped, ",") != tt.wantDropped {
+				t.Errorf("dropped = %v, want %q", dropped, tt.wantDropped)
+			}
+		})
+	}
+}
+
 func TestInstallRedirectsToSlackAuthorizeWithStateCookie(t *testing.T) {
 	store := &fakeTokenStore{}
 	w := httptest.NewRecorder()
