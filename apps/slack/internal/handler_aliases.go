@@ -95,14 +95,18 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	lines := make([]string, 0, len(groups))
 	unresolved := 0
 	for i := range groups {
-		// nil-map (fetch failed) and missing-key (resource_id absent from
-		// the scanned page) both yield a zero-value Resource — empty
-		// Slug/TargetURL, which formatAliasGroupLine degrades to the
-		// alias-only row. A group with a resource_id we couldn't resolve
-		// is a candidate for the pagination gap below.
-		r, ok := byID[groups[i].resourceID]
-		if groups[i].resourceID != "" && !ok {
-			unresolved++
+		// Resource-less groups (the "\x00"-keyed legacy/synthetic rows)
+		// never participate in the join — skip the lookup. For a real
+		// resource_id, a miss (nil map from a failed fetch, or absent from
+		// the scanned page) leaves r as the zero-value Resource, which
+		// formatAliasGroupLine degrades to the alias-only row, and counts
+		// toward the pagination-gap signal below.
+		var r client.Resource
+		if rid := groups[i].resourceID; rid != "" {
+			var ok bool
+			if r, ok = byID[rid]; !ok {
+				unresolved++
+			}
 		}
 		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, groups[i].aliases))
 	}
@@ -129,7 +133,10 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 // resourcesByResourceID fetches one page of the workspace's resources
 // and indexes them by resource_id for the slug join in processAliases
 // (see the call site for why the list path, not the per-id path, is the
-// reliable slug source).
+// reliable slug source). Every resource on the page is indexed —
+// intentionally NOT filtered to type=tunnel like /qurl list — so a
+// legacy URL binding still resolves its target_url and renders the
+// "<url> (legacy URL) → $alias" line.
 //
 // Best-effort: a fetch failure yields (nil, false) — a nil-map lookup
 // returns the zero-value Resource, so the caller degrades each row to

@@ -257,6 +257,35 @@ func TestHandleAliases_PartialUnresolvedCompletePageNoWarning(t *testing.T) {
 	}
 }
 
+// TestHandleAliases_ResourceLessGroupRendersAliasOnly fences the
+// defensive resource-less path end-to-end: a binding written with an
+// empty resource_id (legacy/synthetic data) renders alias-only, never
+// participates in the ListResources join, and does NOT count toward the
+// pagination triage warning even when has_more is true — it can't be
+// "paginated out" because it has no resource to find.
+func TestHandleAliases_ResourceLessGroupRendersAliasOnly(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"orphan": "", // legacy/synthetic binding with no resource_id
+	})
+	// Populated page with has_more set: must NOT trip the warning, since
+	// the resource-less group is excluded from the unresolved count.
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_unrelated01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unrelated"},
+		}, "next-cursor", true)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
+	if !strings.Contains(rendered, "• `$orphan`") {
+		t.Errorf("resource-less binding did not render alias-only: %q", rendered)
+	}
+	if strings.Contains(logs, "listing may be incomplete") {
+		t.Errorf("triage warning fired for a resource-less group (it can't be paginated out): %q", logs)
+	}
+}
+
 // TestHandleAliases_MultiAliasChannelDisplaysAllBindings fences the
 // post-pivot multi-binding behavior: a channel with three
 // alias_bindings emits a PolicyEntry per binding, and `/qurl
