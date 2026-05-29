@@ -793,10 +793,12 @@ func (h *Handler) helpMessage() string {
 		"• `/qurl get <$slug|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		"• `/qurl list` — List the tunnels available to you",
 	)
-	if h.aliasStore != nil {
-		// aliases reads channel_policies; on a sandbox deploy without an
-		// aliasStore it replies ":warning: not configured". Same gate as
-		// the set-alias/unset-alias admin lines below.
+	if h.cfg.AdminStore != nil {
+		// aliases reads channel_policies through the AdminStore (NOT the
+		// aliasStore that set-alias/unset-alias write through), so it
+		// gates on AdminStore to match processAliases's own nil-check —
+		// otherwise help could advertise `/qurl aliases` on a deploy where
+		// it replies ":warning: not configured".
 		lines = append(lines,
 			"• `/qurl aliases` — List the qURL shortcuts configured in this channel",
 		)

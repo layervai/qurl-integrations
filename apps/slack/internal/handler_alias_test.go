@@ -820,6 +820,14 @@ func TestHelpListsNewVerbs(t *testing.T) {
 	if strings.Contains(got, "tunnel install") {
 		t.Errorf("/qurl help = %q, advertised tunnel install without AdminStore", got)
 	}
+	// newAliasTestHandler wires aliasStore but NOT AdminStore, and `/qurl
+	// aliases` reads channel_policies through the AdminStore (processAliases
+	// fails closed when it's nil). So help must gate it on AdminStore — with
+	// aliasStore wired here, a gate that regressed back to aliasStore would
+	// leak the verb.
+	if strings.Contains(got, "/qurl aliases`") {
+		t.Errorf("/qurl help = %q, advertised /qurl aliases without AdminStore", got)
+	}
 }
 
 // TestHelpHidesAliasVerbsWhenAliasStoreNil fences round-19 cr #2:

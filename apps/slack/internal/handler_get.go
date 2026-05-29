@@ -412,6 +412,11 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		// issued, length not guaranteed to match the 11-char get-token
 		// shape): a legacy `r_<id>` is a real resource and still mints,
 		// only a non-`r_` value (a URL) is refused with a re-bind hint.
+		// Residual: a junk `r_<typo>` row (the old parser rejected only
+		// the bare `r_` sigil) passes this prefix check and 404s at mint
+		// → the generic retry copy. Accepted as rare — an admin re-bind
+		// is the same fix as for a URL row; not worth an upstream
+		// pre-resolve on every binding hit just to special-case it.
 		if !strings.HasPrefix(resourceID, "r_") {
 			log.Warn("get: channel alias bound to a non-resource-id (legacy URL) target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
 			return "", &userError{msg: legacyAliasBindingMessage(token)}

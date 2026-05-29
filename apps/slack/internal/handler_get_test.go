@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -250,7 +251,9 @@ func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
 	// is reused (vs a fresh literal) only to stay under goconst's threshold.
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{"legacy": testAliasURL})
 	var mintHits atomic.Int32
-	ts.addCustomerPrefix("POST", "/v1/", func(w http.ResponseWriter, _ *http.Request) {
+	// Narrow to the resource-mint family (where a regressed guard would
+	// send the would-be mint) rather than a blanket /v1/ catch-all.
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
@@ -266,6 +269,36 @@ func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite a legacy URL binding (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestGetWork_DefaultArmRefusesUnknownShape locks the unreachable
+// default arm of getWork's dispatch: a Command that parseGet cannot
+// actually produce (neither an alias nor a resource-id token) must hit
+// the "refuse to mint" guard and return the distinct internal-error
+// copy — NOT fall through to an unauthenticated mint. Drives the arm
+// directly since the parser guarantees it can't be reached end-to-end.
+func TestGetWork_DefaultArmRefusesUnknownShape(t *testing.T) {
+	t.Parallel()
+	h := &Handler{}
+	args := getWorkArgs{
+		// Alias == "" and Resource.Kind != ResourceTokenResourceID, so
+		// both dispatch branches are skipped and the default arm fires.
+		cmd:       &Command{Subcommand: SubcmdGet},
+		teamID:    "T1",
+		channelID: "C1",
+		userID:    "U1",
+	}
+	reply, err := h.getWork(context.Background(), slogTestLogger(t), args)
+	if reply != "" {
+		t.Errorf("reply = %q, want empty on the refuse-to-mint path", reply)
+	}
+	var ue *userError
+	if !errors.As(err, &ue) {
+		t.Fatalf("err = %v (%T), want *userError", err, err)
+	}
+	if ue.msg != unexpectedGetShapeMessage {
+		t.Errorf("err msg = %q, want unexpectedGetShapeMessage (%q)", ue.msg, unexpectedGetShapeMessage)
 	}
 }
 
