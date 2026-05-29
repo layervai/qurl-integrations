@@ -794,7 +794,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			// owner is the existing workspace owner".
 			if looksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID) //nolint:gosec // G706: slog escapes control bytes in attribute values; owner_user_id is shape-validated by looksLikeSlackUserID above.
-				respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is <@%s>. Ask them to re-run setup, or use `/qurl admin` for non-owner admin actions.", ownerID))
+				respondSlack(w, fmt.Sprintf("Only the workspace owner can re-run `/qurl setup`. The current owner is <@%s>. Ask them to re-run setup. For admin actions that don't need workspace ownership, use the other `/qurl admin` commands.", ownerID))
 			} else {
 				slog.Error("/qurl setup: rebind refused; stored owner_id is shape-bad — likely a pre-pivot Auth0 sub. Operator must delete the workspace_mappings row to recover.", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID)) //nolint:gosec // G706: slog escapes control bytes in attribute values; caller_user_id is the Slack-payload user ID and owner_id_len is an int.
 				respondSlack(w, "Only the workspace owner can re-run `/qurl setup`, but this workspace's stored owner record is malformed and can't be displayed (likely a legacy record). Please contact support to recover access.")

@@ -299,7 +299,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			// through to AlreadyBound, the safe default), but log so the
 			// malformed row is grep-able rather than silently routing to the
 			// generic rebind-refused page.
-			slog.Warn("BindWorkspace: row exists but owner_id is empty — likely a manually edited row; refusing rebind (AlreadyBound)", "team_id", m.TeamID)
+			slog.Warn("BindWorkspace: row exists but owner_id is empty — likely a manually edited row; refusing rebind (AlreadyBound)", "team_id", m.TeamID, "admin_count", len(readStringSet(check.Item, attrAdminSlackUserIDs)))
 		}
 	}
 	// ErrCodeWorkspaceAlreadyBound fires for every non-owner rebind
