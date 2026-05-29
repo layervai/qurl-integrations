@@ -910,6 +910,12 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	// that would collide as the leading token of an admin sub-word grammar.
 	switch {
 	case text == "" || text == "help":
+		// help is intentionally NOT admin-gated, unlike every verb below it:
+		// it's discovery, not a privileged action. Gating it would obscure
+		// (a non-admin couldn't learn what exists) rather than protect — the
+		// roster it renders is the same public grammar carried in the user
+		// surface's `/qurl-admin help` pointer. The actual admin verbs each
+		// gate in their own handler (requireAdminSync).
 		respondSlack(w, h.adminHelpMessage(command))
 	case slashSubcommand(text, "admin"):
 		// All admin membership verbs (revoke / add / remove / list)

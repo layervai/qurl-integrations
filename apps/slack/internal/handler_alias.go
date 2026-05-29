@@ -343,7 +343,12 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// Admin gate, in code (see requireAliasAdminGate). Runs after
 	// aliasValidate (team/channel IDs + store-wired check) but before the
 	// slug resolve + DDB bind, so a non-admin is denied before any resource
-	// interaction.
+	// interaction. The parse/validate usage hints (parseAliasArgs above) are
+	// deliberately surfaced before the gate: the grammar is public — it's in
+	// the ungated `/qurl-admin help` — so a non-admin's malformed attempt gets
+	// the usage reply rather than a bare denial. The gate's guarantee is "no
+	// slug resolve or store mutation before the admin check," not "no parser
+	// feedback to non-admins."
 	if !h.requireAliasAdminGate(w, teamID, values, AdminActionSetAlias) {
 		return
 	}
