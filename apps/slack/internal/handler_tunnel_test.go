@@ -372,6 +372,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
+	// Install seeds the description (which doubles as the Display Name) with
+	// the install default, so every tunnel has a Display Name from creation;
+	// admins refine it with `/qurl-admin set-display-name`.
+	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
+		t.Errorf("resource body description = %v, want install default %q", got, want)
+	}
 	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
 		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
 	}
@@ -1774,6 +1780,49 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
+	}
+}
+
+// TestRenderTunnelInstall_ShowsDisplayName fences the install
+// confirmation's id line: it shows the tunnel's Display Name (resource
+// description, always set in production) next to the id; the empty-guard
+// case (defensive — a blank description) shows just the id with no
+// dangling em-dash.
+func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
+	now := fixedNow
+	expiresAt := now.Add(time.Hour)
+	args := &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}
+	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
+	freezeTunnelBootstrapNow(t, h, now)
+	prepared, err := h.prepareTunnelInstallMessage(args)
+	if err != nil {
+		t.Fatalf("prepareTunnelInstallMessage: %v", err)
+	}
+	key := &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}
+	const aliasStatus = "qURL alias `$prod-dashboard` is ready in this channel."
+
+	withName, err := prepared.render(args, key, aliasStatus, "Prod API gateway", now)
+	if err != nil {
+		t.Fatalf("render with Display Name: %v", err)
+	}
+	if !strings.Contains(withName, "qURL tunnel `"+testTunnelSlug+"` — Prod API gateway is ready to install.") {
+		t.Errorf("install confirmation missing Display Name on id line:\n%s", withName)
+	}
+
+	withoutName, err := prepared.render(args, key, aliasStatus, "", now)
+	if err != nil {
+		t.Fatalf("render without Display Name: %v", err)
+	}
+	if !strings.Contains(withoutName, "qURL tunnel `"+testTunnelSlug+"` is ready to install.") {
+		t.Errorf("install confirmation should show a bare id line when no Display Name is set:\n%s", withoutName)
+	}
+	if strings.Contains(withoutName, "—") {
+		t.Errorf("install confirmation should not render an em-dash with no Display Name:\n%s", withoutName)
 	}
 }
 

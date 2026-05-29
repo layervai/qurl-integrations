@@ -294,7 +294,7 @@ func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 // channel alias, so the slug would otherwise appear twice). The token-in-backticks
 // shape lets Slack render each as inline code. There is no `(tunnel)` label
 // or `[slug:...]` fragment — the whole list is tunnels and the token IS the
-// slug. The arrow joins to the human-readable description when one is set.
+// slug. An em-dash joins to the tunnel's Display Name.
 //
 // A slug-less, resource-alias-less tunnel with a bound channel `$alias` has
 // that alias promoted to the primary token (by [tunnelDisplayToken]) so the
@@ -305,6 +305,12 @@ func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
 // alias-shaped token), so the row renders the bare resource_id WITHOUT a `$`
 // sigil and spells out that it's not usable from Slack until an admin sets a
 // slug — keeping the "copy a token and get it" promise honest.
+//
+// An em-dash joins the id to the tunnel's Display Name. The Display Name
+// reuses the resource description field (see handleSetDisplayName) and is
+// always set — install seeds a default and admins refine it with
+// `/qurl-admin set-display-name` — so it normally renders. The empty guard
+// is defensive only.
 func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	token := tunnelDisplayToken(r, boundAliases)
 	var line string
@@ -326,8 +332,12 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 		}
 		line += " (" + label + strings.Join(extras, ", ") + ")"
 	}
+	// Show the tunnel's Display Name next to the id. The description field
+	// doubles as the Display Name (see handleSetDisplayName) and is always
+	// set, so this normally renders; the empty guard is defensive only (an
+	// upstream returning a blank description shouldn't dangle an em-dash).
 	if r.Description != "" {
-		line += " → " + r.Description
+		line += " — " + r.Description
 	}
 	return line
 }
