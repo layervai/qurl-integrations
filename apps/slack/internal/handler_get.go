@@ -225,7 +225,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 		// parser but deliberately omitted from this hint — `/qurl list`
 		// renders slugs, never the opaque `r_<id>`, so there's no
 		// self-serve path to discover one (it's a power-user copy form).
-		respondSlack(w, ":warning: Usage: `/qurl get $<slug>` (or `$<alias>`) to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
+		respondSlack(w, ":warning: Usage: `/qurl get <$slug|$alias>` to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
 		return
 	}
 
