@@ -30,17 +30,17 @@ Customer onboarding is install-first:
 ### User commands (`/qurl`)
 
 - `/qurl setup` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; first-come-claims — the first user to run it becomes the workspace's qURL admin, and only they can re-run it)
-- `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a channel `$alias` (raw URLs are not supported)
+- `/qurl get <$name|$alias>` — Mint a one-time qURL for a tunnel `$name` or a channel `$alias` (raw URLs are not supported)
 - `/qurl list` — List the protected tunnel resources available to you (with their bound channel shortcuts)
 - `/qurl aliases` — List the qURL shortcuts configured in the current channel
 - `/qurl help` — Show the user command help
 
 ### Admin commands (`/qurl-admin`)
 
-- `/qurl-admin set-alias $<alias> $<slug>` — Point a channel shortcut at a tunnel slug (admin-only)
+- `/qurl-admin set-alias $<alias> $<name>` — Point a channel shortcut at a tunnel name (admin-only)
 - `/qurl-admin unset-alias $<alias>` — Remove a channel shortcut binding (admin-only)
 - `/qurl-admin tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install)
-- `/qurl-admin tunnel install <slug|$slug> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
+- `/qurl-admin tunnel install <name|$name> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
 - `/qurl-admin admin add @user` / `remove @user` / `list` — Manage the workspace's bot admins (admin-only)
 - `/qurl-admin admin revoke <qurl_id>` — Revoke a single qURL (admin-only)
 - `/qurl-admin help` — Show the admin command help
@@ -72,13 +72,13 @@ modifiers enabled by the current bot deployment.
   `team_id`.
 - **Tunnel onboarding:** `/qurl-admin tunnel install` opens a Slack modal with the
   bot token for the invoking workspace, letting an admin choose the tunnel
-  slug, optional channel shortcut, local port, and target environment
-  (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl-admin tunnel install <slug>` (or
-  `$slug`) remains available for CLI-style admins. Both paths use the
+  name, optional channel shortcut, local port, and target environment
+  (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl-admin tunnel install <name>` (or
+  `$name`) remains available for CLI-style admins. Both paths use the
   workspace API key to find-or-create a tunnel resource scoped to the
-  connected qURL account, bind `$<slug>` or the `alias:` shortcut override in
+  connected qURL account, bind `$<name>` or the `alias:` shortcut override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
-  key. When `alias:` is omitted, the slug doubles as the channel shortcut.
+  key. When `alias:` is omitted, the name doubles as the channel shortcut.
   Retrying the install within the modal's 25-minute validity window reuses
   the same bootstrap-key idempotency bucket. Retrying after that window can
   mint a new key, so operators should run the newest Slack install block and
@@ -86,8 +86,8 @@ modifiers enabled by the current bot deployment.
   The Slack response hides the internal resource id and renders output
   tailored to the selected environment. Docker and Docker Compose receive
   guarded pasteable shell blocks that write `qurl-proxy.yaml`, create a
-  bootstrap-key file, create/chown slug-scoped durable agent state, pass
-  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_SLUG=<slug>` to the client.
+  bootstrap-key file, create/chown per-tunnel durable agent state, pass
+  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_SLUG=<name>` to the client.
   ECS/Fargate and Kubernetes receive the same contract as deployment
   snippets: co-locate the sidecar with the target container, mount durable
   per-instance state at `/var/lib/layerv/agent`, mount or inject the
