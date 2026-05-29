@@ -20,6 +20,10 @@ const TAB_MESSAGE_TIMEOUT_MS = 3000;
 const INSERT_LINKS_TAB_MESSAGE_TIMEOUT_MS = 9000;
 
 function isGmailTab(tab) {
+  // tab.url is readable here without the "tabs" permission because mail.google.com is in
+  // host_permissions, which grants URL visibility for matching tabs. If that entry ever moves
+  // to optional_host_permissions, tab.url would become undefined and this returns false for
+  // everyone — declare "tabs" (or keep the Gmail host permission required) if that changes.
   return Boolean(tab && tab.id && typeof tab.url === 'string' && tab.url.startsWith('https://mail.google.com/mail/'));
 }
 
@@ -35,7 +39,9 @@ function isTrustedInsertLinksSender(sender) {
     return false;
   }
 
-  // Extension pages such as the popup have no sender.tab; content scripts and web-page contexts do.
+  // Trust contract: a trusted INSERT_LINKS sender is an extension UI page (the popup), which
+  // has sender.id === our extension id AND no sender.tab. Content scripts and web-page contexts
+  // always carry a sender.tab, so requiring its absence rejects them even if the id matches.
   return Boolean(sender && sender.id === chrome.runtime.id && !sender.tab);
 }
 

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "icons": "node scripts/generate-icons.js",
+    "lint": "eslint background.js content lib popup scripts test --max-warnings 0",
     "release": "node scripts/build-release.js",
     "package:release": "node scripts/package-release.js",
     "test": "node --test test/*.test.js",
@@ -19,6 +20,7 @@
     "publish:major": "node scripts/bump-version.js major && node scripts/package-release.js"
   },
   "devDependencies": {
+    "eslint": "^8.57.1",
     "sharp": "^0.34.5"
   }
 }

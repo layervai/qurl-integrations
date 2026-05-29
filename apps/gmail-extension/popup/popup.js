@@ -392,29 +392,40 @@ copyBtn.addEventListener('click', async () => {
 
 // ==================== Progress UI ====================
 
+// Static, user-input-free icon markup keyed by state. Set via innerHTML of a dedicated icon
+// node only (never interpolated with dynamic data) — the filename/status text is set with
+// textContent below, so there is no escape-into-innerHTML surface to drift into XSS.
+const PROGRESS_ICON_HTML = {
+  uploading: '<div class="spinner"></div>',
+  success: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7L5.5 10.5L12 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  error: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3L11 11M11 3L3 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+};
+
+function renderProgressItem(item, state, text) {
+  item.className = `progress-item ${state}`;
+  item.textContent = '';
+
+  const iconNode = document.createElement('div');
+  iconNode.className = 'progress-icon';
+  iconNode.innerHTML = PROGRESS_ICON_HTML[state] || PROGRESS_ICON_HTML.uploading;
+
+  const textNode = document.createElement('span');
+  textNode.className = 'progress-text';
+  textNode.textContent = text;
+
+  item.append(iconNode, textNode);
+}
+
 function addProgressItem(filename, state) {
   progressArea.classList.remove('hidden');
   const item = document.createElement('div');
-  item.className = `progress-item ${state}`;
-  item.innerHTML = `
-    <div class="progress-icon">${state === 'uploading' ? '<div class="spinner"></div>' : ''}</div>
-    <span class="progress-text">${escapeHtml(filename)}</span>
-  `;
+  renderProgressItem(item, state, filename);
   progressArea.appendChild(item);
   return item;
 }
 
 function updateProgressItem(item, state, text) {
-  item.className = `progress-item ${state}`;
-  const icon = state === 'success'
-    ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7L5.5 10.5L12 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-    : state === 'error'
-    ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3L11 11M11 3L3 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
-    : '';
-  item.innerHTML = `
-    <div class="progress-icon">${icon || '<div class="spinner"></div>'}</div>
-    <span class="progress-text">${escapeHtml(text)}</span>
-  `;
+  renderProgressItem(item, state, text);
 }
 
 function formatExpiry(isoString) {
@@ -708,20 +719,16 @@ function isRetryableRuntimeMessageError(err) {
   return Boolean(err && err.qurlRetryable);
 }
 
-// escapeHtml and normalizeAllowedLink delegate to the single implementation in
+// buildCopyHtml/buildCopyText/normalizeAllowedLink delegate to the single implementation in
 // lib/qurl-compose-format.js (loaded before this script in popup.html). Keeping one copy
-// prevents the security-sensitive HTML-escaping and https-only URL logic from drifting
-// between two places. The formatter is a hard dependency, so fail loudly if it is missing
-// rather than silently falling back to a second, potentially weaker, implementation.
+// prevents the security-sensitive https-only URL logic from drifting between two places. The
+// formatter is a hard dependency, so fail loudly if it is missing rather than silently
+// falling back to a second, potentially weaker, implementation.
 function getComposeFormatter() {
   if (!window.QURLComposeFormatter) {
     throw new Error('QURLComposeFormatter is not loaded — check the script order in popup.html.');
   }
   return window.QURLComposeFormatter;
-}
-
-function escapeHtml(str) {
-  return getComposeFormatter().escapeHtml(str);
 }
 
 function formatFileSize(bytes) {

@@ -1,0 +1,58 @@
+{
+  "root": true,
+  "env": {
+    "browser": true,
+    "webextensions": true,
+    "node": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "extends": ["eslint:recommended"],
+  "globals": {
+    "globalThis": "readonly",
+    "importScripts": "readonly",
+    "ClipboardItem": "readonly",
+    "QURLConfig": "readonly",
+    "QURLI18n": "readonly",
+    "QURLComposeFormatter": "readonly",
+    "uploadFile": "readonly",
+    "getQurlApiBase": "readonly",
+    "getStoredQurlApiBase": "readonly",
+    "setStoredQurlApiBase": "readonly",
+    "normalizeQurlApiBase": "readonly",
+    "isDefaultQurlOrigin": "readonly",
+    "ensureQurlHostPermission": "readonly",
+    "requestQurlHostPermission": "readonly",
+    "getQurlHostPermissionPattern": "readonly",
+    "resolveDefaultQurlApiConfig": "readonly"
+  },
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-console": ["error", { "allow": ["warn", "error"] }],
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-prototype-builtins": "error",
+    "no-case-declarations": "error",
+    "eqeqeq": ["error", "smart"],
+    "no-undef": "error"
+  },
+  "overrides": [
+    {
+      "files": ["test/**/*.js"],
+      "env": { "node": true },
+      "rules": {
+        "no-unused-vars": "off",
+        "no-console": "off"
+      }
+    },
+    {
+      "files": ["scripts/**/*.js"],
+      "env": { "node": true },
+      "rules": {
+        "no-console": "off"
+      }
+    }
+  ]
+}

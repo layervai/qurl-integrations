@@ -188,7 +188,7 @@
     "description": "Shown when the user declines the permission prompt for a custom qURL server"
   },
   "permission_request_confirm": {
-    "message": "Allow the extension to access $1 for qURL uploads? Chrome will show a permission prompt next.",
+    "message": "Allow the extension to access $origin$ for qURL uploads? Chrome will show a permission prompt next.",
     "description": "Confirmation shown before requesting host permission for a custom qURL server",
     "placeholders": {
       "origin": {

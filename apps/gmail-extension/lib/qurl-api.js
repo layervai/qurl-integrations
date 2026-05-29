@@ -417,6 +417,7 @@ function _sanitizeContentType(contentType) {
   // Unicode line separators \u0085\u2028\u2029). Note: ';' and '"' are deliberately
   // NOT stripped — they are legitimate in MIME types (e.g. text/plain; charset="utf-8").
   const stripped = String(contentType || 'application/octet-stream')
+    // eslint-disable-next-line no-control-regex -- intentionally strips control chars to block header injection
     .replace(/[\x00-\x1f\u0085\u2028\u2029]+/g, '')
     .trim();
   // Accept only a well-formed MIME type (type/subtype with optional parameters);
@@ -544,6 +545,7 @@ function _parseExpiry(payload) {
  */
 function _sanitizeFilename(name) {
   if (!name) return 'unnamed';
+  // eslint-disable-next-line no-control-regex -- intentionally strips control chars from the Content-Disposition filename
   const sanitized = String(name).replace(/[\x00-\x1f\u0085\u2028\u2029"\\]/g, '_');
   const encoder = new TextEncoder();
   let totalBytes = 0;
@@ -562,15 +564,13 @@ function _sanitizeFilename(name) {
 }
 
 function createMultipartBoundary() {
-  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
-    const bytes = new Uint8Array(16);
-    globalThis.crypto.getRandomValues(bytes);
-    return '----QurlBoundary' + Array.from(bytes, function (byte) {
-      return byte.toString(16).padStart(2, '0');
-    }).join('');
-  }
-
-  return '----QurlBoundary' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  // crypto.getRandomValues is present in every Chrome at/after minimum_chrome_version, so there
+  // is no non-crypto fallback to maintain (Node test runs provide it via the global crypto too).
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return '----QurlBoundary' + Array.from(bytes, function (byte) {
+    return byte.toString(16).padStart(2, '0');
+  }).join('');
 }
 
 /**

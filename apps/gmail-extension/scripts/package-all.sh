@@ -42,8 +42,11 @@ case "$MODE" in
     ;;
 esac
 
+# Derive both name and version from package.json so this stays in lockstep with
+# package-release.js (which names the ZIP "${pkg.name}-v${pkg.version}.zip").
+PKG_NAME="$(node -p "require('./package.json').name")"
 VERSION="$(node -p "require('./package.json').version")"
-ZIP_PATH="$PROJECT_ROOT/dist/qurl-gmail-chrome-extension-v${VERSION}.zip"
+ZIP_PATH="$PROJECT_ROOT/dist/${PKG_NAME}-v${VERSION}.zip"
 
 echo
 echo "Done."
