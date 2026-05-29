@@ -174,9 +174,12 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 
 // apiKeyLimitError reports whether body is a qurl-service error envelope
 // carrying the api-key-limit code. The envelope shape is
-// {"error":{"code":"...", ...}}; a body that doesn't parse to that shape
-// (e.g. a bare {"error":"forbidden"} string, or non-JSON) returns false so
-// the caller falls back to the generic status-code error.
+// {"error":{"code":"...", ...}} — qurl-service's own nested form, NOT RFC
+// 7807 problem+json (where code/title/detail are top-level, not nested under
+// "error"), so the match is driven by the parsed JSON shape, not the
+// response Content-Type. A body that doesn't parse to that shape (e.g. a
+// bare {"error":"forbidden"} string, or non-JSON) returns false so the
+// caller falls back to the generic status-code error.
 func apiKeyLimitError(body []byte) bool {
 	var env struct {
 		Error struct {
