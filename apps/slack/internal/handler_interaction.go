@@ -75,6 +75,10 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 	if !ok {
 		// A button we don't handle (or an empty actions array). Ack and
 		// ignore so Slack doesn't surface an error to the clicking user.
+		// Log the action_ids present so a future button that's rendered
+		// into a message but never wired here surfaces as a breadcrumb
+		// rather than a silent no-op.
+		slog.Info("block_actions: no recognized action", "team_id", payload.Team.ID, "action_ids", blockActionIDs(payload.Actions))
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
@@ -156,6 +160,16 @@ func findListCreateQurlAction(actions []interactionAction) (interactionAction, b
 		}
 	}
 	return interactionAction{}, false
+}
+
+// blockActionIDs lists the action_ids present in a block_actions payload,
+// for the no-recognized-action log breadcrumb.
+func blockActionIDs(actions []interactionAction) []string {
+	ids := make([]string, 0, len(actions))
+	for _, a := range actions {
+		ids = append(ids, a.ActionID)
+	}
+	return ids
 }
 
 func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {

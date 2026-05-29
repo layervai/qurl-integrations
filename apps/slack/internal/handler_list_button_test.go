@@ -2,6 +2,7 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -151,6 +152,77 @@ func TestHandleBlockActions_CreateQurlMints(t *testing.T) {
 	}
 	if !strings.Contains(async, "one-time use") {
 		t.Errorf("async reply missing one-time-use note: %q", async)
+	}
+}
+
+// TestHandleBlockActions_UnparseableTokenRejected fences the
+// defense-in-depth re-validation: a button value that our renderer would
+// never emit (here, uppercase + spaces) fails parseAliasToken the same
+// way a typed token would, so the click is rejected with the
+// "couldn't process" copy and never reaches the mint.
+func TestHandleBlockActions_UnparseableTokenRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, "C_test", inv.responseU.URL, listCreateQurlActionID, "Not A Token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("ack = %d %q, want 200 and {}", w.Code, w.Body.String())
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "Couldn't process") {
+		t.Errorf("async reply missing rejection copy: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached for an unparseable token (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleList_OverflowDegradesToText fences the block-ceiling guard:
+// a tunnel set larger than listCreateButtonMaxRows renders as plain text
+// (no blocks) so every tunnel still shows — rather than a >50-block
+// message Slack would reject. Locks the cap so a future bump that would
+// breach the ceiling fails here.
+func TestHandleList_OverflowDegradesToText(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	n := listCreateButtonMaxRows + 1 // one past the cap → text-only path
+	resources := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		resources = append(resources, map[string]any{
+			testKeyResourceID: fmt.Sprintf("r_tun_%03d", i),
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       fmt.Sprintf("tun-%03d", i),
+		})
+	}
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, resources, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if blocks := parseSlackBlocks(t, body); blocks != nil {
+		t.Errorf("expected text-only fallback past the button cap, got %d blocks", len(blocks))
+	}
+	text := parseSlackText(t, body)
+	// First and last rows both present → the text path truncates nothing.
+	for _, want := range []string{"`$tun-000`", fmt.Sprintf("`$tun-%03d`", n-1), "/qurl get"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text fallback missing %q", want)
+		}
 	}
 }
 
