@@ -303,16 +303,17 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
 //
-// **Admin restriction:** This handler is admin-gated at the Slack app
-// config level — the whole `/qurl-admin` command (which carries every
-// admin verb except setup) must be declared admin-only in the install
-// config. Gating in the app config avoids an extra Slack API round-trip
-// per invocation. The CR feedback on the old #230 (claude-bot review id
-// 2026-05-10) flagged "admin gate before alias resolution" as an
-// info-disclosure surface. Moving the gate to the app config closes that
-// gap structurally: a non-admin's command never reaches this handler.
-// (setup is different — it lives on the open `/qurl` command and is
-// guarded at the OAuth-callback bind layer instead; see handleSetup.)
+// **Admin restriction:** Enforced in code via requireAdminSync (a
+// CheckAdmin lookup against AdminStore), the same gate handleTunnel and
+// the admin membership verbs use. Slack does NOT restrict a slash command
+// to workspace admins — the "admins only" label on the `/qurl-admin`
+// registration is display text, not enforcement — so this code gate is the
+// only real boundary. It runs before alias resolution, so the CR feedback
+// on the old #230 (claude-bot review 2026-05-10) that flagged "admin gate
+// before alias resolution" stays addressed: a non-admin is denied before
+// any tunnel/resource lookup. (setup is different — it lives on the open
+// `/qurl` command and is guarded at the OAuth-callback bind layer instead;
+// see handleSetup.)
 //
 // **Target contract:** the only accepted target is a tunnel `$slug`.
 // A raw URL or an `r_<id>` resource id is rejected synchronously with
@@ -346,6 +347,20 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// rather than aliasPreamble.
 	teamID, channelID, ok := h.aliasValidate(w, values, "setalias")
 	if !ok {
+		return
+	}
+
+	// Admin gate, in code (see the doc comment): Slack does not restrict a
+	// slash command to workspace admins, so the `/qurl-admin` registration
+	// can't be the gate. Runs after aliasValidate (which only reads the
+	// team/channel IDs and checks the store is wired) but before the slug
+	// resolve + DDB bind, so a non-admin is denied before any resource
+	// interaction. requireAdminStoreSync guarantees AdminStore (== aliasStore
+	// in prod; see cmd/main.go SetAliasStore) is non-nil for CheckAdmin.
+	if !h.requireAdminStoreSync(w) {
+		return
+	}
+	if !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminAction("set_alias")) {
 		return
 	}
 	slug := strings.TrimPrefix(args.Target, "$")
@@ -433,7 +448,7 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 // query string from a setalias target before it lands in operator
 // logs. The success-copy path still shows the verbatim target to the
 // admin who set it, but the audit-log readership is typically wider
-// than the manifest-gated admin pool and shouldn't see embedded
+// than the code-gated admin pool and shouldn't see embedded
 // credentials. Non-URL targets (`r_…` resource ids, or anything that
 // fails to re-parse) are returned unchanged — the parser has already
 // fenced backticks and non-printable runes upstream.
@@ -454,10 +469,10 @@ func redactURLForLog(target string) string {
 
 // handleUnsetAlias routes `/qurl-admin unset-alias $<alias>`.
 //
-// **Admin restriction:** Same Slack-manifest-level gate as
-// handleSetAlias — see that comment. The CR feedback's
-// "info-disclosure" concern (a non-admin probing alias existence via
-// the response delta) is closed structurally by the manifest gate.
+// **Admin restriction:** Same in-code requireAdminSync gate as
+// handleSetAlias — see that comment. The CR "info-disclosure" concern (a
+// non-admin probing alias existence via the response delta) is closed by
+// the gate running before any store read.
 //
 // **Not-bound posture:** UnbindChannelAlias is conditional on
 // attribute_exists(alias_bindings.#a) — clearing an alias that
@@ -479,6 +494,18 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	defer cancel()
+
+	// Admin gate, in code — same posture as handleSetAlias (the
+	// `/qurl-admin` registration is not an admin gate; Slack doesn't
+	// restrict slash commands by role). Runs after aliasPreamble (IDs +
+	// store-wired check) but before UnbindChannelAlias, so a non-admin is
+	// denied before any store write.
+	if !h.requireAdminStoreSync(w) {
+		return
+	}
+	if !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminAction("unset_alias")) {
+		return
+	}
 
 	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
 	if errors.Is(err, slackdata.ErrAliasNotFound) {

@@ -243,8 +243,58 @@ func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 func TestDispatchSplit_UnknownCommandDefaultsToUserSurface(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	reply := slashReply(t, h, "/qurl-bogus", "help")
-	if !strings.Contains(reply, "/qurl get") {
+	// Falls back to the user surface. The user help header is
+	// command-name-agnostic (the invoked command name is echoed into the
+	// verb lines), so assert on it rather than a literal command token.
+	if !strings.Contains(reply, "Create and manage qURLs from Slack") {
 		t.Errorf("unknown command did not fall back to user help: %q", reply)
+	}
+	if strings.Contains(reply, "Admin commands for qURL in Slack") {
+		t.Errorf("unknown command rendered the admin surface: %q", reply)
+	}
+}
+
+// TestDispatchSplit_NonProdCommandNamesRouteBySuffix fences env-prefix
+// routing: a non-prod install whose commands carry an infix
+// (`/qurl-sandbox`, `/qurl-sandbox-admin`) must route admin verbs to the
+// admin surface via the `-admin` suffix — a literal `/qurl-admin` match
+// would send `/qurl-sandbox-admin` down the user path and make every admin
+// verb unreachable. Redirects and help must name the invoked command, not
+// the prod `/qurl` / `/qurl-admin`.
+func TestDispatchSplit_NonProdCommandNamesRouteBySuffix(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	// Admin verb on the sandbox admin command reaches the admin surface
+	// (here: the no-AdminStore "not configured" reply from the verb body),
+	// NOT the user-surface "is an admin command" redirect.
+	reply := slashReply(t, h, "/qurl-sandbox-admin", "set-alias $a $b")
+	if strings.Contains(reply, "is an admin command") {
+		t.Errorf("/qurl-sandbox-admin set-alias hit the user-surface redirect (suffix routing broken): %q", reply)
+	}
+
+	// User verb on the sandbox admin command → redirect names the sandbox
+	// user command, not the prod /qurl.
+	reply = slashReply(t, h, "/qurl-sandbox-admin", "get $x")
+	if !strings.Contains(reply, "/qurl-sandbox get") {
+		t.Errorf("user-verb redirect should name /qurl-sandbox, got %q", reply)
+	}
+	if strings.Contains(reply, "/qurl-admin") {
+		t.Errorf("redirect leaked the prod admin command name: %q", reply)
+	}
+
+	// Admin verb on the sandbox user command → redirect names the sandbox
+	// admin command.
+	reply = slashReply(t, h, "/qurl-sandbox", "tunnel install foo")
+	if !strings.Contains(reply, "/qurl-sandbox-admin tunnel") {
+		t.Errorf("admin-verb redirect should name /qurl-sandbox-admin, got %q", reply)
+	}
+
+	// Help renders the invoked (sandbox) command names.
+	if userHelp := slashReply(t, h, "/qurl-sandbox", "help"); !strings.Contains(userHelp, "/qurl-sandbox get") {
+		t.Errorf("/qurl-sandbox help should render the sandbox command name, got %q", userHelp)
+	}
+	if adminHelp := slashReply(t, h, "/qurl-sandbox-admin", "help"); !strings.Contains(adminHelp, "/qurl-sandbox-admin help") {
+		t.Errorf("/qurl-sandbox-admin help should render the sandbox command name, got %q", adminHelp)
 	}
 }
 

@@ -120,6 +120,35 @@ const (
 	commandAdmin = "/qurl-admin"
 )
 
+// adminCommandSuffix is how every env names its admin slash command: the
+// user command plus this suffix (`/qurl`→`/qurl-admin`,
+// `/qurl-sandbox`→`/qurl-sandbox-admin`; see qurl-integrations-infra
+// slack-manifests/envs.json). handleSlashCommand classifies on the suffix
+// rather than the literal commandAdmin so a non-prod env whose commands
+// carry an env infix still reaches the admin surface instead of falling
+// through to the user one.
+const adminCommandSuffix = "-admin"
+
+// isAdminCommand reports whether the invoked slash command is the admin
+// surface — any `*-admin` command, not just the prod commandAdmin.
+func isAdminCommand(command string) bool {
+	return strings.HasSuffix(command, adminCommandSuffix)
+}
+
+// userCommandName / adminCommandName return the sibling command names for
+// the invoked command, so wrong-surface redirects and help name the
+// command that actually exists in this workspace (e.g.
+// `/qurl-sandbox-admin`, not the prod `/qurl-admin`). Both are idempotent
+// on their own surface: userCommandName(commandUser)==commandUser and
+// adminCommandName(commandAdmin)==commandAdmin.
+func userCommandName(command string) string {
+	return strings.TrimSuffix(command, adminCommandSuffix)
+}
+
+func adminCommandName(command string) string {
+	return userCommandName(command) + adminCommandSuffix
+}
+
 const (
 	// defaultMaxConcurrentAsync caps in-flight goroutines. A Slack-side
 	// flood (replay storm, runaway integration) drops with ackBusy past
@@ -697,21 +726,26 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 
 	slog.Info("slash command", "command", command, "text", text)
 
-	// Both /qurl and /qurl-admin POST to the same request endpoint with the
-	// same HMAC gate; Slack stamps which one was invoked in the `command`
-	// field. Branch on it FIRST so the user surface and the admin surface
-	// stay cleanly separated: a verb typed on the wrong command gets a
-	// "that's a /qurl command" / "that's an admin command" redirect rather
-	// than the bare "unknown subcommand" reply. Dispatch is on the literal
-	// command name (not a substring) so a future `/qurl-x` can't collide.
-	switch command {
-	case commandAdmin:
+	// Both the user command and the admin command POST to the same request
+	// endpoint with the same HMAC gate; Slack stamps which one was invoked
+	// in the `command` field. Branch on it FIRST so the user surface and
+	// the admin surface stay cleanly separated: a verb typed on the wrong
+	// command gets a "that's a user command" / "that's an admin command"
+	// redirect rather than the bare "unknown subcommand" reply.
+	//
+	// Classification is by the `-admin` suffix (isAdminCommand), not the
+	// literal commandAdmin, so a non-prod env whose commands carry an infix
+	// (`/qurl-sandbox`, `/qurl-sandbox-admin`) routes admin verbs to the
+	// admin surface too. Matching the literal `/qurl-admin` would send
+	// `/qurl-sandbox-admin` down the user path, making every admin verb
+	// unreachable in that env.
+	if isAdminCommand(command) {
 		h.dispatchAdminCommand(w, command, text, values)
-	default:
-		// commandUser ("/qurl") and any unrecognized command land here.
-		// Unrecognized is defensive — Slack only sends the two commands
-		// the app registers — and the user surface is the safe default
-		// (it never mutates admin state).
+	} else {
+		// The user command and any unrecognized command land here.
+		// Unrecognized is defensive — Slack only sends the commands the app
+		// registers — and the user surface is the safe default (it never
+		// mutates admin state).
 		h.dispatchUserCommand(w, command, text, values)
 	}
 }
@@ -723,7 +757,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values) {
 	switch {
 	case text == "" || text == "help":
-		respondSlack(w, h.userHelpMessage())
+		respondSlack(w, h.userHelpMessage(command))
 	case text == "setup":
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
 		// see handleSetup for why it lives on the open user surface.
@@ -757,12 +791,13 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// first token; echo it inside a code span (it's a known-literal
 		// admin keyword, not arbitrary input) so the correction is
 		// concrete.
-		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `/qurl-admin %s` instead, or run `/qurl-admin help`.", firstWord(text), text))
+		adminCmd := adminCommandName(command)
+		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", firstWord(text), adminCmd, text, adminCmd))
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
 		slog.Info("unknown slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
+		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", text, command))
 	}
 }
 
@@ -782,7 +817,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text string, values url.Values) {
 	switch {
 	case text == "" || text == "help":
-		respondSlack(w, h.adminHelpMessage())
+		respondSlack(w, h.adminHelpMessage(command))
 	case slashSubcommand(text, "admin"):
 		// All admin membership verbs (revoke / add / remove / list)
 		// route through the parse-then-dispatch handler. The retired
@@ -801,11 +836,12 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
 	case isUserVerb(text):
-		// A user verb typed on `/qurl-admin` — redirect to `/qurl`.
-		respondSlack(w, fmt.Sprintf("`%s` is a `/qurl` command. Use `/qurl %s` instead, or run `/qurl help`.", firstWord(text), text))
+		// A user verb typed on the admin command — redirect to the user one.
+		userCmd := userCommandName(command)
+		respondSlack(w, fmt.Sprintf("`%s` is a `%s` command. Use `%s %s` instead, or run `%s help`.", firstWord(text), userCmd, userCmd, text, userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
-		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `/qurl-admin help`.", text))
+		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", text, command))
 	}
 }
 
@@ -888,7 +924,13 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 // omission is just so help text doesn't advertise a path that will reply
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
 // (see [Handler.adminHelpMessage]); a pointer line routes admins there.
-func (h *Handler) userHelpMessage() string {
+func (h *Handler) userHelpMessage(command string) string {
+	// Empty command (malformed/empty payload routes here defensively) →
+	// render the canonical prod name rather than stripping the `/qurl`
+	// prefix to nothing in the ReplaceAll below.
+	if command == "" {
+		command = commandUser
+	}
 	lines := []string{
 		"*/qurl* — Create and manage qURLs from Slack",
 		"",
@@ -916,7 +958,14 @@ func (h *Handler) userHelpMessage() string {
 		"",
 		"Admins: run `/qurl-admin help` for tunnel install, alias, and admin commands.",
 	)
-	return strings.Join(lines, "\n")
+	// The lines are authored with the prod command names (`/qurl`,
+	// `/qurl-admin`). Rewrite the `/qurl` prefix to the invoked user
+	// command so a non-prod env renders its own names — and because every
+	// admin literal here is `/qurl-admin` == `/qurl` + adminCommandSuffix,
+	// the same replace also fixes the admin pointer line
+	// (`/qurl-sandbox` → `/qurl-sandbox-admin help`). command is the user
+	// command on this surface, so the replacement is a no-op in prod.
+	return strings.ReplaceAll(strings.Join(lines, "\n"), commandUser, command)
 }
 
 // adminHelpMessage renders the `/qurl-admin help` text — the admin-gated
@@ -927,7 +976,12 @@ func (h *Handler) userHelpMessage() string {
 // advertises a path the user can't take. These commands are admin-only;
 // that gate lives in the Slack app config (the `/qurl-admin` command should
 // be admin-restricted), not in code — see handleSetAlias's doc comment.
-func (h *Handler) adminHelpMessage() string {
+func (h *Handler) adminHelpMessage(command string) string {
+	// Empty command → render the canonical prod admin name (see
+	// userHelpMessage for why the ReplaceAll below needs a non-empty base).
+	if command == "" {
+		command = commandAdmin
+	}
 	lines := []string{
 		"*/qurl-admin* — Admin commands for qURL in Slack",
 		"",
@@ -978,7 +1032,12 @@ func (h *Handler) adminHelpMessage() string {
 	// just the header with no verbs. Mirrors the `/qurl help` line on the
 	// user surface.
 	lines = append(lines, "• `/qurl-admin help` — Show this help message")
-	return strings.Join(lines, "\n")
+	// Authored with the prod admin command name; rewrite to the invoked
+	// admin command so a non-prod env renders its own (`/qurl-sandbox-admin`
+	// …). Every admin literal here is the full `/qurl-admin`, so a single
+	// replace covers them all; command is the admin command on this
+	// surface, so the replacement is a no-op in prod.
+	return strings.ReplaceAll(strings.Join(lines, "\n"), commandAdmin, command)
 }
 
 // respondMethodNotAllowed writes 405 with an RFC 7231 §6.5.5 Allow header.
