@@ -168,6 +168,13 @@ func (c *Config) Validate() error {
 	if len(scopes) == 0 {
 		return errors.New("at least one bot scope is required")
 	}
+	// Direct callers (and a regression in DefaultBotScopes) bypass the
+	// cmd-layer strip, so reject unsupported scopes here too. The env path
+	// strips them before Validate is reached, so operators still get the
+	// non-fatal strip-and-warn; only programmatic misuse reaches this error.
+	if _, dropped := DropUnsupportedScopes(scopes); len(dropped) > 0 {
+		return fmt.Errorf("bot scopes include scope(s) Slack rejects with invalid_scope: %s", strings.Join(dropped, ","))
+	}
 	if missing := missingRequiredScopes(scopes); len(missing) > 0 {
 		return fmt.Errorf("bot scopes missing required scope(s): %s", strings.Join(missing, ","))
 	}

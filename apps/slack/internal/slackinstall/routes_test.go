@@ -88,6 +88,16 @@ func TestConfigValidateRequiresCommandsScope(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsUnsupportedScope(t *testing.T) {
+	cfg := testConfig(&fakeTokenStore{})
+	// Direct construction bypasses the cmd-layer strip, so Validate must reject
+	// views:write itself rather than forward it to Slack (invalid_scope).
+	cfg.BotScopes = []string{botScopeCommands, "views:write"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "views:write") {
+		t.Fatalf("Validate error = %v, want rejection naming views:write", err)
+	}
+}
+
 func TestDropUnsupportedScopes(t *testing.T) {
 	tests := []struct {
 		name        string

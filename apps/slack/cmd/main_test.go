@@ -556,6 +556,22 @@ func TestBuildSlackInstallConfigStripsViewsWriteOverride(t *testing.T) {
 	}
 }
 
+// If a SLACK_BOT_SCOPES override strips to nothing (only views:write), config
+// load surfaces the "at least one bot scope" error rather than silently falling
+// back to the defaults — so the operator must fix the override.
+func TestBuildSlackInstallConfigRejectsOverrideThatStripsToEmpty(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackBotScopes] = "views:write"
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if ok || err == nil || !strings.Contains(err.Error(), "at least one bot scope") {
+		t.Fatalf("ok=%v err=%v, want config load to fail on empty scope set", ok, err)
+	}
+	if len(cfg.BotScopes) != 0 {
+		t.Fatalf("BotScopes = %v, want empty config on failure", cfg.BotScopes)
+	}
+}
+
 func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 	env := validSlackInstallEnv()
 	env["SLACK_BASE_URL"] = "http://slack-bot.example"
