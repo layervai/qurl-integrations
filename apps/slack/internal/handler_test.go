@@ -135,6 +135,105 @@ func TestSlashCommandHelp(t *testing.T) {
 	}
 }
 
+// slashReply drives a signed slash-command request for (command, text)
+// and returns the ephemeral reply text. Used by the dispatch-split tests
+// below to assert that `command` (/qurl vs /qurl-admin) routes each verb
+// to the right surface.
+func slashReply(t *testing.T, h *Handler, command, text string) string {
+	t.Helper()
+	body := url.Values{
+		fieldCommand:   {command},
+		fieldText:      {text},
+		fieldTeamID:    {"T123ABCDEF"},
+		fieldUserID:    {"U_ADMIN1"},
+		fieldChannelID: {"C123"},
+		fieldTriggerID: {"trig-split"},
+	}.Encode()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("command=%q text=%q: status = %d, want 200; body=%s", command, text, w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return result["text"]
+}
+
+// TestDispatchSplit_HelpPerCommand fences the help-text split: `/qurl
+// help` advertises only the user verbs (and routes admins onward), while
+// `/qurl-admin help` advertises only the admin verbs. A regression that
+// merged the two back into one help message — or pointed either at the
+// wrong verb set — fails here.
+func TestDispatchSplit_HelpPerCommand(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	userHelp := slashReply(t, h, commandUser, "help")
+	if !strings.Contains(userHelp, "/qurl get") || !strings.Contains(userHelp, "/qurl list") {
+		t.Errorf("/qurl help missing user verbs: %q", userHelp)
+	}
+	if !strings.Contains(userHelp, "/qurl-admin help") {
+		t.Errorf("/qurl help should route admins to /qurl-admin help: %q", userHelp)
+	}
+	// User help must NOT advertise admin verbs as runnable commands —
+	// they live on /qurl-admin. Check for the command-line forms (the
+	// `/qurl-admin setup` advert and the `/qurl set-alias` bullet),
+	// not bare words: the "Admins: run /qurl-admin help …" pointer line
+	// legitimately mentions "setup"/"tunnel install" in prose.
+	for _, leaked := range []string{"/qurl-admin setup", "/qurl-admin tunnel install", "/qurl set-alias", "/qurl-admin admin"} {
+		if strings.Contains(userHelp, leaked) {
+			t.Errorf("/qurl help leaked admin command %q: %q", leaked, userHelp)
+		}
+	}
+
+	adminHelp := slashReply(t, h, commandAdmin, "help")
+	if !strings.Contains(adminHelp, "/qurl-admin setup") {
+		t.Errorf("/qurl-admin help missing setup verb: %q", adminHelp)
+	}
+	// Admin help must NOT advertise the user mint verbs.
+	if strings.Contains(adminHelp, "/qurl get") {
+		t.Errorf("/qurl-admin help leaked user verb /qurl get: %q", adminHelp)
+	}
+}
+
+// TestDispatchSplit_WrongSurfaceRedirects fences the friendly redirects:
+// an admin verb typed on `/qurl` points the user at `/qurl-admin`, and a
+// user verb typed on `/qurl-admin` points the user at `/qurl`. Without
+// these the user would get the bare "unknown subcommand" reply.
+func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	// Admin verbs on /qurl → redirect to /qurl-admin.
+	for _, text := range []string{"setup", "tunnel install foo", "set-alias $a $b", "unset-alias $a", "admin list"} {
+		reply := slashReply(t, h, commandUser, text)
+		if !strings.Contains(reply, "admin command") || !strings.Contains(reply, "/qurl-admin") {
+			t.Errorf("/qurl %q: want admin-command redirect, got %q", text, reply)
+		}
+	}
+
+	// User verbs on /qurl-admin → redirect to /qurl.
+	for _, text := range []string{"get $prod-db", "list", "aliases"} {
+		reply := slashReply(t, h, commandAdmin, text)
+		if !strings.Contains(reply, "`/qurl` command") || !strings.Contains(reply, "/qurl ") {
+			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)
+		}
+	}
+}
+
+// TestDispatchSplit_UnknownCommandDefaultsToUserSurface fences the
+// defensive default: an unrecognized `command` value (Slack only sends
+// the two we register, so this is a misconfiguration / probe) routes to
+// the user surface, which never mutates admin state. `help` on an unknown
+// command yields the user help.
+func TestDispatchSplit_UnknownCommandDefaultsToUserSurface(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	reply := slashReply(t, h, "/qurl-bogus", "help")
+	if !strings.Contains(reply, "/qurl get") {
+		t.Errorf("unknown command did not fall back to user help: %q", reply)
+	}
+}
+
 func TestSlashCommandGetToken_AcksWithWorkingOnIt(t *testing.T) {
 	// Ack contract for /qurl get $<alias>: the synchronous response is
 	// the ephemeral working-on-it message. The actual qURL link is
@@ -515,7 +614,7 @@ func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
 	// /qurl setup uses to mint state.
 
 	body := url.Values{
-		"command": {"/qurl"},
+		"command": {"/qurl-admin"},
 		"text":    {"setup"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},
@@ -580,7 +679,7 @@ func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	// SetOAuthSetup deliberately NOT called → oauthSetup == nil.
 	body := url.Values{
-		"command": {"/qurl"},
+		"command": {"/qurl-admin"},
 		"text":    {"setup"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},

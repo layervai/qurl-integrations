@@ -31,7 +31,7 @@ import (
 // checks would mask shape errors behind the not-configured surface.
 //
 // The retired `admin claim` verb is rejected at the parser layer
-// (ErrUnknownAdminAction) since /qurl setup now seeds the workspace
+// (ErrUnknownAdminAction) since /qurl-admin setup now seeds the workspace
 // admin in the OAuth callback. There is no in-bot path that hands a
 // bootstrap code to the user anymore.
 func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
@@ -97,7 +97,7 @@ func (h *Handler) requireAdminStoreSync(w http.ResponseWriter) bool {
 // Remove,List}. Lifted to a const so the three copies can't drift
 // if the gate posture ever changes (today requireAdminSync short-
 // circuits before any of those branches fires).
-const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup` first."
+const workspaceUnboundReply = "Workspace isn't bound — run `/qurl-admin setup` first."
 
 // adminGateBudget bounds the sync admin-gate CheckAdmin call so a
 // hung DDB can't out-block Slack's 3s slash-command ack window. The
@@ -196,10 +196,10 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string
 				return
 			case http.StatusUnauthorized, http.StatusForbidden:
 				// API key rotated or invalidated — generic upstream-error
-				// would leave the admin guessing. Point at /qurl setup so
+				// would leave the admin guessing. Point at /qurl-admin setup so
 				// they have a concrete next step.
 				slog.Warn("admin revoke: upstream auth rejected (API key rotated?)", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-				respondSlack(w, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup` to rotate.")
+				respondSlack(w, "This workspace's API key was rejected by the qURL service — re-run `/qurl-admin setup` to rotate.")
 				return
 			}
 		}
@@ -218,7 +218,7 @@ func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string
 // user-facing surfaces via the slackdata-side disambiguation read:
 //
 //   - 409 admin_already_exists → idempotent "already an admin" copy
-//   - 404 workspace_not_bound  → "run /qurl setup first" nudge
+//   - 404 workspace_not_bound  → "run /qurl-admin setup first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
@@ -229,7 +229,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 	if target == callerUserID {
 		// requireAdminSync already passed → the caller is an admin →
 		// adding themselves is a no-op. Render an explicit copy so an
-		// admin who fat-fingered `/qurl admin add @themselves` doesn't
+		// admin who fat-fingered `/qurl-admin admin add @themselves` doesn't
 		// read the indirect "already an admin" surface as if it
 		// referred to someone else.
 		respondSlack(w, "You're already an admin — nothing to do.")
@@ -283,7 +283,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 //
 //   - 400 cannot_remove_owner → "transfer via OAuth re-install" copy
 //   - 404 admin_not_found     → idempotent "not an admin" copy
-//   - 404 workspace_not_bound → "run /qurl setup first" nudge
+//   - 404 workspace_not_bound → "run /qurl-admin setup first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID string, cmd *Command) {
@@ -294,7 +294,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 	if target == callerUserID {
 		// The store-side owner-check catches owners; this catches the
 		// non-owner self-remove. We refuse rather than allowing it so
-		// an admin who fat-fingers `/qurl admin remove @themselves`
+		// an admin who fat-fingers `/qurl-admin admin remove @themselves`
 		// doesn't lock themselves out without an explicit confirmation.
 		respondSlack(w, "You can't remove yourself — ask another admin.")
 		return
@@ -334,7 +334,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 // owner (or is empty) — operators want a tight reply on a single-
 // admin workspace, not a redundant duplicate.
 //
-//   - 404 workspace_not_bound → "run /qurl setup first" nudge
+//   - 404 workspace_not_bound → "run /qurl-admin setup first" nudge
 //
 // Other store errors surface as the generic upstream-error reply.
 func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID string) {

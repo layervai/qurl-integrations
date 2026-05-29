@@ -112,7 +112,7 @@ func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 		inv := newAdminSlashInvoker(t, h)
 
 		_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(reply, "re-run `/qurl setup`") {
+		if !strings.Contains(reply, "re-run `/qurl-admin setup`") {
 			t.Errorf("status %d: reply missing rotate-hint: %q", status, reply)
 		}
 	}
@@ -923,8 +923,9 @@ func TestResolvePolicy_MissingResourceReturnsFalse(t *testing.T) {
 
 // TestHandleSlashCommand_AdminOvermatchRejected fences the
 // admin-dispatch's exact-token boundary. Inputs like `administrator`
-// or `adminfoo` must NOT route through handleAdmin; they should fall
-// through to the unknown-subcommand branch with a help nudge.
+// or `adminfoo` (on `/qurl-admin`) must NOT route through handleAdmin;
+// they should fall through to the unknown-admin-subcommand branch with a
+// help nudge.
 func TestHandleSlashCommand_AdminOvermatchRejected(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	h := newTestHandler(t, noopQURLServer(t))
@@ -932,7 +933,7 @@ func TestHandleSlashCommand_AdminOvermatchRejected(t *testing.T) {
 
 	for _, text := range []string{"administrator", "adminfoo", "admin-policy"} {
 		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(reply, "Unknown subcommand") {
+		if !strings.Contains(reply, "Unknown admin subcommand") {
 			t.Errorf("%q routed unexpectedly: %q", text, reply)
 		}
 	}

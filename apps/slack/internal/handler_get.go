@@ -331,8 +331,8 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //
 //  1. Channel alias binding (`channel_policies.alias_bindings`). The
 //     presence of the binding in THIS channel is itself the
-//     authorization signal — `/qurl set-alias` is the admin act that
-//     authorizes a resource for use here.
+//     authorization signal — `/qurl-admin set-alias` is the admin act
+//     that authorizes a resource for use here.
 //  2. Tunnel-slug fallback. When no binding matches, the token may
 //     still be a tunnel slug: `/qurl list` renders `$<slug>` for tunnels
 //     surfaced via admin-sees-all or `allowed_resource_ids` that have no

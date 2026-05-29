@@ -292,7 +292,7 @@ func TestHandleList_EmptyWorkspace(t *testing.T) {
 	if !strings.Contains(async, "No tunnels found") {
 		t.Errorf("async reply missing empty-state copy: %q", async)
 	}
-	if !strings.Contains(async, "/qurl tunnel install") {
+	if !strings.Contains(async, "/qurl-admin tunnel install") {
 		t.Errorf("async reply missing tunnel-install hint: %q", async)
 	}
 }

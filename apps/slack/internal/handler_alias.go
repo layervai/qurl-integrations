@@ -72,7 +72,7 @@ var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 // aliasUsage is the help-text body returned when setalias/unsetalias
 // is invoked with an obvious typo. Centralized so the parser-rejection
 // path and the missing-arg path share the same copy.
-const aliasUsage = "Usage:\n• `/qurl set-alias $<alias> $<slug>`\n• `/qurl unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
+const aliasUsage = "Usage:\n• `/qurl-admin set-alias $<alias> $<slug>`\n• `/qurl-admin unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
 
 // URL scheme constants. Lifted so the parser, validator, and any
 // future caller can't drift on the literal string match — and so
@@ -113,10 +113,10 @@ const (
 // [msgAliasTargetInvalid] (a malformed/garbage target) so the admin
 // who typed a valid-but-unsupported target sees why it was refused
 // rather than a generic usage dump.
-const msgAliasTargetNotTunnel = "`/qurl set-alias` points an alias at a tunnel: `/qurl set-alias $<alias> $<slug>`. URLs and resource IDs aren't supported targets."
+const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a tunnel: `/qurl-admin set-alias $<alias> $<slug>`. URLs and resource IDs aren't supported targets."
 
-// aliasArgs is the parsed shape of a `/qurl setalias $a <target>` or
-// `/qurl unsetalias $a` text body. Kept as a separate value type so
+// aliasArgs is the parsed shape of a `/qurl-admin set-alias $a <target>` or
+// `/qurl-admin unset-alias $a` text body. Kept as a separate value type so
 // the parser is unit-testable without spinning a full handler.
 type aliasArgs struct {
 	Alias  string // sigil stripped (no leading `$`)
@@ -301,16 +301,16 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 	return
 }
 
-// handleSetAlias routes `/qurl set-alias $<alias> <target>`.
+// handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
 //
 // **Admin restriction:** This handler is admin-gated at the Slack app
-// manifest level — the `/qurl setalias` command must be declared
+// config level — the whole `/qurl-admin` command must be declared
 // admin-only in the install config. The same posture is used for
-// `/qurl setup` (see handleSetup) — gating in the manifest avoids an
-// extra Slack API round-trip per invocation. The CR feedback on the
-// old #230 (claude-bot review id 2026-05-10) flagged "admin gate
+// `/qurl-admin setup` (see handleSetup) — gating in the app config
+// avoids an extra Slack API round-trip per invocation. The CR feedback
+// on the old #230 (claude-bot review id 2026-05-10) flagged "admin gate
 // before alias resolution" as an info-disclosure surface. Moving the
-// gate to the manifest closes that gap structurally: a non-admin's
+// gate to the app config closes that gap structurally: a non-admin's
 // command never reaches this handler.
 //
 // **Target contract:** the only accepted target is a tunnel `$slug`.
@@ -359,7 +359,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "alias", alias)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl tunnel install %s` first, then retry this alias.", slug, slug)
+			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl-admin tunnel install %s` first, then retry this alias.", slug, slug)
 		}
 		return sanitizeAPIError(err, "Failed to resolve tunnel slug")
 	}
@@ -380,7 +380,7 @@ func (h *Handler) bindAliasTarget(ctx context.Context, teamID, channelID, alias,
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, target)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl unset-alias $%s` first, or pick a different alias.", alias, alias), nil
+		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), nil
 	}
 	if err != nil {
 		return "Failed to update alias. Please try again.", err
@@ -420,7 +420,7 @@ func (h *Handler) resolveTunnelSlugAliasTarget(ctx context.Context, teamID, slug
 		// purpose, but re-assert type/slug/active here so an upstream
 		// regression can't leak a non-tunnel, wrong-slug, or revoked
 		// resource into mintable state (this resolves the resource_id
-		// that both /qurl set-alias and /qurl get then mint against).
+		// that both /qurl-admin set-alias and /qurl get then mint against).
 		if resource.Type == client.ResourceTypeTunnel && resource.Slug == slug && resource.Status == client.StatusActive {
 			return resource.ResourceID, nil
 		}
@@ -451,7 +451,7 @@ func redactURLForLog(target string) string {
 	return redacted.String()
 }
 
-// handleUnsetAlias routes `/qurl unset-alias $<alias>`.
+// handleUnsetAlias routes `/qurl-admin unset-alias $<alias>`.
 //
 // **Admin restriction:** Same Slack-manifest-level gate as
 // handleSetAlias — see that comment. The CR feedback's

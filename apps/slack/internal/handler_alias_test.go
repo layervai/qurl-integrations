@@ -153,7 +153,7 @@ func newAliasTestHandler(t *testing.T) (*Handler, *fakeAliasStore) {
 func aliasSlashRequest(t *testing.T, text, teamID, channelID string) (body, signBody string) {
 	t.Helper()
 	body = url.Values{
-		fieldCommand:   {testSlashCmd},
+		fieldCommand:   {slashCommandForVerb(text)},
 		fieldText:      {text},
 		fieldTeamID:    {teamID},
 		fieldChannelID: {channelID},
@@ -846,15 +846,15 @@ func TestHelpHidesAliasVerbsWhenAliasStoreNil(t *testing.T) {
 
 	got := decodeSlackText(t, w.Body.Bytes())
 	if strings.Contains(got, "set-alias") {
-		t.Errorf("/qurl help = %q, leaked set-alias verb on unwired aliasStore", got)
+		t.Errorf("/qurl-admin help = %q, leaked set-alias verb on unwired aliasStore", got)
 	}
 	if strings.Contains(got, "unset-alias") {
-		t.Errorf("/qurl help = %q, leaked unset-alias verb on unwired aliasStore", got)
+		t.Errorf("/qurl-admin help = %q, leaked unset-alias verb on unwired aliasStore", got)
 	}
-	// help itself MUST still appear — the gate only hides the
-	// alias-bearing verbs, not the help line.
-	if !strings.Contains(got, "/qurl help") {
-		t.Errorf("/qurl help = %q, missing help line", got)
+	// The admin help itself MUST still render — the gate only hides the
+	// alias-bearing verbs, not the always-present setup line.
+	if !strings.Contains(got, "/qurl-admin setup") {
+		t.Errorf("/qurl-admin help = %q, missing setup line", got)
 	}
 }
 

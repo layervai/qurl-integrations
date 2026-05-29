@@ -22,7 +22,7 @@ import (
 // when tunnels exist, hiding the very thing the command is for. One
 // generous page keeps the command single-request while making the
 // client-side tunnel filter reliable; tunnel resources are created
-// deliberately (via `/qurl tunnel install`) so a real workspace has few
+// deliberately (via `/qurl-admin tunnel install`) so a real workspace has few
 // of them, well within Slack's ephemeral-message budget.
 //
 // A server-side `type=tunnel` filter (tracked in #531) would let this
@@ -36,8 +36,8 @@ const listResourcesScanLimit = 100
 // install` is admin-only, so admins are told to run it directly while
 // non-admins are routed to ask an admin — telling a non-admin to run a
 // command they can't would dead-end them.
-const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. Set one up with `/qurl tunnel install <slug>` first."
-const listTunnelsEmptyMessageNonAdmin = ":mag: No tunnels found in this workspace. Ask a Slack admin to set one up with `/qurl tunnel install <slug>`."
+const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. Set one up with `/qurl-admin tunnel install <slug>` first."
+const listTunnelsEmptyMessageNonAdmin = ":mag: No tunnels found in this workspace. Ask a Slack admin to set one up with `/qurl-admin tunnel install <slug>`."
 
 // listTunnelsNonAdminPaginationGapMessage is the user-facing copy
 // for the case where a non-admin's filtered set is empty AND the
@@ -56,7 +56,7 @@ const listTunnelsNonAdminPaginationGapMessage = ":mag: No allowed tunnels on the
 // tunnel resources (type=tunnel only — URL/transit resources are
 // filtered out) so each line is a copy-paste-ready `$<slug>` token the
 // user can pipe into `/qurl get $<slug>` without a manual lookup. The
-// slug is the same stable handle `/qurl tunnel install <slug>` binds as
+// slug is the same stable handle `/qurl-admin tunnel install <slug>` binds as
 // a channel alias, so the listed token resolves directly in `/qurl get`.
 //
 // Channel scoping:
@@ -136,7 +136,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			_ = h.postResponse(log, responseURL, listTunnelsNonAdminPaginationGapMessage)
 			return
 		}
-		// `/qurl tunnel install` is admin-only, so route non-admins to
+		// `/qurl-admin tunnel install` is admin-only, so route non-admins to
 		// ask an admin rather than dead-ending them on a command they
 		// can't run.
 		emptyMsg := listTunnelsEmptyMessage

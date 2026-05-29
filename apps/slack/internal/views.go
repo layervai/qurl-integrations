@@ -124,7 +124,7 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // TunnelInstallModalMetadata is carried through Slack private_metadata from
 // the slash-command request that opened the modal to the later
 // view_submission. The response_url lets the async installer post the same
-// ephemeral follow-up shape as the direct `/qurl tunnel install <slug>` path.
+// ephemeral follow-up shape as the direct `/qurl-admin tunnel install <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
 // resource or minting a bootstrap key; Slack response URLs are time-limited.
 type TunnelInstallModalMetadata struct {
