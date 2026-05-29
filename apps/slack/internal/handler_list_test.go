@@ -22,10 +22,11 @@ import (
 // so the fixtures below are tunnel resources (testKeyType:
 // client.ResourceTypeTunnel) carrying a slug.
 const (
-	testListAliasProdDB = "prod-db"
-	testListAliasSecret = "secret"
-	testListAliasAlpha  = "alpha"
-	testListResIDProdDB = "r_prod_db_aa"
+	testListAliasProdDB  = "prod-db"
+	testListAliasSecret  = "secret"
+	testListAliasAlpha   = "alpha"
+	testListAliasGrafana = "grafana"
+	testListResIDProdDB  = "r_prod_db_aa"
 )
 
 // writeResourceListFixture writes a /v1/resources success envelope
@@ -135,9 +136,12 @@ func TestFormatTunnelListLine(t *testing.T) {
 	}{
 		{name: "slug only, no aliases, no description", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "• `$prod-db`"},
 		{name: "slug + description, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` → Prod database"},
-		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{"grafana"}, want: "• `$prod-db` (also `$grafana`)"},
-		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, "grafana"}, want: "• `$prod-db` (also `$grafana`) → Prod database"},
+		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "• `$prod-db` (also `$grafana`)"},
+		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (also `$grafana`) → Prod database"},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
+		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
+		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no slug set)"},
+		{name: "slug-less tunnel with bound aliases promotes first to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "• `$grafana` (also `$metrics`)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

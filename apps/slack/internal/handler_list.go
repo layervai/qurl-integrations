@@ -188,16 +188,26 @@ func tunnelToken(r *client.Resource) string {
 // or `[slug:...]` fragment — the whole list is tunnels and the token IS the
 // slug. The arrow joins to the human-readable description when one is set.
 //
-// A slug-less, alias-less tunnel ([tunnelToken] == "") has no usable
-// `$<token>` — get is slug/alias-only — so it renders the bare resource_id
-// (no `$` sigil, so it's not advertised as a get token) for visibility.
+// A slug-less, resource-alias-less tunnel ([tunnelToken] == "") has no
+// resource-level `$<token>`. If a channel `$alias` binds to it, that alias is
+// promoted to the primary token so the row shows a name the user can `get`
+// against — rather than a bare resource_id labeled "(no slug set)" sitting
+// next to an "(also `$alias`)" that advertises a usable token. With no bound
+// alias either, it falls back to the bare resource_id (no `$` sigil, so it's
+// not advertised as a get token) for visibility.
 func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	token := tunnelToken(r)
 	var line string
-	if token == "" {
-		line = "• `" + r.ResourceID + "` (no slug set)"
-	} else {
+	switch {
+	case token != "":
 		line = "• `$" + token + "`"
+	case len(boundAliases) > 0:
+		// boundAliases is lexically sorted (channelAliasesByResourceID), so
+		// promoting the first keeps the chosen primary deterministic.
+		token = boundAliases[0]
+		line = "• `$" + token + "`"
+	default:
+		line = "• `" + r.ResourceID + "` (no slug set)"
 	}
 	extras := make([]string, 0, len(boundAliases))
 	for _, a := range boundAliases {

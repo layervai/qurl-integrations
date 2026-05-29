@@ -831,6 +831,16 @@ func (h *Handler) helpMessage() string {
 		// user they can't be used. Keep user-facing copy on "shortcut"
 		// even though the admin verbs retain their historical
 		// set-alias/unset-alias names.
+		//
+		// Gates on aliasStore (NOT AdminStore) by design: set-alias WRITES
+		// through the aliasStore and is admin-gated at the Slack manifest
+		// level (see handleSetAlias), so its runtime dependency is the
+		// aliasStore alone. `/qurl aliases` above gates on AdminStore
+		// because it READS channel_policies through it. The asymmetry is
+		// intentional — each verb is advertised exactly when its own
+		// backing store is wired. (The aliasStore-wired-but-AdminStore-nil
+		// shape, where set-alias would show without `/qurl aliases`, is not
+		// a real deployment: both come from the same QURL_*_TABLE env vars.)
 		lines = append(lines,
 			"• `/qurl set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
 			"• `/qurl unset-alias $<alias>` — Remove a qURL shortcut in this channel (admin only)",

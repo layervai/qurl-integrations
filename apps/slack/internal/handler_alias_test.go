@@ -799,11 +799,15 @@ func TestUnsetAlias_HyphenatedForm(t *testing.T) {
 	}
 }
 
-func TestHelpListsNewVerbs(t *testing.T) {
+func TestHelpGatesAliasVerbsByBackingStore(t *testing.T) {
 	// CR feedback fence from old #230: /qurl help must surface
 	// setalias and unsetalias when the alias store is wired. The
 	// old PR had a stale helpMessage() that listed only
-	// create/list/help even after the alias verbs landed.
+	// create/list/help even after the alias verbs landed. This also
+	// fences the gate asymmetry: with aliasStore wired but AdminStore
+	// nil, set-alias/unset-alias show (they write through aliasStore)
+	// while `/qurl aliases` and `tunnel install` stay hidden (they
+	// read/need AdminStore).
 	h, _ := newAliasTestHandler(t)
 	body, sign := aliasSlashRequest(t, "help", testAliasTeamID, testAliasChannelID)
 
