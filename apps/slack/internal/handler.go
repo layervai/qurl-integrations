@@ -130,12 +130,14 @@ const (
 const adminCommandSuffix = "-admin"
 
 // isAdminCommand reports whether the invoked slash command is the admin
-// surface — any `/qurl…-admin` command, not just the prod commandAdmin.
-// Scoped to the `/qurl` command family (HasPrefix commandUser) so a stray
-// unregistered `*-admin` command can't route to admin dispatch and then
-// have userCommandName/help name a sibling command that doesn't exist.
+// surface — any `/qurl-…-admin` command, not just the prod commandAdmin.
+// Scoped to the `/qurl-` command family (so `/qurl-admin`,
+// `/qurl-sandbox-admin` match but a stray `/qurlfoo-admin` or
+// `/some-other-admin` doesn't) — a foreign command can't route to admin
+// dispatch and then have userCommandName/help name a sibling that doesn't
+// exist.
 func isAdminCommand(command string) bool {
-	return strings.HasPrefix(command, commandUser) && strings.HasSuffix(command, adminCommandSuffix)
+	return strings.HasPrefix(command, commandUser+"-") && strings.HasSuffix(command, adminCommandSuffix)
 }
 
 // userCommandName / adminCommandName return the sibling command names for
@@ -678,9 +680,18 @@ func isUserVerb(text string) bool {
 // firstWord returns the first whitespace-delimited token of text, or ""
 // when text has none. The wrong-surface redirects echo it as the verb
 // word — `admin <action>` collapses to `admin` so the redirect reads
-// `/qurl-admin admin list`, matching the retained sub-word grammar. Used
-// only on already-classified verb text, so the token is a known-literal
-// keyword rather than arbitrary user input.
+// `/qurl-admin admin list`, matching the retained sub-word grammar. It's
+// reached only on already-classified verb text, so the token is a
+// known-literal keyword; the redirects stripBackticks-wrap it anyway to
+// keep the inline-code-fence safety local rather than by chained invariant.
+func firstWord(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
 // stripBackticks removes backticks from user-controlled text echoed into a
 // Slack inline-code span (the wrong-surface redirects). A stray backtick in
 // the echoed text would otherwise unbalance the `…` fence and render the
@@ -688,14 +699,6 @@ func isUserVerb(text string) bool {
 // ephemerals are plain text, not markup-trusted.
 func stripBackticks(s string) string {
 	return strings.ReplaceAll(s, "`", "")
-}
-
-func firstWord(text string) string {
-	fields := strings.Fields(text)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
 }
 
 func slashVerb(text string, verbs ...string) (matched bool, rest string) {
@@ -817,7 +820,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// correction is copy-pasteable without a stray backtick unbalancing
 		// the inline-code span in the ephemeral reply.
 		adminCmd := adminCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", firstWord(text), adminCmd, stripBackticks(text), adminCmd))
+		respondSlack(w, fmt.Sprintf("`%s` is an admin command. Use `%s %s` instead, or run `%s help`.", stripBackticks(firstWord(text)), adminCmd, stripBackticks(text), adminCmd))
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -870,7 +873,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// A user verb typed on the admin command — redirect to the user one.
 		// Echoed text has backticks stripped (see the /qurl-side redirect).
 		userCmd := userCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` is a `%s` command. Use `%s %s` instead, or run `%s help`.", firstWord(text), userCmd, userCmd, stripBackticks(text), userCmd))
+		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", stripBackticks(firstWord(text)), userCmd, userCmd, stripBackticks(text), userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
 		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", text, command))

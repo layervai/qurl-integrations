@@ -232,7 +232,7 @@ func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 	// `/qurl-admin setup` points the user back at `/qurl setup`.
 	for _, text := range []string{"get $prod-db", "list", "aliases", "setup"} {
 		reply := slashReply(t, h, commandAdmin, text)
-		if !strings.Contains(reply, "`/qurl` command") || !strings.Contains(reply, "/qurl ") {
+		if !strings.Contains(reply, "belongs on `/qurl`") || !strings.Contains(reply, "/qurl ") {
 			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)
 		}
 	}
@@ -254,6 +254,22 @@ func TestDispatchSplit_UnknownCommandDefaultsToUserSurface(t *testing.T) {
 	}
 	if strings.Contains(reply, "Admin commands for qURL in Slack") {
 		t.Errorf("unknown command rendered the admin surface: %q", reply)
+	}
+}
+
+// TestDispatchSplit_EmptyCommandDefaultsToUserHelp fences the empty-command
+// normalization in handleSlashCommand: a malformed/synthetic payload with no
+// `command` field is coerced to commandUser, so it renders /qurl user help
+// (the safe read-only surface) with the prod command name rather than a
+// dangling empty name from the ReplaceAll rewrite.
+func TestDispatchSplit_EmptyCommandDefaultsToUserHelp(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	reply := slashReply(t, h, "", "help")
+	if !strings.Contains(reply, "Create and manage qURLs from Slack") {
+		t.Errorf("empty command did not fall back to user help: %q", reply)
+	}
+	if !strings.Contains(reply, "/qurl list") {
+		t.Errorf("empty command did not render the prod /qurl command name: %q", reply)
 	}
 }
 
