@@ -537,6 +537,23 @@ func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	}
 }
 
+// A stale `views:write` in SLACK_BOT_SCOPES must not abort bot startup. Config
+// load forwards the override (warning about the phantom scope) rather than
+// failing Validate(), which would crash the whole bot — Slack rejects the
+// scope at authorize with invalid_scope, which the callback handles.
+func TestBuildSlackInstallConfigAcceptsStaleViewsWriteOverride(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackBotScopes] = "commands,views:write"
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want config load to succeed despite views:write", ok, err)
+	}
+	if strings.Join(cfg.BotScopes, ",") != "commands,views:write" {
+		t.Fatalf("scopes = %v, want override forwarded as-is", cfg.BotScopes)
+	}
+}
+
 func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 	env := validSlackInstallEnv()
 	env["SLACK_BASE_URL"] = "http://slack-bot.example"
