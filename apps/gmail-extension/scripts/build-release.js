@@ -151,6 +151,9 @@ function normalizeBuildQurlApiBase(value) {
   parsed.pathname = pathname || '/';
   parsed.search = '';
   parsed.hash = '';
+  // Mirror lib/qurl-api.js: never carry credentials into the bundled default.
+  parsed.username = '';
+  parsed.password = '';
 
   return parsed.toString().replace(/\/$/, '');
 }

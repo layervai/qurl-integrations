@@ -550,7 +550,8 @@ function _parseExpiry(payload) {
     }
 
     // Current Unix timestamps in seconds are ~1e9, while millisecond timestamps are ~1e12.
-    const ms = raw > 1e12 ? raw : raw * 1000;
+    // Treat exactly 1e12 as milliseconds (year 2001 in ms vs year ~33658 in seconds).
+    const ms = raw >= 1e12 ? raw : raw * 1000;
     return new Date(ms).toISOString();
   }
 
@@ -640,6 +641,10 @@ function normalizeQurlApiBase(value) {
   parsed.pathname = pathname || '/';
   parsed.search = '';
   parsed.hash = '';
+  // Drop any embedded credentials so they don't get persisted to chrome.storage.local or shown
+  // back to the user; the upload sends no auth via the URL.
+  parsed.username = '';
+  parsed.password = '';
 
   return parsed.toString().replace(/\/$/, '');
 }

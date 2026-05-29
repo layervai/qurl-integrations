@@ -37,6 +37,12 @@ test('normalizeQurlApiBase strips /api/upload and requires https', function () {
     qurlApi.normalizeQurlApiBase('http://example.com');
   }, /https:\/\//i);
 
+  // Embedded credentials are stripped so they aren't persisted or shown back to the user.
+  assert.equal(
+    qurlApi.normalizeQurlApiBase('https://user:hunter2@example.com/api/upload'),
+    'https://example.com'
+  );
+
   assert.equal(qurlApi.normalizeQurlApiBase(null), null);
   assert.equal(qurlApi.normalizeQurlApiBase(undefined), null);
   assert.equal(qurlApi.normalizeQurlApiBase('   '), null);
@@ -149,6 +155,12 @@ test('_extractPayload and _parseExpiry support wrapped and timestamp values', fu
   assert.equal(
     qurlApi._parseExpiry({ expires_at: 1710000000 }),
     new Date(1710000000 * 1000).toISOString()
+  );
+
+  // Exactly 1e12 is treated as milliseconds (boundary uses >=), not seconds.
+  assert.equal(
+    qurlApi._parseExpiry({ expires_at: 1e12 }),
+    new Date(1e12).toISOString()
   );
 
   assert.equal(

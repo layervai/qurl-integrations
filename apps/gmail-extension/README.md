@@ -58,8 +58,10 @@ If you plan to publish to the Chrome Web Store, see [docs/chrome-web-store-revie
 >
 > **Gmail must be the active tab in the focused window** when you open the popup — the extension
 > targets the active tab, so a Gmail tab in a *different* window won't be found. Large files are
-> capped (the popup reads each file into memory); oversized files are reported per-file instead
-> of crashing the popup.
+> capped at **100 MB per file** (the popup reads each file into memory); oversized files are
+> reported per-file instead of crashing the popup. This ceiling is a popup-safety limit only —
+> the qURL server may enforce its own (lower) limit, in which case a within-cap file can still be
+> rejected by the server after upload.
 
 ---
 
