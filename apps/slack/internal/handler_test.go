@@ -212,6 +212,15 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 			t.Errorf("/qurl-admin help leaked user verb %q: %q", leaked, adminHelp)
 		}
 	}
+	// `/qurl-admin help` must render the admin help, NOT a wrong-surface
+	// redirect. `help` is dispatched explicitly at the top of each surface,
+	// not via the userVerbs list, so a maintainer who "consistency"-adds
+	// `help` to userVerbs (making isUserVerb("help") true) would route it to
+	// the user-verb redirect here — "belongs on `/qurl`" — instead of the
+	// admin help. Pin that it doesn't.
+	if strings.Contains(adminHelp, "belongs on") {
+		t.Errorf("/qurl-admin help was redirected instead of rendering admin help: %q", adminHelp)
+	}
 }
 
 // TestDispatchSplit_WrongSurfaceRedirects fences the friendly redirects:
