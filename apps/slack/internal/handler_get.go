@@ -109,6 +109,13 @@ func noResourceForAliasMessage(alias string) string {
 // stranding the user. Name the dead shortcut plainly and route to the
 // admin (only an admin can re-point it at a tunnel). Same posture as
 // [noResourceForAliasMessage].
+//
+// Precondition: `alias` MUST be a parser-validated token (the charset gate
+// in parseGet/parseAliasToken), never raw user input. It's interpolated
+// verbatim into the reply AND a `/qurl set-alias $<alias>` hint, so a
+// charset-unchecked value would reopen the Slack-fence-escaping surface
+// the parser otherwise guards. Today every caller comes through the
+// validated get path, so this holds.
 func legacyAliasBindingMessage(alias string) string {
 	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl set-alias $%s $<slug>`.", alias, alias)
 }
@@ -382,8 +389,8 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		// stored raw URLs verbatim in alias_bindings, and those rows
 		// survive this PR. Resolving one would hand a URL to the mint
 		// call and surface as the generic retry error, stranding the
-		// user. Gate on the `r_` prefix (not the parser's exact
-		// [resourceIDPattern] — a stored id is whatever qurl-service
+		// user. Gate on the `r_` prefix (not
+		// an exact id-shape check — a stored id is whatever qurl-service
 		// issued, length not guaranteed to match the 11-char get-token
 		// shape): a legacy `r_<id>` is a real resource and still mints,
 		// only a non-`r_` value (a URL) is refused with a re-bind hint.

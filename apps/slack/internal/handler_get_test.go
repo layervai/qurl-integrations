@@ -272,18 +272,18 @@ func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
 	}
 }
 
-// TestGetWork_DefaultArmRefusesUnknownShape locks the unreachable
-// default arm of getWork's dispatch: a Command that parseGet cannot
+// TestGetWork_EmptyAliasRefusesToMint locks the unreachable
+// empty-alias guard in getWork: a Command that parseGet cannot
 // actually produce (neither an alias nor a resource-id token) must hit
 // the "refuse to mint" guard and return the distinct internal-error
-// copy — NOT fall through to an unauthenticated mint. Drives the arm
+// copy — NOT fall through to an unauthenticated mint. Drives the guard
 // directly since the parser guarantees it can't be reached end-to-end.
-func TestGetWork_DefaultArmRefusesUnknownShape(t *testing.T) {
+func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 	t.Parallel()
 	h := &Handler{}
 	args := getWorkArgs{
-		// Alias == "" and Resource.Kind != ResourceTokenResourceID, so
-		// both dispatch branches are skipped and the default arm fires.
+		// Alias == "" (a shape parseGet can't produce), so getWork's
+		// empty-alias guard fires instead of resolving and minting.
 		cmd:       &Command{Subcommand: SubcmdGet},
 		teamID:    "T1",
 		channelID: "C1",
@@ -629,7 +629,7 @@ func TestHandleGet_DollarSlugMintsAfterAliasBound(t *testing.T) {
 	ts.seedNonAdmin(t)
 	// `set-alias $dash $<slug>` binds `dash` → the tunnel's resource_id;
 	// the slug name itself is NOT a bound alias.
-	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{"dash": testResourceIDFix})
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testTunnelAliasDash: testResourceIDFix})
 	addTunnelSlugResource(t, ts)
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		writeCreateFixture(t, w, "https://qurl.link/slug-after-alias", testResourceIDFix)

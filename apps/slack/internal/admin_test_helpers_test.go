@@ -159,7 +159,7 @@ func (ts *adminTestServers) seedPolicyDualShape(t *testing.T, teamID, channelID,
 
 // seedPolicySet seeds a channel_policies row carrying an explicit
 // allowed_resource_ids SS attribute. Used by any test that needs such a
-// row — the `$r_<id>` mint gate (authorizeResourceIDForGet →
+// row — the tunnel-slug allow-set fallback (resolveTokenForGet's resourceAllowedForUser →
 // AllowedResourceIDsForChannel) is the primary consumer, but alias and
 // admin-policy tests (and the deliberately-inert restrictive policy in
 // the /qurl list regression test) use it too.

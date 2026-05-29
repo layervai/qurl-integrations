@@ -99,25 +99,30 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return
 	}
 
+	// Map each tunnel's resource_id to its channel-bound `$alias`
+	// shortcuts so each row can show them next to the slug. Best-effort:
+	// a fetch failure renders slug-only. Built BEFORE the sort because the
+	// sort keys on [tunnelDisplayToken], which promotes a slug-less
+	// tunnel's first bound alias — the sort key must match what the row
+	// renders.
+	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+
 	// Stable order for two-call idempotency at the Slack ephemeral
-	// surface — the server's pagination cursor implies an order but
-	// not a stable one across re-queries. Sort by the displayed token
-	// (the same slug→alias→resource_id precedence the rows render),
-	// with resource_id as a tiebreaker so two rows sharing a token
-	// (e.g. a slug == another row's alias) order deterministically
-	// rather than inheriting the unstable upstream order. BEFORE
-	// formatting.
+	// surface — the server's pagination cursor implies an order but not a
+	// stable one across re-queries. Sort by the displayed token, with
+	// resource_id as a tiebreaker so two rows sharing a token (e.g. a slug
+	// == another row's alias, or two slug-less rows with no bound alias)
+	// order deterministically rather than inheriting the unstable upstream
+	// order. BEFORE formatting.
 	sort.SliceStable(resources, func(i, j int) bool {
-		ti, tj := tunnelToken(&resources[i]), tunnelToken(&resources[j])
+		ti := tunnelDisplayToken(&resources[i], aliasMap[resources[i].ResourceID])
+		tj := tunnelDisplayToken(&resources[j], aliasMap[resources[j].ResourceID])
 		if ti != tj {
 			return ti < tj
 		}
 		return resources[i].ResourceID < resources[j].ResourceID
 	})
-	// Map each tunnel's resource_id to its channel-bound `$alias`
-	// shortcuts so each row can show them next to the slug. Best-effort
-	// — a fetch failure renders slug-only.
-	aliasMap := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+
 	lines := make([]string, 0, len(resources))
 	for i := range resources {
 		lines = append(lines, formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID]))
@@ -151,8 +156,8 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 	return out
 }
 
-// tunnelToken returns the `$<token>` identifier shown for a tunnel in
-// /qurl list — and the key rows sort by. Precedence:
+// tunnelToken returns the resource-intrinsic `$<token>` for a tunnel.
+// Precedence:
 //
 //  1. Slug — the stable, owner-scoped tunnel handle. `/qurl tunnel
 //     install <slug>` binds `$<slug>` as a channel alias, so the slug
@@ -160,15 +165,34 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 //     and the identifier we want to surface (never the opaque r_<id>).
 //  2. Resource-level alias — fallback when a tunnel somehow carries no
 //     slug but does have an alias.
-//  3. "" — a legacy slug-less, alias-less tunnel has no `$<token>` the
-//     user can `get` (get is slug/alias-only now). Vanishingly rare
-//     (tunnels are created with a slug). formatTunnelListLine renders the
-//     bare resource_id for visibility rather than a broken `$<token>`.
+//  3. "" — a slug-less, resource-alias-less tunnel has no intrinsic
+//     `$<token>` the user can `get` (get is slug/alias-only now).
+//     Vanishingly rare (tunnels are created with a slug).
+//     [tunnelDisplayToken] then tries a channel-bound alias before
+//     falling back to the bare resource_id.
 func tunnelToken(r *client.Resource) string {
 	if r.Slug != "" {
 		return r.Slug
 	}
 	return r.Alias // "" when the tunnel has neither a slug nor an alias
+}
+
+// tunnelDisplayToken is the `$<token>` shown for a tunnel in /qurl list AND
+// the key rows sort by — both go through this one function so the sort order
+// matches what each row actually renders. It extends [tunnelToken] with
+// channel-alias promotion: when a tunnel has no intrinsic token (slug-less,
+// resource-alias-less) but a channel `$alias` binds to it, the first
+// (lexically sorted) bound alias becomes the token. Returns "" only when
+// there is no token at all — formatTunnelListLine then renders the bare
+// resource_id.
+func tunnelDisplayToken(r *client.Resource, boundAliases []string) string {
+	if t := tunnelToken(r); t != "" {
+		return t
+	}
+	if len(boundAliases) > 0 {
+		return boundAliases[0] // sorted by channelAliasesByResourceID
+	}
+	return ""
 }
 
 // formatTunnelListLine renders one tunnel resource as a single text
@@ -178,7 +202,7 @@ func tunnelToken(r *client.Resource) string {
 //   - With bound aliases:  • `$<slug>` (also `$<alias>`, `$<alias2>`)
 //   - With description:    • `$<slug>` → <description>
 //
-// The primary token is [tunnelToken] (slug-first; never the opaque
+// The primary token is [tunnelDisplayToken] (slug-first; never the opaque
 // r_<id>). `boundAliases` are the channel `$alias` shortcuts that resolve
 // to this tunnel in `/qurl get` — a tunnel can have several. They render
 // as "(also …)" so the user sees every name that works, EXCLUDING the
@@ -188,26 +212,20 @@ func tunnelToken(r *client.Resource) string {
 // or `[slug:...]` fragment — the whole list is tunnels and the token IS the
 // slug. The arrow joins to the human-readable description when one is set.
 //
-// A slug-less, resource-alias-less tunnel ([tunnelToken] == "") has no
-// resource-level `$<token>`. If a channel `$alias` binds to it, that alias is
-// promoted to the primary token so the row shows a name the user can `get`
-// against — rather than a bare resource_id labeled "(no slug set)" sitting
-// next to an "(also `$alias`)" that advertises a usable token. With no bound
-// alias either, it falls back to the bare resource_id (no `$` sigil, so it's
-// not advertised as a get token) for visibility.
+// A slug-less, resource-alias-less tunnel with a bound channel `$alias` has
+// that alias promoted to the primary token (by [tunnelDisplayToken]) so the
+// row shows a name the user can `get` against — rather than a bare
+// resource_id labeled "(no slug set)" sitting next to an "(also `$alias`)"
+// that advertises a usable token. With no bound alias either, it falls back
+// to the bare resource_id (no `$` sigil, so it's not advertised as a get
+// token) for visibility.
 func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
-	token := tunnelToken(r)
+	token := tunnelDisplayToken(r, boundAliases)
 	var line string
-	switch {
-	case token != "":
-		line = "• `$" + token + "`"
-	case len(boundAliases) > 0:
-		// boundAliases is lexically sorted (channelAliasesByResourceID), so
-		// promoting the first keeps the chosen primary deterministic.
-		token = boundAliases[0]
-		line = "• `$" + token + "`"
-	default:
+	if token == "" {
 		line = "• `" + r.ResourceID + "` (no slug set)"
+	} else {
+		line = "• `$" + token + "`"
 	}
 	extras := make([]string, 0, len(boundAliases))
 	for _, a := range boundAliases {

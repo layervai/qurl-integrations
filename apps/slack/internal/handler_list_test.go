@@ -548,6 +548,47 @@ func TestHandleList_SortTiebreakerOnTokenCollision(t *testing.T) {
 	}
 }
 
+// TestHandleList_SlugLessTunnelsSortByPromotedAlias fences the sort/render
+// agreement for slug-less tunnels: each has no intrinsic token but a bound
+// channel alias that formatTunnelListLine promotes to the primary token. The
+// sort must key on that SAME promoted alias (via tunnelDisplayToken), not
+// fall back to resource_id. Here the row whose alias sorts first ("apple")
+// carries the lexicographically LARGER resource_id, so a resource_id-keyed
+// sort would order it last — the assertion passes only if the sort follows
+// the displayed alias.
+func TestHandleList_SlugLessTunnelsSortByPromotedAlias(t *testing.T) {
+	const (
+		appleRID = "r_zzz_apple0" // larger resource_id, smaller alias
+		zebraRID = "r_aaa_zebra0" // smaller resource_id, larger alias
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"apple": appleRID,
+		"zebra": zebraRID,
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		// Both slug-less (no slug, no resource-level alias); returned
+		// zebra-first to defeat any incidental upstream order.
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: zebraRID, testKeyType: client.ResourceTypeTunnel},
+			{testKeyResourceID: appleRID, testKeyType: client.ResourceTypeTunnel},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	applePos := strings.Index(async, "`$apple`")
+	zebraPos := strings.Index(async, "`$zebra`")
+	if applePos < 0 || zebraPos < 0 {
+		t.Fatalf("missing promoted-alias rows: %q", async)
+	}
+	if applePos >= zebraPos {
+		t.Errorf("slug-less rows not sorted by promoted alias (a resource_id-keyed sort would invert this): apple=%d zebra=%d in %q", applePos, zebraPos, async)
+	}
+}
+
 // TestTunnelToken pins the slug → alias → resource_id precedence of the
 // `$<token>` shown for a tunnel row, directly (not just via the rendered
 // list output), so a future refactor that reorders the fallback chain
