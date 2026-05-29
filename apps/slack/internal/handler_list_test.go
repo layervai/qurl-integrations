@@ -76,14 +76,29 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 }
 
 // TestHandleList_UnscopedAcrossChannels pins the post-revert (#459)
-// disclosure surface: /qurl list is workspace-wide for everyone, so a
-// NON-admin invoking from a channel that has no channel_policies row
-// still sees every tunnel in the workspace. Pre-revert (#234) this
-// path fail-closed to the empty state. Re-introducing any channel-policy
-// filter on /qurl list would make this test fail.
+// disclosure surface: /qurl list is workspace-wide for everyone, so the
+// SAME complete tunnel listing renders regardless of the caller's
+// channel. It exercises the three channel shapes that diverged
+// pre-revert (#234) for a non-admin:
+//
+//   - a channel carrying a restrictive channel_policies row (would have
+//     filtered the listing down to prod-db, hiding secret);
+//   - a channel with no policy row (would have fail-closed to empty);
+//   - a DM (`D…`) channel (would have fail-closed to empty) — the most
+//     user-surprising case, "I ran /qurl list in a 1:1 and saw URLs
+//     from #ops".
+//
+// Post-revert all three must show every tunnel. The seedNonAdmin +
+// restrictive seedPolicySet below are load-bearing, not inert: the list
+// handler no longer reads them, but if any channel-policy filter were
+// re-introduced on /qurl list this non-admin caller would see the old
+// filtered/empty output and the test would fail.
 func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
+	// A channel_policies row that, under the reverted gate, would have
+	// filtered the listing down to prod-db only (secret excluded).
+	ts.seedPolicySet(t, testAdminTeamID, "C_with_policy", testListAliasProdDB, []string{testListResIDProdDB})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
@@ -91,17 +106,18 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
-	// Invoke from a channel with NO channel_policies row. Pre-revert a
-	// non-admin here saw the fail-closed empty state; post-revert the
-	// listing is unscoped, so both tunnels must appear.
-	inv := newAdminSlashInvokerOnChannel(t, h, "C_no_policy_here")
 
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$prod-db`") {
-		t.Errorf("non-admin in an unscoped channel should see prod-db tunnel: %q", async)
-	}
-	if !strings.Contains(async, "`$secret`") {
-		t.Errorf("non-admin in an unscoped channel should see the secret tunnel (no per-channel filter post-revert): %q", async)
+	// "D…" is a Slack DM channel ID; the others are a policy-bearing and
+	// a policy-free regular channel. All must render the full listing.
+	for _, channelID := range []string{"C_with_policy", "C_no_policy_here", "D_direct_msg_1to1"} {
+		inv := newAdminSlashInvokerOnChannel(t, h, channelID)
+		_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "`$prod-db`") {
+			t.Errorf("channel %q: non-admin should see prod-db tunnel (listing is unscoped post-revert): %q", channelID, async)
+		}
+		if !strings.Contains(async, "`$secret`") {
+			t.Errorf("channel %q: non-admin should see the secret tunnel (no per-channel filter post-revert): %q", channelID, async)
+		}
 	}
 }
 
