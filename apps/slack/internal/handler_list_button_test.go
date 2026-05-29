@@ -187,6 +187,47 @@ func TestHandleBlockActions_UnparseableTokenRejected(t *testing.T) {
 	}
 }
 
+// TestHandleBlockActions_NotAllowedNonAdmin fences the headline security
+// property at the button boundary: clicking "Create qURL" cannot mint a
+// tunnel the user couldn't already mint by typing the command. A
+// non-admin clicks the button for a slug whose resource isn't in this
+// channel's allow-set; the button routes through the same
+// resolveTokenForGet → resourceAllowedForUser gate as `/qurl get`, so it
+// gets the anti-enumeration "not configured for this channel" copy, the
+// resolved resource_id never leaks, and the mint never runs. Mirrors
+// TestHandleGet_DollarSlugNotAllowedNonAdmin on the interaction path.
+func TestHandleBlockActions_NotAllowedNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	addTunnelSlugResource(t, ts)
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, "C_test", inv.responseU.URL, listCreateQurlActionID, testTunnelSlug)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("ack = %d %q, want 200 and {}", w.Code, w.Body.String())
+	}
+	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
+		t.Errorf("button bypassed channel authorization — missing not-configured copy: %q", async)
+	}
+	if strings.Contains(async, testResourceIDFix) {
+		t.Errorf("resolved resource_id leaked in rejection message: %q", async)
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("button minted a tunnel not allowed in this channel (hits = %d)", mintHits.Load())
+	}
+}
+
 // TestHandleList_OverflowDegradesToText fences the block-ceiling guard:
 // a tunnel set larger than listCreateButtonMaxRows renders as plain text
 // (no blocks) so every tunnel still shows — rather than a >50-block
