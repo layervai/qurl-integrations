@@ -312,6 +312,28 @@ func TestSuccessPageHTMLEscapesInterpolations(t *testing.T) {
 	}
 }
 
+// TestOAuthErrorPageHTMLEscapesInterpolations is the symmetric lock for
+// renderOAuthErrorPage. Heading/Message are operator-authored today, but the
+// template doc comment notes a future caller could pass an upstream string
+// through — so the html/template auto-escape is the load-bearing defense if
+// that happens. A swap to text/template (or string concat) would let a
+// payload render raw; this fails first.
+func TestOAuthErrorPageHTMLEscapesInterpolations(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusBadGateway,
+		"<script>alert('h')</script>", "<img src=x onerror=alert('m')>")
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<img src=x") {
+		t.Errorf("raw HTML rendered — auto-escape regressed:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("expected escaped <script> from Heading in body:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;img") {
+		t.Errorf("expected escaped <img> from Message in body:\n%s", body)
+	}
+}
+
 func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
 	// Regression: configuredBy used to be read from ?admin_user=…
 	// which let an attacker pick the DM target. Now the value is
@@ -415,11 +437,11 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 		t.Fatalf("got %d want 502 (mint failure → 502)", rec.Code)
 	}
 	// The non-limit failure now renders a styled HTML page, not bare
-	// http.Error — lock the heading + headers so a regression back to plain
-	// text is caught. ("connect qURL" avoids the apostrophe in "Couldn't",
-	// which html/template escapes to &#39;.)
-	if body := rec.Body.String(); !strings.Contains(body, "connect qURL") {
-		t.Errorf("502 body should render the styled error page; got: %q", body)
+	// http.Error — pin the exact heading so a regression back to plain text
+	// (or a reworded heading) is caught. The apostrophe in "Couldn't" is
+	// html/template-escaped to &#39;, hence the entity form here.
+	if body := rec.Body.String(); !strings.Contains(body, "Couldn&#39;t connect qURL") {
+		t.Errorf("502 body should render the styled error page heading; got: %q", body)
 	}
 	assertSecurityHeaders(t, rec)
 	// Give any spurious revoke goroutine a window to fire.
