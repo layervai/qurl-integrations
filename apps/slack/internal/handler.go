@@ -826,6 +826,11 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 // surfaces reading the same. The verb-specific handlers and parser are
 // unchanged — they still see `admin <action>` text.
 func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text string, values url.Values) {
+	// Verb-match order is load-bearing: the admin/tunnel/alias sub-word
+	// matches MUST precede the isUserVerb fall-through. The `admin` sub-word
+	// grammar (`admin list`) collides with the bare user verb `list`, so a
+	// user-verb check first would mis-route `admin list` to the wrong-surface
+	// redirect. Keep new admin verbs above the isUserVerb case.
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, h.adminHelpMessage(command))
@@ -1037,15 +1042,15 @@ func (h *Handler) adminHelpMessage(command string) string {
 		// even though the admin verbs retain their historical
 		// set-alias/unset-alias names.
 		//
-		// Gates on aliasStore (NOT AdminStore) by design: set-alias WRITES
-		// through the aliasStore and is admin-gated in code via
-		// requireAdminSync (see handleSetAlias), so its runtime dependency
-		// is the aliasStore alone. `/qurl aliases` above gates on AdminStore
-		// because it READS channel_policies through it. The asymmetry is
-		// intentional — each verb is advertised exactly when its own
-		// backing store is wired. (The aliasStore-wired-but-AdminStore-nil
-		// shape, where set-alias would show without `/qurl aliases`, is not
-		// a real deployment: both come from the same QURL_*_TABLE env vars.)
+		// Gates on aliasStore (the store set-alias/unset-alias WRITE
+		// through). At runtime these verbs ALSO need AdminStore for the
+		// in-code requireAdminSync gate (see handleSetAlias), so aliasStore
+		// isn't the verb's only dependency — but aliasStore and AdminStore
+		// are wired in lockstep (both come from the same QURL_*_TABLE env
+		// vars; see cmd/main.go), so an aliasStore-wired-but-AdminStore-nil
+		// deploy doesn't arise and gating here on aliasStore is equivalent
+		// to gating on both. `/qurl aliases` above gates on AdminStore
+		// because it READS channel_policies through it.
 		lines = append(lines,
 			"• `/qurl-admin set-alias $<alias> $<slug>` — Point a qURL shortcut at a tunnel slug in this channel (admin only)",
 			"• `/qurl-admin unset-alias $<alias>` — Remove a qURL shortcut in this channel (admin only)",
