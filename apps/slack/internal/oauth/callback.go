@@ -419,19 +419,22 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 	}
 	switch code {
 	case BindConflictAlreadyBoundToCaller:
-		// Same Slack user re-running /qurl setup — they were already
-		// admin. We continue to mint, which rotates their API key.
-		// Operator-visible effect: "key rotated, admin set unchanged."
-		slog.Info("oauth/callback rebind idempotent (caller already on admin set)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		// The workspace owner is re-running /qurl setup — the stored
+		// owner_id matches the verified caller (owner-only short-circuit;
+		// added admins do NOT land here, they get AlreadyBound). We
+		// continue to mint, which rotates their API key. Operator-visible
+		// effect: "key rotated, owner + admin set unchanged."
+		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID)
 		return true
 	case BindConflictAlreadyBound, BindConflictUnverified:
-		// A different admin holds the workspace (or we can't tell —
-		// treat unverified the same way; the safer default is to
-		// refuse the rebind than to potentially overwrite). No mint
-		// has happened yet, so nothing to revoke — the existing
-		// admin's key row is untouched.
-		slog.Warn("oauth/callback rebind refused — workspace held by different admin", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		// A different Slack user owns the workspace — the caller isn't
+		// the stored owner_id (this fires for added admins too, not just
+		// strangers), or we can't tell (treat unverified the same way;
+		// the safer default is to refuse the rebind than to potentially
+		// overwrite). No mint has happened yet, so nothing to revoke —
+		// the existing owner's key row is untouched.
+		slog.Warn("oauth/callback rebind refused — workspace owned by a different Slack user", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID, "conflict", string(code), "error", bindErr)
 		renderRebindRefused(w, teamID)
 		return false

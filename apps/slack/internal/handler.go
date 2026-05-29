@@ -760,6 +760,12 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 		// get a setup URL, but BindWorkspace's consistent owner check is
 		// the structural backstop — that caller just lands on the
 		// generic rebind-refused page instead of the friendly copy here.
+		// The eventual read is deliberate, not an oversight: CheckAdmin
+		// is the shared admin-gate read (same call the admin verbs make),
+		// so the race only ever costs the loser a less-friendly error
+		// page — never security, since the consistent backstop is
+		// authoritative. Upgrading just this caller to a consistent read
+		// would spend 2x RCU on every /setup to improve one racer's copy.
 		if ownerID != "" && ownerID != userID {
 			// Shape-guard the stored owner_id before interpolating it
 			// into a `<@%s>` mention. BindWorkspace writes owner_id
