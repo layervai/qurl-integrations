@@ -176,19 +176,20 @@ function qurlConfigPath(targetReleaseRoot) {
 function writeDefaultApiBaseConfig(normalizedBase, targetReleaseRoot) {
   const configPath = qurlConfigPath(targetReleaseRoot);
   const source = fs.readFileSync(configPath, 'utf8');
-  const replacement = `const DEFAULT_QURL_API_BASE = ${JSON.stringify(normalizedBase + '/')};`;
-  const updated = source.replace(
-    /const DEFAULT_QURL_API_BASE\s*=\s*['"][^'"]+['"]\s*;/,
-    function () {
-      return replacement;
-    }
-  );
+  // Anchor to a real declaration LINE (multiline ^…$, capturing leading indent) so we never
+  // match a `const DEFAULT_QURL_API_BASE = '...'` that appears inside a comment or string.
+  const declarationPattern = /^([ \t]*)const DEFAULT_QURL_API_BASE\s*=\s*['"][^'"]+['"]\s*;[ \t]*$/m;
 
-  if (updated === source && normalizeBuildQurlApiBase(readDefaultQurlApiBase(configPath)) !== normalizedBase) {
+  // Fail loudly if the marked declaration is gone (someone reshaped qurl-config.js); otherwise
+  // the rewrite is unconditional — rewriting to the same value just writes identical content.
+  if (!declarationPattern.test(source)) {
     throw new Error('Could not rewrite DEFAULT_QURL_API_BASE in release/lib/qurl-config.js.');
   }
 
-  fs.writeFileSync(configPath, updated);
+  const declaration = `const DEFAULT_QURL_API_BASE = ${JSON.stringify(normalizedBase + '/')};`;
+  fs.writeFileSync(configPath, source.replace(declarationPattern, function (_match, indent) {
+    return indent + declaration;
+  }));
 }
 
 function rewriteManifestHostPermission(normalizedBase, targetReleaseRoot) {

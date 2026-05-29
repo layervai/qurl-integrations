@@ -58,6 +58,38 @@ test('writeDefaultApiBaseConfig regenerates the marked declaration regardless of
   }
 });
 
+test('writeDefaultApiBaseConfig rewrites the declaration, not a matching comment/string', function () {
+  const releaseRoot = makeTempReleaseRoot();
+
+  try {
+    // The real lib/qurl-config.js carries a marker comment that itself contains the literal
+    // `const DEFAULT_QURL_API_BASE = '...';`. The rewrite must target the actual declaration
+    // line, not the first textual match (which is the comment).
+    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
+    fs.writeFileSync(
+      path.join(releaseRoot, 'lib', 'qurl-config.js'),
+      [
+        '(function (global) {',
+        "  // build-release.js rewrites the `const DEFAULT_QURL_API_BASE = '...';` declaration below.",
+        "  const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.ai/';",
+        '  const QURLConfig = { DEFAULT_QURL_API_BASE };',
+        '  if (typeof module !== "undefined" && module.exports) { module.exports = QURLConfig; }',
+        "}(typeof globalThis !== 'undefined' ? globalThis : this));",
+        '',
+      ].join('\n')
+    );
+
+    buildRelease.writeDefaultApiBaseConfig('https://custom.example.com', releaseRoot);
+
+    const written = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-config.js'), 'utf8');
+    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/');
+    // The decoy comment is untouched.
+    assert.ok(written.includes("// build-release.js rewrites the `const DEFAULT_QURL_API_BASE = '...';` declaration below."));
+  } finally {
+    fs.rmSync(releaseRoot, { recursive: true, force: true });
+  }
+});
+
 test('writeDefaultApiBaseConfig preserves $ and apostrophes in the replacement URL', function () {
   const releaseRoot = makeTempReleaseRoot();
 
