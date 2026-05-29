@@ -38,7 +38,7 @@ const listResourcesScanLimit = 100
 // their Slack admin. Post-revert of #234 (#459) `/qurl list` no longer
 // probes admin status, so there is a single empty-state for everyone
 // rather than the old admin/non-admin branch.
-const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl-admin tunnel install <name>`."
+const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl-admin tunnel install <id>`."
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
 // Clicking it mints a one-time qURL for that row's tunnel — the same work
@@ -64,13 +64,13 @@ const listCreateButtonMaxRows = 45
 // [listCreateButtonMaxRows]). It names the typed path and the
 // one-time-use default; the button path is named only in
 // [listFooterButtons], shown when the buttons are actually present.
-const listFooterText = "Each `$<name>` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel. Copy a name or an alias and run `/qurl get` on it to mint a one-time qURL link — it opens access once, then expires."
+const listFooterText = "Each `$<id>` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel. Copy an ID or an alias and run `/qurl get` on it to mint a one-time qURL link — it opens access once, then expires."
 
 // listFooterButtons is the guidance line beneath the interactive /qurl
 // list (the version with a per-row Create qURL button). It names BOTH
 // ways to mint — tapping the button and the typed command — and the
 // one-time-use default.
-const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$name` or `$alias` and run `/qurl get`, to mint a one-time qURL link — it opens access once, then expires. A `$name` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel."
+const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$id` or `$alias` and run `/qurl get`, to mint a one-time qURL link — it opens access once, then expires. A `$id` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel."
 
 // handleListResources implements `/qurl list`. It lists the workspace's
 // tunnel resources (type=tunnel only — URL/transit resources are
@@ -309,7 +309,7 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	token := tunnelDisplayToken(r, boundAliases)
 	var line string
 	if token == "" {
-		line = "• `" + r.ResourceID + "` (no name — ask your Slack admin to set one)"
+		line = "• `" + r.ResourceID + "` (no ID — ask your Slack admin to set one)"
 	} else {
 		line = "• `$" + token + "`"
 	}

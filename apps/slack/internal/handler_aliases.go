@@ -85,7 +85,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl-admin set-alias $<alias> $<name>` to add one.")
+		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl-admin set-alias $<alias> $<id>` to add one.")
 		return
 	}
 
@@ -100,7 +100,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	sort.Strings(lines)
 
 	body := "*Aliases configured for this channel:*\n" +
-		"_Format: `$<name>` → the aliases that resolve to it. Run `/qurl get` with the name or any alias._\n" +
+		"_Format: `$<id>` → the aliases that resolve to it. Run `/qurl get` with the ID or any alias._\n" +
 		strings.Join(lines, "\n")
 	_ = h.postResponse(log, responseURL, body)
 }

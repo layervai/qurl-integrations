@@ -112,7 +112,7 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 	// Text fallback still lists every tunnel, including the buttonless
 	// slug-less row, plus the one-time-use guidance.
 	fallback := parseSlackText(t, body)
-	for _, want := range []string{"`$prod-db`", "`$stage-db`", "no name", "/qurl get", "one-time qURL link"} {
+	for _, want := range []string{"`$prod-db`", "`$stage-db`", "no ID", "/qurl get", "one-time qURL link"} {
 		if !strings.Contains(fallback, want) {
 			t.Errorf("text fallback missing %q: %q", want, fallback)
 		}

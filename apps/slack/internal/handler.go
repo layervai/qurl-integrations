@@ -855,7 +855,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// `$slug` or a channel `$alias`. Surface a deprecation hint
 		// instead of an "unknown subcommand" so existing users hitting
 		// muscle memory get a direct redirect to the new shape.
-		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$name|$alias>` instead — run `/qurl list` to see your tunnels.")
+		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$id|$alias>` instead — run `/qurl list` to see your tunnels.")
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
@@ -1136,15 +1136,15 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
-			"_`$name` identifies a tunnel. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one name. Use either with `/qurl get`._",
+			"_`$id` identifies a tunnel. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
 			"",
-			"• `/qurl get <$name|$alias>` — Mint a one-time qURL for a tunnel `$name` or a `$alias` configured in this channel",
+			"• `/qurl get <$id|$alias>` — Mint a one-time qURL for a tunnel `$id` or a `$alias` configured in this channel",
 		)
 		if h.cfg.PostDM != nil {
-			lines = append(lines, "• `/qurl get <$name|$alias> dm:true` — DM the link to you instead of posting it in-channel")
+			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
-			"• `/qurl get <$name|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+			"• `/qurl get <$id|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		)
 	}
 	lines = append(lines,
@@ -1206,12 +1206,12 @@ func (h *Handler) adminHelpMessage(command string) string {
 			lines = append(lines,
 				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
 				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
-				"• `/qurl-admin tunnel install <name> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<name>` in this channel",
+				"• `/qurl-admin tunnel install <id> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<id>` in this channel",
 				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin tunnel install <name>` — Create a Docker sidecar bootstrap key and bind `$<name>` in this channel (admin only)",
+				"• `/qurl-admin tunnel install <id>` — Create a Docker sidecar bootstrap key and bind `$<id>` in this channel (admin only)",
 				"  Guided setup is not enabled in this deployment; use the typed installer form.",
 			)
 		}
@@ -1234,7 +1234,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		// to gating on both. `/qurl aliases` above gates on AdminStore
 		// because it READS channel_policies through it.
 		lines = append(lines,
-			"• `/qurl-admin set-alias $<alias> $<name>` — Point an alias at a tunnel name in this channel (admin only)",
+			"• `/qurl-admin set-alias $<alias> $<id>` — Point an alias at a tunnel ID in this channel (admin only)",
 			"• `/qurl-admin unset-alias $<alias>` — Remove an alias from this channel (admin only)",
 		)
 	}

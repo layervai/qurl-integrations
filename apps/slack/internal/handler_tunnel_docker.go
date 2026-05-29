@@ -30,7 +30,7 @@ AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
 CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
 
 # This intentionally overwrites the per-tunnel config so rerunning the install
-# refreshes the deterministic name and port values in place.
+# refreshes the deterministic ID and port values in place.
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF

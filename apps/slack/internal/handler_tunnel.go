@@ -108,7 +108,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		Environment: tunnelEnvDocker,
 	}
 	if !tunnelSlugPattern.MatchString(args.Slug) {
-		return nil, "qURL tunnel name must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
+		return nil, "qURL tunnel ID must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
 	}
 	for _, token := range fields[2:] {
 		if msg := parseTunnelInstallOption(args, token); msg != "" {
@@ -173,9 +173,9 @@ func tunnelInstallUsage() string {
 		"Usage:",
 		"• `/qurl-admin tunnel install` for guided setup",
 		"Guided setup is exactly `/qurl-admin tunnel install`; add arguments only when using typed setup.",
-		"• Docker: `/qurl-admin tunnel install <name|$name> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
-		"• Compose: `/qurl-admin tunnel install <name|$name> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
-		"• ECS/Fargate or Kubernetes: `/qurl-admin tunnel install <name|$name> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
+		"• Docker: `/qurl-admin tunnel install <id|$id> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
+		"• Compose: `/qurl-admin tunnel install <id|$id> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
+		"• ECS/Fargate or Kubernetes: `/qurl-admin tunnel install <id|$id> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
 		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
 		"Example: `/qurl-admin tunnel install prod-dashboard port:8080`",
 	}, "\n")
@@ -269,7 +269,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <name> [port:8080]` instead.")
+		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <id> [port:8080]` instead.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -282,7 +282,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	}
 	triggerID := strings.TrimSpace(values.Get(fieldTriggerID))
 	if triggerID == "" {
-		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl-admin tunnel install <name> [port:8080]` instead.")
+		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl-admin tunnel install <id> [port:8080]` instead.")
 		return
 	}
 	log := slog.With(

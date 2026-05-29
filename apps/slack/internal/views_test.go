@@ -207,7 +207,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 	}
 	body := string(raw)
 	for _, want := range []string{
-		"qURL tunnel name",
+		"qURL tunnel ID",
 		"Channel alias",
 		"Target environment",
 		"Docker snippets assume a Linux host",
