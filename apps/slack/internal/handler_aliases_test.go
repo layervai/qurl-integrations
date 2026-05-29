@@ -13,12 +13,12 @@ import (
 )
 
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
-// flow: LookupChannelAlias → per-row resource fetch → rendered
-// list. Single alias binding on the channel.
+// flow: GetChannelPolicy → per-group resource fetch (by resource_id) →
+// rendered list. Single alias binding on the channel.
 func TestHandleAliases_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.addCustomer("GET", "/v1/resources/by-alias/prod-db", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("GET", "/v1/resources/"+testResourceIDFix, func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceFixtureWithTarget(t, w, testResourceIDFix, "prod-db", "https://prod.example.com")
 	})
 	h := newAdminTestHandler(t, ts)
@@ -28,32 +28,33 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	if !strings.Contains(async, "Aliases configured for this channel") {
 		t.Errorf("async reply missing header: %q", async)
 	}
-	// Legacy URL binding: the alias points at a raw URL (no slug), so the
-	// line reads "<url> (URL) → `$<alias>`".
-	if !strings.Contains(async, "https://prod.example.com (URL) → `$prod-db`") {
+	// Legacy URL binding: the resource has a target_url and no slug, so the
+	// line reads "<url> (legacy URL) → `$<alias>`".
+	if !strings.Contains(async, "https://prod.example.com (legacy URL) → `$prod-db`") {
 		t.Errorf("async reply missing prod-db line: %q", async)
 	}
 }
 
-// TestHandleAliases_TunnelAliasShowsSlug fences the alias→slug rendering
-// for tunnel-backed aliases: a tunnel resource has no target_url, so the
-// row shows the tunnel's `$<slug>` (the same token /qurl list renders
-// and /qurl get accepts) instead of the opaque resource_id.
+// TestHandleAliases_TunnelAliasShowsSlug fences the resource_id→slug
+// rendering for tunnel-backed aliases: a tunnel resource has no
+// target_url, so the row shows the tunnel's `$<slug>` (the same token
+// /qurl list renders and /qurl get accepts) instead of the opaque
+// resource_id.
 func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
 		"bastion": "r_bastion01",
 	})
-	ts.addCustomer("GET", "/v1/resources/by-alias/bastion", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("GET", "/v1/resources/r_bastion01", func(w http.ResponseWriter, _ *http.Request) {
 		writeTunnelResourceFixture(t, w, "r_bastion01", "bastion", "ops-bastion")
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	// Tunnel-backed: the slug is the canonical name (left of the arrow,
-	// labeled "(tunnel)") and the alias is its alternate name.
-	if !strings.Contains(async, "`$ops-bastion` (tunnel) → `$bastion`") {
+	// Tunnel-backed: the slug is the canonical name (left of the arrow)
+	// and the alias is its alternate name.
+	if !strings.Contains(async, "`$ops-bastion` → `$bastion`") {
 		t.Errorf("aliases reply missing slug→alias mapping: %q", async)
 	}
 	if strings.Contains(async, "r_bastion01") {
@@ -63,9 +64,9 @@ func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 
 // TestHandleAliases_MultipleAliasesOneTunnelCollapse fences change #2's
 // headline behavior: several aliases pointing at the SAME tunnel
-// collapse onto one line — `$<slug> (tunnel) → $<a1>, $<a2>` — with the
-// aliases sorted and a single resource fetch for the group (one lookup
-// via the first alias, not one per alias).
+// collapse onto one line — `$<slug> → $<a1>, $<a2>` — with the aliases
+// sorted and a single resource fetch for the group (one by-id lookup
+// covers the whole group, not one per alias).
 func TestHandleAliases_MultipleAliasesOneTunnelCollapse(t *testing.T) {
 	ts := newAdminTestServers(t)
 	// Two aliases bound to the same tunnel resource_id.
@@ -73,23 +74,19 @@ func TestHandleAliases_MultipleAliasesOneTunnelCollapse(t *testing.T) {
 		"dashboard":       "r_kktest01",
 		"kevin-dashboard": "r_kktest01",
 	})
-	// The group resolves via its first (sorted) alias — "dashboard". One
-	// fetch covers the whole group; assert a second per-alias fetch never
-	// fires by failing if the kevin-dashboard endpoint is hit.
+	// The group resolves once by its shared resource_id. One fetch covers
+	// the whole group regardless of how many aliases point at it; assert
+	// the by-id endpoint is hit exactly once.
 	var fetches atomic.Int32
-	ts.addCustomer("GET", "/v1/resources/by-alias/dashboard", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("GET", "/v1/resources/r_kktest01", func(w http.ResponseWriter, _ *http.Request) {
 		fetches.Add(1)
 		writeTunnelResourceFixture(t, w, "r_kktest01", "dashboard", "kktest")
-	})
-	ts.addCustomer("GET", "/v1/resources/by-alias/kevin-dashboard", func(w http.ResponseWriter, _ *http.Request) {
-		fetches.Add(1)
-		writeTunnelResourceFixture(t, w, "r_kktest01", "kevin-dashboard", "kktest")
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$kktest` (tunnel) → `$dashboard`, `$kevin-dashboard`") {
+	if !strings.Contains(async, "`$kktest` → `$dashboard`, `$kevin-dashboard`") {
 		t.Errorf("aliases reply did not collapse both aliases onto one slug line: %q", async)
 	}
 	if got := fetches.Load(); got != 1 {
@@ -110,15 +107,15 @@ func TestHandleAliases_MultiAliasChannelDisplaysAllBindings(t *testing.T) {
 		"alpha": "r_alpha",
 		"mu":    "r_mu",
 	})
-	// Per-alias resource fetch returns the alias label + a unique
-	// target URL so we can assert all three lines independently.
-	ts.addCustomer("GET", "/v1/resources/by-alias/alpha", func(w http.ResponseWriter, _ *http.Request) {
+	// Per-group resource fetch (by resource_id) returns a unique target
+	// URL so we can assert all three lines independently.
+	ts.addCustomer("GET", "/v1/resources/r_alpha", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceFixtureWithTarget(t, w, "r_alpha", "alpha", "https://alpha.example.com")
 	})
-	ts.addCustomer("GET", "/v1/resources/by-alias/mu", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("GET", "/v1/resources/r_mu", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceFixtureWithTarget(t, w, "r_mu", "mu", "https://mu.example.com")
 	})
-	ts.addCustomer("GET", "/v1/resources/by-alias/zeta", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("GET", "/v1/resources/r_zeta", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceFixtureWithTarget(t, w, "r_zeta", "zeta", "https://zeta.example.com")
 	})
 	h := newAdminTestHandler(t, ts)
@@ -224,7 +221,7 @@ func TestGroupAliasEntriesByResource(t *testing.T) {
 
 // TestFanoutAliasGroups_RespectsCtxCancellation fences the dispatcher
 // loop's ctx-aware semaphore acquire: a canceled ctx during dispatch
-// fills un-dispatched groups with id-only fallbacks (no goroutine
+// fills un-dispatched groups with alias-only fallbacks (no goroutine
 // leaks, no deadlock).
 func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -239,7 +236,7 @@ func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 
 	var hits atomic.Int32
 	ts := newAdminTestServers(t)
-	ts.addCustomerPrefix("GET", "/v1/resources/by-alias/", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomerPrefix("GET", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
@@ -254,11 +251,11 @@ func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("lines len = %d, want 3", len(lines))
 	}
-	// All three should be id-only fallbacks because ctx is canceled
-	// before any worker dispatched.
+	// All three should be alias-only fallbacks because ctx is canceled
+	// before any worker dispatched — never the opaque resource_id.
 	for i, l := range lines {
-		if !strings.Contains(l, "`r_") {
-			t.Errorf("line[%d] = %q, want id-only fallback", i, l)
+		if !strings.Contains(l, "`$") || strings.Contains(l, "r_") {
+			t.Errorf("line[%d] = %q, want alias-only fallback (no resource_id)", i, l)
 		}
 	}
 	// At most one hit may have leaked through before the cancel was
@@ -277,9 +274,10 @@ func TestFanoutAliasGroups_RespectsCtxCancellation(t *testing.T) {
 //   - return one line per entry (no entry silently dropped),
 //   - return within ctx.Deadline() + a small grace (no goroutine
 //     leak that holds onto the worker pool past timeout),
-//   - degrade un-dispatched and slow-fetched rows to id-only
+//   - degrade un-dispatched and slow-fetched rows to alias-only
 //     fallbacks (the user sees a complete list, just with some
-//     `$alias` → `r_xxx` lines instead of `$alias` → https://...).
+//     bare `$alias` lines instead of `$slug` → `$alias`), never
+//     leaking the opaque resource_id.
 //
 // Without this fence, a refactor that swallows ctx in
 // [fanoutAliasGroups]'s per-group goroutine (e.g., dropping the
@@ -304,7 +302,7 @@ func TestFanoutAliasGroups_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 	// slow customer API where per-call latency is on the order of the
 	// remaining ctx budget. The handler's ctx is propagated through
 	// the SDK; the handler.go semaphore-and-ctx logic must observe it.
-	ts.addCustomerPrefix("GET", "/v1/resources/by-alias/", func(w http.ResponseWriter, r *http.Request) {
+	ts.addCustomerPrefix("GET", "/v1/resources/", func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 		// Reply doesn't matter — ctx-canceled errors surface to the
 		// caller via the SDK's request layer, not from the response
@@ -321,7 +319,7 @@ func TestFanoutAliasGroups_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 	// 150ms deadline keeps the test cheap while still letting the
 	// dispatcher fan out the first batch of 8 workers (limit) before
 	// ctx fires. The remaining 72 entries hit the ctx-aware semaphore
-	// branch and fall back to id-only fallbacks.
+	// branch and fall back to alias-only fallbacks.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
@@ -346,17 +344,21 @@ func TestFanoutAliasGroups_DeadlineDuringFanoutDoesNotLeak(t *testing.T) {
 			t.Errorf("line[%d] empty — entry was dropped, not fallback-rendered", i)
 		}
 	}
-	// At least the tail of the list (the un-dispatched majority) MUST
-	// have rendered as id-only `r_xx` fallbacks, never as upstream
-	// targets (the upstream never returned anything other than 503).
-	idOnly := 0
+	// The upstream never resolved a slug (it only ever 503'd or was
+	// ctx-canceled), so every line must be an alias-only fallback — and
+	// the opaque resource_id must never leak. Count the fallbacks and pin
+	// that none carry an `r_` id.
+	fallbacks := 0
 	for _, l := range lines {
-		if strings.Contains(l, "`r_") {
-			idOnly++
+		if strings.Contains(l, "r_") {
+			t.Errorf("line leaked opaque resource_id: %q", l)
+		}
+		if strings.Contains(l, "`$alias-") {
+			fallbacks++
 		}
 	}
-	if idOnly < numEntries-aliasesResourceFanoutLimit {
-		t.Errorf("id-only fallback count = %d, want ≥%d (un-dispatched rows must fall back)", idOnly, numEntries-aliasesResourceFanoutLimit)
+	if fallbacks < numEntries-aliasesResourceFanoutLimit {
+		t.Errorf("alias-only fallback count = %d, want ≥%d (un-dispatched rows must fall back)", fallbacks, numEntries-aliasesResourceFanoutLimit)
 	}
 }
 
@@ -375,13 +377,14 @@ func TestHandleAliases_OtherChannelsDoNotLeak(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		ts.seedPolicySet(t, testAdminTeamID, "C_other_"+string(rune('a'+i)), "leak-canary", []string{"r_leak"})
 	}
-	ts.addCustomer("GET", "/v1/resources/by-alias/primary", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomer("GET", "/v1/resources/r_primary", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceFixtureWithTarget(t, w, "r_primary", "primary", "https://prod.example.com")
 	})
-	ts.addCustomerPrefix("GET", "/v1/resources/by-alias/", func(w http.ResponseWriter, _ *http.Request) {
+	ts.addCustomerPrefix("GET", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
 		// Force a 404 on any non-primary fetch — if the handler leaks
 		// a sibling channel's alias, the resource fetch lands here
-		// and renders as id-only (not the prod-example.com URL).
+		// and renders as an alias-only fallback (not the prod-example.com
+		// URL).
 		w.WriteHeader(http.StatusNotFound)
 	})
 	h := newAdminTestHandler(t, ts)

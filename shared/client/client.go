@@ -126,9 +126,9 @@ var ErrUpdateResourceAliasClearExclusive = errors.New("update resource: alias an
 // guard on Create.
 var ErrUpdateResourceNoFieldsSet = errors.New("update resource: input has no fields set")
 
-// ErrGetResourceByAliasEmpty is returned by GetResourceByAlias when alias
+// ErrGetResourceEmptyID is returned by GetResource when the resource ID
 // is the empty string.
-var ErrGetResourceByAliasEmpty = errors.New("get resource by alias: alias is empty")
+var ErrGetResourceEmptyID = errors.New("get resource: resource id is empty")
 
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
@@ -280,7 +280,7 @@ type AccessPolicy struct {
 type CreateInput struct {
 	TargetURL string `json:"target_url,omitempty"`
 	// ResourceID, when set, mints a qURL bound to an existing resource
-	// (e.g. a tunnel resource resolved via GetResourceByAlias). Mutually
+	// (e.g. a tunnel resource resolved via GetResource). Mutually
 	// exclusive with TargetURL on the wire.
 	ResourceID   string        `json:"resource_id,omitempty"`
 	Description  string        `json:"description,omitempty"`
@@ -587,8 +587,8 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 // --- Resources ---
 //
 // These methods target the post-PR-3a.2 surface in qurl-service: alias
-// fields on `Resource`, the `GET /v1/resources/by-alias/{alias}` endpoint,
-// and `clear_alias` on `PATCH /v1/resources/{id}`. The OpenAPI schema for
+// fields on `Resource` and `clear_alias` on `PATCH /v1/resources/{id}`.
+// The OpenAPI schema for
 // PR-3a.2 has not shipped at the time this client method set lands — they
 // are added here so the Slack `setalias`/`get` flows in PR-3c.3+ have a
 // stable Go surface to call against. Until PR-3a.2 ships in qurl-service,
@@ -886,7 +886,7 @@ func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
 
 // UpdateResource updates a resource's mutable properties (alias, description,
 // access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
-// must first resolve via GetResourceByAlias.
+// must first resolve the alias to its resource_id.
 //
 // Validation order (first match wins): trim resourceID → empty
 // resourceID → nil input → no-fields-set → trim Alias → exclusivity
@@ -922,7 +922,7 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 		return nil, ErrUpdateResourceNoFieldsSet
 	}
 	// Trim *input.Alias for symmetry with the resourceID and
-	// GetResourceByAlias trim contracts. Shallow-copy input so the
+	// GetResource trim contracts. Shallow-copy input so the
 	// trim doesn't mutate the caller's struct, then re-point Alias at
 	// the trimmed value. The trimmed string is what hits the wire and
 	// what the empty-pointer guard below sees.
@@ -965,26 +965,25 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	return &out, nil
 }
 
-// GetResourceByAlias resolves an alias to its underlying resource.
-//
-// alias must NOT include the leading `$` sigil used in Slack/Discord
-// surfaces — pass the bare alias string. Returns a typed APIError with
-// 404 status if the alias is not registered for the caller's owner.
-func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resource, error) {
+// GetResource fetches a single resource by its `r_…` ID via
+// GET /v1/resources/{id}. The response carries the full Resource,
+// including the tunnel Slug for type=tunnel rows. Returns a typed
+// APIError with 404 status when the ID is unknown to the caller's owner.
+func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
 	// Normalize then validate (same posture as UpdateResource on
-	// resourceID) — strips surrounding whitespace so trimmed value
+	// resourceID) — strips surrounding whitespace so the trimmed value
 	// is what hits the wire, and rejects whitespace-only as empty.
-	alias = strings.TrimSpace(alias)
-	if alias == "" {
-		return nil, ErrGetResourceByAliasEmpty
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return nil, ErrGetResourceEmptyID
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/by-alias/"+url.PathEscape(alias), http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
 	var out Resource
-	if _, err := c.do(req, &out, "GET /v1/resources/by-alias/:alias"); err != nil {
+	if _, err := c.do(req, &out, "GET /v1/resources/:id"); err != nil {
 		return nil, err
 	}
 	return &out, nil

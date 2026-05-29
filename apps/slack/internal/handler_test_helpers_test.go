@@ -56,10 +56,11 @@ func writeResourceFixtureWithTarget(t *testing.T, w http.ResponseWriter, resourc
 	}
 }
 
-// writeTunnelResourceFixture writes the by-alias resource envelope for
+// writeTunnelResourceFixture writes the by-id resource envelope for
 // a TUNNEL resource: no target_url, carries a slug + active status.
-// Used by the aliases tests to exercise the alias→slug rendering branch
-// (formatAliasLine prefers the slug over the opaque resource_id).
+// Used by the aliases tests to exercise the resource_id→slug rendering
+// branch (formatAliasGroupLine prefers the slug over the opaque
+// resource_id).
 func writeTunnelResourceFixture(t *testing.T, w http.ResponseWriter, resourceID, alias, slug string) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

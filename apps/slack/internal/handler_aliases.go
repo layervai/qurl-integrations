@@ -92,14 +92,16 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	// Collapse the per-alias bindings into one group per tunnel: several
 	// aliases can point to the same slug, so the listing shows the slug
 	// once followed by every alias that resolves to it here. Per-group
-	// resource fetch is best-effort — a failed fetch degrades to a
-	// resource-id line rather than dropping the group.
+	// resource fetch is best-effort — a failed fetch degrades to an
+	// alias-only line (never the opaque resource_id) rather than dropping
+	// the group.
 	groups := groupAliasEntriesByResource(entries)
 	lines := fanoutAliasGroups(ctx, log, c, groups, aliasesResourceFanoutLimit)
 	sort.Strings(lines)
 
-	body := "*Aliases configured for this channel:*\n" + strings.Join(lines, "\n") +
-		"\n\n_Each line is a tunnel `$<slug>` followed by the aliases that resolve to it here. Run `/qurl get` with the slug or any alias._"
+	body := "*Aliases configured for this channel:*\n" +
+		"_Format: `$<slug>` → the aliases that resolve to it. Run `/qurl get` with the slug or any alias._\n" +
+		strings.Join(lines, "\n")
 	_ = h.postResponse(log, responseURL, body)
 }
 
@@ -154,8 +156,8 @@ func groupAliasEntriesByResource(entries []slackdata.PolicyEntry) []aliasGroup {
 // without this, a cancellation that fires while the loop is queuing rows
 // (more groups than `limit`) would block on `sem <- {}` indefinitely
 // (the workers only honor ctx through their downstream HTTP call).
-// Groups that don't get dispatched fall back to resource-id-only lines
-// via [formatAliasGroupLine] so the user still sees one line per group.
+// Groups that don't get dispatched fall back to alias-only lines via
+// [formatAliasGroupLine] so the user still sees one line per group.
 //
 // Output order is non-deterministic — the caller sorts before rendering.
 func fanoutAliasGroups(ctx context.Context, log *slog.Logger, c *client.Client, groups []aliasGroup, limit int) []string {
@@ -170,9 +172,10 @@ loop:
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			// Fill un-dispatched tail with id-only fallbacks.
+			// Fill un-dispatched tail with alias-only fallbacks — no fetch
+			// happened, so there's no slug and (by design) no resource_id.
 			for j := i; j < len(groups); j++ {
-				lines[j] = formatAliasGroupLine(groups[j].resourceID, "", "", groups[j].aliases)
+				lines[j] = formatAliasGroupLine("", "", groups[j].aliases)
 			}
 			break loop
 		}
@@ -182,33 +185,27 @@ loop:
 			defer func() { <-sem }()
 			g := &groups[idx]
 			target, slug := "", ""
-			if g.resourceID != "" && len(g.aliases) > 0 {
-				// GetResourceByAlias returns the full Resource (Slug,
-				// TargetURL, …). Every alias in a group resolves to the
-				// same resource, so one lookup (via the first alias)
-				// resolves the whole group. A tunnel carries a Slug and
-				// no TargetURL; a legacy URL binding the reverse.
-				//
-				// This single-fetch optimization assumes the upstream
-				// lookup-by-alias returns the canonical resource (the same
-				// one all aliases in the group are bound to in DDB), not an
-				// alias-specific view. True today; if GetResourceByAlias
-				// ever returned a per-alias view, a group line could pick up
-				// the wrong slug — fetch per alias then.
-				if r, rerr := c.GetResourceByAlias(ctx, g.aliases[0]); rerr == nil {
+			if g.resourceID != "" {
+				// Resolve the group's canonical resource directly by the
+				// resource_id we already hold from channel_policies, via
+				// GET /v1/resources/{id}. The response carries the full
+				// Resource: a tunnel has a Slug and no TargetURL; a legacy
+				// URL binding the reverse. One fetch covers the whole group
+				// — every alias in it points at this same resource_id.
+				if r, rerr := c.GetResource(ctx, g.resourceID); rerr == nil {
 					target = r.TargetURL
 					slug = r.Slug
 				} else if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 					// Distinct log from the 404/5xx branch so operators
 					// can tell "request was cut short by SIGTERM /
 					// asyncWorkTimeout" apart from "upstream rejected
-					// this alias" when triaging.
+					// this id" when triaging.
 					log.Debug("aliases: resource fetch canceled before completion", "error", rerr, "resource_id", g.resourceID)
 				} else {
 					log.Debug("aliases: resource fetch failed in fanout", "error", rerr, "resource_id", g.resourceID)
 				}
 			}
-			lines[idx] = formatAliasGroupLine(g.resourceID, target, slug, g.aliases)
+			lines[idx] = formatAliasGroupLine(target, slug, g.aliases)
 		}(i)
 	}
 	wg.Wait()
@@ -216,19 +213,23 @@ loop:
 }
 
 // formatAliasGroupLine renders one /qurl aliases line as
-// `<what the aliases resolve to> → <the aliases>`, so the slug/target
-// reads as the canonical thing and the `$alias` tokens as its alternate
+// `$<slug> → <the aliases>`, so the immutable tunnel slug reads as the
+// canonical name and the `$alias` tokens as its channel-scoped alternate
 // names. The left side, most to least specific:
 //
-//   - tunnel slug:        • `$<slug>` (tunnel) → `$<a1>`, `$<a2>`
-//   - legacy URL target:  • <url> (URL) → `$<a1>`, `$<a2>`
-//   - unresolved id:      • `<r_id>` (no slug) → `$<a1>`, `$<a2>`
-//   - nothing resolved:   • `$<a1>`, `$<a2>` (resource-less synthetic row)
+//   - tunnel slug:        • `$<slug>` → `$<a1>`, `$<a2>`
+//   - legacy URL target:  • <url> (legacy URL) → `$<a1>`, `$<a2>`
+//   - slug unresolved:    • `$<a1>`, `$<a2>`
+//
+// The opaque resource_id is never surfaced to users: a group whose slug
+// can't be resolved (upstream fetch failed, or a legacy resource that
+// predates the slug requirement) degrades to listing its channel aliases
+// alone — the user can still `/qurl get $alias`.
 //
 // An alias equal to the slug is dropped from the right side — the install
 // flow binds `$<slug>` as a channel alias, so it would otherwise list
 // itself. A group whose only alias IS the slug renders just the slug.
-func formatAliasGroupLine(resourceID, target, slug string, aliases []string) string {
+func formatAliasGroupLine(target, slug string, aliases []string) string {
 	rhs := make([]string, 0, len(aliases))
 	for _, a := range aliases {
 		if a != slug {
@@ -238,15 +239,13 @@ func formatAliasGroupLine(resourceID, target, slug string, aliases []string) str
 	var left string
 	switch {
 	case slug != "":
-		left = "`$" + slug + "` (tunnel)"
+		left = "`$" + slug + "`"
 	case target != "":
-		left = target + " (URL)"
-	case resourceID != "":
-		left = "`" + resourceID + "` (no slug)"
+		left = target + " (legacy URL)"
 	default:
-		// No resource resolved at all — show the alias names alone so the
-		// row still renders (resource-less synthetic entry; a real
-		// PolicyEntry always carries a resource_id).
+		// No slug resolved — never fall back to the opaque resource_id.
+		// Show the channel aliases alone so the row still renders and
+		// `/qurl get $alias` still works.
 		if len(rhs) == 0 {
 			return "• (no alias)"
 		}
