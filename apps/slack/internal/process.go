@@ -183,6 +183,25 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool 
 	return h.postResponseBody(log, responseURL, body)
 }
 
+// postResponseBlocks POSTs an ephemeral Block Kit follow-up to Slack's
+// response_url. fallbackText is the plain-text rendering Slack shows in
+// notifications and to clients that can't render blocks — Slack treats a
+// blocks message's `text` as the accessibility/notification fallback, so
+// it MUST still carry the full listing. Same SSRF-fenced delivery,
+// single-attempt-with-logging posture as [Handler.postResponse].
+func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
+	body, err := json.Marshal(map[string]any{
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         fallbackText,
+		blockKitFieldBlocks:   blocks,
+	})
+	if err != nil {
+		log.Error("marshal response_url blocks payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
 func (h *Handler) postErrorResponse(log *slog.Logger, responseURL, message string, replaceOriginal bool) bool {
 	body, err := ErrorResponse(message, replaceOriginal)
 	if err != nil {
