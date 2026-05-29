@@ -105,8 +105,36 @@ func TestHTTPAPIKeyMinterMintAPIKeyLimit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	if err := mintAPIKeyOnlyErr(m); !errors.Is(err, ErrAPIKeyLimitReached) {
+	err := mintAPIKeyOnlyErr(m)
+	if !errors.Is(err, ErrAPIKeyLimitReached) {
 		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	}
+	// The %w wrap also keeps the status in the message operator logs grep —
+	// lock it so a refactor that drops the "(status %d)" suffix is caught.
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected wrapped status code in error, got %q", err.Error())
+	}
+}
+
+// TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric is the negative case
+// for apiKeyLimitError's code match: a well-formed error envelope carrying a
+// NON-limit code (here insufficient_scope) must stay a generic status error,
+// not the ErrAPIKeyLimitReached sentinel. Pins that the match is on the exact
+// code, so a future "any code containing limit" loosening breaks loudly.
+func TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden","detail":"token missing qurl:write"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintAPIKeyOnlyErr(m)
+	if errors.Is(err, ErrAPIKeyLimitReached) {
+		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyLimitReached, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected generic status error, got %q", err)
 	}
 }
 
