@@ -61,7 +61,7 @@ $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 %s
 
 # This heredoc is intentionally unquoted so it expands the validated variables
-# now and writes a static per-slug Compose fragment. Future compose commands
+# now and writes a static per-tunnel Compose fragment. Future compose commands
 # do not need WEB_SERVICE exported unless you regenerate the fragment.
 # If you edit this generated file by hand later, rerun the install instead of
 # adding new shell variables here.

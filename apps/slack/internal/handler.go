@@ -1136,7 +1136,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
-			"_`$name` is a tunnel's name. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one name. Use either with `/qurl get`._",
+			"_`$name` identifies a tunnel. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one name. Use either with `/qurl get`._",
 			"",
 			"• `/qurl get <$name|$alias>` — Mint a one-time qURL for a tunnel `$name` or a `$alias` configured in this channel",
 		)
