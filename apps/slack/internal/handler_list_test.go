@@ -50,6 +50,10 @@ func writeResourceListFixture(t *testing.T, w http.ResponseWriter, resources []m
 // so this is what every workspace member sees.
 func TestHandleList_RendersAllTunnels(t *testing.T) {
 	ts := newAdminTestServers(t)
+	// seedAdmin supplies the workspace_mappings / API-key fixture that
+	// authenticatedClient needs; the admin-vs-non-admin distinction no
+	// longer affects /qurl list, so this happy path renders identically
+	// for a non-admin (see TestHandleList_UnscopedAcrossChannels).
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
