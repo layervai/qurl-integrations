@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -132,6 +133,22 @@ func LooksLikeSlackUserID(s string) bool {
 		}
 	}
 	return true
+}
+
+// legacyOwnerPrefix returns the bounded provider prefix of a shape-bad
+// owner_id for logging — `auth0|`, `google-oauth2|`, etc. — so on-call
+// can confirm a pre-pivot row from CloudWatch without a DDB read. It
+// stops at (and includes) the first `|`, or the first 8 chars if there
+// is none, so the per-user identifier after the provider is never
+// logged.
+func legacyOwnerPrefix(s string) string {
+	if i := strings.IndexByte(s, '|'); i >= 0 && i <= 24 {
+		return s[:i+1]
+	}
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // CheckAdmin returns (isAdmin, ownerID) for the workspace.
@@ -324,8 +341,15 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 			// rows behind, and the old recovery ("operator deletes the
 			// row") needed manual DDB access. This makes /qurl setup
 			// recover them on its own.
-			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_len", len(existingOwner))
-			return s.reclaimLegacyWorkspace(ctx, m, seedAdmin, existingOwner)
+			// Log the provider prefix (e.g. `auth0|`) — not the full sub —
+			// so on-call can confirm "yes, pre-pivot row" from CloudWatch
+			// without a DDB read. The prefix carries no per-user identifier.
+			slog.Warn("BindWorkspace: existing owner_id is shape-bad (pre-pivot Auth0 sub) — reclaiming row for caller (first-come-claims)", "team_id", m.TeamID, "new_owner", seedAdmin, "legacy_owner_prefix", legacyOwnerPrefix(existingOwner), "legacy_owner_len", len(existingOwner))
+			// Preserve the orphaned row's original created_at so the reclaim
+			// keeps the one durable signal that this workspace predates the
+			// #510 migration (the comment on reclaimLegacyWorkspace explains
+			// the fallback when it's absent).
+			return s.reclaimLegacyWorkspace(ctx, m, seedAdmin, existingOwner, readString(check.Item, attrCreatedAt))
 		}
 		if existingOwner == "" {
 			// A row exists but carries no owner_id. This shouldn't happen —
@@ -382,16 +406,25 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created time.Time, 
 // the loser's condition fails because the owner_id is no longer the
 // legacy value, and it surfaces AlreadyBound — the same refusal any
 // non-owner rebind gets.
-func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin, legacyOwner string) error {
+func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin, legacyOwner, existingCreatedAt string) error {
 	now := s.nowOrDefault().UTC()
 	nowISO := now.Format(time.RFC3339)
 	created := m.CreatedAt
 	if created.IsZero() {
 		created = now
 	}
+	item := workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, nowISO)
+	// Preserve the orphaned row's original created_at verbatim when the
+	// disambiguation read found one — it's the durable "this predates
+	// #510" signal, and keeping the raw string avoids a parse/format
+	// round-trip that could trip on a non-RFC3339 legacy value. Falls
+	// back to the freshly-stamped created above when absent.
+	if existingCreatedAt != "" {
+		item[attrCreatedAt] = stringAttr(existingCreatedAt)
+	}
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           aws.String(s.WorkspaceMappingsName),
-		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, nowISO),
+		Item:                item,
 		ConditionExpression: aws.String("owner_id = :legacy"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":legacy": stringAttr(legacyOwner),

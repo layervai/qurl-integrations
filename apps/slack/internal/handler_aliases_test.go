@@ -185,6 +185,43 @@ func TestHandleAliases_AdminStoreNil(t *testing.T) {
 	}
 }
 
+// TestGroupAliasEntriesByResource fences the grouping helper behind
+// /qurl aliases: aliases sharing a resource_id collapse into one group
+// (sorted), distinct resources stay separate, and resource-less rows
+// (the defensive empty-resource_id case) are keyed per-alias so they
+// don't merge into each other.
+func TestGroupAliasEntriesByResource(t *testing.T) {
+	groups := groupAliasEntriesByResource([]slackdata.PolicyEntry{
+		{Alias: "zeta", ResourceID: "r_one"},
+		{Alias: "alpha", ResourceID: "r_one"},
+		{Alias: "solo", ResourceID: "r_two"},
+		{Alias: "ghostA", ResourceID: ""},
+		{Alias: "ghostB", ResourceID: ""},
+	})
+	if len(groups) != 4 {
+		t.Fatalf("group count = %d, want 4 (r_one collapses 2 aliases, r_two, + 2 distinct resource-less)", len(groups))
+	}
+	byKey := map[string][]string{}
+	for i := range groups {
+		// Resource-less rows share resourceID "" — key the assertion map
+		// by the first alias so they stay distinguishable.
+		key := groups[i].resourceID
+		if key == "" {
+			key = groups[i].aliases[0]
+		}
+		byKey[key] = groups[i].aliases
+	}
+	if got := byKey["r_one"]; len(got) != 2 || got[0] != "alpha" || got[1] != "zeta" {
+		t.Errorf("r_one aliases = %v, want sorted [alpha zeta]", got)
+	}
+	if got := byKey["r_two"]; len(got) != 1 || got[0] != "solo" {
+		t.Errorf("r_two aliases = %v, want [solo]", got)
+	}
+	if len(byKey["ghostA"]) != 1 || len(byKey["ghostB"]) != 1 {
+		t.Errorf("resource-less rows merged: ghostA=%v ghostB=%v", byKey["ghostA"], byKey["ghostB"])
+	}
+}
+
 // TestFanoutAliasGroups_RespectsCtxCancellation fences the dispatcher
 // loop's ctx-aware semaphore acquire: a canceled ctx during dispatch
 // fills un-dispatched groups with id-only fallbacks (no goroutine

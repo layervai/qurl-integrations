@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -372,6 +373,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 // a compare-and-swap on the exact legacy owner_id.
 func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 	const legacyAuth0Sub = "auth0|653fpre-pivot-subxyz"
+	const legacyCreatedAt = "2026-05-01T00:00:00Z"
 
 	t.Run("shape-bad owner_id is reclaimed for the caller", func(t *testing.T) {
 		var putCalls int
@@ -391,6 +393,7 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
 					attrSlackTeamID: &ddbtypes.AttributeValueMemberS{Value: "T"},
 					attrOwnerID:     &ddbtypes.AttributeValueMemberS{Value: legacyAuth0Sub},
+					attrCreatedAt:   &ddbtypes.AttributeValueMemberS{Value: legacyCreatedAt},
 				}}, nil
 			},
 		})
@@ -417,6 +420,12 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 		newOwner, ok := reclaimPut.Item[attrOwnerID].(*ddbtypes.AttributeValueMemberS)
 		if !ok || newOwner.Value != testCallerSlackID {
 			t.Errorf("reclaim new owner_id = %+v, want %q", reclaimPut.Item[attrOwnerID], testCallerSlackID)
+		}
+		// The orphaned row's original created_at must be preserved (the
+		// durable "predates #510" signal), not overwritten with `now`.
+		gotCreated, ok := reclaimPut.Item[attrCreatedAt].(*ddbtypes.AttributeValueMemberS)
+		if !ok || gotCreated.Value != legacyCreatedAt {
+			t.Errorf("reclaim created_at = %+v, want preserved %q", reclaimPut.Item[attrCreatedAt], legacyCreatedAt)
 		}
 	})
 
@@ -457,8 +466,16 @@ func TestBindWorkspace_ReclaimsLegacyAuth0SubRow(t *testing.T) {
 // the reclaim path fires, and real Slack IDs must read as valid so a
 // healthy owner_id is never mistaken for a legacy one.
 func TestLooksLikeSlackUserID(t *testing.T) {
-	valid := []string{"UCALLER01", "WENTERPRISE01", "U012345678"}
-	invalid := []string{"", "auth0|653fpre-pivot-subxyz", "google-oauth2|123", "u012345678", "U12", "UABCDEF!1"}
+	valid := []string{
+		"UCALLER01", "WENTERPRISE01", "U012345678",
+		"U" + strings.Repeat("A", 8),  // 9 chars — lower length bound.
+		"U" + strings.Repeat("A", 63), // 64 chars — upper length bound.
+	}
+	invalid := []string{
+		"", "auth0|653fpre-pivot-subxyz", "google-oauth2|123", "u012345678", "U12", "UABCDEF!1",
+		"U" + strings.Repeat("A", 7),  // 8 chars — one under the lower bound.
+		"U" + strings.Repeat("A", 64), // 65 chars — one over the upper bound.
+	}
 	for _, s := range valid {
 		if !LooksLikeSlackUserID(s) {
 			t.Errorf("LooksLikeSlackUserID(%q) = false, want true", s)
