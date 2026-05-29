@@ -90,8 +90,14 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	// slugs on; the per-id `GET /v1/resources/{id}` path does not). One
 	// fetch covers every group, joined by resource_id. Best-effort: a
 	// failed fetch degrades each row to its channel aliases alone (never
-	// the opaque resource_id).
-	byID, hasMore := resourcesByResourceID(ctx, log, c)
+	// the opaque resource_id). Skipped entirely when every group is
+	// resource-less (all-legacy channel) — there's nothing to join, so we
+	// don't spend an upstream call.
+	var byID map[string]client.Resource
+	var hasMore bool
+	if groupsNeedResolution(groups) {
+		byID, hasMore = resourcesByResourceID(ctx, log, c)
+	}
 	lines := make([]string, 0, len(groups))
 	unresolved := 0
 	for i := range groups {
@@ -121,13 +127,26 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		// `$foo` show its slug?"; arms the #555 follow-up. Additive only —
 		// the rows already rendered above are unchanged.
 		log.Warn("aliases: listing may be incomplete — unresolved bindings with more resources past the scanned page",
-			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "channel_id", channelID)
+			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "team_id", teamID, "channel_id", channelID)
 	}
 
 	body := "*Aliases configured for this channel:*\n" +
 		"_Format: `$<slug>` → the aliases that resolve to it. Run `/qurl get` with the slug or any alias._\n" +
 		strings.Join(lines, "\n")
 	_ = h.postResponse(log, responseURL, body)
+}
+
+// groupsNeedResolution reports whether any group carries a resource_id —
+// i.e. whether the ListResources slug join is worth an upstream call. A
+// channel whose bindings are all resource-less (legacy/synthetic) renders
+// alias-only with no fetch.
+func groupsNeedResolution(groups []aliasGroup) bool {
+	for i := range groups {
+		if groups[i].resourceID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // resourcesByResourceID fetches one page of the workspace's resources

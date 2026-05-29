@@ -268,9 +268,12 @@ func TestHandleAliases_ResourceLessGroupRendersAliasOnly(t *testing.T) {
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
 		"orphan": "", // legacy/synthetic binding with no resource_id
 	})
-	// Populated page with has_more set: must NOT trip the warning, since
-	// the resource-less group is excluded from the unresolved count.
+	// Registered so a stray fetch is observable, but it must NOT be hit:
+	// an all-resource-less channel has nothing to join, so processAliases
+	// short-circuits the ListResources call entirely.
+	var fetches atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_unrelated01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unrelated"},
 		}, "next-cursor", true)
@@ -280,6 +283,9 @@ func TestHandleAliases_ResourceLessGroupRendersAliasOnly(t *testing.T) {
 	logs, rendered := runProcessAliasesCapturingLogs(t, h, "C_test")
 	if !strings.Contains(rendered, "• `$orphan`") {
 		t.Errorf("resource-less binding did not render alias-only: %q", rendered)
+	}
+	if got := fetches.Load(); got != 0 {
+		t.Errorf("ListResources hit %d times for an all-resource-less channel, want 0 (short-circuit)", got)
 	}
 	if strings.Contains(logs, "listing may be incomplete") {
 		t.Errorf("triage warning fired for a resource-less group (it can't be paginated out): %q", logs)
