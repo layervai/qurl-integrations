@@ -76,7 +76,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl-admin set-alias $<alias> $<slug>` to add one.")
+		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl-admin set-alias $<alias> $<id>` to add one.")
 		return
 	}
 
@@ -114,7 +114,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 				unresolved++
 			}
 		}
-		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, groups[i].aliases))
+		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases))
 	}
 	sort.Strings(lines)
 
@@ -134,7 +134,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	}
 
 	body := "*Aliases configured for this channel:*\n" +
-		"_Format: `$<slug>` → the aliases that resolve to it. Run `/qurl get` with the slug or any alias._\n" +
+		"_Format: `$<id>` → the aliases that resolve to it. Run `/qurl get` with the ID or any alias._\n" +
 		strings.Join(lines, "\n")
 	_ = h.postResponse(log, responseURL, body)
 }
@@ -241,7 +241,13 @@ func groupAliasEntriesByResource(entries []slackdata.PolicyEntry) []aliasGroup {
 // An alias equal to the slug is dropped from the right side — the install
 // flow binds `$<slug>` as a channel alias, so it would otherwise list
 // itself. A group whose only alias IS the slug renders just the slug.
-func formatAliasGroupLine(target, slug string, aliases []string) string {
+//
+// An em-dash joins the id to the tunnel's Display Name when present:
+// • `$<slug>` — <Display Name> → `$<a1>`. The Display Name reuses the
+// resource description field (see handleSetDisplayName) and is normally set;
+// the empty guard handles the alias-only fallback rows (no resource fetch,
+// so no description) and is defensive otherwise.
+func formatAliasGroupLine(target, slug, description string, aliases []string) string {
 	rhs := make([]string, 0, len(aliases))
 	for _, a := range aliases {
 		if a != slug {
@@ -252,6 +258,13 @@ func formatAliasGroupLine(target, slug string, aliases []string) string {
 	switch {
 	case slug != "":
 		left = "`$" + slug + "`"
+		// Append the tunnel's Display Name to the id when present. The
+		// description field doubles as the Display Name (see
+		// handleSetDisplayName); it's normally set, but the alias-only
+		// fallback rows pass "" (no resource fetch happened), so guard it.
+		if description != "" {
+			left += " — " + description
+		}
 	case target != "":
 		left = target + " (legacy URL)"
 	default:

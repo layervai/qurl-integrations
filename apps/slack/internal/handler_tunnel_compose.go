@@ -61,7 +61,7 @@ $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 %s
 
 # This heredoc is intentionally unquoted so it expands the validated variables
-# now and writes a static per-slug Compose fragment. Future compose commands
+# now and writes a static per-tunnel Compose fragment. Future compose commands
 # do not need WEB_SERVICE exported unless you regenerate the fragment.
 # If you edit this generated file by hand later, rerun the install instead of
 # adding new shell variables here.
@@ -98,7 +98,7 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 	}
 	introParts = append(introParts,
 		"If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it.",
-		"Re-run this install to regenerate the same slug's Compose fragment when the port or service changes; do not hand-edit the generated fragment because the next install replaces it.",
+		"Re-run this install to regenerate the same tunnel's Compose fragment when the port or service changes; do not hand-edit the generated fragment because the next install replaces it.",
 		"If Compose recreates the web service container, bring the tunnel service up again too.",
 	)
 	intro := strings.Join(introParts, " ")

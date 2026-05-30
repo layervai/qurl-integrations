@@ -98,6 +98,9 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 		"kevin-dashboard": resID,
 		"ops":             resID,
 	})
+	// Description doubles as the Display Name and is always set; here it
+	// carries the install default ("Slack tunnel install for <slug>"). The
+	// row shows the bound aliases AND the Display Name after the em-dash.
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack tunnel install for kktest"},
@@ -107,13 +110,13 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$kktest` (aliases: `$kevin-dashboard`, `$ops`) → Slack tunnel install for kktest") {
-		t.Errorf("async reply missing slug + bound-aliases row: %q", async)
+	if !strings.Contains(async, "`$kktest` (aliases: `$kevin-dashboard`, `$ops`) — Slack tunnel install for kktest") {
+		t.Errorf("async reply missing slug + bound-aliases + Display Name row: %q", async)
 	}
 }
 
 // TestFormatTunnelListLine fences the per-row rendering contract
-// directly so the slug-only and slug+description (no-alias) shapes are
+// directly so the slug-only and slug + Display Name (no-alias) shapes are
 // pinned independently of the combined end-to-end TestHandleList_*
 // tests. In particular it locks the self-binding exclusion: the
 // install-flow binds `$<slug>` as a channel alias, and that name must
@@ -134,13 +137,14 @@ func TestFormatTunnelListLine(t *testing.T) {
 		boundAliases []string
 		want         string
 	}{
-		{name: "slug only, no aliases, no description", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "• `$prod-db`"},
-		{name: "slug + description, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` → Prod database"},
+		{name: "slug only, no aliases, no Display Name", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "• `$prod-db`"},
+		{name: "slug + Display Name, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` — Prod database"},
 		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`)"},
-		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`) → Prod database"},
+		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`) — Prod database"},
+		{name: "install-default description renders as Display Name", resource: tunnel(testListAliasProdDB, "Slack tunnel install for "+testListAliasProdDB), boundAliases: nil, want: "• `$prod-db` — Slack tunnel install for " + testListAliasProdDB},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
 		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
-		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no slug — ask your Slack admin to set one)"},
+		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no ID — ask your Slack admin to set one)"},
 		{name: "slug-less tunnel with bound aliases promotes first to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "• `$grafana` (alias: `$metrics`)"},
 	}
 	for _, tc := range cases {
@@ -408,7 +412,7 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`r_tunnel_noa` (no slug — ask your Slack admin to set one)") {
+	if !strings.Contains(async, "`r_tunnel_noa` (no ID — ask your Slack admin to set one)") {
 		t.Errorf("async reply missing bare resource_id fallback: %q", async)
 	}
 	if strings.Contains(async, "`$r_tunnel_noa`") {
@@ -419,10 +423,10 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	}
 }
 
-// TestHandleList_TunnelWithDescription fences the trailing
-// "→ <description>" annotation, and that an undescribed tunnel renders
-// just the bare token (no dangling arrow).
-func TestHandleList_TunnelWithDescription(t *testing.T) {
+// TestHandleList_TunnelWithDisplayName fences the trailing
+// "— <Display Name>" annotation, and that a tunnel with no Display Name
+// renders just the bare token (no dangling em-dash).
+func TestHandleList_TunnelWithDisplayName(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -435,14 +439,14 @@ func TestHandleList_TunnelWithDescription(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$ops-bastion` → ops jump host") {
-		t.Errorf("async reply missing slug + description row: %q", async)
+	if !strings.Contains(async, "`$ops-bastion` — ops jump host") {
+		t.Errorf("async reply missing slug + Display Name row: %q", async)
 	}
 	if !strings.Contains(async, "`$no-desc-tun`") {
-		t.Errorf("async reply missing undescribed tunnel row: %q", async)
+		t.Errorf("async reply missing no-Display-Name tunnel row: %q", async)
 	}
-	if strings.Contains(async, "`$no-desc-tun` →") {
-		t.Errorf("undescribed tunnel should not render a trailing arrow: %q", async)
+	if strings.Contains(async, "`$no-desc-tun` —") {
+		t.Errorf("tunnel with no Display Name should not render a trailing em-dash: %q", async)
 	}
 }
 
@@ -507,7 +511,7 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
 	// Legible tokens lead in order ("alpha" < "middle"); the tokenless
 	// slug-less row sorts to the END.
-	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no slug — ask your Slack admin to set one)")
+	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no ID — ask your Slack admin to set one)")
 	alphaPos := strings.Index(async, "`$alpha`")
 	middlePos := strings.Index(async, "`$middle`")
 	if alphaPos < 0 || middlePos < 0 || zzzPos < 0 {

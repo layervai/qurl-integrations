@@ -684,7 +684,7 @@ func slashSubcommand(text, command string) bool {
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-alias", "unsetalias"}
+var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-alias", "unsetalias", "set-display-name", "unset-display-name"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -786,6 +786,16 @@ func stripUnsetAliasPrefix(text string) string {
 	return rest
 }
 
+func stripSetDisplayNamePrefix(text string) string {
+	_, rest := slashVerb(text, "set-display-name")
+	return rest
+}
+
+func stripUnsetDisplayNamePrefix(text string) string {
+	_, rest := slashVerb(text, "unset-display-name")
+	return rest
+}
+
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
@@ -855,7 +865,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// `$slug` or a channel `$alias`. Surface a deprecation hint
 		// instead of an "unknown subcommand" so existing users hitting
 		// muscle memory get a direct redirect to the new shape.
-		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$slug|$alias>` instead — run `/qurl list` to see your tunnels.")
+		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$id|$alias>` instead — run `/qurl list` to see your tunnels.")
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
@@ -889,8 +899,9 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 }
 
 // dispatchAdminCommand routes the admin-facing `/qurl-admin` verbs:
-// tunnel install, set-alias, unset-alias, admin add/remove/list/revoke,
-// and help. User verbs typed on `/qurl-admin` — including `setup`, which
+// tunnel install, set-alias, unset-alias, set-display-name,
+// unset-display-name, admin add/remove/list/revoke, and help. User verbs
+// typed on `/qurl-admin` — including `setup`, which
 // is a `/qurl` verb (first-come-claims; see handleSetup) — get a redirect
 // to `/qurl` so a user who fat-fingers the command gets a direct
 // correction.
@@ -934,6 +945,19 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleSetAlias(w, values)
 	case unsetAliasSubcommand(text):
 		h.handleUnsetAlias(w, values)
+	// Use slashSubcommand directly here (unlike set-alias's dedicated
+	// helper): the verb has a single canonical spelling, and the
+	// cross-repo dispatcher-drift check (qurl-integrations-infra) only
+	// extracts the slashSubcommand and …AliasSubcommand case shapes — a
+	// …DisplayNameSubcommand helper would be invisible to it and keep the
+	// infra manifest drift check red even after this merges.
+	case slashSubcommand(text, "set-display-name"):
+		// A bare `set-display-name` (no args) matches this arm too; the
+		// handler then renders the usage hint, so the user gets the right
+		// grammar without a separate "missing args" branch here.
+		h.handleSetDisplayName(w, values)
+	case slashSubcommand(text, "unset-display-name"):
+		h.handleUnsetDisplayName(w, values)
 	case isUserVerb(text):
 		// A user verb typed on the admin command — redirect to the user one.
 		// Echoed text has backticks stripped (see the /qurl-side redirect).
@@ -1136,15 +1160,15 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
-			"_A tunnel's `$slug` is its name. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one slug. Use either with `/qurl get`._",
+			"_`$id` identifies a tunnel. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
 			"",
-			"• `/qurl get <$slug|$alias>` — Mint a one-time qURL for a tunnel `$slug` or a `$alias` configured in this channel",
+			"• `/qurl get <$id|$alias>` — Mint a one-time qURL for a tunnel `$id` or a `$alias` configured in this channel",
 		)
 		if h.cfg.PostDM != nil {
-			lines = append(lines, "• `/qurl get <$slug|$alias> dm:true` — DM the link to you instead of posting it in-channel")
+			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
-			"• `/qurl get <$slug|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+			"• `/qurl get <$id|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
 		)
 	}
 	lines = append(lines,
@@ -1206,12 +1230,12 @@ func (h *Handler) adminHelpMessage(command string) string {
 			lines = append(lines,
 				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
 				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
-				"• `/qurl-admin tunnel install <slug> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<slug>` in this channel",
+				"• `/qurl-admin tunnel install <id> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<id>` in this channel",
 				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin tunnel install <slug>` — Create a Docker sidecar bootstrap key and bind `$<slug>` in this channel (admin only)",
+				"• `/qurl-admin tunnel install <id>` — Create a Docker sidecar bootstrap key and bind `$<id>` in this channel (admin only)",
 				"  Guided setup is not enabled in this deployment; use the typed installer form.",
 			)
 		}
@@ -1234,18 +1258,24 @@ func (h *Handler) adminHelpMessage(command string) string {
 		// to gating on both. `/qurl aliases` above gates on AdminStore
 		// because it READS channel_policies through it.
 		lines = append(lines,
-			"• `/qurl-admin set-alias $<alias> $<slug>` — Point an alias at a tunnel slug in this channel (admin only)",
+			"• `/qurl-admin set-alias $<alias> $<id>` — Point an alias at a tunnel ID in this channel (admin only)",
 			"• `/qurl-admin unset-alias $<alias>` — Remove an alias from this channel (admin only)",
 		)
 	}
 	if h.cfg.AdminStore != nil {
-		// add/remove/list/revoke all require AdminStore — on sandbox
-		// deploys without the three QURL_*_TABLE env vars (see
-		// cmd/main.go), AdminStore is nil and these verbs render
-		// "Admin features are not configured". Gate the help lines on
-		// the same condition so the listing stays consistent with
-		// what the verbs will actually do.
+		// Every verb below gates on the in-code requireAdminSync (CheckAdmin
+		// against AdminStore), so they're listed only when AdminStore is
+		// wired — the same condition the verbs use at runtime. On sandbox
+		// deploys without the three QURL_*_TABLE env vars (see cmd/main.go),
+		// AdminStore is nil and these verbs render "Admin features are not
+		// configured", so gating the help lines on the same condition keeps
+		// the listing consistent with what the verbs actually do.
+		//
+		// set-display-name / unset-display-name set a friendly Display Name
+		// on a tunnel id (the `$<slug>` shown by `/qurl list`).
 		lines = append(lines,
+			"• `/qurl-admin set-display-name <id> <display name>` — Set a tunnel's friendly Display Name shown in `/qurl list` (admin only)",
+			"• `/qurl-admin unset-display-name <id>` — Reset a tunnel's Display Name to the default (admin only)",
 			"• `/qurl-admin admin add @user` — Promote a Slack user to bot admin (admin only)",
 			"• `/qurl-admin admin remove @user` — Demote a Slack user from bot admin (admin only)",
 			"• `/qurl-admin admin list` — List who connected qURL (the owner) and the current bot admins (admin only)",

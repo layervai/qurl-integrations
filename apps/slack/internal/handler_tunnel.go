@@ -108,7 +108,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		Environment: tunnelEnvDocker,
 	}
 	if !tunnelSlugPattern.MatchString(args.Slug) {
-		return nil, "qURL tunnel slug must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
+		return nil, "qURL tunnel ID must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
 	}
 	for _, token := range fields[2:] {
 		if msg := parseTunnelInstallOption(args, token); msg != "" {
@@ -173,9 +173,9 @@ func tunnelInstallUsage() string {
 		"Usage:",
 		"• `/qurl-admin tunnel install` for guided setup",
 		"Guided setup is exactly `/qurl-admin tunnel install`; add arguments only when using typed setup.",
-		"• Docker: `/qurl-admin tunnel install <slug|$slug> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
-		"• Compose: `/qurl-admin tunnel install <slug|$slug> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
-		"• ECS/Fargate or Kubernetes: `/qurl-admin tunnel install <slug|$slug> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
+		"• Docker: `/qurl-admin tunnel install <id|$id> [port:8080] [alias:$alias] [env:docker] [container:<name>|web_container:<name>]`",
+		"• Compose: `/qurl-admin tunnel install <id|$id> env:docker-compose [port:8080] [alias:$alias] [service:<name>]`",
+		"• ECS/Fargate or Kubernetes: `/qurl-admin tunnel install <id|$id> env:ecs-fargate|kubernetes [port:8080] [alias:$alias]`",
 		"`env:compose` is accepted as shorthand for `env:docker-compose`.",
 		"Example: `/qurl-admin tunnel install prod-dashboard port:8080`",
 	}, "\n")
@@ -269,7 +269,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <slug> [port:8080]` instead.")
+		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <id> [port:8080]` instead.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -282,7 +282,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	}
 	triggerID := strings.TrimSpace(values.Get(fieldTriggerID))
 	if triggerID == "" {
-		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl-admin tunnel install <slug> [port:8080]` instead.")
+		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl-admin tunnel install <id> [port:8080]` instead.")
 		return
 	}
 	log := slog.With(
@@ -440,11 +440,19 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 
+	// The description doubles as the tunnel's user-facing Display Name
+	// (see handleSetDisplayName — there's no separate field). Install
+	// seeds it with a sensible default so every tunnel has a Display Name
+	// from the moment it exists; admins refine it with
+	// `/qurl-admin set-display-name` and revert to this default with
+	// `/qurl-admin unset-display-name`. find_or_create only applies the
+	// description on first create, so re-installing an admin-renamed
+	// tunnel keeps the admin's Display Name.
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
 		FindOrCreate: true,
-		Description:  "Slack tunnel install for " + args.Slug,
+		Description:  defaultTunnelDisplayName(args.Slug),
 	})
 	if err != nil {
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
@@ -497,7 +505,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 
-	msg, err := preparedMessage.render(args, key, aliasStatus, h.now())
+	msg, err := preparedMessage.render(args, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
 		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
@@ -630,7 +638,7 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	}, nil
 }
 
-func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string, now time.Time) (string, error) {
+func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *client.APIKey, aliasStatus, tunnelDisplayName string, now time.Time) (string, error) {
 	if key == nil {
 		return "", errors.New("bootstrap api key is missing")
 	}
@@ -644,7 +652,17 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	var b strings.Builder
 	b.WriteString("qURL tunnel `")
 	b.WriteString(args.Slug)
-	b.WriteString("` is ready to install.\n")
+	b.WriteString("`")
+	// Show the tunnel's Display Name next to the id. It reuses the resource
+	// description (see handleSetDisplayName) and is always set — install
+	// seeds the default, admins refine it — so it normally renders. The
+	// empty guard is defensive only (an upstream that ever returned a blank
+	// description shouldn't dangle an em-dash).
+	if tunnelDisplayName != "" {
+		b.WriteString(" — ")
+		b.WriteString(tunnelDisplayName)
+	}
+	b.WriteString(" is ready to install.\n")
 	b.WriteString(aliasStatus)
 	b.WriteString("\n\nBootstrap key ")
 	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
@@ -672,7 +690,12 @@ func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *clien
 	if err != nil {
 		return "", err
 	}
-	return prepared.render(args, key, aliasStatus, h.now())
+	// Focused-test convenience wrapper: passes an empty Display Name so
+	// these tests fence the rest of the install block in isolation. The
+	// production path (processTunnelInstall) passes resource.Description,
+	// and the Display-Name-on-install behavior is covered by a dedicated
+	// test that drives render directly.
+	return prepared.render(args, key, aliasStatus, "", h.now())
 }
 
 func tunnelImageNote(usingDefaultImage bool) string {

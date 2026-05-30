@@ -69,6 +69,33 @@ func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 	}
 }
 
+// TestHandleAliases_ShowsDisplayName fences the Display Name annotation on
+// the aliases view: when the resolved tunnel carries a description (which
+// doubles as the Display Name; install seeds it and admins set it via
+// `/qurl-admin set-display-name`), an em-dash joins it to the id ahead of
+// the alias mapping: • `$<slug>` — <Display Name> → `$<alias>`. The slug
+// (and its description) resolve from the same single ListResources page the
+// rest of /qurl aliases now reads.
+func TestHandleAliases_ShowsDisplayName(t *testing.T) {
+	const resID = "r_dn_jumphost"
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": resID,
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops jump host"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$ops-bastion` — Ops jump host → `$bastion`") {
+		t.Errorf("aliases reply missing id + Display Name + alias mapping: %q", async)
+	}
+}
+
 // TestHandleAliases_MultipleAliasesOneTunnelCollapse fences the headline
 // behavior: several aliases pointing at the SAME tunnel collapse onto one
 // line — `$<slug> → $<a1>, $<a2>` — with the aliases sorted. The single

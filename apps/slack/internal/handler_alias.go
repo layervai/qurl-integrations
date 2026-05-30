@@ -67,7 +67,7 @@ var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`
 // aliasUsage is the help-text body returned when setalias/unsetalias
 // is invoked with an obvious typo. Centralized so the parser-rejection
 // path and the missing-arg path share the same copy.
-const aliasUsage = "Usage:\n• `/qurl-admin set-alias $<alias> $<slug>`\n• `/qurl-admin unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
+const aliasUsage = "Usage:\n• `/qurl-admin set-alias $<alias> $<id>`\n• `/qurl-admin unset-alias $<alias>`\n\nAliases are lowercase alphanumeric + dashes, up to 64 chars."
 
 // Parser-rejection user copy. These strings are returned via
 // [parseAliasArgs] as the second return value (a user-facing message)
@@ -85,7 +85,7 @@ const (
 	reasonAliasNoSigil   = "Alias must start with `$` (e.g. `$staging`)."
 	reasonAliasEmptyName = "Missing alias name after `$`."
 
-	msgAliasTargetInvalid = "Target must be a tunnel slug (`$prod-dashboard`). Tunnel slugs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
+	msgAliasTargetInvalid = "Target must be a tunnel ID (`$prod-dashboard`). Tunnel IDs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
 	msgAliasMissing       = reasonAliasMissing + "\n\n" + aliasUsage
 	msgAliasNoSigil       = reasonAliasNoSigil + "\n\n" + aliasUsage
 	msgAliasEmptyName     = reasonAliasEmptyName + "\n\n" + aliasUsage
@@ -101,7 +101,7 @@ const (
 // admins are most likely to try) rather than asserting the admin typed
 // one. Distinct from [msgAliasTargetInvalid], which fires once a
 // `$`-prefixed target fails the tunnel-slug grammar.
-const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a tunnel slug — `/qurl-admin set-alias $<alias> $<slug>`. (Raw URLs and resource IDs aren't supported targets.)"
+const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a tunnel ID — `/qurl-admin set-alias $<alias> $<id>`. (Raw URLs and resource IDs aren't supported targets.)"
 
 // aliasArgs is the parsed shape of a `/qurl-admin set-alias $a <target>` or
 // `/qurl-admin unset-alias $a` text body. Kept as a separate value type so
@@ -379,9 +379,9 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("Tunnel slug `$%s` was not found. Run `/qurl-admin tunnel install %s` first, then retry this alias.", slug, slug)
+			return fmt.Sprintf("Tunnel `$%s` was not found. Run `/qurl-admin tunnel install %s` first, then retry this alias.", slug, slug)
 		}
-		return sanitizeAPIError(err, "Failed to resolve tunnel slug")
+		return sanitizeAPIError(err, "Failed to resolve tunnel ID")
 	}
 
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem

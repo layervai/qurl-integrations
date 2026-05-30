@@ -251,8 +251,8 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " $prod-dashboard", wantErr: true},
 		// A `$slug` target that fails the tunnel-slug grammar → usage
 		// dump (it passed the `$`-prefix gate but isn't a valid slug).
-		{name: "slug target too short rejected", input: "$staging $ab", wantErr: true, wantMsgSub: "tunnel slug"},
-		{name: "slug target uppercase rejected", input: "$staging $Prod", wantErr: true, wantMsgSub: "tunnel slug"},
+		{name: "slug target too short rejected", input: "$staging $ab", wantErr: true, wantMsgSub: "tunnel ID"},
+		{name: "slug target uppercase rejected", input: "$staging $Prod", wantErr: true, wantMsgSub: "tunnel ID"},
 		// Backtick / control byte in the target token are rejected before
 		// the slug check so the success-copy fence + audit log stay clean.
 		{name: "backtick in slug target rejected", input: "$staging $prod`bad", wantErr: true},
