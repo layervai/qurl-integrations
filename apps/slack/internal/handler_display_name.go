@@ -74,15 +74,19 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 	if len([]rune(name)) > displayNameMaxLen {
 		return "", "", fmt.Sprintf("Display Name is too long (max %d characters).\n\n%s", displayNameMaxLen, displayNameUsage)
 	}
-	// Reject backticks and control bytes: the Display Name is echoed into a
-	// Slack reply and rendered next to the id inside an inline-code fence in
-	// `/qurl list` (`` `<id>` — <name> ``). A backtick breaks the fence,
-	// running an unterminated code span into the next row; a control byte
-	// garbles the line. Same rendering-hygiene rejection the alias-target
-	// parser applies. Other printable text (spaces, punctuation) is fine.
+	// Reject backticks, angle brackets, and control bytes. The Display Name
+	// is stored in `description` and rendered to EVERY user who runs
+	// `/qurl list` or `/qurl aliases` (not just the admin who set it), inside
+	// an inline-code fence (`` `<id>` — <name> ``). A backtick breaks the
+	// fence (running an unterminated code span into the next row); a control
+	// byte garbles the line; and Slack mrkdwn `<…>` is an injection vector —
+	// `<https://evil|Prod>` renders a disguised link and `<!channel>` /
+	// `<!here>` ping the workspace. Admins are trusted, but a stored value
+	// shown to all users is worth fencing at the parser (the alias-target
+	// parser rejects backticks for the same hygiene reason).
 	for _, r := range name {
-		if r == '`' || !unicode.IsPrint(r) {
-			return "", "", "Display Name can't contain backticks or control characters. Use plain text only.\n\n" + displayNameUsage
+		if r == '`' || r == '<' || r == '>' || !unicode.IsPrint(r) {
+			return "", "", "Display Name can't contain backticks, angle brackets, or control characters. Use plain text only.\n\n" + displayNameUsage
 		}
 	}
 	return idTok, name, ""
@@ -243,7 +247,10 @@ func (h *Handler) resolveAndResetTunnelDisplayName(ctx context.Context, log *slo
 	if msg != "" {
 		return msg
 	}
-	reset := defaultTunnelDisplayName(id)
+	// Revert using the resolved slug (resolveTunnelByID guarantees
+	// r.Slug == id) so the value provably matches what install wrote with
+	// args.Slug, without depending on that invariant holding at a distance.
+	reset := defaultTunnelDisplayName(resource.Slug)
 	if _, err := c.UpdateResource(ctx, resource.ResourceID, &client.UpdateResourceInput{Description: &reset}); err != nil {
 		log.Error("unset-display-name update failed", "error", err, "team_id", teamID, "id", id, "resource_id", resource.ResourceID)
 		return sanitizeAPIError(err, "Failed to reset the Display Name")

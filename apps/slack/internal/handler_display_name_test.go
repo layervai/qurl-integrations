@@ -61,6 +61,8 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		{name: "name at length cap accepted", input: id + " " + strings.Repeat("a", displayNameMaxLen), wantID: id, wantName: strings.Repeat("a", displayNameMaxLen)},
 		{name: "control byte in name rejected", input: id + " bad\x01name", wantErr: true, wantMsgSub: "control characters"},
 		{name: "backtick in name rejected", input: id + " Prod `code` API", wantErr: true, wantMsgSub: "backticks"},
+		{name: "angle-bracket broadcast rejected", input: id + " Prod <!here>", wantErr: true, wantMsgSub: "angle brackets"},
+		{name: "angle-bracket disguised link rejected", input: id + " <https://evil|Prod>", wantErr: true, wantMsgSub: "angle brackets"},
 		{name: "tab-separated id and name parses", input: id + "\tProd API", wantID: id, wantName: testDisplayNameProdAPI},
 	}
 	for _, tc := range cases {
