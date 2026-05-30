@@ -175,7 +175,7 @@ loop:
 			// Fill un-dispatched tail with alias-only fallbacks — no fetch
 			// happened, so there's no slug and (by design) no resource_id.
 			for j := i; j < len(groups); j++ {
-				lines[j] = formatAliasGroupLine("", "", groups[j].aliases)
+				lines[j] = formatAliasGroupLine("", "", "", groups[j].aliases)
 			}
 			break loop
 		}
@@ -184,7 +184,7 @@ loop:
 			defer wg.Done()
 			defer func() { <-sem }()
 			g := &groups[idx]
-			target, slug := "", ""
+			target, slug, description := "", "", ""
 			if g.resourceID != "" {
 				// Resolve the group's canonical resource directly by the
 				// resource_id we already hold from channel_policies, via
@@ -195,6 +195,7 @@ loop:
 				if r, rerr := c.GetResource(ctx, g.resourceID); rerr == nil {
 					target = r.TargetURL
 					slug = r.Slug
+					description = r.Description
 				} else if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 					// Distinct log from the 404/5xx branch so operators
 					// can tell "request was cut short by SIGTERM /
@@ -205,7 +206,7 @@ loop:
 					log.Debug("aliases: resource fetch failed in fanout", "error", rerr, "resource_id", g.resourceID)
 				}
 			}
-			lines[idx] = formatAliasGroupLine(target, slug, g.aliases)
+			lines[idx] = formatAliasGroupLine(target, slug, description, g.aliases)
 		}(i)
 	}
 	wg.Wait()
@@ -229,7 +230,13 @@ loop:
 // An alias equal to the slug is dropped from the right side — the install
 // flow binds `$<slug>` as a channel alias, so it would otherwise list
 // itself. A group whose only alias IS the slug renders just the slug.
-func formatAliasGroupLine(target, slug string, aliases []string) string {
+//
+// An em-dash joins the id to the tunnel's Display Name when present:
+// • `$<slug>` — <Display Name> → `$<a1>`. The Display Name reuses the
+// resource description field (see handleSetDisplayName) and is normally set;
+// the empty guard handles the alias-only fallback rows (no resource fetch,
+// so no description) and is defensive otherwise.
+func formatAliasGroupLine(target, slug, description string, aliases []string) string {
 	rhs := make([]string, 0, len(aliases))
 	for _, a := range aliases {
 		if a != slug {
@@ -240,6 +247,13 @@ func formatAliasGroupLine(target, slug string, aliases []string) string {
 	switch {
 	case slug != "":
 		left = "`$" + slug + "`"
+		// Append the tunnel's Display Name to the id when present. The
+		// description field doubles as the Display Name (see
+		// handleSetDisplayName); it's normally set, but the alias-only
+		// fallback rows pass "" (no resource fetch happened), so guard it.
+		if description != "" {
+			left += " — " + description
+		}
 	case target != "":
 		left = target + " (legacy URL)"
 	default:

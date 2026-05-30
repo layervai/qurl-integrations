@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
@@ -59,6 +60,35 @@ func TestHandleAliases_TunnelAliasShowsSlug(t *testing.T) {
 	}
 	if strings.Contains(async, "r_bastion01") {
 		t.Errorf("aliases reply leaked opaque resource_id instead of slug: %q", async)
+	}
+}
+
+// TestHandleAliases_ShowsDisplayName fences the Display Name annotation on
+// the aliases view: when the resolved tunnel carries a description (which
+// doubles as the Display Name; install seeds it and admins set it via
+// `/qurl-admin set-display-name`), an em-dash joins it to the id ahead of
+// the alias mapping: • `$<slug>` — <Display Name> → `$<alias>`.
+func TestHandleAliases_ShowsDisplayName(t *testing.T) {
+	const resID = "r_dn_jumphost"
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"bastion": resID,
+	})
+	ts.addCustomer("GET", "/v1/resources/"+resID, func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:  resID,
+			testKeyType:        client.ResourceTypeTunnel,
+			testKeySlug:        "ops-bastion",
+			testKeyStatus:      client.StatusActive,
+			testKeyDescription: "Ops jump host",
+		})
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$ops-bastion` — Ops jump host → `$bastion`") {
+		t.Errorf("aliases reply missing id + Display Name + alias mapping: %q", async)
 	}
 }
 

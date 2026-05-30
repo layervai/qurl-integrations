@@ -372,6 +372,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
+	// Install seeds the description (which doubles as the Display Name) with
+	// the install default, so every tunnel has a Display Name from creation;
+	// admins refine it with `/qurl-admin set-display-name`.
+	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
+		t.Errorf("resource body description = %v, want install default %q", got, want)
+	}
 	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
 		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
 	}
@@ -422,6 +428,69 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 	if !found || gotRID != testTunnelResourceID {
 		t.Fatalf("alias lookup = (%q, %v), want (%s, true)", gotRID, found, testTunnelResourceID)
+	}
+}
+
+// TestTunnelInstallReinstallShowsExistingDisplayName pins the PR's core UX
+// promise end-to-end: when find_or_create returns an EXISTING tunnel whose
+// description (its Display Name) an admin already customized, the install
+// confirmation renders that admin name — not defaultTunnelDisplayName. It
+// guards the processTunnelInstall→render linkage (render is fed
+// resource.Description, the server's value, not a locally-built default), so
+// re-installing an admin-renamed tunnel never silently clobbers the name in
+// the confirmation. (render's own show/hide-on-empty behavior is unit-tested
+// by TestRenderTunnelInstall_ShowsDisplayNameOnReinstall.)
+func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
+	now := fixedNow
+	const existingDisplayName = "Admin renamed prod gateway"
+
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		// find_or_create returns the EXISTING resource, carrying the admin's
+		// previously-set Display Name in description (not the install default).
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+			testKeyDescription:  existingDisplayName,
+			"knock_resource_id": "qurl-tunnel-server",
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			"name":            "Slack tunnel bootstrap " + testTunnelSlug,
+			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:     client.StatusActive,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+		})
+	})
+
+	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	inv := newAdminSlashInvoker(t, h)
+	if _, ack := inv.invokeAdmin(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID); !strings.Contains(ack, "Working") {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	var asyncEnvelope map[string]string
+	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
+		t.Fatalf("unmarshal tunnel install response_url body: %v", err)
+	}
+	async := asyncEnvelope[respFieldText]
+
+	if !strings.Contains(async, existingDisplayName) {
+		t.Errorf("re-install confirmation missing the admin's existing Display Name %q:\n%s", existingDisplayName, async)
+	}
+	if strings.Contains(async, defaultTunnelDisplayName(testTunnelSlug)) {
+		t.Errorf("re-install confirmation rendered the install default instead of the admin's Display Name:\n%s", async)
 	}
 }
 
@@ -1774,6 +1843,49 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
+	}
+}
+
+// TestRenderTunnelInstall_ShowsDisplayNameOnReinstall fences the install
+// confirmation's id line: it shows the tunnel's Display Name (resource
+// description, always set in production) next to the id; the empty-guard
+// case (defensive — a blank description) shows just the id with no
+// dangling em-dash.
+func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
+	now := fixedNow
+	expiresAt := now.Add(time.Hour)
+	args := &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}
+	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
+	freezeTunnelBootstrapNow(t, h, now)
+	prepared, err := h.prepareTunnelInstallMessage(args)
+	if err != nil {
+		t.Fatalf("prepareTunnelInstallMessage: %v", err)
+	}
+	key := &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}
+	const aliasStatus = "qURL alias `$prod-dashboard` is ready in this channel."
+
+	withName, err := prepared.render(args, key, aliasStatus, "Prod API gateway", now)
+	if err != nil {
+		t.Fatalf("render with Display Name: %v", err)
+	}
+	if !strings.Contains(withName, "qURL tunnel `"+testTunnelSlug+"` — Prod API gateway is ready to install.") {
+		t.Errorf("install confirmation missing Display Name on id line:\n%s", withName)
+	}
+
+	withoutName, err := prepared.render(args, key, aliasStatus, "", now)
+	if err != nil {
+		t.Fatalf("render without Display Name: %v", err)
+	}
+	if !strings.Contains(withoutName, "qURL tunnel `"+testTunnelSlug+"` is ready to install.") {
+		t.Errorf("install confirmation should show a bare id line when no Display Name is set:\n%s", withoutName)
+	}
+	if strings.Contains(withoutName, "—") {
+		t.Errorf("install confirmation should not render an em-dash with no Display Name:\n%s", withoutName)
 	}
 }
 

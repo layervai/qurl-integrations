@@ -70,9 +70,11 @@ const (
 // lines; naming them keeps a typo from becoming a silent mislabel in the
 // audit trail.
 const (
-	AdminActionSetAlias      AdminAction = "set_alias"
-	AdminActionUnsetAlias    AdminAction = "unset_alias"
-	AdminActionTunnelInstall AdminAction = "tunnel_install"
+	AdminActionSetAlias         AdminAction = "set_alias"
+	AdminActionUnsetAlias       AdminAction = "unset_alias"
+	AdminActionTunnelInstall    AdminAction = "tunnel_install"
+	AdminActionSetDisplayName   AdminAction = "set_display_name"
+	AdminActionUnsetDisplayName AdminAction = "unset_display_name"
 )
 
 // Command is the parsed shape of a `/qurl …` slash command.
