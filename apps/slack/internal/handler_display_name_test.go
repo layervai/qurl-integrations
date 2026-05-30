@@ -59,7 +59,9 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		{name: "invalid id (too short)", input: "ab foo", wantErr: true, wantMsgSub: "valid tunnel id"},
 		{name: "name too long rejected", input: id + " " + strings.Repeat("a", displayNameMaxLen+1), wantErr: true, wantMsgSub: "too long"},
 		{name: "name at length cap accepted", input: id + " " + strings.Repeat("a", displayNameMaxLen), wantID: id, wantName: strings.Repeat("a", displayNameMaxLen)},
-		{name: "control byte in name rejected", input: id + " bad\x01name", wantErr: true, wantMsgSub: "unsupported character"},
+		{name: "control byte in name rejected", input: id + " bad\x01name", wantErr: true, wantMsgSub: "control characters"},
+		{name: "backtick in name rejected", input: id + " Prod `code` API", wantErr: true, wantMsgSub: "backticks"},
+		{name: "tab-separated id and name parses", input: id + "\tProd API", wantID: id, wantName: testDisplayNameProdAPI},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

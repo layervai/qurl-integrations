@@ -952,9 +952,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	// …DisplayNameSubcommand helper would be invisible to it and keep the
 	// infra manifest drift check red even after this merges.
 	case slashSubcommand(text, "set-display-name"):
-		// Bare `set-display-name` falls through too — the handler renders
-		// the usage hint, so the user gets the right grammar without a
-		// separate "missing args" branch here.
+		// A bare `set-display-name` (no args) matches this arm too; the
+		// handler then renders the usage hint, so the user gets the right
+		// grammar without a separate "missing args" branch here.
 		h.handleSetDisplayName(w, values)
 	case slashSubcommand(text, "unset-display-name"):
 		h.handleUnsetDisplayName(w, values)

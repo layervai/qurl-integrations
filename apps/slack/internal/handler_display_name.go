@@ -47,7 +47,17 @@ const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <displa
 // punctuation that ST1005 rejects on error-typed values.
 func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 	text = strings.TrimSpace(text)
-	idTok, rest, found := strings.Cut(text, " ")
+	// Split the id off the first run of whitespace (any kind), matching
+	// parseUnsetDisplayNameArgs' strings.Fields tokenization — so a tab- or
+	// newline-separated `<id> <name>` parses the same as a space-separated
+	// one, rather than folding the whitespace into the id and failing the
+	// slug check with a confusing error.
+	idTok, rest := text, ""
+	found := false
+	if i := strings.IndexFunc(text, unicode.IsSpace); i >= 0 {
+		idTok, rest = text[:i], strings.TrimLeftFunc(text[i:], unicode.IsSpace)
+		found = true
+	}
 	if idTok == "" {
 		return "", "", "Missing tunnel id.\n\n" + displayNameUsage
 	}
@@ -64,13 +74,15 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 	if len([]rune(name)) > displayNameMaxLen {
 		return "", "", fmt.Sprintf("Display Name is too long (max %d characters).\n\n%s", displayNameMaxLen, displayNameUsage)
 	}
-	// Reject control bytes: the Display Name is echoed into a Slack reply
-	// and rendered next to the id in `/qurl list`; a control byte would
-	// garble both. Printable text (including spaces and punctuation) is
-	// fine — this is free-text copy, not a token.
+	// Reject backticks and control bytes: the Display Name is echoed into a
+	// Slack reply and rendered next to the id inside an inline-code fence in
+	// `/qurl list` (`` `<id>` — <name> ``). A backtick breaks the fence,
+	// running an unterminated code span into the next row; a control byte
+	// garbles the line. Same rendering-hygiene rejection the alias-target
+	// parser applies. Other printable text (spaces, punctuation) is fine.
 	for _, r := range name {
-		if !unicode.IsPrint(r) {
-			return "", "", "Display Name contains an unsupported character. Use plain text only.\n\n" + displayNameUsage
+		if r == '`' || !unicode.IsPrint(r) {
+			return "", "", "Display Name can't contain backticks or control characters. Use plain text only.\n\n" + displayNameUsage
 		}
 	}
 	return idTok, name, ""

@@ -431,6 +431,69 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 }
 
+// TestTunnelInstallReinstallShowsExistingDisplayName pins the PR's core UX
+// promise end-to-end: when find_or_create returns an EXISTING tunnel whose
+// description (its Display Name) an admin already customized, the install
+// confirmation renders that admin name — not defaultTunnelDisplayName. It
+// guards the processTunnelInstall→render linkage (render is fed
+// resource.Description, the server's value, not a locally-built default), so
+// re-installing an admin-renamed tunnel never silently clobbers the name in
+// the confirmation. (render's own show/hide-on-empty behavior is unit-tested
+// by TestRenderTunnelInstall_ShowsDisplayNameOnReinstall.)
+func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
+	now := fixedNow
+	const existingDisplayName = "Admin renamed prod gateway"
+
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		// find_or_create returns the EXISTING resource, carrying the admin's
+		// previously-set Display Name in description (not the install default).
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+			testKeyDescription:  existingDisplayName,
+			"knock_resource_id": "qurl-tunnel-server",
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			"name":            "Slack tunnel bootstrap " + testTunnelSlug,
+			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:     client.StatusActive,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+		})
+	})
+
+	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	inv := newAdminSlashInvoker(t, h)
+	if _, ack := inv.invokeAdmin(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID); !strings.Contains(ack, "Working") {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	var asyncEnvelope map[string]string
+	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
+		t.Fatalf("unmarshal tunnel install response_url body: %v", err)
+	}
+	async := asyncEnvelope[respFieldText]
+
+	if !strings.Contains(async, existingDisplayName) {
+		t.Errorf("re-install confirmation missing the admin's existing Display Name %q:\n%s", existingDisplayName, async)
+	}
+	if strings.Contains(async, defaultTunnelDisplayName(testTunnelSlug)) {
+		t.Errorf("re-install confirmation rendered the install default instead of the admin's Display Name:\n%s", async)
+	}
+}
+
 func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
