@@ -140,7 +140,7 @@ func TestFormatTunnelListLine(t *testing.T) {
 		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`) → Prod database"},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
 		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
-		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no slug — ask your Slack admin to set one)"},
+		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no ID — ask your Slack admin to set one)"},
 		{name: "slug-less tunnel with bound aliases promotes first to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "• `$grafana` (alias: `$metrics`)"},
 	}
 	for _, tc := range cases {
@@ -408,7 +408,7 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`r_tunnel_noa` (no slug — ask your Slack admin to set one)") {
+	if !strings.Contains(async, "`r_tunnel_noa` (no ID — ask your Slack admin to set one)") {
 		t.Errorf("async reply missing bare resource_id fallback: %q", async)
 	}
 	if strings.Contains(async, "`$r_tunnel_noa`") {
@@ -507,7 +507,7 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
 	// Legible tokens lead in order ("alpha" < "middle"); the tokenless
 	// slug-less row sorts to the END.
-	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no slug — ask your Slack admin to set one)")
+	zzzPos := strings.Index(async, "`r_zzz_aaaaa` (no ID — ask your Slack admin to set one)")
 	alphaPos := strings.Index(async, "`$alpha`")
 	middlePos := strings.Index(async, "`$middle`")
 	if alphaPos < 0 || middlePos < 0 || zzzPos < 0 {

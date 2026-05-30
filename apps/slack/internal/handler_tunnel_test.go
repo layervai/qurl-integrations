@@ -497,7 +497,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 		t.Fatalf("metadata = %+v, want team/channel/user/response_url", meta)
 	}
 	body := string(call.view)
-	for _, want := range []string{"Target channel", testTunnelChannelID, "qURL tunnel slug", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
+	for _, want := range []string{"Target channel", testTunnelChannelID, "qURL tunnel ID", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal missing %q:\n%s", want, body)
 		}
@@ -661,7 +661,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl-admin tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl-admin tunnel install <slug>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	for _, want := range []string{"/qurl-admin tunnel install`", "Guided tunnel setup", "Guided setup is enabled in this workspace", "/qurl-admin tunnel install <id>", "Typed tunnel options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
@@ -711,7 +711,7 @@ func TestTunnelInstallBareWithoutTriggerIDFallsBackToTypedInstall(t *testing.T) 
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl-admin tunnel install <slug>") {
+	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl-admin tunnel install <id>") {
 		t.Fatalf("response = %q, want trigger_id fallback guidance", got)
 	}
 }
@@ -738,7 +738,7 @@ func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	for _, want := range []string{"Guided tunnel setup is not configured", "/qurl-admin tunnel install <slug>", "port:8080"} {
+	for _, want := range []string{"Guided tunnel setup is not configured", "/qurl-admin tunnel install <id>", "port:8080"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("response = %q, missing %q", got, want)
 		}
