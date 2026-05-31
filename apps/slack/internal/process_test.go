@@ -409,12 +409,10 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	}
 }
 
-// TestHandle_AsyncGetSurfaces5xxCorrelationHandle fences the
-// mirror-of-pre-consolidation contract on /qurl get: a 5xx from
-// upstream surfaces the bounded Title and the opaque RequestID so
-// users have a handle to share with support, while Detail (which
-// can carry internal hostnames / DB error strings) MUST stay
-// stripped. The retry-friendly "Please try again." is preserved so
+// TestHandle_AsyncGetSurfaces5xxCorrelationHandle fences the 5xx
+// surface on /qurl get: upstream Title and Detail stay out of Slack,
+// while the opaque RequestID remains so users have a handle to share
+// with support. The retry-friendly "Please try again." is preserved so
 // the disposition is unchanged.
 func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 	const titleText = "Internal Server Error"
