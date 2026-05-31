@@ -519,6 +519,34 @@ func TestMapListResourcesErrorIncludesRequestIDWithoutLeakingAPIText(t *testing.
 	}
 }
 
+func TestMapListResourcesErrorRateLimitUsesRetryHintWithoutLeakingAPIText(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	err := &client.APIError{
+		StatusCode: http.StatusTooManyRequests,
+		Code:       "rate_limited",
+		Title:      "Too Many Requests from internal API",
+		Detail:     "tenant quota shard qurl-internal-7 exceeded",
+		RequestID:  "req_rate123",
+		RetryAfter: 45,
+	}
+
+	msg := mapListResourcesError(log, testAdminTeamID, err)
+	for _, leak := range []string{err.Title, err.Detail, "qurl-internal-7", "rate_limited"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("list rate-limit response leaked %q: %q", leak, msg)
+		}
+	}
+	for _, want := range []string{"Rate limit hit", "Try again in 45s", "req_rate123"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("list rate-limit response missing %q: %q", want, msg)
+		}
+	}
+	if !strings.Contains(logs.String(), "request_id=req_rate123") {
+		t.Errorf("list rate-limit log missing request_id: %q", logs.String())
+	}
+}
+
 func TestMapListResourcesErrorPermanentClassUsesGenericListFailure(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))

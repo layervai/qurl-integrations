@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -379,17 +380,20 @@ func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logg
 
 // mapListResourcesError surfaces a friendly user-facing error for
 // /qurl list failures. Auth-class (401/403) maps to authFailureMessage;
-// 5xx maps to retry-friendly service-unreachable copy; other APIError
-// statuses use generic list-failed copy so permanent-class errors don't
-// masquerade as transport outages. Raw APIError text MUST NOT reach
-// Slack — it carries internal codes that are operator-grade, not
-// user-grade.
+// 429 gets specific retry-after guidance; 5xx maps to retry-friendly
+// service-unreachable copy; other APIError statuses use generic
+// list-failed copy so permanent-class errors don't masquerade as
+// transport outages. Raw APIError text MUST NOT reach Slack — it carries
+// internal codes that are operator-grade, not user-grade.
 func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
 		log.Warn("list: list resources failed", appendRequestIDAttr(apiErr.RequestID, "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 		if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
 			return authFailureMessage
+		}
+		if apiErr.StatusCode == http.StatusTooManyRequests {
+			return listResourcesRateLimitMessage(apiErr)
 		}
 		if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
 			return serviceUnreachableMessageWith(apiErr)
@@ -402,4 +406,9 @@ func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
 
 func listResourcesFailedMessage(requestID string) string {
 	return appendSlackReference(commonListResourcesFailedPrefix, requestID) + "."
+}
+
+func listResourcesRateLimitMessage(apiErr *client.APIError) string {
+	retry := time.Duration(apiErr.RetryAfter) * time.Second
+	return appendSlackReference("Rate limit hit", apiErr.RequestID) + ". Try again in " + humanizeRetry(retry) + "."
 }
