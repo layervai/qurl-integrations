@@ -416,7 +416,7 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 
-	wantSuffix := "(one-time use · link expires in " + tunnelLinkExpiry + ")"
+	wantSuffix := "(one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
 	if !strings.HasSuffix(strings.TrimSpace(dmText), wantSuffix) {
 		t.Errorf("DM payload missing one-time-use/expiry suffix %q: %q", wantSuffix, dmText)
 	}
@@ -546,13 +546,13 @@ func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	if got, _ := parsed["one_time_use"].(bool); !got {
 		t.Errorf("one_time_use = %v, want true (one-time use is the unconditional default)", parsed["one_time_use"])
 	}
-	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use · link expires in "+tunnelLinkExpiry+")") {
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use · link expires in "+tunnelLinkExpiryHuman+")") {
 		t.Errorf("async reply missing one-time-use/expiry suffix: %q", async)
 	}
 	// The tight admit window MUST be surfaced at the point of sharing so a
 	// late click isn't a silent dead link (cr #561).
-	if !strings.Contains(async, "link expires in "+tunnelLinkExpiry) {
-		t.Errorf("async reply does not surface the link-expiry window %q: %q", tunnelLinkExpiry, async)
+	if !strings.Contains(async, "link expires in "+tunnelLinkExpiryHuman) {
+		t.Errorf("async reply does not surface the link-expiry window %q: %q", tunnelLinkExpiryHuman, async)
 	}
 }
 

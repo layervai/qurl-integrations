@@ -52,6 +52,10 @@ const (
 	tunnelLinkExpiry      = "1m"
 	tunnelSessionDuration = "1h"
 	tunnelMaxSessions     = 1
+	// tunnelLinkExpiryHuman is the user-facing rendering of tunnelLinkExpiry
+	// for the Slack reply — "1 minute" reads clearer to a recipient than the
+	// terse "1m" duration syntax. Keep in sync with tunnelLinkExpiry above.
+	tunnelLinkExpiryHuman = "1 minute"
 )
 
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL
@@ -404,7 +408,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// minting. That admit window is tight, so surface it at the point of
 	// sharing: a recipient who clicks after it lapses gets a dead link, and
 	// the suffix tells them why.
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + tunnelLinkExpiry + ")"
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}
