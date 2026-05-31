@@ -21,12 +21,20 @@ const testStateSecret = "0123456789abcdef0123456789abcdef"
 const (
 	testClientID        = "111.222"
 	testClientSecret    = "secret"
-	testScopeCSV        = "commands,views:write"
+	testScopeCSV        = "commands"
 	testWorkspaceID     = "T_WORKSPACE"
+	testEnterpriseID    = "E_GRID"
 	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
 	testAuthCode        = "abc123"
 	testAccessTokenKey  = "access_token"
 	testSlackInstallURL = CallbackPath + "?code=" + testAuthCode + "&state="
+
+	testResponseKeyScope               = "scope"
+	testResponseKeyTeam                = "team"
+	testResponseKeyEnterprise          = "enterprise"
+	testResponseKeyAuthedUser          = "authed_user"
+	testResponseKeyIsEnterpriseInstall = "is_enterprise_install"
+	testInstallerUserID                = "U_INSTALLER"
 )
 
 type fakeTokenStore struct {
@@ -49,7 +57,7 @@ func testConfig(store *fakeTokenStore) Config {
 		ClientSecret: testClientSecret,
 		SlackBaseURL: "https://slack-bot.example",
 		StateSecret:  []byte(testStateSecret),
-		BotScopes:    []string{botScopeCommands, botScopeViewsWrite},
+		BotScopes:    []string{botScopeCommands},
 		TokenStore:   store,
 		Now:          func() time.Time { return time.Unix(1800000000, 0).UTC() },
 	}
@@ -66,15 +74,52 @@ func testStateHTTPCookie(value string) *http.Cookie {
 	}
 }
 
-func TestConfigValidateRequiresGuidedInstallScopes(t *testing.T) {
+func TestConfigValidateRequiresCommandsScope(t *testing.T) {
 	cfg := testConfig(&fakeTokenStore{})
+	// `commands` alone is sufficient (see DefaultBotScopes for why).
 	cfg.BotScopes = []string{botScopeCommands}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeViewsWrite) {
-		t.Fatalf("Validate error = %v, want missing views:write", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate error = %v, want nil for commands-only scopes", err)
 	}
-	cfg.BotScopes = []string{botScopeViewsWrite}
+	// A scope set missing `commands` is still rejected.
+	cfg.BotScopes = []string{"chat:write"}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeCommands) {
 		t.Fatalf("Validate error = %v, want missing commands", err)
+	}
+}
+
+func TestConfigValidateRejectsUnsupportedScope(t *testing.T) {
+	cfg := testConfig(&fakeTokenStore{})
+	// Direct construction bypasses the cmd-layer strip, so Validate must reject
+	// views:write itself rather than forward it to Slack.
+	cfg.BotScopes = []string{botScopeCommands, "views:write"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "views:write") {
+		t.Fatalf("Validate error = %v, want rejection naming views:write", err)
+	}
+}
+
+func TestDropUnsupportedScopes(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          []string
+		wantKept    string
+		wantDropped string
+	}{
+		{"nothing unsupported", []string{"commands", "chat:write"}, "commands,chat:write", ""},
+		{"strips views:write", []string{"commands", "views:write"}, "commands", "views:write"},
+		{"case-insensitive", []string{"commands", "Views:Write"}, "commands", "Views:Write"},
+		{"only views:write leaves empty", []string{"views:write"}, "", "views:write"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kept, dropped := DropUnsupportedScopes(tt.in)
+			if strings.Join(kept, ",") != tt.wantKept {
+				t.Errorf("kept = %v, want %q", kept, tt.wantKept)
+			}
+			if strings.Join(dropped, ",") != tt.wantDropped {
+				t.Errorf("dropped = %v, want %q", dropped, tt.wantDropped)
+			}
+		})
 	}
 }
 
@@ -102,8 +147,8 @@ func TestInstallRedirectsToSlackAuthorizeWithStateCookie(t *testing.T) {
 	if q.Get("client_id") != testClientID {
 		t.Errorf("client_id = %q", q.Get("client_id"))
 	}
-	if q.Get("scope") != testScopeCSV {
-		t.Errorf("scope = %q", q.Get("scope"))
+	if q.Get(testResponseKeyScope) != testScopeCSV {
+		t.Errorf("scope = %q", q.Get(testResponseKeyScope))
 	}
 	if q.Get("redirect_uri") != "https://slack-bot.example/oauth/slack/callback" {
 		t.Errorf("redirect_uri = %q", q.Get("redirect_uri"))
@@ -156,20 +201,20 @@ func TestCallbackStoresWorkspaceBotToken(t *testing.T) {
 		gotForm = r.Form
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":               true,
-			testAccessTokenKey: testWorkspaceToken,
-			"scope":            testScopeCSV,
-			"bot_user_id":      "U_BOT",
-			"app_id":           "A_APP",
-			"team": map[string]string{
+			"ok":                 true,
+			testAccessTokenKey:   testWorkspaceToken,
+			testResponseKeyScope: testScopeCSV,
+			"bot_user_id":        "U_BOT",
+			"app_id":             "A_APP",
+			testResponseKeyTeam: map[string]string{
 				"id":   testWorkspaceID,
 				"name": "Customer",
 			},
-			"enterprise": map[string]string{
-				"id": "E_GRID",
+			testResponseKeyEnterprise: map[string]string{
+				"id": testEnterpriseID,
 			},
-			"authed_user": map[string]string{
-				"id": "U_INSTALLER",
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
 			},
 		})
 	}))
@@ -199,10 +244,10 @@ func TestCallbackStoresWorkspaceBotToken(t *testing.T) {
 		t.Fatalf("workspaceID = %q", store.workspaceID)
 	}
 	if store.install.BotToken != testWorkspaceToken ||
-		store.install.InstalledBy != "U_INSTALLER" ||
+		store.install.InstalledBy != testInstallerUserID ||
 		store.install.BotUserID != "U_BOT" ||
 		store.install.AppID != "A_APP" ||
-		store.install.EnterpriseID != "E_GRID" {
+		store.install.EnterpriseID != testEnterpriseID {
 		t.Fatalf("stored install mismatch: %+v", store.install)
 	}
 	if strings.Join(store.install.Scopes, ",") != testScopeCSV {
@@ -324,7 +369,7 @@ func TestCallbackSurfacesSlackOAuthError(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":    false,
-			"error": "bad_redirect_uri",
+			"error": slackOAuthErrorBadRedirect,
 		})
 	}))
 	defer slack.Close()
@@ -374,7 +419,7 @@ func TestCallbackRejectsSlackResponseMissingTeamID(t *testing.T) {
 	}
 }
 
-func TestCallbackRejectsEnterpriseGridOrgInstall(t *testing.T) {
+func TestCallbackStoresEnterpriseGridOrgInstallToken(t *testing.T) {
 	store := &fakeTokenStore{}
 	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
 	if err != nil {
@@ -383,18 +428,56 @@ func TestCallbackRejectsEnterpriseGridOrgInstall(t *testing.T) {
 	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":                    true,
-			testAccessTokenKey:      testWorkspaceToken,
-			"scope":                 testScopeCSV,
-			"is_enterprise_install": true,
-			"team": map[string]string{
+			"ok":                               true,
+			testAccessTokenKey:                 testWorkspaceToken,
+			testResponseKeyScope:               testScopeCSV,
+			testResponseKeyIsEnterpriseInstall: true,
+			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},
-			"enterprise": map[string]string{
-				"id": "E_GRID",
+			testResponseKeyEnterprise: map[string]string{
+				"id": testEnterpriseID,
 			},
-			"authed_user": map[string]string{
-				"id": "U_INSTALLER",
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
+			},
+		})
+	}))
+	defer slack.Close()
+
+	cfg := testConfig(store)
+	cfg.OAuthAccessURL = slack.URL
+	w := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, testSlackInstallURL+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(testStateHTTPCookie(state))
+	Callback(&cfg).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%q, want 200", w.Code, w.Body.String())
+	}
+	if store.workspaceID != testEnterpriseID {
+		t.Fatalf("workspaceID = %q, want enterprise id", store.workspaceID)
+	}
+	if store.install.EnterpriseID != testEnterpriseID {
+		t.Fatalf("EnterpriseID = %q, want %q", store.install.EnterpriseID, testEnterpriseID)
+	}
+}
+
+func TestCallbackRejectsEnterpriseGridOrgInstallWithoutEnterpriseID(t *testing.T) {
+	store := &fakeTokenStore{}
+	state, err := mintState([]byte(testStateSecret), time.Unix(1800000000, 0).UTC())
+	if err != nil {
+		t.Fatalf("mintState: %v", err)
+	}
+	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":                               true,
+			testAccessTokenKey:                 testWorkspaceToken,
+			testResponseKeyScope:               testScopeCSV,
+			testResponseKeyIsEnterpriseInstall: true,
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
 			},
 		})
 	}))
@@ -411,10 +494,10 @@ func TestCallbackRejectsEnterpriseGridOrgInstall(t *testing.T) {
 		t.Fatalf("status = %d, want 422", w.Code)
 	}
 	if store.workspaceID != "" {
-		t.Fatalf("store should not be called for org-level Enterprise Grid install, got %q", store.workspaceID)
+		t.Fatalf("store should not be called without enterprise id, got %q", store.workspaceID)
 	}
-	if !strings.Contains(w.Body.String(), "Enterprise Grid") {
-		t.Fatalf("body = %q, want Enterprise Grid guidance", w.Body.String())
+	if !strings.Contains(w.Body.String(), "enterprise id") {
+		t.Fatalf("body = %q, want enterprise id guidance", w.Body.String())
 	}
 }
 
@@ -427,18 +510,18 @@ func TestCallbackAcceptsWorkspaceInstallWithinEnterpriseGrid(t *testing.T) {
 	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":                    true,
-			testAccessTokenKey:      testWorkspaceToken,
-			"scope":                 testScopeCSV,
-			"is_enterprise_install": false,
-			"team": map[string]string{
+			"ok":                               true,
+			testAccessTokenKey:                 testWorkspaceToken,
+			testResponseKeyScope:               testScopeCSV,
+			testResponseKeyIsEnterpriseInstall: false,
+			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},
-			"enterprise": map[string]string{
-				"id": "E_GRID",
+			testResponseKeyEnterprise: map[string]string{
+				"id": testEnterpriseID,
 			},
-			"authed_user": map[string]string{
-				"id": "U_INSTALLER",
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
 			},
 		})
 	}))
@@ -457,8 +540,8 @@ func TestCallbackAcceptsWorkspaceInstallWithinEnterpriseGrid(t *testing.T) {
 	if store.workspaceID != testWorkspaceID {
 		t.Fatalf("workspaceID = %q, want %q", store.workspaceID, testWorkspaceID)
 	}
-	if store.install.EnterpriseID != "E_GRID" {
-		t.Fatalf("EnterpriseID = %q, want E_GRID", store.install.EnterpriseID)
+	if store.install.EnterpriseID != testEnterpriseID {
+		t.Fatalf("EnterpriseID = %q, want %q", store.install.EnterpriseID, testEnterpriseID)
 	}
 }
 
@@ -471,10 +554,10 @@ func TestCallbackRejectsSlackResponseMissingAuthedUserID(t *testing.T) {
 	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":               true,
-			testAccessTokenKey: testWorkspaceToken,
-			"scope":            testScopeCSV,
-			"team": map[string]string{
+			"ok":                 true,
+			testAccessTokenKey:   testWorkspaceToken,
+			testResponseKeyScope: testScopeCSV,
+			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},
 		})
@@ -504,15 +587,17 @@ func TestCallbackRejectsMissingRequiredSlackScopes(t *testing.T) {
 	}
 	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// Grant a scope set that omits the required `commands` scope, so
+		// missingRequiredScopes flags it and the callback rejects with 422.
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":               true,
-			testAccessTokenKey: testWorkspaceToken,
-			"scope":            botScopeCommands,
-			"team": map[string]string{
+			"ok":                 true,
+			testAccessTokenKey:   testWorkspaceToken,
+			testResponseKeyScope: "chat:write",
+			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},
-			"authed_user": map[string]string{
-				"id": "U_INSTALLER",
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
 			},
 		})
 	}))
@@ -547,11 +632,11 @@ func TestCallbackRejectsMalformedSlackBotToken(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":               true,
 			testAccessTokenKey: "xoxa-123456789012345678901234567890",
-			"team": map[string]string{
+			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},
-			"authed_user": map[string]string{
-				"id": "U_INSTALLER",
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
 			},
 		})
 	}))
@@ -581,14 +666,14 @@ func TestCallbackSurfacesTokenStoreFailure(t *testing.T) {
 	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":               true,
-			testAccessTokenKey: testWorkspaceToken,
-			"scope":            testScopeCSV,
-			"team": map[string]string{
+			"ok":                 true,
+			testAccessTokenKey:   testWorkspaceToken,
+			testResponseKeyScope: testScopeCSV,
+			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},
-			"authed_user": map[string]string{
-				"id": "U_INSTALLER",
+			testResponseKeyAuthedUser: map[string]string{
+				"id": testInstallerUserID,
 			},
 		})
 	}))
@@ -665,7 +750,7 @@ func TestCallbackDoesNotLeakSlackHTTPErrorBody(t *testing.T) {
 func TestSafeSlackOAuthErrorCode(t *testing.T) {
 	for _, code := range []string{
 		"access_denied",
-		"bad_redirect_uri",
+		slackOAuthErrorBadRedirect,
 		"invalid_client_id",
 		"invalid_redirect_uri",
 		"invalid_scope",

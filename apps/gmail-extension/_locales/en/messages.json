@@ -1,0 +1,280 @@
+{
+  "ext_name": {
+    "message": "qURL File Upload",
+    "description": "Extension name"
+  },
+  "ext_desc": {
+    "message": "Upload files to qURL and insert secure access links into Gmail compose drafts.",
+    "description": "Extension description"
+  },
+  "subtitle": {
+    "message": "Upload files to qURL and insert links",
+    "description": "Subtitle shown under the title"
+  },
+  "settings_label": {
+    "message": "Settings",
+    "description": "Accessible label and tooltip for the settings button"
+  },
+  "settings_close_label": {
+    "message": "Close settings",
+    "description": "Accessible label and tooltip for closing the settings panel"
+  },
+  "config_label": {
+    "message": "qURL server",
+    "description": "Label for the qURL server configuration area"
+  },
+  "config_placeholder": {
+    "message": "Enter qURL server URL",
+    "description": "Placeholder text for the qURL server URL input"
+  },
+  "config_default_hint": {
+    "message": "Leave this blank to use the built-in default server.",
+    "description": "Hint shown when the default server is active"
+  },
+  "config_custom_active": {
+    "message": "Custom server is active.",
+    "description": "Hint shown when a custom server override is active"
+  },
+  "config_custom_saved": {
+    "message": "Custom server saved.",
+    "description": "Success hint shown after saving a custom server URL"
+  },
+  "config_save_error": {
+    "message": "Failed to save qURL server URL.",
+    "description": "Fallback error shown when saving the server URL fails"
+  },
+  "config_load_error": {
+    "message": "Failed to load qURL server configuration.",
+    "description": "Fallback error shown when loading the stored server URL fails"
+  },
+  "config_invalid_url_error": {
+    "message": "qURL server URL must be a valid http(s) URL.",
+    "description": "Shown when the configured qURL server URL cannot be parsed"
+  },
+  "config_https_required_error": {
+    "message": "qURL server URL must start with https://",
+    "description": "Shown when the configured qURL server URL is not HTTPS"
+  },
+  "api_invalid_json_error": {
+    "message": "Invalid JSON response: $SNIPPET$",
+    "description": "Shown when the qURL server responds with invalid JSON",
+    "placeholders": {
+      "snippet": {
+        "content": "$1",
+        "example": "<html>Oops</html>"
+      }
+    }
+  },
+  "api_invalid_payload_error": {
+    "message": "Invalid API response payload.",
+    "description": "Shown when the qURL server responds with an unexpected JSON shape"
+  },
+  "api_missing_link_error": {
+    "message": "Server returned success but no download link was provided.",
+    "description": "Shown when the qURL server returns a success response without a qurl_link field"
+  },
+  "file_too_large_error": {
+    "message": "$FILENAME$ is too large to upload from the popup (max $MAX$).",
+    "description": "Shown when a selected file exceeds the popup's per-file size cap",
+    "placeholders": {
+      "filename": {
+        "content": "$1",
+        "example": "video.mp4"
+      },
+      "max": {
+        "content": "$2",
+        "example": "100.0 MB"
+      }
+    }
+  },
+  "config_reset_error": {
+    "message": "Failed to reset qURL server URL.",
+    "description": "Fallback error shown when resetting the server URL fails"
+  },
+  "save_config_btn": {
+    "message": "Save",
+    "description": "Button label for saving the configured qURL server URL"
+  },
+  "reset_config_btn": {
+    "message": "Use default",
+    "description": "Button label for clearing the configured qURL server URL"
+  },
+  "select_label": {
+    "message": "Select files",
+    "description": "Label for the file selection section"
+  },
+  "browse_btn": {
+    "message": "Browse files",
+    "description": "Button text to open file picker"
+  },
+  "file_remove_label": {
+    "message": "Remove file",
+    "description": "Accessible label for removing a selected file"
+  },
+  "no_file_selected": {
+    "message": "No file selected",
+    "description": "Placeholder text when no file is selected"
+  },
+  "unnamed_file": {
+    "message": "Unnamed file",
+    "description": "Fallback label when an uploaded file does not have a name"
+  },
+  "file_count": {
+    "message": "Selected: $COUNT$",
+    "description": "Number of files selected",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "3"
+      }
+    }
+  },
+  "upload_btn": {
+    "message": "Upload to qURL",
+    "description": "Main upload button label"
+  },
+  "uploading_label": {
+    "message": "Uploading...",
+    "description": "Button label while uploading"
+  },
+  "uploading_hint": {
+    "message": "Uploading — keep this popup open until it finishes…",
+    "description": "Footer hint while uploading"
+  },
+  "inserting_hint": {
+    "message": "Upload complete. Inserting links into Gmail...",
+    "description": "Footer hint shown while the extension is waiting to insert links into Gmail"
+  },
+  "copy_btn": {
+    "message": "Copy inserted content",
+    "description": "Copy the same formatted content that is inserted into Gmail"
+  },
+  "copy_done": {
+    "message": "Copied",
+    "description": "Copy success state"
+  },
+  "copy_failed": {
+    "message": "Copy failed",
+    "description": "Copy failed state"
+  },
+  "footer_hint": {
+    "message": "Make sure a Gmail compose window is open.",
+    "description": "Footer hint"
+  },
+  "result_one_success": {
+    "message": "1 file uploaded successfully",
+    "description": "Success summary for single file"
+  },
+  "result_n_success": {
+    "message": "$COUNT$ files uploaded successfully",
+    "description": "Success summary for multiple files",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "5"
+      }
+    }
+  },
+  "result_one_error": {
+    "message": "1 file failed to upload",
+    "description": "Error summary for single failed file"
+  },
+  "result_n_errors": {
+    "message": "$COUNT$ files failed to upload",
+    "description": "Error summary for multiple failed files",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "3"
+      }
+    }
+  },
+  "result_insertion_only_failed": {
+    "message": "Uploaded successfully, but Gmail draft insertion failed",
+    "description": "Error summary shown when uploads succeed but Gmail insertion fails"
+  },
+  "permission_missing_error": {
+    "message": "Permission to access the configured qURL server is missing. Open settings and save the server URL again.",
+    "description": "Shown when the configured qURL server origin is no longer granted"
+  },
+  "permission_request_denied_error": {
+    "message": "Permission to access this qURL server was not granted.",
+    "description": "Shown when the user declines the permission prompt for a custom qURL server"
+  },
+  "permission_request_confirm": {
+    "message": "Allow the extension to access $origin$ for qURL uploads? Chrome will show a permission prompt next.",
+    "description": "Confirmation shown before requesting host permission for a custom qURL server",
+    "placeholders": {
+      "origin": {
+        "content": "$1",
+        "example": "https://files.example.com"
+      }
+    }
+  },
+  "permission_request_cancelled": {
+    "message": "Custom server access request was canceled.",
+    "description": "Shown when the user cancels the pre-permission confirmation for a custom qURL server"
+  },
+  "permission_request_continue": {
+    "message": "Continue",
+    "description": "Button label for proceeding with a custom-server permission request"
+  },
+  "permission_request_cancel": {
+    "message": "Cancel",
+    "description": "Button label for canceling a custom-server permission request"
+  },
+  "active_tab_not_gmail_error": {
+    "message": "Active tab is not Gmail. Please switch to an open Gmail compose tab.",
+    "description": "Shown when the popup tries to insert links while the active tab is not Gmail"
+  },
+  "no_active_tab_error": {
+    "message": "No active tab found",
+    "description": "Shown when Chrome does not report an active tab for the current window"
+  },
+  "no_response_from_content_script": {
+    "message": "No response from content script",
+    "description": "Shown when the Gmail content script does not return a result after receiving an insert request"
+  },
+  "gmail_response_timeout": {
+    "message": "Timed out while waiting for the Gmail tab to respond.",
+    "description": "Shown when the popup waits too long for the background or Gmail tab response"
+  },
+  "gmail_insert_failed": {
+    "message": "Failed to insert links into the Gmail draft.",
+    "description": "Fallback error shown when Gmail link insertion fails without a more specific reason"
+  },
+  "compose_body_missing_error": {
+    "message": "qURL: Could not find compose window. Please open a compose window and try again.",
+    "description": "Toast shown inside Gmail when no visible compose body can be found"
+  },
+  "compose_insert_failed_notification": {
+    "message": "qURL: Failed to insert links. Please copy them manually from the popup.",
+    "description": "Toast shown inside Gmail when all compose insertion strategies fail"
+  },
+  "runtime_message_failed": {
+    "message": "Failed to send runtime message.",
+    "description": "Fallback error shown when the popup cannot contact the background worker at all"
+  },
+  "upload_timeout_error": {
+    "message": "Upload timed out after 5 minutes.",
+    "description": "Shown when a file upload exceeds the configured request timeout"
+  },
+  "compose_insert_timeout_error": {
+    "message": "Timed out while waiting to insert links into Gmail.",
+    "description": "Shown when the Gmail insertion request remains pending for too long"
+  },
+  "compose_insert_evicted_error": {
+    "message": "Insertion is taking longer than expected — check the draft before retrying.",
+    "description": "Shown when a pending insertion request is evicted; the insertion may have succeeded"
+  },
+  "expiry_suffix": {
+    "message": " (Expires: $EXPIRY$)",
+    "description": "Suffix shown after a link when the server returns an expiry timestamp",
+    "placeholders": {
+      "expiry": {
+        "content": "$1",
+        "example": "2026-05-01 12:00:00"
+      }
+    }
+  }
+}

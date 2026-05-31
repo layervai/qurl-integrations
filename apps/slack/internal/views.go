@@ -26,6 +26,16 @@ const (
 	callbackIDTunnelInstall  = "tunnel_install"
 )
 
+// listCreateQurlActionID is the action_id on the "Create qURL" button
+// rendered next to each `/qurl list` row. The block_actions handler
+// matches on it to mint a one-time qURL for that row's tunnel — the same
+// resolve→authorize→mint work as `/qurl get $<slug>`. The button's value
+// carries the row's `$<slug>`/`$<alias>` token with the `$` sigil
+// stripped. Reused as the action_id on every row (Slack only requires
+// action_id uniqueness within a block, not across the message), so the
+// clicked row is identified by the button's value, not its action_id.
+const listCreateQurlActionID = "list_create_qurl"
+
 const (
 	blockKitFieldBlocks          = "blocks"
 	blockKitFieldCallbackID      = "callback_id"
@@ -124,7 +134,7 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // TunnelInstallModalMetadata is carried through Slack private_metadata from
 // the slash-command request that opened the modal to the later
 // view_submission. The response_url lets the async installer post the same
-// ephemeral follow-up shape as the direct `/qurl tunnel install <slug>` path.
+// ephemeral follow-up shape as the direct `/qurl-admin tunnel install <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
 // resource or minting a bootstrap key; Slack response URLs are time-limited.
 type TunnelInstallModalMetadata struct {
@@ -157,9 +167,9 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			inputBlock(tunnelInstallBlockSlug, "qURL tunnel slug", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
+			inputBlock(tunnelInstallBlockSlug, "qURL tunnel ID", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
-			inputBlock(tunnelInstallBlockShortcut, "Channel shortcut", "Optional. Leave blank to use the tunnel slug.", true,
+			inputBlock(tunnelInstallBlockShortcut, "Channel alias", "Optional. Leave blank to use the tunnel ID.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
 			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output. Docker snippets assume a Linux host.", false,
 				staticSelect(tunnelInstallActionEnvironment, []map[string]any{
@@ -279,6 +289,28 @@ func sectionBlock(text string) map[string]any {
 		"text": map[string]any{
 			"type": "mrkdwn",
 			"text": text,
+		},
+	}
+}
+
+// sectionWithButton returns a `section` block whose accessory is a
+// button. Slack renders an accessory to the RIGHT of the section text —
+// Block Kit has no leading/left accessory slot, so the right-aligned
+// accessory is the idiomatic "one action per row" shape. `value` rides
+// along on the button and is echoed back in the block_actions payload
+// when the button is clicked, so the handler knows which row was tapped.
+func sectionWithButton(text, buttonText, actionID, value string) map[string]any {
+	return map[string]any{
+		"type": "section",
+		"text": map[string]any{
+			"type": "mrkdwn",
+			"text": text,
+		},
+		"accessory": map[string]any{
+			"type":      "button",
+			"text":      plainTextObj(buttonText),
+			"action_id": actionID,
+			"value":     value,
 		},
 	}
 }

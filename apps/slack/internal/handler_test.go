@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -135,8 +137,253 @@ func TestSlashCommandHelp(t *testing.T) {
 	}
 }
 
-func TestSlashCommandGetURL_AcksWithWorkingOnIt(t *testing.T) {
-	// Ack contract for /qurl get <url>: the synchronous response is
+// slashReply drives a signed slash-command request for (command, text)
+// and returns the ephemeral reply text. Used by the dispatch-split tests
+// below to assert that `command` (/qurl vs /qurl-admin) routes each verb
+// to the right surface.
+func slashReply(t *testing.T, h *Handler, command, text string) string {
+	t.Helper()
+	body := url.Values{
+		fieldCommand:   {command},
+		fieldText:      {text},
+		fieldTeamID:    {"T123ABCDEF"},
+		fieldUserID:    {"U_ADMIN1"},
+		fieldChannelID: {"C123"},
+		fieldTriggerID: {"trig-split"},
+	}.Encode()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("command=%q text=%q: status = %d, want 200; body=%s", command, text, w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return result["text"]
+}
+
+// TestDispatchSplit_HelpPerCommand fences the help-text split: `/qurl
+// help` advertises only the user verbs (and routes admins onward), while
+// `/qurl-admin help` advertises only the admin verbs. A regression that
+// merged the two back into one help message — or pointed either at the
+// wrong verb set — fails here.
+func TestDispatchSplit_HelpPerCommand(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	userHelp := slashReply(t, h, commandUser, "help")
+	// `/qurl list` is an unconditional user verb; `/qurl get` and `/qurl
+	// aliases` gate on AdminStore (not wired here) — their gating is fenced
+	// by TestUserHelpGatesGetAndAliasesOnAdminStore.
+	if !strings.Contains(userHelp, "/qurl list") {
+		t.Errorf("/qurl help missing user verbs: %q", userHelp)
+	}
+	// setup is a user verb (first-come-claims) — the user surface must
+	// advertise it so the first claimant of an unbound workspace can find
+	// it.
+	if !strings.Contains(userHelp, "/qurl setup") {
+		t.Errorf("/qurl help missing setup verb: %q", userHelp)
+	}
+	if !strings.Contains(userHelp, "/qurl-admin help") {
+		t.Errorf("/qurl help should route admins to /qurl-admin help: %q", userHelp)
+	}
+	// User help must NOT advertise admin verbs as runnable commands —
+	// they live on /qurl-admin. Check for the command-line forms (the
+	// `/qurl-admin tunnel install` advert and the `/qurl set-alias`
+	// bullet), not bare words: the "Admins: run /qurl-admin help …"
+	// pointer line legitimately mentions "tunnel install"/"alias" in prose.
+	for _, leaked := range []string{"/qurl-admin tunnel install", "/qurl set-alias", "/qurl-admin admin", "/qurl-admin set-alias"} {
+		if strings.Contains(userHelp, leaked) {
+			t.Errorf("/qurl help leaked admin command %q: %q", leaked, userHelp)
+		}
+	}
+
+	adminHelp := slashReply(t, h, commandAdmin, "help")
+	// The always-present admin-help line (the optional verb blocks are
+	// gated on sandbox wiring, which newTestHandler doesn't supply).
+	if !strings.Contains(adminHelp, "/qurl-admin help") {
+		t.Errorf("/qurl-admin help missing its own help line: %q", adminHelp)
+	}
+	// Admin help must NOT advertise the setup verb (it's a user verb now)
+	// or the user mint verbs. Match the command forms — bare "setup" would
+	// false-positive on the "Guided tunnel setup" copy.
+	for _, leaked := range []string{"/qurl-admin setup", "/qurl setup", "/qurl get"} {
+		if strings.Contains(adminHelp, leaked) {
+			t.Errorf("/qurl-admin help leaked user verb %q: %q", leaked, adminHelp)
+		}
+	}
+	// `/qurl-admin help` must render the admin help, NOT a wrong-surface
+	// redirect. `help` is dispatched explicitly at the top of each surface,
+	// not via the userVerbs list, so a maintainer who "consistency"-adds
+	// `help` to userVerbs (making isUserVerb("help") true) would route it to
+	// the user-verb redirect here — "belongs on `/qurl`" — instead of the
+	// admin help. Pin that it doesn't.
+	if strings.Contains(adminHelp, "belongs on") {
+		t.Errorf("/qurl-admin help was redirected instead of rendering admin help: %q", adminHelp)
+	}
+}
+
+// TestDispatchSplit_WrongSurfaceRedirects fences the friendly redirects:
+// an admin verb typed on `/qurl` points the user at `/qurl-admin`, and a
+// user verb typed on `/qurl-admin` points the user at `/qurl`. Without
+// these the user would get the bare "unknown subcommand" reply.
+func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	// Admin verbs on /qurl → redirect to /qurl-admin. (setup is NOT here:
+	// it's a user verb now, so `/qurl setup` is handled, not redirected.)
+	for _, text := range []string{"tunnel install foo", "set-alias $a $b", "unset-alias $a", "admin list"} {
+		reply := slashReply(t, h, commandUser, text)
+		if !strings.Contains(reply, "admin command") || !strings.Contains(reply, "/qurl-admin") {
+			t.Errorf("/qurl %q: want admin-command redirect, got %q", text, reply)
+		}
+	}
+
+	// User verbs on /qurl-admin → redirect to /qurl. setup is included:
+	// `/qurl-admin setup` points the user back at `/qurl setup`.
+	for _, text := range []string{"get $prod-db", "list", "aliases", "setup"} {
+		reply := slashReply(t, h, commandAdmin, text)
+		if !strings.Contains(reply, "belongs on `/qurl`") || !strings.Contains(reply, "/qurl ") {
+			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)
+		}
+	}
+}
+
+// TestDispatchSplit_UnknownCommandDefaultsToUserSurface fences the
+// defensive default: an unrecognized `command` value (Slack only sends
+// the two we register, so this is a misconfiguration / probe) routes to
+// the user surface, which never mutates admin state. `help` on an unknown
+// command yields the user help.
+func TestDispatchSplit_UnknownCommandDefaultsToUserSurface(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	reply := slashReply(t, h, "/qurl-bogus", "help")
+	// Falls back to the user surface. The user help header is
+	// command-name-agnostic (the invoked command name is echoed into the
+	// verb lines), so assert on it rather than a literal command token.
+	if !strings.Contains(reply, "Create and manage qURLs from Slack") {
+		t.Errorf("unknown command did not fall back to user help: %q", reply)
+	}
+	if strings.Contains(reply, "Admin commands for qURL in Slack") {
+		t.Errorf("unknown command rendered the admin surface: %q", reply)
+	}
+}
+
+// TestDispatchSplit_EmptyCommandDefaultsToUserHelp fences the empty-command
+// normalization in handleSlashCommand: a malformed/synthetic payload with no
+// `command` field is coerced to commandUser, so it renders /qurl user help
+// (the safe read-only surface) with the prod command name rather than a
+// dangling empty name from the ReplaceAll rewrite.
+func TestDispatchSplit_EmptyCommandDefaultsToUserHelp(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	reply := slashReply(t, h, "", "help")
+	if !strings.Contains(reply, "Create and manage qURLs from Slack") {
+		t.Errorf("empty command did not fall back to user help: %q", reply)
+	}
+	if !strings.Contains(reply, "/qurl list") {
+		t.Errorf("empty command did not render the prod /qurl command name: %q", reply)
+	}
+}
+
+// TestCommandNameConstantsStayInSync pins the invariant the help-text
+// ReplaceAll rewrite leans on: the admin command is exactly the user command
+// plus adminCommandSuffix. A rename of either constant that desynced this
+// would silently break adminCommandName and the non-prod help rewrite — fail
+// here first.
+func TestCommandNameConstantsStayInSync(t *testing.T) {
+	if commandAdmin != commandUser+adminCommandSuffix {
+		t.Errorf("commandAdmin %q != commandUser %q + adminCommandSuffix %q", commandAdmin, commandUser, adminCommandSuffix)
+	}
+}
+
+// TestHelpMessagesContainOnlyCommandTokens guards the MAINTAINER INVARIANT
+// documented on userHelpMessage / adminHelpMessage: the help lines are
+// authored with prod command names and rewritten to the invoked command via
+// a blind strings.ReplaceAll, so every `/qurl…` token in the rendered help
+// must be a real command literal (`/qurl` or `/qurl-admin`). A future help
+// line introducing a non-command slash token — a `/qurl-docs` link, a
+// `/qurl-foo` example — would be silently mangled in a non-prod env (where
+// the command is named e.g. `/qurl-sandbox`). Fail here instead of shipping
+// a garbled help message.
+func TestHelpMessagesContainOnlyCommandTokens(t *testing.T) {
+	// Fully wire the handler (aliasStore + AdminStore + OpenView) so every
+	// gated help line renders — maximizes the set of tokens under test.
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	// Matches `/qurl` plus the run of bytes up to the next formatting
+	// delimiter (space, the `*` bold marker, or a backtick fence). Captured
+	// broadly — not just [a-z0-9-] — so a mangle-able token like `/qurl_admin`
+	// or `/qurl.docs` (which would otherwise slip past as a bare, allowed
+	// `/qurl`) surfaces as its own non-allowed token and fails here.
+	tokenRe := regexp.MustCompile(`/qurl[^\s*\x60]*`) // \x60 = backtick fence
+	allowed := map[string]bool{commandUser: true, commandAdmin: true}
+
+	for _, tc := range []struct {
+		surface  string
+		rendered string
+	}{
+		{"user", h.userHelpMessage(commandUser)},
+		{"admin", h.adminHelpMessage(commandAdmin)},
+	} {
+		for _, tok := range tokenRe.FindAllString(tc.rendered, -1) {
+			if !allowed[tok] {
+				t.Errorf("%s help contains non-command slash token %q; the blind ReplaceAll rewrite would mangle it in a non-prod env (see the MAINTAINER INVARIANT on userHelpMessage)", tc.surface, tok)
+			}
+		}
+	}
+}
+
+// TestDispatchSplit_NonProdCommandNamesRouteBySuffix fences env-prefix
+// routing: a non-prod install whose commands carry an infix
+// (`/qurl-sandbox`, `/qurl-sandbox-admin`) must route admin verbs to the
+// admin surface via the `-admin` suffix — a literal `/qurl-admin` match
+// would send `/qurl-sandbox-admin` down the user path and make every admin
+// verb unreachable. Redirects and help must name the invoked command, not
+// the prod `/qurl` / `/qurl-admin`.
+func TestDispatchSplit_NonProdCommandNamesRouteBySuffix(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	// Admin verb on the sandbox admin command reaches the admin surface
+	// (here: the no-AdminStore "not configured" reply from the verb body),
+	// NOT the user-surface "is an admin command" redirect.
+	reply := slashReply(t, h, "/qurl-sandbox-admin", "set-alias $a $b")
+	if strings.Contains(reply, "is an admin command") {
+		t.Errorf("/qurl-sandbox-admin set-alias hit the user-surface redirect (suffix routing broken): %q", reply)
+	}
+
+	// User verb on the sandbox admin command → redirect names the sandbox
+	// user command, not the prod /qurl.
+	reply = slashReply(t, h, "/qurl-sandbox-admin", "get $x")
+	if !strings.Contains(reply, "/qurl-sandbox get") {
+		t.Errorf("user-verb redirect should name /qurl-sandbox, got %q", reply)
+	}
+	if strings.Contains(reply, "/qurl-admin") {
+		t.Errorf("redirect leaked the prod admin command name: %q", reply)
+	}
+
+	// Admin verb on the sandbox user command → redirect names the sandbox
+	// admin command.
+	reply = slashReply(t, h, "/qurl-sandbox", "tunnel install foo")
+	if !strings.Contains(reply, "/qurl-sandbox-admin tunnel") {
+		t.Errorf("admin-verb redirect should name /qurl-sandbox-admin, got %q", reply)
+	}
+
+	// Help renders the invoked (sandbox) command names. Assert on the
+	// unconditional `/qurl-sandbox list` verb (get/aliases gate on AdminStore,
+	// not wired here) to prove the command-name rewrite.
+	if userHelp := slashReply(t, h, "/qurl-sandbox", "help"); !strings.Contains(userHelp, "/qurl-sandbox list") {
+		t.Errorf("/qurl-sandbox help should render the sandbox command name, got %q", userHelp)
+	}
+	if adminHelp := slashReply(t, h, "/qurl-sandbox-admin", "help"); !strings.Contains(adminHelp, "/qurl-sandbox-admin help") {
+		t.Errorf("/qurl-sandbox-admin help should render the sandbox command name, got %q", adminHelp)
+	}
+}
+
+func TestSlashCommandGetToken_AcksWithWorkingOnIt(t *testing.T) {
+	// Ack contract for /qurl get $<alias>: the synchronous response is
 	// the ephemeral working-on-it message. The actual qURL link is
 	// delivered later via response_url (covered in process_test.go).
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -158,13 +405,14 @@ func TestSlashCommandGetURL_AcksWithWorkingOnIt(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	h := newTestHandler(t, qurlSrv)
+	seedGetAliasBinding(t, h, "T123")
 	// Wire response_url to a local recorder so the async worker's
 	// follow-up POST stays in-process. The literal `hooks.slack.com`
 	// URL the migration left here would otherwise dial Slack on every
 	// CI run (postResponse's `Wait()` cleanup blocks for the goroutine,
 	// the recorder mock just captures and discards).
 	rec := newResponseURLRecorder(t)
-	body := getURLCommandBody("https://example.com", "T123", "trig-1", rec.URL)
+	body := getTokenCommandBody("T123", "trig-1", rec.URL)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
@@ -616,7 +864,10 @@ func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "/qurl get") {
+	// Assert on `/qurl help` — the unconditional help marker. (`/qurl get`
+	// is now gated on AdminStore, which this handler doesn't wire, so it's
+	// no longer a reliable "help rendered" signal here.)
+	if !strings.Contains(result["text"], "/qurl help") {
 		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }

@@ -52,6 +52,8 @@ type fakeDDB struct {
 	updateHook func(in *dynamodb.UpdateItemInput)
 	// putHook mirrors updateHook for PutItem (BindWorkspace).
 	putHook func(in *dynamodb.PutItemInput)
+	// getHook mirrors updateHook for GetItem read assertions.
+	getHook func(table string, key map[string]string)
 	// getItemErrs maps tableName → injected GetItem error.
 	getItemErrs map[string]error
 	// updateItemErrs maps tableName → injected UpdateItem error.
@@ -71,7 +73,7 @@ type fakeDDB struct {
 
 // SetGetItemErr injects an error returned on every GetItem against
 // `table`. Used to simulate transport failures from the admin gate
-// (workspace_mappings) or the ResolvePolicy path (channel_policies).
+// (workspace_mappings) or the channel-policy reads (channel_policies).
 func (f *fakeDDB) SetGetItemErr(table string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -150,6 +152,13 @@ func (f *fakeDDB) SetPutItemHook(hook func(in interface{})) {
 		return
 	}
 	f.putHook = func(in *dynamodb.PutItemInput) { hook(in) }
+}
+
+// SetGetItemHook installs a callback invoked on every GetItem.
+func (f *fakeDDB) SetGetItemHook(hook func(table string, key map[string]string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getHook = hook
 }
 
 // tableNames groups the table names used across the post-pivot
@@ -257,6 +266,9 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	name := aws.ToString(in.TableName)
+	if f.getHook != nil {
+		f.getHook(name, stringKey(in.Key))
+	}
 	if err, ok := f.getItemErrs[name]; ok {
 		return nil, err
 	}
@@ -285,6 +297,16 @@ func (f *fakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fun
 		return &dynamodb.GetItemOutput{}, nil
 	}
 	return &dynamodb.GetItemOutput{Item: cloneItem(item)}, nil
+}
+
+func stringKey(in map[string]ddbtypes.AttributeValue) map[string]string {
+	out := make(map[string]string, len(in))
+	for name, value := range in {
+		if s, ok := value.(*ddbtypes.AttributeValueMemberS); ok {
+			out[name] = s.Value
+		}
+	}
+	return out
 }
 
 // PutItem implements [slackdata.DynamoDBClient]. Honors the

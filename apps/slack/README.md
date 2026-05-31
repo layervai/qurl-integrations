@@ -2,27 +2,53 @@
 
 Slack bot for creating and managing qURLs via slash commands, with per-workspace OAuth setup.
 
+User commands live under `/qurl`; admin commands live under a separate
+`/qurl-admin` slash command. Both POST to the same request endpoint and
+share the same signature verification — Slack stamps which command was
+invoked in the `command` field, and the bot dispatches on it. **Deploy
+prerequisite:** `/qurl-admin` must be registered as a slash command in the
+Slack app config pointing at the **same request URL** as `/qurl`. The admin
+verbs are inert until that registration exists. Admin enforcement is
+**in-code** — every admin verb checks the qURL admin set
+(`admin_slack_user_ids`) via `requireAdminSync`, so the AdminStore must be
+wired; the "admins only" restriction on the `/qurl-admin` registration is a
+cosmetic Slack-picker hint, not the enforcement boundary (Slack does not
+gate slash-command invocation on workspace-admin role). `setup` is
+deliberately **not** an admin verb — it
+stays on `/qurl` so the first user to connect an unbound workspace can
+reach it (qURL is first-come-claims); the overwrite guard for an
+already-bound workspace lives at the OAuth-callback bind layer.
+
 Customer onboarding is install-first:
 
 1. Install the qURL Slack app from the install link your operator provided (`https://<SLACK_BASE_URL host>/oauth/slack/install`).
 2. Run `/qurl setup` in Slack.
-3. Use `/qurl tunnel install` or `/qurl get`.
+3. Use `/qurl-admin tunnel install` or `/qurl get`.
 
 ## Features
 
-- `/qurl setup` — Connect qURL to the workspace (admin-only; one-shot OAuth flow against Auth0)
-- `/qurl get <url>` — Mint a qURL for a URL
-- `/qurl get $shortcut` — Mint a qURL for a channel shortcut
-- `/qurl set-alias $shortcut <url|resource-id|$tunnel-slug>` — Bind a channel shortcut (admin-only)
-- `/qurl unset-alias $shortcut` — Remove a channel shortcut binding (admin-only)
-- `/qurl tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install with `views:write`)
-- `/qurl tunnel install <slug|$slug> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
-- `/qurl list` — List recent qURLs
+### User commands (`/qurl`)
+
+- `/qurl setup` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; first-come-claims — the first user to run it becomes the workspace's qURL admin, and only they can re-run it)
+- `/qurl get <$id|$alias>` — Mint a one-time qURL for a tunnel `$id` or a channel `$alias` (raw URLs are not supported)
+- `/qurl list` — List the protected tunnel resources available to you (with their bound channel shortcuts)
+- `/qurl aliases` — List the qURL shortcuts configured in the current channel
+- `/qurl help` — Show the user command help
+
+### Admin commands (`/qurl-admin`)
+
+- `/qurl-admin set-alias $<alias> $<id>` — Point a channel shortcut at a tunnel ID (admin-only)
+- `/qurl-admin unset-alias $<alias>` — Remove a channel shortcut binding (admin-only)
+- `/qurl-admin tunnel install` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install)
+- `/qurl-admin tunnel install <id|$id> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
+- `/qurl-admin admin add @user` / `remove @user` / `list` — Manage the workspace's bot admins (admin-only)
+- `/qurl-admin admin revoke <qurl_id>` — Revoke a single qURL (admin-only)
+- `/qurl-admin help` — Show the admin command help
 - Link unfurling for `qurl.link` URLs (planned)
 - Channel notifications on qURL events (planned)
 
-Run `/qurl help` in Slack for the canonical command modifiers enabled
-by the current bot deployment.
+Run `/qurl help` (or `/qurl-admin help`) in Slack for the canonical command
+modifiers enabled by the current bot deployment.
 
 ## Architecture
 
@@ -40,17 +66,19 @@ by the current bot deployment.
   encryption posture as qURL API keys. `SLACK_BOT_TOKEN` is only a legacy
   single-workspace fallback; customers do not manually provide bot tokens, and
   production guided setup should use the per-workspace token captured by Slack
-  install OAuth. Org-level Enterprise Grid installs are not supported in this
-  flow; install qURL to each workspace that should use guided tunnel setup.
-- **Tunnel onboarding:** `/qurl tunnel install` opens a Slack modal with the
+  install OAuth. Enterprise Grid org-level installs are also supported: the
+  enterprise-scoped bot token is stored under the Slack `enterprise_id`, while
+  qURL API keys and admin state remain scoped to each invoking workspace's
+  `team_id`.
+- **Tunnel onboarding:** `/qurl-admin tunnel install` opens a Slack modal with the
   bot token for the invoking workspace, letting an admin choose the tunnel
-  slug, optional channel shortcut, local port, and target environment
-  (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl tunnel install <slug>` (or
-  `$slug`) remains available for CLI-style admins. Both paths use the
+  ID, optional channel shortcut, local port, and target environment
+  (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl-admin tunnel install <id>` (or
+  `$id`) remains available for CLI-style admins. Both paths use the
   workspace API key to find-or-create a tunnel resource scoped to the
-  connected qURL account, bind `$<slug>` or the `alias:` shortcut override in
+  connected qURL account, bind `$<id>` or the `alias:` shortcut override in
   the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
-  key. When `alias:` is omitted, the slug doubles as the channel shortcut.
+  key. When `alias:` is omitted, the ID doubles as the channel shortcut.
   Retrying the install within the modal's 25-minute validity window reuses
   the same bootstrap-key idempotency bucket. Retrying after that window can
   mint a new key, so operators should run the newest Slack install block and
@@ -58,8 +86,8 @@ by the current bot deployment.
   The Slack response hides the internal resource id and renders output
   tailored to the selected environment. Docker and Docker Compose receive
   guarded pasteable shell blocks that write `qurl-proxy.yaml`, create a
-  bootstrap-key file, create/chown slug-scoped durable agent state, pass
-  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_SLUG=<slug>` to the client.
+  bootstrap-key file, create/chown per-tunnel durable agent state, pass
+  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_SLUG=<id>` to the client.
   ECS/Fargate and Kubernetes receive the same contract as deployment
   snippets: co-locate the sidecar with the target container, mount durable
   per-instance state at `/var/lib/layerv/agent`, mount or inject the
@@ -114,7 +142,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,views:write`; any override must still include both required scopes. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands` (the captured token is used only for `views.open`, which requires no scope); any override must still include `commands`. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
@@ -125,7 +153,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
-| `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl tunnel install`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
+| `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl-admin tunnel install`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
@@ -147,17 +175,17 @@ For customer Slack installs, configure the Slack app with:
 - Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: at least `commands` and `views:write`
-- Installation mode: workspace-level installs; org-level Enterprise Grid
-  installs are rejected until enterprise-scoped tokens are supported
+- Bot scopes: `commands` (the captured token is used only for `views.open`, which requires no scope of its own)
+- Installation mode: workspace-level installs or Enterprise Grid org-level
+  installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
+  workspace setup and admin checks still use workspace `team_id`.
 - Token posture: non-rotating bot tokens. The validator accepts `xoxe.xoxb-`
   shapes defensively, but qURL does not request or persist Slack refresh tokens
   yet, so rotation-enabled apps need refresh support before production use.
 
-After adding `views:write` or moving to per-workspace token storage, existing
-customer workspaces must reinstall or reauthorize the Slack app so Slack issues
-a bot token with the new scope. New installs through `/oauth/slack/install`
-store that token automatically, and guided `/qurl tunnel install` will use it
-for `views.open`. If Slack tells a customer guided tunnel setup needs the latest
-qURL Slack app install, send them through this reinstall link and confirm the app
-grants `views:write`.
+With per-workspace token storage in place, existing customer workspaces must
+reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
+token. New installs through `/oauth/slack/install` store that token
+automatically, and guided `/qurl-admin tunnel install` uses it for `views.open`
+(which requires no scope). If Slack tells a customer guided tunnel setup needs
+the latest qURL Slack app install, send them through this reinstall link.

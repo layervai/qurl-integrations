@@ -199,6 +199,30 @@ func callbackRequest(state string) *http.Request {
 	return req
 }
 
+// assertSecurityHeaders checks the defense-in-depth header set every OAuth-
+// callback HTML response must carry. renderSuccess, renderRebindRefused, and
+// renderOAuthErrorPage all set the same six; centralizing the assertion means
+// a render path that silently drops one fails here instead of slipping past a
+// status-and-body-only test.
+func assertSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	want := map[string]string{
+		"Content-Type":           "text/html; charset=utf-8",
+		"Cache-Control":          "no-store",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+		"X-Content-Type-Options": "nosniff",
+	}
+	for h, v := range want {
+		if got := rec.Header().Get(h); got != v {
+			t.Errorf("%s: got %q want %q", h, got, v)
+		}
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("CSP missing default-src 'none': %q", csp)
+	}
+}
+
 func TestCallbackHappyPath(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 
@@ -224,18 +248,7 @@ func TestCallbackHappyPath(t *testing.T) {
 		t.Errorf("success body missing email: %s", body)
 	}
 	// Defense-in-depth headers are required on the success page.
-	if rec.Header().Get("X-Frame-Options") != "DENY" {
-		t.Errorf("X-Frame-Options: got %q want DENY", rec.Header().Get("X-Frame-Options"))
-	}
-	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
-		t.Errorf("CSP missing default-src 'none': %q", rec.Header().Get("Content-Security-Policy"))
-	}
-	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
-		t.Errorf("Referrer-Policy: got %q want no-referrer", rec.Header().Get("Referrer-Policy"))
-	}
-	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Errorf("X-Content-Type-Options: got %q want nosniff", rec.Header().Get("X-Content-Type-Options"))
-	}
+	assertSecurityHeaders(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -296,6 +309,28 @@ func TestSuccessPageHTMLEscapesInterpolations(t *testing.T) {
 	}
 	if strings.Contains(body, "<b>") || strings.Contains(body, "<i>") {
 		t.Errorf("HTML tags leaked through:\n%s", body)
+	}
+}
+
+// TestOAuthErrorPageHTMLEscapesInterpolations is the symmetric lock for
+// renderOAuthErrorPage. Heading/Message are operator-authored today, but the
+// template doc comment notes a future caller could pass an upstream string
+// through — so the html/template auto-escape is the load-bearing defense if
+// that happens. A swap to text/template (or string concat) would let a
+// payload render raw; this fails first.
+func TestOAuthErrorPageHTMLEscapesInterpolations(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusBadGateway,
+		"<script>alert('h')</script>", "<img src=x onerror=alert('m')>")
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<img src=x") {
+		t.Errorf("raw HTML rendered — auto-escape regressed:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("expected escaped <script> from Heading in body:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;img") {
+		t.Errorf("expected escaped <img> from Message in body:\n%s", body)
 	}
 }
 
@@ -401,12 +436,49 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("got %d want 502 (mint failure → 502)", rec.Code)
 	}
+	// The non-limit failure now renders a styled HTML page, not bare
+	// http.Error — pin the exact heading so a regression back to plain text
+	// (or a reworded heading) is caught. The apostrophe in "Couldn't" is
+	// html/template-escaped to &#39;, hence the entity form here.
+	if body := rec.Body.String(); !strings.Contains(body, "Couldn&#39;t connect qURL") {
+		t.Errorf("502 body should render the styled error page heading; got: %q", body)
+	}
+	assertSecurityHeaders(t, rec)
 	// Give any spurious revoke goroutine a window to fire.
 	time.Sleep(50 * time.Millisecond)
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
 	if minter.revoked {
 		t.Error("RevokeAPIKey must NOT be called when mint itself failed (no keyID exists)")
+	}
+}
+
+// TestCallbackMintAPIKeyLimitRendersGuidance locks the actionable-error
+// contract: when the mint fails because the account is at its API-key cap,
+// the callback renders a 409 page that names the limit and tells the admin
+// to revoke a key — NOT the generic "run setup again to retry" (which never
+// clears a quota). No key is minted, so nothing is persisted.
+func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.mintErr = ErrAPIKeyLimitReached
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d want 409 (api-key limit → 409)", rec.Code)
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
+		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", rec.Body.String())
+	}
+	assertSecurityHeaders(t, rec)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must NOT run when the mint hit the API-key limit")
 	}
 }
 
@@ -702,8 +774,15 @@ func TestCallbackSeedsAdminOnBind(t *testing.T) {
 	if admin.gotTeamID != testTeamID {
 		t.Errorf("BindWorkspace TeamID: got %q want %q", admin.gotTeamID, testTeamID)
 	}
-	if admin.gotOwner != testAdminSub {
-		t.Errorf("BindWorkspace OwnerID: got %q want %q (must come from id_token sub claim)", admin.gotOwner, testAdminSub)
+	// OwnerID is the Slack user ID of the /setup invoker (workspace
+	// owner in the LayerV admin model). It must equal verified.UserID
+	// — the same value as seedAdmin — by construction at first bind.
+	// The id_token sub claim is still required at OAuth-callback time
+	// (verifier runs upstream of this) but no longer persisted; the
+	// security gate it provides is still in place via the
+	// `qurlSub == ""` check in checkBindAllowed.
+	if admin.gotOwner != testUserID {
+		t.Errorf("BindWorkspace OwnerID: got %q want %q (must equal verified.UserID — the Slack user who ran /setup)", admin.gotOwner, testUserID)
 	}
 	if admin.gotSeed != testUserID {
 		t.Errorf("BindWorkspace seedAdmin: got %q want %q (must come from verified state's userID)", admin.gotSeed, testUserID)

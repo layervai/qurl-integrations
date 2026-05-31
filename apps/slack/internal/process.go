@@ -26,13 +26,14 @@ import (
 // it would risk SSRF if the signature gate ever broke, so postResponse
 // validates the scheme and host before dialing.
 const (
-	fieldResponseURL = "response_url"
-	fieldTeamID      = "team_id"
-	fieldUserID      = "user_id"
-	fieldChannelID   = "channel_id"
-	fieldCommand     = "command"
-	fieldText        = "text"
-	fieldTriggerID   = "trigger_id"
+	fieldResponseURL  = "response_url"
+	fieldTeamID       = "team_id"
+	fieldUserID       = "user_id"
+	fieldChannelID    = "channel_id"
+	fieldCommand      = "command"
+	fieldText         = "text"
+	fieldTriggerID    = "trigger_id"
+	fieldEnterpriseID = "enterprise_id"
 )
 
 // slackResponseURLHost is Slack's webhook ingress for slash-command
@@ -66,6 +67,7 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 	log := slog.With(
 		"command", command,
 		"team_id", values.Get(fieldTeamID),
+		"enterprise_id", values.Get(fieldEnterpriseID),
 		"channel_id", values.Get(fieldChannelID),
 		"trigger_id", values.Get(fieldTriggerID),
 	)
@@ -166,6 +168,25 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool 
 		// json.Marshal of a map[string]string can't fail in practice; log
 		// and bail rather than POSTing a half-baked body.
 		log.Error("marshal response_url payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBody(log, responseURL, body)
+}
+
+// postResponseBlocks POSTs an ephemeral Block Kit follow-up to Slack's
+// response_url. fallbackText is the plain-text rendering Slack shows in
+// notifications and to clients that can't render blocks — Slack treats a
+// blocks message's `text` as the accessibility/notification fallback, so
+// it MUST still carry the full listing. Same SSRF-fenced delivery,
+// single-attempt-with-logging posture as [Handler.postResponse].
+func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
+	body, err := json.Marshal(map[string]any{
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         fallbackText,
+		blockKitFieldBlocks:   blocks,
+	})
+	if err != nil {
+		log.Error("marshal response_url blocks payload failed", "error", err)
 		return false
 	}
 	return h.postResponseBody(log, responseURL, body)

@@ -173,8 +173,8 @@ func run() error {
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
-	// `/qurl tunnel install` can create the resource, bind `$slug`, and let
-	// users immediately `/qurl get $slug` against the same table shape.
+	// `/qurl-admin tunnel install` can create the resource, bind `$slug`, and
+	// let users immediately `/qurl get $slug` against the same table shape.
 	if adminStore != nil {
 		handler.SetAliasStore(adminStore)
 		slog.Info("alias storage wired via slackdata")
@@ -206,14 +206,25 @@ func run() error {
 			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
 		})
-		// Operator reminder: /qurl setup runs whichever Slack user
-		// invokes it. Workspace identity comes from the signature-
-		// verified payload, but ROLE is not enforced in this binary.
-		// The Slack app manifest must restrict /qurl setup to
-		// workspace admins; without that gate, any user could
-		// initiate a flow that overwrites the workspace's qURL key
-		// against their own Auth0 account.
-		slog.Info("CONFIGURATION REMINDER: /qurl setup is workspace-admin-only by manifest, not by code — verify the Slack app manifest restricts the command")
+		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
+		// install, set-alias, admin add/remove/list/revoke). It must be
+		// registered in the Slack app config pointing at the same request
+		// URL as /qurl — or those verbs never arrive. Admin enforcement is
+		// in-code: every admin verb runs requireAdminSync against the qURL
+		// admin set (admin_slack_user_ids), so the AdminStore must be
+		// wired. The "admins only" restriction on the /qurl-admin
+		// registration is a cosmetic Slack-picker hint, NOT the
+		// enforcement boundary — Slack does not gate slash-command
+		// invocation on workspace-admin role. /qurl setup is NOT on
+		// /qurl-admin and is intentionally open to any workspace member so
+		// the first claimant of an unbound workspace can reach it
+		// (first-come-claims). Setup re-runs are still owner-only, enforced
+		// in code in handleSetup via AdminStore, with the OAuth-callback
+		// BindWorkspace check as the structural backstop. The remaining
+		// exposure is the first-install claim: restrict who can reach the
+		// command at install time (Slack app manifest / onboarding) if
+		// first-claim ownership matters for this deployment.
+		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims) so the first claimant can reach it — though setup re-runs are owner-only (enforced in code) — and an admin-only /qurl would lock out the first claimant of an unbound workspace")
 	}
 	// Else: buildOAuthConfig already logged the specific missing-var
 	// list; nothing more to say here.
@@ -222,6 +233,7 @@ func run() error {
 		return fmt.Errorf("slack install config: %w", err)
 	}
 	if ok {
+		handler.SetSlackInstallURL(strings.TrimRight(slackInstallCfg.SlackBaseURL, "/") + slackinstall.InstallPath)
 		slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
 		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
 			return fmt.Errorf("slack install routes: %w", err)
@@ -336,7 +348,10 @@ type workspaceSlackTokenLookupStart struct {
 }
 
 type workspaceSlackTokenLookupCache struct {
-	mu             sync.Mutex
+	mu sync.Mutex
+	// Cache keys are Slack token owners: workspace team_id values for
+	// workspace installs, and enterprise_id values for Enterprise Grid org
+	// installs. The ID spaces are disjoint, so one cache can hold both.
 	positive       map[string]cachedSlackBotToken
 	negative       map[string]time.Time
 	inFlight       map[string]*workspaceSlackTokenLookupCall
@@ -757,6 +772,15 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
 		scopes = slackinstall.NormalizeScopes([]string{raw})
+		// Strip unsupported scopes (see slackinstall.DropUnsupportedScopes) from
+		// operator overrides before Validate: a stale SLACK_BOT_SCOPES with
+		// surviving valid scopes then warns instead of aborting startup. (An
+		// override of only unsupported scopes strips to empty and Validate still
+		// rejects it.)
+		if kept, dropped := slackinstall.DropUnsupportedScopes(scopes); len(dropped) > 0 {
+			scopes = kept
+			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. SLACK_BOT_SCOPES must still include commands.")
+		}
 	}
 	cfg := slackinstall.Config{
 		ClientID:     clientID,
@@ -897,7 +921,7 @@ func readMaxConcurrentAsync() int {
 
 // buildAdminStore constructs the DDB-direct facade for
 // workspace_mappings + channel_policies. When both QURL_*_TABLE env
-// vars are set, we construct it; otherwise the /qurl admin verbs
+// vars are set, we construct it; otherwise the /qurl-admin admin verbs
 // reply "Admin features are not configured" rather than crashing.
 // Failure during construction (AWS config load, etc.) degrades the
 // bot to no-admin mode rather than failing startup, so the OAuth +
@@ -905,13 +929,13 @@ func readMaxConcurrentAsync() int {
 func buildAdminStore(ctx context.Context) *slackdata.Store {
 	if os.Getenv(slackdata.EnvWorkspaceMappingsTable) == "" ||
 		os.Getenv(slackdata.EnvChannelPoliciesTable) == "" {
-		slog.Warn("admin store NOT configured — /qurl admin will reply 'not configured'",
+		slog.Warn("admin store NOT configured — /qurl-admin admin will reply 'not configured'",
 			"missing_env", missingAdminStoreEnvVars())
 		return nil
 	}
 	s, err := slackdata.NewStore(ctx)
 	if err != nil {
-		slog.Error("slackdata.NewStore failed; /qurl admin will be disabled", "error", err)
+		slog.Error("slackdata.NewStore failed; /qurl-admin admin will be disabled", "error", err)
 		return nil
 	}
 	slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.

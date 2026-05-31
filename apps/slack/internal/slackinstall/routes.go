@@ -45,7 +45,7 @@ const (
 	slackOAuthBodyLimit         = 16 << 10
 	slackInstallFlow            = "slack-install"
 	botScopeCommands            = "commands"
-	botScopeViewsWrite          = "views:write"
+	slackOAuthErrorBadRedirect  = "bad_redirect_uri"
 	slackOAuthErrorUnrecognized = "unrecognized"
 )
 
@@ -66,8 +66,8 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <body>
 <div class="card">
 <h1><span class="ok">&#10003;</span> qURL Slack app installed</h1>
-<p>Guided tunnel setup is enabled for this workspace. Return to Slack and run <code>/qurl tunnel install</code>.</p>
-<p>Workspace: <code>{{.TeamID}}</code></p>
+<p>Guided tunnel setup is enabled for this workspace. Return to Slack and run <code>/qurl-admin tunnel install</code>.</p>
+<p>Install target: <code>{{.InstallTarget}}</code></p>
 </div>
 </body>
 </html>`))
@@ -97,9 +97,33 @@ type TokenStore interface {
 	SetSlackBotToken(ctx context.Context, workspaceID string, install *auth.SlackBotTokenInstall) error
 }
 
-// DefaultBotScopes returns the minimum Slack bot scopes needed by qURL.
+// DefaultBotScopes returns the minimum Slack bot scopes the install flow
+// requests. Only `commands` is needed: the captured per-workspace token is
+// used solely for views.open (see apps/slack/cmd/main.go), which requires no
+// scope (https://docs.slack.dev/reference/methods/views.open), and `commands`
+// is the minimal scope to install this slash-command app into a workspace.
+// Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
+// at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
-	return []string{botScopeCommands, botScopeViewsWrite}
+	return []string{botScopeCommands}
+}
+
+// DropUnsupportedScopes removes scope strings that are not real Slack OAuth
+// scopes (currently just views:write — see DefaultBotScopes) from an
+// operator-supplied scope set, returning the kept and dropped scopes. Slack
+// rejects such scopes at authorize with invalid_scope, so callers strip them
+// from SLACK_BOT_SCOPES overrides — keeping installs working off the valid
+// scopes — and surface the dropped scopes to the operator. Matching is
+// case-insensitive because NormalizeScopes does not lowercase.
+func DropUnsupportedScopes(scopes []string) (kept, dropped []string) {
+	for _, s := range scopes {
+		if strings.EqualFold(s, "views:write") {
+			dropped = append(dropped, s)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept, dropped
 }
 
 // RegisterRoutes wires the Slack install OAuth endpoints onto mux.
@@ -143,6 +167,13 @@ func (c *Config) Validate() error {
 	scopes := NormalizeScopes(c.BotScopes)
 	if len(scopes) == 0 {
 		return errors.New("at least one bot scope is required")
+	}
+	// Direct callers (and a regression in DefaultBotScopes) bypass the
+	// cmd-layer strip, so reject unsupported scopes here too. The env path
+	// strips them before Validate is reached, so operators still get the
+	// non-fatal strip-and-warn; only programmatic misuse reaches this error.
+	if _, dropped := DropUnsupportedScopes(scopes); len(dropped) > 0 {
+		return fmt.Errorf("bot scopes include scope(s) Slack rejects with invalid_scope: %s", strings.Join(dropped, ","))
 	}
 	if missing := missingRequiredScopes(scopes); len(missing) > 0 {
 		return fmt.Errorf("bot scopes missing required scope(s): %s", strings.Join(missing, ","))
@@ -254,31 +285,29 @@ func Callback(cfg *Config) http.HandlerFunc {
 			return
 		}
 		enterpriseID := strings.TrimSpace(resp.Enterprise.ID)
-		if resp.IsEnterpriseInstall {
-			logSlackInstallEnterpriseInstallUnsupported(resp.IsEnterpriseInstall, enterpriseID != "")
-			fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusUnprocessableEntity)
-			return
-		}
 		teamID := strings.TrimSpace(resp.Team.ID)
-		if teamID == "" {
-			if enterpriseID != "" {
-				logSlackInstallEnterpriseInstallUnsupported(resp.IsEnterpriseInstall, enterpriseID != "")
-				fail("Slack Enterprise Grid org installs are not supported; install qURL to a workspace instead", http.StatusUnprocessableEntity)
+		tokenOwnerID := teamID
+		if resp.IsEnterpriseInstall {
+			tokenOwnerID = enterpriseID
+			if tokenOwnerID == "" {
+				logSlackInstallMissingEnterpriseID(strings.TrimSpace(resp.AppID) != "")
+				fail("Slack Enterprise Grid org install did not include an enterprise id", http.StatusUnprocessableEntity)
 				return
 			}
+		} else if tokenOwnerID == "" {
 			logSlackInstallMissingTeamID(strings.TrimSpace(resp.AppID) != "")
 			fail("Slack workspace install did not include a workspace id", http.StatusUnprocessableEntity)
 			return
 		}
 		installedBy := strings.TrimSpace(resp.AuthedUser.ID)
 		if installedBy == "" {
-			logSlackInstallMissingAuthedUser(teamID != "")
+			logSlackInstallMissingAuthedUser(tokenOwnerID != "")
 			fail("Slack workspace install did not include an installer id", http.StatusUnprocessableEntity)
 			return
 		}
 		grantedScopes := NormalizeScopes([]string{resp.Scope})
 		if missing := missingRequiredScopes(grantedScopes); len(missing) > 0 {
-			logSlackInstallMissingRequiredScopes(missing, teamID != "")
+			logSlackInstallMissingRequiredScopes(missing, tokenOwnerID != "")
 			fail("Slack install did not grant required bot scopes", http.StatusUnprocessableEntity)
 			return
 		}
@@ -287,7 +316,7 @@ func Callback(cfg *Config) http.HandlerFunc {
 		// keeps request-scoped values for tracing while detaching client cancel.
 		persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(r.Context()), persistTimeout)
 		defer persistCancel()
-		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, teamID, &auth.SlackBotTokenInstall{
+		if err := cfg.TokenStore.SetSlackBotToken(persistCtx, tokenOwnerID, &auth.SlackBotTokenInstall{
 			BotToken:     resp.AccessToken,
 			InstalledBy:  installedBy,
 			BotUserID:    resp.BotUserID,
@@ -295,19 +324,19 @@ func Callback(cfg *Config) http.HandlerFunc {
 			EnterpriseID: enterpriseID,
 			Scopes:       grantedScopes,
 		}); err != nil {
-			logSlackInstallPersistFailed(err, teamID != "", installedBy != "")
+			logSlackInstallPersistFailed(err, tokenOwnerID != "", installedBy != "")
 			fail("Slack install could not be stored", http.StatusInternalServerError)
 			return
 		}
 		clearStateCookie(w)
 		if cfg.OnTokenStored != nil {
-			cfg.OnTokenStored(teamID)
+			cfg.OnTokenStored(tokenOwnerID)
 		}
 		slog.Info("Slack app install stored workspace bot token", // #nosec G706 -- Slack IDs are structured slog attributes; JSON handlers escape control bytes.
-			"team_id", teamID, "installed_by", installedBy,
+			"token_owner_id", tokenOwnerID, "team_id", teamID, "installed_by", installedBy,
 			"bot_user_id", resp.BotUserID, "app_id", resp.AppID,
-			"enterprise_id", enterpriseID)
-		renderSuccess(w, teamID)
+			"enterprise_id", enterpriseID, "is_enterprise_install", resp.IsEnterpriseInstall)
+		renderSuccess(w, tokenOwnerID)
 	}
 }
 
@@ -533,7 +562,7 @@ func safeSlackOAuthErrorCode(raw string) string {
 	code := strings.TrimSpace(raw)
 	switch code {
 	case "access_denied",
-		"bad_redirect_uri",
+		slackOAuthErrorBadRedirect,
 		"invalid_client_id",
 		"invalid_redirect_uri",
 		"invalid_scope",
@@ -553,28 +582,27 @@ func logSlackInstallMissingTeamID(appIDPresent bool) {
 	slog.Error("Slack install token exchange missing team id", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
 }
 
-func logSlackInstallEnterpriseInstallUnsupported(isEnterpriseInstall, enterpriseIDPresent bool) {
-	slog.Error("Slack install rejected unsupported Enterprise Grid org install", // #nosec G706 -- only booleans are logged; no Slack string reaches the attribute.
-		"is_enterprise_install", isEnterpriseInstall, "enterprise_id_present", enterpriseIDPresent)
+func logSlackInstallMissingEnterpriseID(appIDPresent bool) {
+	slog.Error("Slack install token exchange missing enterprise id for org install", "app_id_present", appIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
 }
 
 func logSlackInstallMissingAuthedUser(teamIDPresent bool) {
 	slog.Error("Slack install token exchange missing authed user id", "team_id_present", teamIDPresent) // #nosec G706 -- only a boolean is logged; no Slack string reaches the attribute.
 }
 
-func logSlackInstallPersistFailed(err error, teamIDPresent, installedByPresent bool) {
+func logSlackInstallPersistFailed(err error, tokenOwnerIDPresent, installedByPresent bool) {
 	slog.Error("Slack install token persist failed", // #nosec G706 -- only booleans plus the storage error are logged.
-		"error", err, "team_id_present", teamIDPresent, "installed_by_present", installedByPresent)
+		"error", err, "token_owner_id_present", tokenOwnerIDPresent, "installed_by_present", installedByPresent)
 }
 
-func logSlackInstallMissingRequiredScopes(missing []string, teamIDPresent bool) {
+func logSlackInstallMissingRequiredScopes(missing []string, tokenOwnerIDPresent bool) {
 	// missing follows DefaultBotScopes order for operator readability. Stored
 	// scopes are normalized separately as a sorted DDB String Set.
 	slog.Warn("Slack install token exchange missing required bot scope(s)", // #nosec G706 -- missing scopes come from DefaultBotScopes constants.
-		"missing_scopes", strings.Join(missing, ","), "team_id_present", teamIDPresent)
+		"missing_scopes", strings.Join(missing, ","), "token_owner_id_present", tokenOwnerIDPresent)
 }
 
-func renderSuccess(w http.ResponseWriter, teamID string) {
+func renderSuccess(w http.ResponseWriter, installTarget string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -583,7 +611,7 @@ func renderSuccess(w http.ResponseWriter, teamID string) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if err := successTemplate.Execute(w, struct{ TeamID string }{TeamID: teamID}); err != nil {
+	if err := successTemplate.Execute(w, struct{ InstallTarget string }{InstallTarget: installTarget}); err != nil {
 		slog.Warn("Slack install success page write failed", "error", err)
 	}
 }

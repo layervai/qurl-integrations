@@ -58,7 +58,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	switch cmd.AdminAction {
+	switch cmd.AdminAction { //nolint:exhaustive // dispatch handles only parser-producible actions; gate-audit labels never reach here, default covers the rest
 	case AdminRevoke:
 		h.handleAdminRevoke(w, teamID, userID, cmd)
 	case AdminAdd:
@@ -101,9 +101,11 @@ const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup` first
 
 // adminGateBudget bounds the sync admin-gate CheckAdmin call so a
 // hung DDB can't out-block Slack's 3s slash-command ack window. The
-// gate is the FIRST upstream call on every sync admin verb; using
-// `context.Background()` here would let a misbehaving upstream
-// silently consume the entire user-visible budget.
+// gate is the FIRST upstream call on every sync admin verb (and is
+// reused by the owner gate in handleSetup, which makes the same
+// CheckAdmin call); using `context.Background()` here would let a
+// misbehaving upstream silently consume the entire user-visible
+// budget.
 //
 // 800ms covers a healthy DDB GetItem with ample tail-latency margin
 // (warm-path p99 is well under 100ms; 800ms is ~10x that). The
@@ -229,7 +231,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 	if target == callerUserID {
 		// requireAdminSync already passed → the caller is an admin →
 		// adding themselves is a no-op. Render an explicit copy so an
-		// admin who fat-fingered `/qurl admin add @themselves` doesn't
+		// admin who fat-fingered `/qurl-admin admin add @themselves` doesn't
 		// read the indirect "already an admin" surface as if it
 		// referred to someone else.
 		respondSlack(w, "You're already an admin — nothing to do.")
@@ -294,7 +296,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 	if target == callerUserID {
 		// The store-side owner-check catches owners; this catches the
 		// non-owner self-remove. We refuse rather than allowing it so
-		// an admin who fat-fingers `/qurl admin remove @themselves`
+		// an admin who fat-fingers `/qurl-admin admin remove @themselves`
 		// doesn't lock themselves out without an explicit confirmation.
 		respondSlack(w, "You can't remove yourself — ask another admin.")
 		return
@@ -306,7 +308,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 		if errors.As(err, &se) {
 			switch {
 			case se.StatusCode == http.StatusBadRequest && se.Code == slackdata.ErrCodeCannotRemoveOwner:
-				respondSlack(w, fmt.Sprintf("Can't remove <@%s> — they're the workspace owner. Transfer ownership via OAuth re-install first.", target))
+				respondSlack(w, fmt.Sprintf("Can't remove <@%s> — they connected qURL to this workspace, so they can't be removed as an admin.", target))
 				return
 			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
 				// Unreachable in practice: requireAdminSync short-
@@ -366,7 +368,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// escapeMrkdwnCode posture in views.go). The user-visible copy
 	// omits the internal table name; the slog.Error below carries
 	// it for on-call triage.
-	ownerCopy := "(unknown — workspace owner record is missing; contact support)"
+	ownerCopy := "(unknown — the qURL setup record is missing; contact support)"
 	if looksLikeSlackUserID(ownerID) {
 		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
 	} else {
@@ -395,7 +397,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 		}
 		otherAdmins = append(otherAdmins, fmt.Sprintf("<@%s>", a))
 	}
-	body := "Owner: " + ownerCopy
+	body := "Owner (connected qURL): " + ownerCopy
 	if len(otherAdmins) > 0 {
 		body += "\nAdmins: " + strings.Join(otherAdmins, ", ")
 	}
@@ -424,18 +426,11 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 // (a different code path), and admin_slack_user_ids could in
 // principle be hand-mutated. Cheap insurance against a malformed
 // value breaking out of the mention surface.
+//
+// Thin wrapper over slackdata.LooksLikeSlackUserID — the store layer
+// owns the shape check because BindWorkspace also depends on it (to
+// detect a legacy Auth0-sub owner_id for self-heal). Keeping one
+// implementation stops the two from drifting.
 func looksLikeSlackUserID(s string) bool {
-	if len(s) < 9 || len(s) > 64 {
-		return false
-	}
-	if s[0] != 'U' && s[0] != 'W' {
-		return false
-	}
-	for i := 1; i < len(s); i++ {
-		c := s[i]
-		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
-			return false
-		}
-	}
-	return true
+	return slackdata.LooksLikeSlackUserID(s)
 }

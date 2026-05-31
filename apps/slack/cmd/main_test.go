@@ -482,7 +482,7 @@ func TestBuildSlackInstallConfigHappyPath(t *testing.T) {
 	if string(cfg.StateSecret) != validStateSecret {
 		t.Fatalf("StateSecret not threaded through")
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands,views:write" {
+	if strings.Join(cfg.BotScopes, ",") != "commands" {
 		t.Fatalf("default bot scopes = %v", cfg.BotScopes)
 	}
 	if cfg.TokenStore == nil {
@@ -526,14 +526,49 @@ func TestBuildSlackInstallConfigMissingVar(t *testing.T) {
 
 func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	env := validSlackInstallEnv()
-	env[envSlackBotScopes] = "commands views:write,chat:write"
+	env[envSlackBotScopes] = "commands chat:write,im:write"
 	applySlackInstallEnv(t, env)
 	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands,views:write,chat:write" {
+	if strings.Join(cfg.BotScopes, ",") != "commands,chat:write,im:write" {
 		t.Fatalf("custom scopes = %v", cfg.BotScopes)
+	}
+}
+
+// A stale `views:write` in a SLACK_BOT_SCOPES override is stripped at config
+// load (see slackinstall.DropUnsupportedScopes), so the install flow keeps
+// working off the valid scopes instead of breaking every install with
+// invalid_scope or aborting startup. Mixed case confirms the wiring uses the
+// case-insensitive helper; the drop decision itself is unit-tested in the
+// slackinstall package.
+func TestBuildSlackInstallConfigStripsViewsWriteOverride(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackBotScopes] = "commands,Views:Write"
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want config load to succeed", ok, err)
+	}
+	if strings.Join(cfg.BotScopes, ",") != "commands" {
+		t.Fatalf("scopes = %v, want views:write stripped", cfg.BotScopes)
+	}
+}
+
+// If a SLACK_BOT_SCOPES override strips to nothing (only views:write), config
+// load surfaces the "at least one bot scope" error rather than silently falling
+// back to the defaults — so the operator must fix the override.
+func TestBuildSlackInstallConfigRejectsOverrideThatStripsToEmpty(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackBotScopes] = "views:write"
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if ok || err == nil || !strings.Contains(err.Error(), "at least one bot scope") {
+		t.Fatalf("ok=%v err=%v, want config load to fail on empty scope set", ok, err)
+	}
+	if len(cfg.BotScopes) != 0 {
+		t.Fatalf("BotScopes = %v, want empty config on failure", cfg.BotScopes)
 	}
 }
 

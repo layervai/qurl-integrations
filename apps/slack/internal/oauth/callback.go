@@ -140,6 +140,42 @@ type rebindRefusedPageData struct {
 	TeamID string
 }
 
+// oauthErrorPageTemplate renders a styled, human-readable error page for
+// OAuth-callback failures that previously fell through to bare http.Error
+// (a blank white page with raw text — the experience operators flagged).
+// Same no-asset / strict-CSP posture as the success and rebind-refused
+// pages. Heading and Message are the only interpolations; html/template
+// auto-escapes both (they're operator-authored today, but the escape keeps
+// the page safe if a future caller passes an upstream string through).
+var oauthErrorPageTemplate = template.Must(template.New("oauth-error").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>qURL setup</title>
+<meta name="robots" content="noindex">
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
+.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
+h1{margin:0 0 .5rem;font-size:1.5rem}
+p{color:#374151;font-size:.95rem;line-height:1.5}
+.warn{color:#b91c1c;font-weight:600}
+</style>
+</head>
+<body>
+<div class="card">
+<h1><span class="warn">&#9888;</span> {{.Heading}}</h1>
+<p>{{.Message}}</p>
+<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
+</div>
+</body>
+</html>`))
+
+// oauthErrorPageData is the model passed to oauthErrorPageTemplate.
+type oauthErrorPageData struct {
+	Heading string
+	Message string
+}
+
 // auth0TokenResponse is the slice of Auth0's /oauth/token response we read.
 type auth0TokenResponse struct {
 	AccessToken string `json:"access_token"`
@@ -359,9 +395,26 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 // key and never overwrites an existing admin's stored credential.
 //
 // AdminStore=nil is the sandbox / no-DDB path — log and skip.
-// qurlSub=="" means the verifier failed; we can't bind without the
-// OwnerID. Render a 500 — half-installing (API key minted, admin
-// verbs broken) is the worst-of-both-worlds state.
+// qurlSub is the output of the upstream id_token verifier (VerifySub,
+// logged on failure earlier in the callback), not the gate itself.
+// qurlSub=="" therefore means that verification silently failed — we
+// have no proof the OAuth flow originated from a legit Auth0 session,
+// so we refuse the bind here rather than half-install. The Auth0
+// identity check stays a security gate at OAuth time even though
+// qurlSub is no longer persisted in workspace_mappings; without it,
+// anyone with workspace OAuth-flow access could complete /setup
+// without proving qURL service identity. Render a 500 — half-
+// installing (API key minted, admin verbs broken) is the worst-of-
+// both-worlds state.
+//
+// `verified.UserID` is the Slack user ID of the /setup invoker
+// (HMAC-verified through the OAuth state token). That value becomes
+// BOTH the workspace_mappings.owner_id (the long-lived "only this
+// Slack user can re-run /setup" anchor) AND the initial entry in
+// admin_slack_user_ids. The two are the same value at first bind
+// by construction; /qurl admin add later grows the admin set but
+// leaves owner_id immutable. See WorkspaceMapping doc in slackdata
+// for the model rationale.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState, qurlSub string) bool {
@@ -379,7 +432,7 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
 	defer bindCancel()
 	bindErr := cfg.AdminStore.BindWorkspace(bindCtx,
-		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: qurlSub},
+		&WorkspaceMapping{TeamID: verified.TeamID, OwnerID: verified.UserID},
 		verified.UserID)
 	if bindErr == nil {
 		return true
@@ -402,19 +455,22 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 	}
 	switch code {
 	case BindConflictAlreadyBoundToCaller:
-		// Same Slack user re-running /qurl setup — they were already
-		// admin. We continue to mint, which rotates their API key.
-		// Operator-visible effect: "key rotated, admin set unchanged."
-		slog.Info("oauth/callback rebind idempotent (caller already on admin set)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		// The workspace owner is re-running /qurl setup — the stored
+		// owner_id matches the verified caller (owner-only short-circuit;
+		// added admins do NOT land here, they get AlreadyBound). We
+		// continue to mint, which rotates their API key. Operator-visible
+		// effect: "key rotated, owner + admin set unchanged."
+		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID)
 		return true
 	case BindConflictAlreadyBound, BindConflictUnverified:
-		// A different admin holds the workspace (or we can't tell —
-		// treat unverified the same way; the safer default is to
-		// refuse the rebind than to potentially overwrite). No mint
-		// has happened yet, so nothing to revoke — the existing
-		// admin's key row is untouched.
-		slog.Warn("oauth/callback rebind refused — workspace held by different admin", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		// A different Slack user owns the workspace — the caller isn't
+		// the stored owner_id (this fires for added admins too, not just
+		// strangers), or we can't tell (treat unverified the same way;
+		// the safer default is to refuse the rebind than to potentially
+		// overwrite). No mint has happened yet, so nothing to revoke —
+		// the existing owner's key row is untouched.
+		slog.Warn("oauth/callback rebind refused — workspace owned by a different Slack user", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID, "conflict", string(code), "error", bindErr)
 		renderRebindRefused(w, teamID)
 		return false
@@ -471,8 +527,22 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(mintCtx, accessToken,
 		keyName, apiKeyScopes())
 	if err != nil {
-		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
-		http.Error(w, "could not provision qURL key — run /qurl setup again to retry", http.StatusBadGateway)
+		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		//nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID, "api_key_limit_reached", limitReached)
+		if limitReached {
+			// Quota is a precondition the admin must clear themselves —
+			// retrying does nothing (the old "run setup again" advice was
+			// actively wrong here). 409 so an automated retry surfaces the
+			// conflict rather than looping. Don't state a key count: the cap
+			// is plan-dependent (free 3 / growth 50 / unlimited) and is
+			// qurl-service's to own.
+			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
+				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Each run of /qurl setup creates a new key — revoke one you no longer use, then run /qurl setup again.")
+			return "", false
+		}
+		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
+			"Something went wrong while creating your qURL API key. Run /qurl setup again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 
@@ -535,20 +605,42 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 }
 
-// renderRebindRefused writes the rebind-refused page. Same defense-in-
-// depth headers as the success page — the only differences are the body
-// template and a 409 status code (so an automated retry surfaces the
-// conflict rather than silently looping).
-func renderRebindRefused(w http.ResponseWriter, teamID string) {
+// setOAuthPageSecurityHeaders writes the defense-in-depth header set shared
+// by every OAuth-callback HTML response (success, rebind-refused, error).
+// These pages render post-redirect, so they shouldn't be framable
+// (clickjacking), shouldn't leak the callback URL via Referer to anything
+// they link to, and shouldn't load any off-origin resources beyond the
+// inline style.
+func setOAuthPageSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// renderRebindRefused writes the rebind-refused page. Same defense-in-
+// depth headers as the success page — the only differences are the body
+// template and a 409 status code (so an automated retry surfaces the
+// conflict rather than silently looping).
+func renderRebindRefused(w http.ResponseWriter, teamID string) {
+	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(http.StatusConflict)
 	if err := rebindRefusedPageTemplate.Execute(w, rebindRefusedPageData{TeamID: teamID}); err != nil {
 		slog.Warn("oauth/callback rebind-refused page write failed", "error", err)
+	}
+}
+
+// renderOAuthErrorPage writes a styled error page with the given status.
+// Replaces bare http.Error on the mint-failure path so a callback failure
+// renders human-readable, actionable guidance instead of a blank page with
+// raw text. Same defense-in-depth headers as renderRebindRefused.
+func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string) {
+	setOAuthPageSecurityHeaders(w)
+	w.WriteHeader(status)
+	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Message: message}); err != nil {
+		slog.Warn("oauth/callback error-page write failed", "error", err)
 	}
 }
 
@@ -557,16 +649,7 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 	// keyPrefix comes from qurl-service's JSON response; email is JWKS-
 	// verified — but the template's context-aware auto-escape is the
 	// load-bearing XSS defense here.
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	// Defense-in-depth headers: success page is rendered post-auth so it
-	// shouldn't be framable (clickjacking), shouldn't leak the URL via
-	// Referer to anything the page links to, and shouldn't load any
-	// off-origin resources beyond the inline style.
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	if err := successPageTemplate.Execute(w, successPageData{
 		TeamID:    teamID,

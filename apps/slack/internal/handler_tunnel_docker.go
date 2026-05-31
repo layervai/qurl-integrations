@@ -29,8 +29,8 @@ SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
 CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
 
-# This intentionally overwrites the per-slug config so rerunning the install
-# refreshes the deterministic slug/port values in place.
+# This intentionally overwrites the per-tunnel config so rerunning the install
+# refreshes the deterministic ID and port values in place.
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
@@ -63,6 +63,6 @@ docker run -d \
 	if args.WebRef == "" {
 		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
-	intro += " It writes or overwrites a per-slug qurl-proxy config in the current directory. Re-running this install briefly restarts the tunnel container if it already exists. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
+	intro += " It writes or overwrites a per-tunnel qurl-proxy config in the current directory. Re-running this install briefly restarts the tunnel container if it already exists. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
 	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file.", nil
 }

@@ -12,7 +12,7 @@
 //
 // /qurl setup also seeds the workspace admin row from the OAuth
 // callback (the installer becomes the seed admin), so the previously
-// separate bootstrap_codes table and the `/qurl admin claim` redeem
+// separate bootstrap_codes table and the `/qurl-admin admin claim` redeem
 // step are gone — this package owns only workspace_mappings +
 // channel_policies.
 //
@@ -216,8 +216,26 @@ type PolicyEntry struct {
 
 // WorkspaceMapping describes the 1:1 workspace → owner row stored on
 // the workspace_mappings table. Passed to `BindWorkspace` from the
-// OAuth callback to seed the row (TeamID from the HMAC'd state,
-// OwnerID from the JWKS-verified id_token sub).
+// OAuth callback to seed the row.
+//
+// OwnerID is the Slack user ID of the Slack user who completed the
+// first `/qurl setup` flow for this workspace — the "workspace
+// owner" in the LayerV admin model. Only the owner can re-run
+// `/qurl setup` after the first bind; other admins (added via
+// `/qurl admin add`) can run the rest of the admin commands but
+// cannot rotate the workspace's qURL credential. The OAuth
+// callback gates this distinction: BindWorkspace classifies a
+// rebind attempt as AlreadyBoundToCaller iff the OwnerID stored
+// here matches the new caller's verified Slack user ID.
+//
+// Historical note: prior versions stored the JWKS-verified Auth0
+// id_token sub here. That diverged from /qurl admin list's
+// Slack-mention rendering (it expects a Slack user ID shape) and
+// from /qurl setup's owner-only gate (which compares to the
+// invoking Slack user). Switched to Slack user ID end-to-end —
+// the Auth0 sub stays a runtime-only gate at OAuth callback time
+// (id_token verification still refuses installs without a valid
+// sub) but isn't persisted here.
 type WorkspaceMapping struct {
 	TeamID    string    `json:"team_id"`
 	OwnerID   string    `json:"owner_id"`

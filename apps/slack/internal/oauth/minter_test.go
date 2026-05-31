@@ -93,6 +93,51 @@ func TestHTTPAPIKeyMinterMintNon2xx(t *testing.T) {
 	}
 }
 
+// TestHTTPAPIKeyMinterMintAPIKeyLimit locks the contract that a 403 carrying
+// qurl-service's api_key_limit envelope maps to the ErrAPIKeyLimitReached
+// sentinel (so the callback can render the "revoke a key" guidance) — while
+// the plain {"error":"forbidden"} 403 above stays a generic status error.
+func TestHTTPAPIKeyMinterMintAPIKeyLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"api_key_limit","title":"API Key Limit Exceeded","detail":"api key limit exceeded: plan limit reached"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintAPIKeyOnlyErr(m)
+	if !errors.Is(err, ErrAPIKeyLimitReached) {
+		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	}
+	// The %w wrap also keeps the status in the message operator logs grep —
+	// lock it so a refactor that drops the "(status %d)" suffix is caught.
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected wrapped status code in error, got %q", err.Error())
+	}
+}
+
+// TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric is the negative case
+// for apiKeyLimitError's code match: a well-formed error envelope carrying a
+// NON-limit code (here insufficient_scope) must stay a generic status error,
+// not the ErrAPIKeyLimitReached sentinel. Pins that the match is on the exact
+// code, so a future "any code containing limit" loosening breaks loudly.
+func TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden","detail":"token missing qurl:write"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintAPIKeyOnlyErr(m)
+	if errors.Is(err, ErrAPIKeyLimitReached) {
+		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyLimitReached, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected generic status error, got %q", err)
+	}
+}
+
 // TestHTTPAPIKeyMinterMintMissingAPIKey is the symmetric case to
 // MissingKeyID — qurl-service returns 200 with key_id but the api_key
 // field empty. The mint must reject so the bot doesn't hand the caller
