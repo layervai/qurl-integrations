@@ -550,6 +550,42 @@ func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	}
 }
 
+// TestCreateInputJSON_TunnelSessionLimits fences that every `/qurl get`
+// mint carries the tunnel access limits on the wire: a 1-minute link
+// expiry, a 1-hour session duration, and a single concurrent session.
+// `/qurl get` is tunnel-only, so these bound a shared tunnel link to one
+// short-lived viewer. Enforcement is server-side; this only fences that the
+// bot sets the policy (and that the resource-scoped body carries all three).
+func TestCreateInputJSON_TunnelSessionLimits(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var capturedBody []byte
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = b
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
+		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
+	}
+	if got, _ := parsed["expires_in"].(string); got != tunnelLinkExpiry {
+		t.Errorf("expires_in = %q, want %q", parsed["expires_in"], tunnelLinkExpiry)
+	}
+	if got, _ := parsed["session_duration"].(string); got != tunnelSessionDuration {
+		t.Errorf("session_duration = %q, want %q", parsed["session_duration"], tunnelSessionDuration)
+	}
+	// JSON numbers decode to float64 through map[string]any.
+	if got, _ := parsed["max_sessions"].(float64); int(got) != tunnelMaxSessions {
+		t.Errorf("max_sessions = %v, want %d", parsed["max_sessions"], tunnelMaxSessions)
+	}
+}
+
 // TestCreateInputJSON_IdempotencyKeyHeader fences that the
 // Idempotency-Key header lands on the wire (not in the JSON body)
 // and is the sha256(team\x00channel\x00user\x00trigger). Alias-form,

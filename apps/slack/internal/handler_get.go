@@ -19,6 +19,27 @@ import (
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 
+// Tunnel access limits applied to every `/qurl get` mint. `/qurl get` is
+// tunnel-only (raw URLs are unsupported — see urlNotSupportedGetMessage), so
+// these bound a shared tunnel link to a single short-lived viewer:
+//   - tunnelLinkExpiry: the link only admits a NEW visitor session for this
+//     long after minting (qurl-service `expires_in`).
+//   - tunnelSessionDuration: how long an admitted visitor session lasts
+//     (qurl-service `session_duration`).
+//   - tunnelMaxSessions: max concurrent visitor sessions (qurl-service
+//     `max_sessions`).
+//
+// Enforcement is entirely server-side (qurl-service + qurl-router); this just
+// sets the policy at mint time and requires the qurl-service tunnel
+// session-limit support to be deployed (otherwise create returns 400 —
+// hence the gating in the PR). Per-visitor identity is IP-based for now;
+// layervai/qurl-service#777 tracks the cookie follow-up.
+const (
+	tunnelLinkExpiry      = "1m"
+	tunnelSessionDuration = "1h"
+	tunnelMaxSessions     = 1
+)
+
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL
 // `/qurl get`. The parser flags the case with the terse
 // [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
@@ -314,8 +335,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		Reason: args.cmd.Reason(),
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
-		OneTimeUse:     true,
-		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
+		OneTimeUse: true,
+		// Tunnel access limits — see the const block above.
+		ExpiresIn:       tunnelLinkExpiry,
+		SessionDuration: tunnelSessionDuration,
+		MaxSessions:     tunnelMaxSessions,
+		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
 	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)

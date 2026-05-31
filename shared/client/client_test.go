@@ -1007,6 +1007,62 @@ func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {
 	}
 }
 
+// TestCreateSessionDurationOnWire pins that CreateInput.SessionDuration
+// serializes as `session_duration` on both create wire shapes — the direct
+// `/v1/qurls` body (target_url form) and the resource-scoped
+// `/v1/resources/{id}/qurls` body — and that it omits when empty.
+func TestCreateSessionDurationOnWire(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input CreateInput
+	}{
+		{"target_url form", CreateInput{TargetURL: "https://example.com", SessionDuration: "1h"}},
+		{"resource_id form", CreateInput{ResourceID: "r_tunnel", SessionDuration: "1h"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+			}))
+			defer srv.Close()
+			c := testClient(srv.URL, "test-key")
+			if _, err := c.Create(context.Background(), tc.input); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(gotBody, &raw); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if got, _ := raw["session_duration"].(string); got != "1h" {
+				t.Errorf("session_duration = %v, want \"1h\"; body=%s", raw["session_duration"], gotBody)
+			}
+		})
+	}
+}
+
+// TestCreateSessionDurationOmittedWhenEmpty pins the omitempty contract so a
+// zero SessionDuration inherits the server/plan default rather than forcing 0.
+func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+	}))
+	defer srv.Close()
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if _, ok := raw["session_duration"]; ok {
+		t.Errorf("session_duration must be omitted when empty; body=%s", gotBody)
+	}
+}
+
 // TestCreateTargetURLAndResourceIDMutuallyExclusive pins the client-side
 // fail-fast for the both-populated case. Mirror of the symmetric guard in
 // UpdateResource for (Alias, ClearAlias). Closes the third leg of the
