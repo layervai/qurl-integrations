@@ -29,6 +29,14 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 //   - tunnelMaxSessions: max concurrent visitor sessions (qurl-service
 //     `max_sessions`).
 //
+// How the four limits stack (the OneTimeUse=true mint plus these three):
+// OneTimeUse burns the link on its first redemption, so in steady state only
+// one session is ever established and tunnelMaxSessions=1 is belt-and-
+// suspenders — it makes the "one viewer" intent explicit on the wire and
+// stays correct if the one-time-use default is ever relaxed. tunnelLinkExpiry
+// bounds the window to redeem; tunnelSessionDuration bounds how long that one
+// session then lives.
+//
 // Enforcement is entirely server-side (qurl-service + qurl-router); this just
 // sets the policy at mint time and requires the qurl-service tunnel
 // session-limit support to be deployed (otherwise create returns 400 —
@@ -385,9 +393,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// Unconditional suffix — every `/qurl get` link is one-time use
-	// (see OneTimeUse above).
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use)"
+	// Unconditional suffix — every `/qurl get` link is one-time use (see
+	// OneTimeUse above) AND only admits a session within tunnelLinkExpiry of
+	// minting. That admit window is tight, so surface it at the point of
+	// sharing: a recipient who clicks after it lapses gets a dead link, and
+	// the suffix tells them why.
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + tunnelLinkExpiry + ")"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}

@@ -416,13 +416,14 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 
-	if !strings.HasSuffix(strings.TrimSpace(dmText), "(one-time use)") {
-		t.Errorf("DM payload missing one-time-use suffix: %q", dmText)
+	wantSuffix := "(one-time use · link expires in " + tunnelLinkExpiry + ")"
+	if !strings.HasSuffix(strings.TrimSpace(dmText), wantSuffix) {
+		t.Errorf("DM payload missing one-time-use/expiry suffix %q: %q", wantSuffix, dmText)
 	}
 	if !strings.Contains(dmText, "https://qurl.link/dm-once") {
 		t.Errorf("DM payload missing link: %q", dmText)
 	}
-	if strings.Contains(async, "(one-time use)") {
+	if strings.Contains(async, "one-time use") {
 		t.Errorf("one-time-use suffix leaked to channel ephemeral on dm:true: %q", async)
 	}
 	if strings.Contains(async, "https://qurl.link/dm-once") {
@@ -545,8 +546,13 @@ func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	if got, _ := parsed["one_time_use"].(bool); !got {
 		t.Errorf("one_time_use = %v, want true (one-time use is the unconditional default)", parsed["one_time_use"])
 	}
-	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
-		t.Errorf("async reply missing one-time-use suffix: %q", async)
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use · link expires in "+tunnelLinkExpiry+")") {
+		t.Errorf("async reply missing one-time-use/expiry suffix: %q", async)
+	}
+	// The tight admit window MUST be surfaced at the point of sharing so a
+	// late click isn't a silent dead link (cr #561).
+	if !strings.Contains(async, "link expires in "+tunnelLinkExpiry) {
+		t.Errorf("async reply does not surface the link-expiry window %q: %q", tunnelLinkExpiry, async)
 	}
 }
 
