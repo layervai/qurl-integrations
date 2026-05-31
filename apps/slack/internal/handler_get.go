@@ -520,15 +520,15 @@ func mapMintError(log *slog.Logger, err error) error {
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
-			log.Error("get: mint rejected with 403 — unmapped error code", "code", apiErr.Code, "detail", apiErr.Detail, "request_id", apiErr.RequestID)
+			log.Error("get: mint rejected with 403 — unmapped error code", appendRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadRequest:
 			// `mutually_exclusive_fields` → server contract drift,
 			// not a user error. Surface friendly + log loud.
-			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", "code", apiErr.Code, "detail", apiErr.Detail, "request_id", apiErr.RequestID)
+			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", appendRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+			log.Warn("get: mint failed with transport-class error", appendRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 			return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 		default:
 			// Unmapped 5xx (e.g. 500, 599) is server-side trouble —
@@ -537,14 +537,14 @@ func mapMintError(log *slog.Logger, err error) error {
 			// would tell the user "permanent failure, do not retry"
 			// when the upstream is actually transient.
 			if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
-				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+				log.Warn("get: mint failed with unmapped 5xx", appendRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 				return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 			}
 			// Other unmapped statuses (401, 404, 422, etc.) are
 			// permanent-class — log loud so the operator sees the
 			// contract surprise, surface the generic message so the
 			// user isn't told to retry forever.
-			log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail, "request_id", apiErr.RequestID)
+			log.Error("get: mint rejected with unmapped status", appendRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		}
 	}

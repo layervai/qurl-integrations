@@ -58,6 +58,8 @@ const listCreateButtonLabel = "Create qURL"
 // [listResourcesScanLimit].
 const listCreateButtonMaxRows = 45
 
+const commonListResourcesFailedPrefix = "Failed to list qURL tunnels"
+
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
 // message when the tunnel set is too large for per-row buttons (see
@@ -377,18 +379,27 @@ func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logg
 
 // mapListResourcesError surfaces a friendly user-facing error for
 // /qurl list failures. Auth-class (401/403) maps to authFailureMessage;
-// everything else falls back to serviceUnreachableMessage. Raw
-// APIError text MUST NOT reach Slack — it carries internal codes
-// that are operator-grade, not user-grade.
+// 5xx maps to retry-friendly service-unreachable copy; other APIError
+// statuses use generic list-failed copy so permanent-class errors don't
+// masquerade as transport outages. Raw APIError text MUST NOT reach
+// Slack — it carries internal codes that are operator-grade, not
+// user-grade.
 func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
-		log.Warn("list: list resources failed", "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+		log.Warn("list: list resources failed", appendRequestIDAttr(apiErr.RequestID, "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 		if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
 			return authFailureMessage
 		}
-		return serviceUnreachableMessageWith(apiErr)
+		if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
+			return serviceUnreachableMessageWith(apiErr)
+		}
+		return listResourcesFailedMessage(apiErr.RequestID)
 	}
 	log.Warn("list: list resources failed", "error", err, "team_id", teamID)
 	return serviceUnreachableMessage
+}
+
+func listResourcesFailedMessage(requestID string) string {
+	return appendSlackReference(commonListResourcesFailedPrefix, requestID) + ". Please try again."
 }

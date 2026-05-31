@@ -519,6 +519,33 @@ func TestMapListResourcesErrorIncludesRequestIDWithoutLeakingAPIText(t *testing.
 	}
 }
 
+func TestMapListResourcesErrorPermanentClassUsesGenericListFailure(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	err := &client.APIError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Code:       "invalid_cursor",
+		Title:      "Invalid Cursor",
+		Detail:     "cursor tenant shard mismatch",
+	}
+
+	msg := mapListResourcesError(log, testAdminTeamID, err)
+	for _, leak := range []string{err.Title, err.Detail, "invalid_cursor"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("list permanent-class response leaked %q: %q", leak, msg)
+		}
+	}
+	if !strings.Contains(msg, "Failed to list qURL tunnels") {
+		t.Errorf("list permanent-class response missing generic list failure: %q", msg)
+	}
+	if strings.Contains(msg, "Could not reach qURL") {
+		t.Errorf("list permanent-class response looked like transport failure: %q", msg)
+	}
+	if strings.Contains(logs.String(), "request_id=") {
+		t.Errorf("list error log included empty request_id attr: %q", logs.String())
+	}
+}
+
 // TestHandleList_StableSortByToken fences the sort order: tunnel rows
 // are sorted by the displayed token (slug, else alias) so two consecutive
 // `/qurl list` calls render identically. A slug-less row has an empty

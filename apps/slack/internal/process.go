@@ -142,6 +142,13 @@ func appendSlackReference(message, requestID string) string {
 	return fmt.Sprintf("%s (Reference: `%s`)", message, requestID)
 }
 
+func appendRequestIDAttr(requestID string, attrs ...any) []any {
+	if requestID == "" {
+		return attrs
+	}
+	return append(attrs, "request_id", requestID)
+}
+
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.
 // Errors are logged, never retried. The bool tells sensitive callers whether
 // they should add extra audit context after a failed delivery.
