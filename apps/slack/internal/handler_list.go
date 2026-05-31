@@ -335,10 +335,14 @@ func formatTunnelListLine(r *client.Resource) string {
 // APIError text MUST NOT reach Slack — it carries internal codes
 // that are operator-grade, not user-grade.
 func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
-	log.Warn("list: list resources failed", "error", err, "team_id", teamID)
 	var apiErr *client.APIError
-	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
-		return authFailureMessage
+	if errors.As(err, &apiErr) {
+		log.Warn("list: list resources failed", "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+		if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+			return authFailureMessage
+		}
+		return serviceUnreachableMessageWith(apiErr)
 	}
+	log.Warn("list: list resources failed", "error", err, "team_id", teamID)
 	return serviceUnreachableMessage
 }

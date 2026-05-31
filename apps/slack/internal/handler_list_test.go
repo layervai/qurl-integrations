@@ -1,7 +1,9 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -501,6 +503,33 @@ func TestHandleList_UpstreamError(t *testing.T) {
 	}
 	if !strings.Contains(async, "Could not reach qURL") {
 		t.Errorf("async reply missing service-unreachable message: %q", async)
+	}
+}
+
+func TestMapListResourcesErrorIncludesRequestIDWithoutLeakingAPIText(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	err := &client.APIError{
+		StatusCode: http.StatusBadGateway,
+		Code:       "upstream_error",
+		Title:      "Bad Gateway from internal API",
+		Detail:     "db: connection to internal-host:5432 refused",
+		RequestID:  "req_list123",
+	}
+
+	msg := mapListResourcesError(log, testAdminTeamID, err)
+	for _, leak := range []string{err.Title, err.Detail, "internal-host"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("list error response leaked %q: %q", leak, msg)
+		}
+	}
+	for _, want := range []string{"Could not reach qURL", "Please try again", "req_list123"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("list error response missing %q: %q", want, msg)
+		}
+	}
+	if !strings.Contains(logs.String(), "request_id=req_list123") {
+		t.Errorf("list error log missing request_id: %q", logs.String())
 	}
 }
 

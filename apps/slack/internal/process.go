@@ -121,33 +121,23 @@ func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Conte
 
 // sanitizeAPIError builds a user-safe message from a (possibly non-nil)
 // qURL API error. The full *client.APIError is logged at the call site;
-// what reaches Slack is bounded to:
-//
-//   - `prefix` (caller-supplied static text)
-//   - `apiErr.Title` — qURL service or net/http standard text, stable
-//     and not a leak surface
-//   - `apiErr.RequestID` — operator handle for support correlation
-//
-// Notably absent: `apiErr.Detail`, which can carry server-side internals
-// (DB error strings, internal hostnames, stack-trace fragments via the
-// non-RFC-7807 fallback path in shared/client).
+// what reaches Slack is bounded to caller-owned static copy plus the
+// opaque RequestID support handle. Upstream Title and Detail stay out of
+// Slack because either can drift into service names, DB errors, or other
+// operator-grade text.
 func sanitizeAPIError(err error, prefix string) string {
 	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) {
 		return prefix + "."
 	}
-	msg := prefix
-	if apiErr.Title != "" {
-		// Trim a trailing period from Title so the appended one
-		// below doesn't double-punctuate (some upstream servers
-		// emit "Internal Server Error." — surfacing that verbatim
-		// reads as "...Server Error..").
-		msg = prefix + ": " + strings.TrimRight(apiErr.Title, ".")
+	return appendSlackReference(prefix, apiErr.RequestID) + "."
+}
+
+func appendSlackReference(message, requestID string) string {
+	if requestID == "" {
+		return message
 	}
-	if apiErr.RequestID != "" {
-		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
-	}
-	return msg + "."
+	return fmt.Sprintf("%s (Reference: `%s`)", message, requestID)
 }
 
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.

@@ -31,28 +31,16 @@ const tunnelDisabledMessage = "Tunnel resources are not yet enabled for this wor
 // the user knows a retry is the right next move.
 const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
-// serviceUnreachableMessageWith builds the retry-friendly message
-// augmented with the upstream's bounded Title and the opaque
-// RequestID for support correlation. Detail is suppressed — it can
-// carry internal hostnames / DB error strings. Mirrors the
-// pre-consolidation /qurl create behavior (sanitizeAPIError) so
-// users keep the reference handle they previously had for support
-// tickets; on-call can paste the RequestID directly into
-// qurl-service CloudWatch to find the failed request server-side.
-// Falls back to [serviceUnreachableMessage] when neither field is
-// present.
+// serviceUnreachableMessageWith builds the retry-friendly message plus
+// the opaque RequestID support handle. Upstream Title and Detail are
+// intentionally suppressed because either can carry operator-grade text
+// under service regressions. Falls back to [serviceUnreachableMessage]
+// when no RequestID is present.
 func serviceUnreachableMessageWith(apiErr *client.APIError) string {
-	if apiErr == nil || (apiErr.Title == "" && apiErr.RequestID == "") {
+	if apiErr == nil || apiErr.RequestID == "" {
 		return serviceUnreachableMessage
 	}
-	msg := "Could not reach qURL"
-	if apiErr.Title != "" {
-		msg += ": " + strings.TrimRight(apiErr.Title, ".")
-	}
-	if apiErr.RequestID != "" {
-		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
-	}
-	return msg + ". Please try again."
+	return appendSlackReference("Could not reach qURL", apiErr.RequestID) + ". Please try again."
 }
 
 // channelRequiredMessage is the user-facing copy surfaced when a
@@ -475,12 +463,12 @@ func mapMintError(log *slog.Logger, err error) error {
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
-			log.Error("get: mint rejected with 403 — unmapped error code", "code", apiErr.Code, "detail", apiErr.Detail)
+			log.Error("get: mint rejected with 403 — unmapped error code", "code", apiErr.Code, "detail", apiErr.Detail, "request_id", apiErr.RequestID)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadRequest:
 			// `mutually_exclusive_fields` → server contract drift,
 			// not a user error. Surface friendly + log loud.
-			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", "code", apiErr.Code, "detail", apiErr.Detail)
+			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", "code", apiErr.Code, "detail", apiErr.Detail, "request_id", apiErr.RequestID)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
@@ -499,7 +487,7 @@ func mapMintError(log *slog.Logger, err error) error {
 			// permanent-class — log loud so the operator sees the
 			// contract surprise, surface the generic message so the
 			// user isn't told to retry forever.
-			log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)
+			log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail, "request_id", apiErr.RequestID)
 			return &userError{msg: commonGetMintFailedMessage}
 		}
 	}
