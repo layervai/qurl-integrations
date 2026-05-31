@@ -42,6 +42,12 @@ const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 // session-limit support to be deployed (otherwise create returns 400 —
 // hence the gating in the PR). Per-visitor identity is IP-based for now;
 // layervai/qurl-service#777 tracks the cookie follow-up.
+//
+// As of qurl-service#778 these values are ALSO the server-side tunnel
+// defaults (session_duration→1h, and one_time_use→single-visitor when
+// max_sessions<=1), so setting them explicitly here is belt-and-suspenders:
+// it pins the bot's intent on the wire and decouples it from any future
+// change to the server defaults, rather than being load-bearing.
 const (
 	tunnelLinkExpiry      = "1m"
 	tunnelSessionDuration = "1h"
