@@ -394,6 +394,19 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 }
 
+// TestTunnelLinkExpiryConstsInSync is a tripwire: tunnelLinkExpiry (the wire
+// value sent as expires_in) and tunnelLinkExpiryHuman (the Slack reply copy)
+// are hand-maintained and must describe the same window. Without this, a bump
+// to one (e.g. "1m"→"5m") that forgets the other would silently diverge the
+// user-facing copy from the actual admit window. Pin the current pair; whoever
+// changes the window updates both consts AND this assertion. (cr #561.)
+func TestTunnelLinkExpiryConstsInSync(t *testing.T) {
+	if tunnelLinkExpiry != "1m" || tunnelLinkExpiryHuman != "1 minute" {
+		t.Errorf("link-expiry consts drifted: wire=%q human=%q — update BOTH the consts and this assertion together",
+			tunnelLinkExpiry, tunnelLinkExpiryHuman)
+	}
+}
+
 // TestHandleGet_DMRidesOneTimeSuffix fences that the
 // "(one-time use · link expires in 1 minute)" suffix rides into the DM
 // payload (not the channel reply) on dm:true. That suffix is the

@@ -248,12 +248,10 @@ type QURL struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	OneTimeUse  bool       `json:"one_time_use"`
 	MaxSessions int        `json:"max_sessions,omitempty"`
-	// SessionDuration read-back is intentionally omitted: the bot doesn't
-	// consume it yet, and adding an `int` field would couple the WHOLE QURL
-	// decode to session_duration's wire type (a string-typed echo would fail
-	// json.Unmarshal for the entire struct, not just that field). Add it WITH
-	// a decode test against the confirmed number wire shape when a consumer
-	// (e.g. an admin "show limits" view) actually needs it. (cr #561.)
+	// SessionDuration read-back is intentionally omitted (no consumer yet): an
+	// int field would couple the whole QURL decode to session_duration's wire
+	// type. Add it with a decode test when a consumer needs it. See qurl-service
+	// #778 for the wire shape (response is a number; CreateInput sends a string).
 	Description  string        `json:"description,omitempty"`
 	QURLSite     string        `json:"qurl_site,omitempty"`
 	QURLLink     string        `json:"qurl_link,omitempty"`
