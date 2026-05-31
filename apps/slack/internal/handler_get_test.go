@@ -418,11 +418,25 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMRidesOneTimeSuffix fences that the (one-time use)
-// suffix rides into the DM payload (not the channel reply) on dm:true.
-// One-time use is the unconditional default for `/qurl get`, so the
-// suffix is always present; this guards against a future refactor that
-// reorders the suffix-append and DM-dispatch branches in getWork.
+// TestTunnelLinkExpiryConstsInSync is a tripwire: tunnelLinkExpiry (the wire
+// value sent as expires_in) and tunnelLinkExpiryHuman (the Slack reply copy)
+// are hand-maintained and must describe the same window. Without this, a bump
+// to one (e.g. "1m"→"5m") that forgets the other would silently diverge the
+// user-facing copy from the actual admit window. Pin the current pair; whoever
+// changes the window updates both consts AND this assertion. (cr #561.)
+func TestTunnelLinkExpiryConstsInSync(t *testing.T) {
+	if tunnelLinkExpiry != "1m" || tunnelLinkExpiryHuman != "1 minute" {
+		t.Errorf("link-expiry consts drifted: wire=%q human=%q — update BOTH the consts and this assertion together",
+			tunnelLinkExpiry, tunnelLinkExpiryHuman)
+	}
+}
+
+// TestHandleGet_DMRidesOneTimeSuffix fences that the
+// "(one-time use · link expires in 1 minute)" suffix rides into the DM
+// payload (not the channel reply) on dm:true. That suffix is the
+// unconditional default for `/qurl get`, so it's always present; this guards
+// against a future refactor that reorders the suffix-append and DM-dispatch
+// branches in getWork.
 func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -440,13 +454,14 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 
-	if !strings.HasSuffix(strings.TrimSpace(dmText), "(one-time use)") {
-		t.Errorf("DM payload missing one-time-use suffix: %q", dmText)
+	wantSuffix := "(one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
+	if !strings.HasSuffix(strings.TrimSpace(dmText), wantSuffix) {
+		t.Errorf("DM payload missing one-time-use/expiry suffix %q: %q", wantSuffix, dmText)
 	}
 	if !strings.Contains(dmText, "https://qurl.link/dm-once") {
 		t.Errorf("DM payload missing link: %q", dmText)
 	}
-	if strings.Contains(async, "(one-time use)") {
+	if strings.Contains(async, "one-time use") {
 		t.Errorf("one-time-use suffix leaked to channel ephemeral on dm:true: %q", async)
 	}
 	if strings.Contains(async, "https://qurl.link/dm-once") {
@@ -546,8 +561,8 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 // TestCreateInputJSON_OneTimeDefault fences that one-time use is the
 // unconditional default for `/qurl get`: with no flag at all, the wire
 // body carries `one_time_use: true` and the async reply carries the
-// `(one-time use)` suffix. There is no `once` flag — every `/qurl get`
-// link burns on first redemption.
+// "(one-time use · link expires in 1 minute)" suffix. There is no `once`
+// flag — every `/qurl get` link burns on first redemption.
 func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -569,8 +584,49 @@ func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	if got, _ := parsed["one_time_use"].(bool); !got {
 		t.Errorf("one_time_use = %v, want true (one-time use is the unconditional default)", parsed["one_time_use"])
 	}
-	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use)") {
-		t.Errorf("async reply missing one-time-use suffix: %q", async)
+	if !strings.HasSuffix(strings.TrimSpace(async), "(one-time use · link expires in "+tunnelLinkExpiryHuman+")") {
+		t.Errorf("async reply missing one-time-use/expiry suffix: %q", async)
+	}
+	// The tight admit window MUST be surfaced at the point of sharing so a
+	// late click isn't a silent dead link (cr #561).
+	if !strings.Contains(async, "link expires in "+tunnelLinkExpiryHuman) {
+		t.Errorf("async reply does not surface the link-expiry window %q: %q", tunnelLinkExpiryHuman, async)
+	}
+}
+
+// TestCreateInputJSON_TunnelSessionLimits fences that every `/qurl get`
+// mint carries the tunnel access limits on the wire: a 1-minute link
+// expiry, a 1-hour session duration, and a single concurrent session.
+// `/qurl get` is tunnel-only, so these bound a shared tunnel link to one
+// short-lived viewer. Enforcement is server-side; this only fences that the
+// bot sets the policy (and that the resource-scoped body carries all three).
+func TestCreateInputJSON_TunnelSessionLimits(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var capturedBody []byte
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = b
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
+		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
+	}
+	if got, _ := parsed["expires_in"].(string); got != tunnelLinkExpiry {
+		t.Errorf("expires_in = %q, want %q", parsed["expires_in"], tunnelLinkExpiry)
+	}
+	if got, _ := parsed["session_duration"].(string); got != tunnelSessionDuration {
+		t.Errorf("session_duration = %q, want %q", parsed["session_duration"], tunnelSessionDuration)
+	}
+	// JSON numbers decode to float64 through map[string]any.
+	if got, _ := parsed["max_sessions"].(float64); int(got) != tunnelMaxSessions {
+		t.Errorf("max_sessions = %v, want %d", parsed["max_sessions"], tunnelMaxSessions)
 	}
 }
 

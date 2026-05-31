@@ -19,6 +19,45 @@ import (
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 
+// Tunnel access limits applied to every `/qurl get` mint. `/qurl get` is
+// tunnel-only (raw URLs are unsupported — see urlNotSupportedGetMessage), so
+// these bound a shared tunnel link to a single short-lived viewer:
+//   - tunnelLinkExpiry: the link only admits a NEW visitor session for this
+//     long after minting (qurl-service `expires_in`).
+//   - tunnelSessionDuration: how long an admitted visitor session lasts
+//     (qurl-service `session_duration`).
+//   - tunnelMaxSessions: max concurrent visitor sessions (qurl-service
+//     `max_sessions`).
+//
+// How the four limits stack (the OneTimeUse=true mint plus these three):
+// OneTimeUse burns the link on its first redemption, so in steady state only
+// one session is ever established and tunnelMaxSessions=1 is belt-and-
+// suspenders — it makes the "one viewer" intent explicit on the wire and
+// stays correct if the one-time-use default is ever relaxed. tunnelLinkExpiry
+// bounds the window to redeem; tunnelSessionDuration bounds how long that one
+// session then lives.
+//
+// Enforcement is entirely server-side (qurl-service + qurl-router); this just
+// sets the policy at mint time and requires the qurl-service tunnel
+// session-limit support to be deployed (otherwise create returns 400 —
+// hence the gating in the PR). Per-visitor identity is IP-based for now;
+// layervai/qurl-service#777 tracks the cookie follow-up.
+//
+// As of qurl-service#778 these values are ALSO the server-side tunnel
+// defaults (session_duration→1h, and one_time_use→single-visitor when
+// max_sessions<=1), so setting them explicitly here is belt-and-suspenders:
+// it pins the bot's intent on the wire and decouples it from any future
+// change to the server defaults, rather than being load-bearing.
+const (
+	tunnelLinkExpiry      = "1m"
+	tunnelSessionDuration = "1h"
+	tunnelMaxSessions     = 1
+	// tunnelLinkExpiryHuman is the user-facing rendering of tunnelLinkExpiry
+	// for the Slack reply — "1 minute" reads clearer to a recipient than the
+	// terse "1m" duration syntax. Keep in sync with tunnelLinkExpiry above.
+	tunnelLinkExpiryHuman = "1 minute"
+)
+
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL
 // `/qurl get`. The parser flags the case with the terse
 // [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
@@ -295,8 +334,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		Reason: args.cmd.Reason(),
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
-		OneTimeUse:     true,
-		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
+		OneTimeUse: true,
+		// Tunnel access limits — see the const block above.
+		ExpiresIn:       tunnelLinkExpiry,
+		SessionDuration: tunnelSessionDuration,
+		MaxSessions:     tunnelMaxSessions,
+		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
 	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
@@ -341,9 +384,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// Unconditional suffix — every `/qurl get` link is one-time use
-	// (see OneTimeUse above).
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use)"
+	// Unconditional suffix — every `/qurl get` link is one-time use (see
+	// OneTimeUse above) AND only admits a session within tunnelLinkExpiry of
+	// minting. That admit window is tight, so surface it at the point of
+	// sharing: a recipient who clicks after it lapses gets a dead link, and
+	// the suffix tells them why.
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}

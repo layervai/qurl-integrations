@@ -241,13 +241,17 @@ type ResponseMeta struct {
 
 // QURL represents a qURL resource as returned by the API.
 type QURL struct {
-	ResourceID   string        `json:"resource_id"`
-	TargetURL    string        `json:"target_url"`
-	Status       string        `json:"status"`
-	CreatedAt    time.Time     `json:"created_at"`
-	ExpiresAt    *time.Time    `json:"expires_at,omitempty"`
-	OneTimeUse   bool          `json:"one_time_use"`
-	MaxSessions  int           `json:"max_sessions,omitempty"`
+	ResourceID  string     `json:"resource_id"`
+	TargetURL   string     `json:"target_url"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	OneTimeUse  bool       `json:"one_time_use"`
+	MaxSessions int        `json:"max_sessions,omitempty"`
+	// SessionDuration read-back is intentionally omitted (no consumer yet): an
+	// int field would couple the whole QURL decode to session_duration's wire
+	// type. Add it with a decode test when a consumer needs it. See qurl-service
+	// #778 for the wire shape (response is a number; CreateInput sends a string).
 	Description  string        `json:"description,omitempty"`
 	QURLSite     string        `json:"qurl_site,omitempty"`
 	QURLLink     string        `json:"qurl_link,omitempty"`
@@ -282,12 +286,18 @@ type CreateInput struct {
 	// ResourceID, when set, mints a qURL bound to an existing resource
 	// (e.g. a tunnel resource resolved via GetResource). Mutually
 	// exclusive with TargetURL on the wire.
-	ResourceID   string        `json:"resource_id,omitempty"`
-	Description  string        `json:"description,omitempty"`
-	ExpiresIn    string        `json:"expires_in,omitempty"`
-	OneTimeUse   bool          `json:"one_time_use,omitempty"`
-	MaxSessions  int           `json:"max_sessions,omitempty"`
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	ResourceID  string `json:"resource_id,omitempty"`
+	Description string `json:"description,omitempty"`
+	ExpiresIn   string `json:"expires_in,omitempty"`
+	OneTimeUse  bool   `json:"one_time_use,omitempty"`
+	MaxSessions int    `json:"max_sessions,omitempty"`
+	// SessionDuration is the per-qURL session lifetime (e.g. "1h"): how
+	// long access lasts after a visitor reaches the content, distinct
+	// from ExpiresIn (the link's own expiry). Server-side it maps to
+	// CreateQurlRequest.session_duration. omitempty so the zero value
+	// stays off the wire and inherits the server/plan default.
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
 	// Reason is forwarded to the audit log when set (e.g. an
 	// operator-supplied "for incident #123" annotation from the
 	// `/qurl get $alias reason:"…"` slash-command flag). The server
@@ -390,12 +400,13 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
 		logLabel = "POST /v1/resources/:id/qurls"
 		body, err = json.Marshal(createForResourceBody{
-			Description:  input.Description,
-			ExpiresIn:    input.ExpiresIn,
-			OneTimeUse:   input.OneTimeUse,
-			MaxSessions:  input.MaxSessions,
-			AccessPolicy: input.AccessPolicy,
-			Reason:       input.Reason,
+			Description:     input.Description,
+			ExpiresIn:       input.ExpiresIn,
+			OneTimeUse:      input.OneTimeUse,
+			MaxSessions:     input.MaxSessions,
+			SessionDuration: input.SessionDuration,
+			AccessPolicy:    input.AccessPolicy,
+			Reason:          input.Reason,
 		})
 	} else {
 		endpoint = c.baseURL + "/v1/qurls"
@@ -431,12 +442,13 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 // path, so it doesn't repeat in the body; target_url is absent for
 // the same reason — the resource already owns it).
 type createForResourceBody struct {
-	Description  string        `json:"description,omitempty"`
-	ExpiresIn    string        `json:"expires_in,omitempty"`
-	OneTimeUse   bool          `json:"one_time_use,omitempty"`
-	MaxSessions  int           `json:"max_sessions,omitempty"`
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
-	Reason       string        `json:"reason,omitempty"`
+	Description     string        `json:"description,omitempty"`
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+	Reason          string        `json:"reason,omitempty"`
 }
 
 // Get retrieves a qURL by ID.
