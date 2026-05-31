@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -57,6 +58,11 @@ const listCreateButtonLabel = "Create qURL"
 // tunnel install`), so a real workspace is far below this; see
 // [listResourcesScanLimit].
 const listCreateButtonMaxRows = 45
+
+const (
+	commonListResourcesFailedPrefix = "Failed to list qURL tunnels"
+	listResourcesFailedLogMessage   = "list: list resources failed"
+)
 
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
@@ -377,14 +383,30 @@ func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logg
 
 // mapListResourcesError surfaces a friendly user-facing error for
 // /qurl list failures. Auth-class (401/403) maps to authFailureMessage;
-// everything else falls back to serviceUnreachableMessage. Raw
-// APIError text MUST NOT reach Slack — it carries internal codes
-// that are operator-grade, not user-grade.
+// 429 gets specific retry-after guidance; 5xx maps to retry-friendly
+// service-unreachable copy; other APIError statuses use generic
+// list-failed copy so permanent-class errors don't masquerade as
+// transport outages. Raw APIError text MUST NOT reach Slack — it carries
+// internal codes that are operator-grade, not user-grade.
 func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
-	log.Warn("list: list resources failed", "error", err, "team_id", teamID)
 	var apiErr *client.APIError
-	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
-		return authFailureMessage
+	if errors.As(err, &apiErr) {
+		log.Warn(listResourcesFailedLogMessage, withRequestIDAttr(apiErr.RequestID, "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
+		if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+			return authFailureMessage
+		}
+		if apiErr.StatusCode == http.StatusTooManyRequests {
+			return rateLimitMessage(time.Duration(apiErr.RetryAfter)*time.Second, apiErr.RequestID)
+		}
+		if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
+			return serviceUnreachableMessageWith(apiErr)
+		}
+		return listResourcesFailedMessage(apiErr.RequestID)
 	}
+	log.Warn(listResourcesFailedLogMessage, "error", err, "team_id", teamID)
 	return serviceUnreachableMessage
+}
+
+func listResourcesFailedMessage(requestID string) string {
+	return appendSlackReference(commonListResourcesFailedPrefix, requestID) + "."
 }

@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -487,6 +489,104 @@ func TestHandleList_UpstreamError(t *testing.T) {
 	}
 	if !strings.Contains(async, "Could not reach qURL") {
 		t.Errorf("async reply missing service-unreachable message: %q", async)
+	}
+}
+
+func TestMapListResourcesErrorIncludesRequestIDWithoutLeakingAPIText(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	err := &client.APIError{
+		StatusCode: http.StatusBadGateway,
+		Code:       "upstream_error",
+		Title:      "Bad Gateway from internal API",
+		Detail:     "db: connection to internal-host:5432 refused",
+		RequestID:  "req_list123",
+	}
+
+	msg := mapListResourcesError(log, testAdminTeamID, err)
+	for _, leak := range []string{err.Title, err.Detail, "internal-host"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("list error response leaked %q: %q", leak, msg)
+		}
+	}
+	for _, want := range []string{"Could not reach qURL", "Please try again", "req_list123"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("list error response missing %q: %q", want, msg)
+		}
+	}
+	if !strings.Contains(logs.String(), "request_id=req_list123") {
+		t.Errorf("list error log missing request_id: %q", logs.String())
+	}
+}
+
+func TestMapListResourcesErrorRateLimitUsesRetryHintWithoutLeakingAPIText(t *testing.T) {
+	cases := []struct {
+		name       string
+		retryAfter int
+		requestID  string
+		wantRetry  string
+	}{
+		{name: "retry after seconds", retryAfter: 45, requestID: "req_rate123", wantRetry: "Try again in 45s"},
+		{name: "missing retry after", retryAfter: 0, requestID: "req_rate_zero", wantRetry: "Try again in a moment"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&logs, nil))
+			err := &client.APIError{
+				StatusCode: http.StatusTooManyRequests,
+				Code:       testAPIErrorCodeRateLimited,
+				Title:      "Too Many Requests from internal API",
+				Detail:     "tenant quota shard qurl-internal-7 exceeded",
+				RequestID:  tc.requestID,
+				RetryAfter: tc.retryAfter,
+			}
+
+			msg := mapListResourcesError(log, testAdminTeamID, err)
+			for _, leak := range []string{err.Title, err.Detail, "qurl-internal-7", testAPIErrorCodeRateLimited} {
+				if strings.Contains(msg, leak) {
+					t.Errorf("list rate-limit response leaked %q: %q", leak, msg)
+				}
+			}
+			for _, want := range []string{"Rate limit hit", tc.wantRetry, tc.requestID} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("list rate-limit response missing %q: %q", want, msg)
+				}
+			}
+			if !strings.Contains(logs.String(), "request_id="+tc.requestID) {
+				t.Errorf("list rate-limit log missing request_id: %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestMapListResourcesErrorPermanentClassUsesGenericListFailure(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	err := &client.APIError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Code:       "invalid_cursor",
+		Title:      "Invalid Cursor",
+		Detail:     "cursor tenant shard mismatch",
+	}
+
+	msg := mapListResourcesError(log, testAdminTeamID, err)
+	for _, leak := range []string{err.Title, err.Detail, "invalid_cursor"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("list permanent-class response leaked %q: %q", leak, msg)
+		}
+	}
+	if !strings.Contains(msg, "Failed to list qURL tunnels") {
+		t.Errorf("list permanent-class response missing generic list failure: %q", msg)
+	}
+	if strings.Contains(msg, "Could not reach qURL") {
+		t.Errorf("list permanent-class response looked like transport failure: %q", msg)
+	}
+	if strings.Contains(msg, "Please try again") {
+		t.Errorf("list permanent-class response included retry hint: %q", msg)
+	}
+	if strings.Contains(logs.String(), "request_id=") {
+		t.Errorf("list error log included empty request_id attr: %q", logs.String())
 	}
 }
 

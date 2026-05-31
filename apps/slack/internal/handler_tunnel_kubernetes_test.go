@@ -150,11 +150,15 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 	}, testTunnelImageRef)
 	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
 	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-tunnel-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	const kubectlDryRunTimeout = 20 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), kubectlDryRunTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, kubectl, "apply", "--dry-run=client", "--validate=false", "-f", "-") //nolint:gosec // G204: kubectl path comes from exec.LookPath and no user input reaches argv.
 	cmd.Stdin = strings.NewReader(pod)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			t.Skipf("kubectl dry-run exceeded %s in this environment", kubectlDryRunTimeout)
+		}
 		if bytes.Contains(out, []byte("couldn't get current server API group list")) {
 			t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
 		}

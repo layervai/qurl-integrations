@@ -409,12 +409,10 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	}
 }
 
-// TestHandle_AsyncGetSurfaces5xxCorrelationHandle fences the
-// mirror-of-pre-consolidation contract on /qurl get: a 5xx from
-// upstream surfaces the bounded Title and the opaque RequestID so
-// users have a handle to share with support, while Detail (which
-// can carry internal hostnames / DB error strings) MUST stay
-// stripped. The retry-friendly "Please try again." is preserved so
+// TestHandle_AsyncGetSurfaces5xxCorrelationHandle fences the 5xx
+// surface on /qurl get: upstream Title and Detail stay out of Slack,
+// while the opaque RequestID remains so users have a handle to share
+// with support. The retry-friendly "Please try again." is preserved so
 // the disposition is unchanged.
 func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 	const titleText = "Internal Server Error"
@@ -465,11 +463,11 @@ func TestHandle_AsyncGetSurfaces5xxCorrelationHandle(t *testing.T) {
 			t.Errorf("Detail leak on 5xx: response contains %q: %q", leak, text)
 		}
 	}
-	// Title (bounded short text) and RequestID (opaque correlation
-	// handle) SHOULD appear — mirrors the pre-consolidation
-	// /qurl create UX and lets users share the handle with support.
-	if !strings.Contains(text, titleText) {
-		t.Errorf("expected Title %q in 5xx reply for support correlation, got: %q", titleText, text)
+	// Upstream Title is suppressed along with Detail. Even though it
+	// is usually bounded short text, it is service-owned copy and can
+	// drift into operator-grade internals under regressions.
+	if strings.Contains(text, titleText) {
+		t.Errorf("Title leak on 5xx: response contains %q: %q", titleText, text)
 	}
 	if !strings.Contains(text, "req_abc123") {
 		t.Errorf("expected RequestID req_abc123 in 5xx reply for support correlation, got: %q", text)
@@ -689,8 +687,9 @@ func TestResponseURLClient_RefusesRedirects(t *testing.T) {
 }
 
 // TestSanitizeAPIError fences the user-facing message contract for a
-// range of qURL API error shapes. A regression that surfaced Detail or
-// dropped RequestID would change the security/observability posture.
+// range of qURL API error shapes. A regression that surfaced upstream
+// Title/Detail or dropped RequestID would change the
+// security/observability posture.
 func TestSanitizeAPIError(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -708,8 +707,8 @@ func TestSanitizeAPIError(t *testing.T) {
 				RequestID:  "req_xyz",
 			},
 			prefix:  "Failed to create qURL",
-			wantSub: []string{"Failed to create qURL", "Internal Server Error", "req_xyz"},
-			notSub:  []string{"leaked-internal-host"},
+			wantSub: []string{"Failed to create qURL", "req_xyz"},
+			notSub:  []string{"Internal Server Error", "leaked-internal-host"},
 		},
 		{
 			name: "APIError without title",
@@ -730,14 +729,14 @@ func TestSanitizeAPIError(t *testing.T) {
 			notSub:  []string{"opaque transport"},
 		},
 		{
-			name: "Title with trailing period does not double-punctuate",
+			name: "APIError title-only still falls back to static copy",
 			err: &client.APIError{
 				StatusCode: 500,
 				Title:      "Internal Server Error.",
 			},
 			prefix:  "Failed to create qURL",
-			wantSub: []string{"Internal Server Error"},
-			notSub:  []string{".."},
+			wantSub: []string{"Failed to create qURL."},
+			notSub:  []string{"Internal Server Error", ".."},
 		},
 	}
 	for _, tc := range cases {

@@ -14,6 +14,12 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+const (
+	testAPIErrorCodeRateLimited = "rate_limited"
+	testKeyMeta                 = "meta"
+	testKeyRequestID            = "request_id"
+)
+
 // writeCreateFixture writes a POST /v1/qurls success envelope.
 func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID string) {
 	t.Helper()
@@ -125,13 +131,25 @@ func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 }
 
 // TestHandleGet_MintRateLimit fences the 429 mint error with a
-// retry-after header → user-facing "Rate limit hit. Try again in 30s."
+// retry-after header plus opaque request ID support handle.
 func TestHandleGet_MintRateLimit(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "30")
-		writeAPIError(t, w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		body := map[string]any{
+			testKeyError: map[string]any{
+				"status":     http.StatusTooManyRequests,
+				"code":       testAPIErrorCodeRateLimited,
+				testKeyTitle: "Too Many Requests from internal API",
+			},
+			testKeyMeta: map[string]any{testKeyRequestID: "req_get_rate"},
+		}
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Fatalf("encode error: %v", err)
+		}
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -142,6 +160,12 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 	}
 	if !strings.Contains(async, "30s") {
 		t.Errorf("async reply missing 30s retry hint: %q", async)
+	}
+	if !strings.Contains(async, "req_get_rate") {
+		t.Errorf("async reply missing request ID: %q", async)
+	}
+	if strings.Contains(async, "internal API") {
+		t.Errorf("async reply leaked upstream rate-limit title: %q", async)
 	}
 }
 
