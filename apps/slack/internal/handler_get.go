@@ -140,13 +140,6 @@ type userError struct{ msg string }
 // Error returns the user-facing message verbatim.
 func (e *userError) Error() string { return e.msg }
 
-// userErrorf builds a [*userError] using fmt.Sprintf semantics. The
-// returned error's text is the literal Slack message — no extra
-// wrapping, no "context: …" prefix.
-func userErrorf(format string, args ...any) error {
-	return &userError{msg: fmt.Sprintf(format, args...)}
-}
-
 // errAdminStoreNotConfigured is returned by getWork when the handler's
 // AdminStore is nil (sandbox / no-DDB deployment). Surfaces as a user-
 // facing message that doesn't expose the "AdminStore" implementation
