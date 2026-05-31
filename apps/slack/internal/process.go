@@ -142,11 +142,17 @@ func appendSlackReference(message, requestID string) string {
 	return fmt.Sprintf("%s (Reference: `%s`)", message, requestID)
 }
 
-func appendRequestIDAttr(requestID string, attrs ...any) []any {
+func rateLimitMessage(retry time.Duration, requestID string) string {
+	return appendSlackReference("Rate limit hit", requestID) + ". Try again in " + humanizeRetry(retry) + "."
+}
+
+func withRequestIDAttr(requestID string, attrs ...any) []any {
 	if requestID == "" {
 		return attrs
 	}
-	return append(attrs, "request_id", requestID)
+	out := make([]any, 0, len(attrs)+2)
+	out = append(out, "request_id", requestID)
+	return append(out, attrs...)
 }
 
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.

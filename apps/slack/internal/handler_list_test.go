@@ -535,7 +535,7 @@ func TestMapListResourcesErrorRateLimitUsesRetryHintWithoutLeakingAPIText(t *tes
 			log := slog.New(slog.NewTextHandler(&logs, nil))
 			err := &client.APIError{
 				StatusCode: http.StatusTooManyRequests,
-				Code:       "rate_limited",
+				Code:       testAPIErrorCodeRateLimited,
 				Title:      "Too Many Requests from internal API",
 				Detail:     "tenant quota shard qurl-internal-7 exceeded",
 				RequestID:  tc.requestID,
@@ -543,7 +543,7 @@ func TestMapListResourcesErrorRateLimitUsesRetryHintWithoutLeakingAPIText(t *tes
 			}
 
 			msg := mapListResourcesError(log, testAdminTeamID, err)
-			for _, leak := range []string{err.Title, err.Detail, "qurl-internal-7", "rate_limited"} {
+			for _, leak := range []string{err.Title, err.Detail, "qurl-internal-7", testAPIErrorCodeRateLimited} {
 				if strings.Contains(msg, leak) {
 					t.Errorf("list rate-limit response leaked %q: %q", leak, msg)
 				}
