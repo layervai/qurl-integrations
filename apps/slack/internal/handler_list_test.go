@@ -541,6 +541,9 @@ func TestMapListResourcesErrorPermanentClassUsesGenericListFailure(t *testing.T)
 	if strings.Contains(msg, "Could not reach qURL") {
 		t.Errorf("list permanent-class response looked like transport failure: %q", msg)
 	}
+	if strings.Contains(msg, "Please try again") {
+		t.Errorf("list permanent-class response included retry hint: %q", msg)
+	}
 	if strings.Contains(logs.String(), "request_id=") {
 		t.Errorf("list error log included empty request_id attr: %q", logs.String())
 	}

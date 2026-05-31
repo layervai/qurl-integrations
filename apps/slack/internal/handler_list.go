@@ -401,5 +401,5 @@ func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
 }
 
 func listResourcesFailedMessage(requestID string) string {
-	return appendSlackReference(commonListResourcesFailedPrefix, requestID) + ". Please try again."
+	return appendSlackReference(commonListResourcesFailedPrefix, requestID) + "."
 }
