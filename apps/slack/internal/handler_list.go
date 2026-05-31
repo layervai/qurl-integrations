@@ -60,6 +60,7 @@ const listCreateButtonLabel = "Create qURL"
 const listCreateButtonMaxRows = 45
 
 const commonListResourcesFailedPrefix = "Failed to list qURL tunnels"
+const listResourcesFailedLogMessage = "list: list resources failed"
 
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
@@ -388,7 +389,7 @@ func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logg
 func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
-		log.Warn("list: list resources failed", appendRequestIDAttr(apiErr.RequestID, "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
+		log.Warn(listResourcesFailedLogMessage, appendRequestIDAttr(apiErr.RequestID, "error", err, "team_id", teamID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 		if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
 			return authFailureMessage
 		}
@@ -400,7 +401,7 @@ func mapListResourcesError(log *slog.Logger, teamID string, err error) string {
 		}
 		return listResourcesFailedMessage(apiErr.RequestID)
 	}
-	log.Warn("list: list resources failed", "error", err, "team_id", teamID)
+	log.Warn(listResourcesFailedLogMessage, "error", err, "team_id", teamID)
 	return serviceUnreachableMessage
 }
 
