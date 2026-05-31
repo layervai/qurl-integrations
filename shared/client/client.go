@@ -248,14 +248,16 @@ type QURL struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	OneTimeUse  bool       `json:"one_time_use"`
 	MaxSessions int        `json:"max_sessions,omitempty"`
-	// SessionDuration is the per-qURL session lifetime in seconds (the
-	// read-back counterpart of CreateInput.SessionDuration). Symmetric with
-	// MaxSessions/ExpiresAt so an admin "show limits" view can surface it.
-	SessionDuration int           `json:"session_duration,omitempty"`
-	Description     string        `json:"description,omitempty"`
-	QURLSite        string        `json:"qurl_site,omitempty"`
-	QURLLink        string        `json:"qurl_link,omitempty"`
-	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+	// SessionDuration read-back is intentionally omitted: the bot doesn't
+	// consume it yet, and adding an `int` field would couple the WHOLE QURL
+	// decode to session_duration's wire type (a string-typed echo would fail
+	// json.Unmarshal for the entire struct, not just that field). Add it WITH
+	// a decode test against the confirmed number wire shape when a consumer
+	// (e.g. an admin "show limits" view) actually needs it. (cr #561.)
+	Description  string        `json:"description,omitempty"`
+	QURLSite     string        `json:"qurl_site,omitempty"`
+	QURLLink     string        `json:"qurl_link,omitempty"`
+	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
 // AccessPolicy defines access restrictions for a qURL.

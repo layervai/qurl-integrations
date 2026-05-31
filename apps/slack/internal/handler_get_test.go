@@ -394,11 +394,12 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMRidesOneTimeSuffix fences that the (one-time use)
-// suffix rides into the DM payload (not the channel reply) on dm:true.
-// One-time use is the unconditional default for `/qurl get`, so the
-// suffix is always present; this guards against a future refactor that
-// reorders the suffix-append and DM-dispatch branches in getWork.
+// TestHandleGet_DMRidesOneTimeSuffix fences that the
+// "(one-time use · link expires in 1 minute)" suffix rides into the DM
+// payload (not the channel reply) on dm:true. That suffix is the
+// unconditional default for `/qurl get`, so it's always present; this guards
+// against a future refactor that reorders the suffix-append and DM-dispatch
+// branches in getWork.
 func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
@@ -523,8 +524,8 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 // TestCreateInputJSON_OneTimeDefault fences that one-time use is the
 // unconditional default for `/qurl get`: with no flag at all, the wire
 // body carries `one_time_use: true` and the async reply carries the
-// `(one-time use)` suffix. There is no `once` flag — every `/qurl get`
-// link burns on first redemption.
+// "(one-time use · link expires in 1 minute)" suffix. There is no `once`
+// flag — every `/qurl get` link burns on first redemption.
 func TestCreateInputJSON_OneTimeDefault(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
