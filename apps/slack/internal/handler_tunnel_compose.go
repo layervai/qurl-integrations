@@ -28,7 +28,7 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 		return "", err
 	}
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
-	// expand WEB_SERVICE, QURL_TUNNEL_SLUG, AGENT_STATE_DIR, and SECRET_DIR
+	// expand WEB_SERVICE, QURL_TUNNEL_ID, AGENT_STATE_DIR, and SECRET_DIR
 	// into the generated file. Trust assumptions: WEB_SERVICE comes from
 	// dockerComposeServicePattern plus the runtime case guard below; the slug
 	// matches tunnelSlugPattern; state/secret dirs derive only from that slug.
@@ -44,12 +44,12 @@ APP_COMPOSE_FILE=${APP_COMPOSE_FILE:-compose.yaml}
 WEB_SERVICE=%s
 %s
 
-QURL_TUNNEL_SLUG=%s
+QURL_TUNNEL_ID=%s
 TUNNEL_SERVICE=%s
-SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
-QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"
+SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_ID}/agent"
+CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_ID}.yaml"
+QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_ID}.compose.yaml"
 
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
@@ -77,10 +77,10 @@ services:
     volumes:
       - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
       - ${SECRET_DIR}:/run/secrets/qurl-tunnel:ro
-      - ./qurl-proxy-${QURL_TUNNEL_SLUG}.yaml:/work/qurl-proxy.yaml:ro
+      - ./qurl-proxy-${QURL_TUNNEL_ID}.yaml:/work/qurl-proxy.yaml:ro
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-tunnel/api_key
-      QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}
+      QURL_TUNNEL_ID: ${QURL_TUNNEL_ID}
 QURL_COMPOSE_YAML_EOF
 
 docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)

@@ -366,7 +366,7 @@ func TestHandleList_URLResourcesFiltered(t *testing.T) {
 // label or `[slug:...]` fragment (both redundant now that the whole
 // list is tunnels and the token IS the slug). The customer's
 // onboarding flow reads this slug to match what the sidecar
-// provisioned (via QURL_TUNNEL_SLUG) and pastes it into `/qurl get`.
+// provisioned (via QURL_TUNNEL_ID) and pastes it into `/qurl get`.
 func TestHandleList_TunnelSlugIsToken(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)

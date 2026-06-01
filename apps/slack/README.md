@@ -94,7 +94,7 @@ modifiers enabled by the current bot deployment.
   tailored to the selected environment. Docker and Docker Compose receive
   guarded pasteable shell blocks that write `qurl-proxy.yaml`, create a
   bootstrap-key file, create/chown per-tunnel durable agent state, pass
-  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_SLUG=<id>` to the client.
+  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_ID=<id>` to the client.
   ECS/Fargate and Kubernetes receive the same contract as deployment
   snippets: co-locate the sidecar with the target container, mount durable
   per-instance state at `/var/lib/layerv/agent`, mount or inject the

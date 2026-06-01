@@ -22,7 +22,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		"configure passwordless sudo",
 		"WEB_CONTAINER='web.1_2-3'",
 		"WEB_CONTAINER may contain only letters, numbers, dots, underscores, and hyphens.",
-		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
+		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_ID}.yaml"`,
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
 		`--network "container:${WEB_CONTAINER}"`,

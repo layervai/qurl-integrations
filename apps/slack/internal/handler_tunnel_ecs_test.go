@@ -34,7 +34,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point",
 		"mounted into the task as the `qurl-config` volume",
 		testTunnelLocalPort9090Line,
-		`"name": "QURL_TUNNEL_SLUG"`,
+		`"name": "QURL_TUNNEL_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
 		testTunnelECSAPIKeyNameLine,
 		`REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_` + testTunnelSlug,

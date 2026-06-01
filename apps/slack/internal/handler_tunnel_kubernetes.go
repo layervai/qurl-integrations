@@ -80,7 +80,7 @@ containers:
     env:
       - name: QURL_API_KEY_FILE
         value: /run/secrets/qurl-tunnel/api_key
-      - name: QURL_TUNNEL_SLUG
+      - name: QURL_TUNNEL_ID
         value: %s
     volumeMounts:
       - name: qurl-agent-state

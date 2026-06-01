@@ -23,11 +23,11 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 WEB_CONTAINER=%s
 %s
 
-QURL_TUNNEL_SLUG=%s
-TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"
-SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_SLUG}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"
+QURL_TUNNEL_ID=%s
+TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_ID}"
+SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_ID}/agent"
+CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_ID}.yaml"
 
 # This intentionally overwrites the per-tunnel config so rerunning the install
 # refreshes the deterministic ID and port values in place.
@@ -52,7 +52,7 @@ docker run -d \
   -v "$SECRET_DIR:$SECRET_DIR:ro" \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
-  -e QURL_TUNNEL_SLUG="$QURL_TUNNEL_SLUG" \
+  -e QURL_TUNNEL_ID="$QURL_TUNNEL_ID" \
   %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)

@@ -738,7 +738,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf(`routes:
-  - name: %s
+  - id: %s
     type: http
     local_ip: 127.0.0.1
     local_port: %d`, quotedSlug, args.LocalPort), nil
