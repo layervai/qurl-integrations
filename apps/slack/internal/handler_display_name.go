@@ -35,6 +35,25 @@ func defaultTunnelDisplayName(slug string) string {
 // missing-arg path and the validation-rejection path share one copy.
 const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <display name>`\n• `/qurl-admin unset-display-name <id>`\n\nThe id is the tunnel token shown by `/qurl list` (the leading `$` is optional). The Display Name is free text up to 500 characters."
 
+// parseDisplayNameID strips an optional leading `$` from a tunnel-id token
+// and validates it against tunnelSlugPattern. Shared by the set/unset
+// display-name parsers so both accept the `$<id>` sigil form `/qurl list`
+// prints — matching every other tunnel-id/alias command (`/qurl get`,
+// `/qurl-admin set-alias`) — and reject identically. Stripping here rather
+// than widening tunnelSlugPattern keeps the slug grammar (shared with
+// install) intact. Returns (id, "") on success or ("", userMsg) with the
+// ephemeral copy to surface.
+func parseDisplayNameID(tok string) (id, userMsg string) {
+	id = strings.TrimPrefix(tok, "$")
+	if id == "" {
+		return "", "Missing tunnel id.\n\n" + displayNameUsage
+	}
+	if !tunnelSlugPattern.MatchString(id) {
+		return "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(id), displayNameUsage)
+	}
+	return id, ""
+}
+
 // parseSetDisplayNameArgs splits a `set-display-name <id> <display name>`
 // body into the tunnel id (first whitespace-delimited token) and the
 // Display Name (the rest of the line). The Display Name is trimmed and may
@@ -58,16 +77,11 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 		idTok, rest = text[:i], strings.TrimLeftFunc(text[i:], unicode.IsSpace)
 		found = true
 	}
-	// Accept an optional leading `$` on the id so set-display-name matches
-	// every other tunnel-id/alias command (`/qurl get`, `/qurl-admin set-alias`),
-	// which all take the `$<id>` sigil form `/qurl list` prints. Strip it here
-	// rather than widening tunnelSlugPattern (which the slug grammar shares).
-	idTok = strings.TrimPrefix(idTok, "$")
-	if idTok == "" {
-		return "", "", "Missing tunnel id.\n\n" + displayNameUsage
-	}
-	if !tunnelSlugPattern.MatchString(idTok) {
-		return "", "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(idTok), displayNameUsage)
+	// Strip the optional `$` and validate the id (shared with the unset
+	// parser via parseDisplayNameID).
+	id, userMsg = parseDisplayNameID(idTok)
+	if userMsg != "" {
+		return "", "", userMsg
 	}
 	if !found {
 		return "", "", "Missing Display Name.\n\n" + displayNameUsage
@@ -94,7 +108,7 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 			return "", "", "Display Name can't contain backticks, angle brackets, or control characters. Use plain text only.\n\n" + displayNameUsage
 		}
 	}
-	return idTok, name, ""
+	return id, name, ""
 }
 
 // parseUnsetDisplayNameArgs validates a `unset-display-name <id>` body:
@@ -104,16 +118,7 @@ func parseUnsetDisplayNameArgs(text string) (id, userMsg string) {
 	if len(tokens) != 1 {
 		return "", "Provide exactly one tunnel id.\n\n" + displayNameUsage
 	}
-	// Accept an optional leading `$` on the id, matching parseSetDisplayNameArgs
-	// and the rest of the tunnel-id/alias commands.
-	id = strings.TrimPrefix(tokens[0], "$")
-	if id == "" {
-		return "", "Missing tunnel id.\n\n" + displayNameUsage
-	}
-	if !tunnelSlugPattern.MatchString(id) {
-		return "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(id), displayNameUsage)
-	}
-	return id, ""
+	return parseDisplayNameID(tokens[0])
 }
 
 // stripSurroundingQuotes removes one matched pair of surrounding single or
