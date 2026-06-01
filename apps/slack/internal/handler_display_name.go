@@ -38,11 +38,15 @@ const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <displa
 // parseDisplayNameID strips an optional leading `$` from a tunnel-id token
 // and validates it against tunnelSlugPattern. Shared by the set/unset
 // display-name parsers so both accept the `$<id>` sigil form `/qurl list`
-// prints — matching every other tunnel-id/alias command (`/qurl get`,
-// `/qurl-admin set-alias`) — and reject identically. Stripping here rather
-// than widening tunnelSlugPattern keeps the slug grammar (shared with
-// install) intact. Returns (id, "") on success or ("", userMsg) with the
-// ephemeral copy to surface.
+// prints. Note the sigil is *optional* here (bare and `$`-prefixed both
+// parse); `/qurl get` and `/qurl-admin set-alias` instead *require* it (a
+// missing `$` is ErrMissingSigil in parseAliasToken). So these verbs are the
+// lenient superset — accepting the sigil form a user copies from `/qurl
+// list`, not enforcing it. Stripping here rather than widening
+// tunnelSlugPattern keeps the slug grammar (shared with install) intact, and
+// the invalid-id message echoes the stripped id (matching parseAliasToken,
+// which echoes the post-`$` value). Returns (id, "") on success or
+// ("", userMsg) with the ephemeral copy to surface.
 func parseDisplayNameID(tok string) (id, userMsg string) {
 	id = strings.TrimPrefix(tok, "$")
 	if id == "" {
