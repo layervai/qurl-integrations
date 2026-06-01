@@ -70,14 +70,15 @@ const listCreateButtonMaxRows = 45
 // Name and channel aliases.
 const listEditButtonLabel = "Edit"
 
-// listEditButtonMaxRows caps interactive rows when the Edit button is shown.
+// listEditButtonMaxRows caps how many rows may carry the per-row Edit button.
 // An admin row renders TWO blocks (a section line + an actions block carrying
 // Create qURL + Edit) versus one for the Create-only path, so it halves
 // [listCreateButtonMaxRows]'s row budget — derived from it (not a separate
 // magic number) so the two can't drift. At 22 rows the message is header (1) +
 // 2N + footer (1) + optional has-more (1) = 47 blocks, under Slack's 50-block
-// ceiling. Above this, the listing degrades to plain text — every tunnel still
-// shown, just without buttons.
+// ceiling. Past this, the per-row Edit button is dropped but Create qURL
+// buttons still render (one block per row, like any caller's list); only past
+// [listCreateButtonMaxRows] does the listing degrade to plain text.
 const listEditButtonMaxRows = listCreateButtonMaxRows / 2
 
 // slackButtonValueMaxBytes is Slack's documented cap on a button element's
@@ -280,17 +281,23 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// boundary for the affordance; the mutation it opens is re-gated at
 	// view_submission time (see handleTunnelEditSubmission).
 	editable := h.listCallerCanEdit(ctx, log, teamID, values.Get(fieldUserID))
-	// An editable row renders two blocks (section + actions), so halve the row
-	// cap to keep the message under Slack's 50-block ceiling.
-	maxButtonRows := listCreateButtonMaxRows
-	if editable {
-		maxButtonRows = listEditButtonMaxRows
-	}
-	useButtons := len(resources) <= maxButtonRows
+	// Buttons render whenever the tunnel set fits the per-message block ceiling
+	// (listCreateButtonMaxRows). An admin row carries an extra block (Edit lives
+	// in its own actions block), so per-row Edit only fits under the halved
+	// listEditButtonMaxRows budget. Past that an admin still gets the Create-only
+	// buttons every caller gets — just no per-row Edit — rather than the whole
+	// list collapsing to text (which would be a surprising admin-only regression
+	// versus the same tunnel count for a non-admin).
+	useButtons := len(resources) <= listCreateButtonMaxRows
+	showEdit := editable && len(resources) <= listEditButtonMaxRows
 	lines := make([]string, 0, len(resources))
 	var blocks []any
 	if useButtons {
-		blocks = make([]any, 0, len(resources)*2+3)
+		blockCap := len(resources) + 3
+		if showEdit {
+			blockCap = len(resources)*2 + 3
+		}
+		blocks = make([]any, 0, blockCap)
 		blocks = append(blocks, sectionBlock("*Protected Tunnel Resources:*"))
 	}
 	for i := range resources {
@@ -311,7 +318,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		// button carries the row's edit snapshot so opening the modal needs no
 		// extra read. A snapshot too large for a button value falls back to the
 		// Create-only accessory button.
-		if editable {
+		if showEdit {
 			if editVal, ok := buildTunnelEditButtonValue(resources[i].ResourceID, tok, resources[i].Description, aliasMap[resources[i].ResourceID]); ok {
 				blocks = append(blocks, sectionBlock(line), actionsBlock(
 					buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok),

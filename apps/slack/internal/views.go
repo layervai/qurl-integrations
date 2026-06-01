@@ -293,7 +293,13 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Editing tunnel " + tunnelEditTokenLabel(meta.Token)),
-			inputBlock(tunnelEditBlockDisplayName, "Display name", "Shown next to the tunnel in /qurl list.", false,
+			// Optional: a Display Name is not mandatory (a tunnel can have none,
+			// and `/qurl-admin unset-display-name` clears it), so a required field
+			// would block an alias-only edit on an unnamed tunnel — the empty input
+			// pre-fills empty and Slack would refuse submission. With the
+			// changed-only diff, an empty submission on an empty-named tunnel is a
+			// no-op (normalizes to "" == "" → nameChanged=false → PATCH skipped).
+			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to the tunnel in /qurl list.", true,
 				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
 			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this tunnel in this channel; the tunnel's own name always works and isn't listed here. Clear a line to remove that alias.", true,
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),

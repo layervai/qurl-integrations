@@ -314,6 +314,14 @@ type aliasReconcileResult struct {
 // (read fresh, excluding the primary token), binds the additions, and unbinds
 // the removals. Best-effort: a per-alias failure is logged and flagged in the
 // result rather than aborting the whole reconcile.
+//
+// The submitted set is authoritative (last-write-wins): an alias bound to this
+// tunnel by ANOTHER admin after this modal opened is present in the fresh
+// `current` set but absent from `desired`, so it is unbound. This is broader
+// than a concurrent rename — it can drop an alias this admin never saw — and is
+// an accepted, documented rare race for an admin tool (two admins editing the
+// same tunnel's aliases at once). The cap-on-newly-added in parseEditAliasLines
+// is scoped to the pre-filled set, but the bind/unbind reconcile here is not.
 func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, desired []string) aliasReconcileResult {
 	var res aliasReconcileResult
 

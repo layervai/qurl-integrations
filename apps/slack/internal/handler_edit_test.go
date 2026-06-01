@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -347,6 +348,43 @@ func TestHandleList_OverCapRowFallsBackToCreateOnly(t *testing.T) {
 	}
 }
 
+// TestHandleList_AdminPastEditCapKeepsCreateButtons fences the no-asymmetry
+// fix: an admin whose tunnel count is past listEditButtonMaxRows but within
+// listCreateButtonMaxRows still gets Create-only buttons (no per-row Edit),
+// rather than the whole list collapsing to text as it would if the edit cap
+// gated all buttons.
+func TestHandleList_AdminPastEditCapKeepsCreateButtons(t *testing.T) {
+	n := listEditButtonMaxRows + 1 // past the edit cap, within the create cap
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	resources := make([]map[string]any, n)
+	for i := 0; i < n; i++ {
+		slug := fmt.Sprintf("tun-%03d", i)
+		resources[i] = map[string]any{testKeyResourceID: "r_" + slug, testKeyType: client.ResourceTypeTunnel, testKeySlug: slug}
+	}
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, resources, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	inv := newAdminSlashInvoker(t, h)
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status != 200")
+	}
+	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+	if len(blocks) == 0 {
+		t.Fatalf("expected interactive Create buttons, got a plain-text (block-less) list")
+	}
+	if edits := editButtonValues(t, blocks); len(edits) != 0 {
+		t.Errorf("Edit buttons should be absent past the edit cap, got %d", len(edits))
+	}
+	if creates := createQurlButtonValues(t, blocks); len(creates) != n {
+		t.Errorf("Create qURL buttons = %d, want %d (admin keeps Create-only past the edit cap)", len(creates), n)
+	}
+}
+
 // --- modal open (block_actions) ------------------------------------------
 
 // TestHandleListEditClick_OpensModal fences that tapping Edit opens a modal
@@ -490,13 +528,7 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 
 	var got []byte
-	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusOK)
-		close(done)
-	}))
-	t.Cleanup(srv.Close)
+	srv, done := editResultServer(t, &got)
 
 	meta := TunnelEditModalMetadata{
 		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
@@ -553,13 +585,7 @@ func TestHandleTunnelEdit_NoOpSubmission(t *testing.T) {
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 
 	var got []byte
-	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusOK)
-		close(done)
-	}))
-	t.Cleanup(srv.Close)
+	srv, done := editResultServer(t, &got)
 
 	meta := TunnelEditModalMetadata{
 		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
@@ -583,6 +609,147 @@ func TestHandleTunnelEdit_NoOpSubmission(t *testing.T) {
 	}
 	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, testEditAlias); !found || rid != testEditResourceID {
 		t.Errorf("extra alias should remain bound: rid=%q found=%v", rid, found)
+	}
+}
+
+// editResultServer wires a response_url capture server and returns it plus a
+// done channel closed on the first POST, shared by the submission tests below.
+func editResultServer(t *testing.T, got *[]byte) (srv *httptest.Server, done chan struct{}) {
+	t.Helper()
+	done = make(chan struct{})
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		close(done)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, done
+}
+
+// TestHandleTunnelEdit_EmptyNameAliasOnly fences bug-class #1: a tunnel with NO
+// Display Name stays editable for an alias-only change. The empty (optional)
+// name field submits empty, which the changed-only diff treats as a no-op (no
+// PATCH), while the new alias still binds.
+func TestHandleTunnelEdit_EmptyNameAliasOnly(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID, // only the token bound; no display name
+	})
+	ts.addCustomer(http.MethodPatch, "/v1/resources/"+testEditResourceID, func(http.ResponseWriter, *http.Request) {
+		t.Errorf("PATCH reached for an empty-name (no-op) edit")
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken,
+		DisplayName: "", // tunnel has no display name
+	}
+	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, "", "$fresh")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("submission ack = %d %q, want 200 {}", w.Code, w.Body.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	summary := parseSlackText(t, got)
+	if !strings.Contains(summary, "fresh") {
+		t.Errorf("summary should report the added alias: %s", summary)
+	}
+	if strings.Contains(summary, "Display Name") {
+		t.Errorf("no Display Name change expected for an empty-name edit: %s", summary)
+	}
+	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "fresh"); !found || rid != testEditResourceID {
+		t.Errorf("'fresh' alias should be bound: rid=%q found=%v", rid, found)
+	}
+}
+
+// TestHandleTunnelEdit_AliasConflictReported fences the conflict path: adding an
+// alias already bound to a DIFFERENT tunnel in the channel is skipped and
+// reported, leaving the other tunnel's binding intact.
+func TestHandleTunnelEdit_AliasConflictReported(t *testing.T) {
+	const otherRID = "r_other_tunnel"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+		"taken":       otherRID, // already owned by a different tunnel
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken,
+		DisplayName: testEditDisplay, // unchanged → no PATCH
+	}
+	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "$taken")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Skipped (already used by another tunnel") || !strings.Contains(summary, "taken") {
+		t.Errorf("summary missing conflict line: %s", summary)
+	}
+	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "taken"); !found || rid != otherRID {
+		t.Errorf("'taken' should still belong to %q: rid=%q found=%v", otherRID, rid, found)
+	}
+}
+
+// TestHandleTunnelEdit_BindErrorSurfacesWarning fences the hadError path: a
+// non-conflict bind failure surfaces the ":warning: Some changes may not have
+// applied" line rather than reporting a clean success.
+func TestHandleTunnelEdit_BindErrorSurfacesWarning(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+	})
+	// Fail alias writes (UpdateItem) on the channel-policy table; the policy
+	// READ still succeeds, so the failure is a bind error, not a read error.
+	ts.ddb.SetUpdateItemErr(ts.tableNames.channelPolicy, errors.New("injected bind failure"))
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken,
+		DisplayName: testEditDisplay, // unchanged → no PATCH; isolate the alias-bind failure
+	}
+	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "$newone")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Some changes may not have applied") {
+		t.Errorf("summary missing hadError warning: %s", summary)
 	}
 }
 
