@@ -41,8 +41,9 @@ const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <displa
 // identically. The sigil is optional here, whereas `/qurl get`/`set-alias`
 // require it (missing → ErrMissingSigil) — these verbs are the lenient
 // superset. Stripping beats widening tunnelSlugPattern (shared with install),
-// and the invalid-id echo shows the stripped id, matching parseAliasToken.
-// Returns (id, "") on success or ("", userMsg).
+// and the invalid-id echo shows the stripped id, matching parseAliasToken on
+// the value (the Slack escaper differs). Returns (id, "") on success or
+// ("", userMsg).
 func parseDisplayNameID(tok string) (id, userMsg string) {
 	id = strings.TrimPrefix(tok, "$")
 	if id == "" {
