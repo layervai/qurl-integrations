@@ -21,9 +21,10 @@ import (
 // admin" (not "workspace admin") is deliberate: membership is the bot's own
 // admin set, not Slack's workspace-admin role.
 //
-// Keep this action roster in sync with the `/qurl-admin help` listing in
-// handler.go — the two are maintained independently and would otherwise drift
-// when an admin action is added or renamed.
+// Keep the action SET (add/remove/list/revoke) in sync with the `/qurl-admin
+// help` listing in handler.go — only the verb roster must match, not the prose
+// (help capitalizes and appends "(admin only)"). The two are maintained
+// independently and would otherwise drift when an action is added or renamed.
 const adminUsageMessage = "Usage:\n• `/qurl-admin admin add @user` — promote a Slack user to qURL bot admin\n• `/qurl-admin admin remove @user` — demote a qURL bot admin\n• `/qurl-admin admin list` — show who connected qURL (the owner) and current bot admins\n• `/qurl-admin admin revoke <qurl_id>` — revoke a single qURL"
 
 // handleAdmin parses the `admin <verb> ...` form via the shared parser
@@ -52,9 +53,12 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	if err != nil {
 		// Bare `admin` (no action) parses to ErrMissingAdminAction. List the
 		// available actions instead of the terse sentinel so the user learns
-		// the grammar. The action roster is public (it's in `/qurl-admin help`),
-		// so this hint is ungated — the admin gate is on execution, not
-		// discovery, matching the set-alias / set-display-name usage paths.
+		// the grammar. This parser-level discovery hint is ungated (the admin
+		// gate is on execution, not discovery — matching set-alias /
+		// set-display-name). It stays shown even on a no-DDB deploy, where
+		// `/qurl-admin help` instead gates its admin lines behind AdminStore;
+		// the divergence is deliberate — parser feedback is useful regardless
+		// of wiring (see the handleAdmin doc comment).
 		if errors.Is(err, ErrMissingAdminAction) {
 			respondSlack(w, ":warning: "+adminUsageMessage)
 			return
