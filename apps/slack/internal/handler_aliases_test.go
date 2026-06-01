@@ -41,6 +41,61 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHandleAliases_SlugOnlyBindingReportsNoAliases fences the empty-state for
+// a channel whose only bindings are auto-bound `$<slug>` aliases (no
+// user-defined alias). The install flow binds `$<slug>` as a channel alias, so
+// such a tunnel has one binding equal to its slug — that isn't a real alias,
+// so the listing must say "no aliases" rather than print a bare `$<slug>` row
+// that reads as if the slug were an alias.
+func TestHandleAliases_SlugOnlyBindingReportsNoAliases(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"ops-bastion": "r_bastion01", // alias == the tunnel's slug
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_bastion01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "No aliases are configured for this channel") {
+		t.Errorf("slug-only channel should report no aliases, got: %q", async)
+	}
+	if strings.Contains(async, "ops-bastion") {
+		t.Errorf("slug-only row should be filtered, but the slug rendered: %q", async)
+	}
+}
+
+// TestHandleAliases_DropsSlugOnlyKeepsRealAlias fences that the slug-only
+// filter is per-tunnel: a tunnel whose only binding equals its slug is
+// dropped, while a sibling tunnel with a real (non-slug) alias still lists.
+func TestHandleAliases_DropsSlugOnlyKeepsRealAlias(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"ops-bastion": "r_bastion01", // == slug "ops-bastion" → dropped
+		"web":         "r_frontend1", // real alias; slug is "frontend" → kept
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_bastion01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion"},
+			{testKeyResourceID: "r_frontend1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "frontend"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$frontend` → `$web`") {
+		t.Errorf("real-alias row missing or mis-rendered: %q", async)
+	}
+	if strings.Contains(async, "ops-bastion") {
+		t.Errorf("slug-only row should be dropped: %q", async)
+	}
+}
+
 // TestHandleAliases_TunnelAliasShowsSlug fences the resource_id→slug
 // rendering for tunnel-backed aliases: the workspace list resolves the
 // tunnel's `$<slug>` (the same token /qurl list renders and /qurl get

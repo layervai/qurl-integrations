@@ -12,6 +12,13 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// noChannelAliasesMessage is the /qurl aliases empty state. It fires both
+// when the channel has no policy entries at all and when every entry is only
+// a tunnel's auto-bound `$<slug>` (no user-defined alias) — in both cases the
+// channel has no real alias worth listing, so saying "no aliases" is clearer
+// than printing bare `$<slug>` rows that read as if the slug were an alias.
+const noChannelAliasesMessage = ":mag: No aliases are configured for this channel yet. Run `/qurl-admin set-alias $<alias> $<id>` to add one."
+
 // handleAliases implements `/qurl aliases`. Lists the aliases bound
 // to the current channel via a single GetItem on channel_policies
 // (PK=team, SK=channel — point read, no pagination concerns).
@@ -76,7 +83,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 	if len(entries) == 0 {
-		_ = h.postResponse(log, responseURL, ":mag: No aliases are configured for this channel yet. Run `/qurl-admin set-alias $<alias> $<id>` to add one.")
+		_ = h.postResponse(log, responseURL, noChannelAliasesMessage)
 		return
 	}
 
@@ -114,9 +121,25 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 				unresolved++
 			}
 		}
+		// Skip a tunnel whose only channel alias is its own slug. The install
+		// flow auto-binds `$<slug>` as a channel alias, so every installed
+		// tunnel carries one entry equal to its slug — but the slug is the
+		// tunnel's ID, not a user-defined alias, and listing it here made it
+		// ambiguous whether the token was an ID or an alias. A resource-less
+		// or slug-unresolved group (slug == "") has no slug to exclude, so any
+		// alias it carries still counts. When this filters every group, the
+		// len(lines)==0 guard below renders the no-aliases empty state.
+		if !hasNonSlugAlias(r.Slug, groups[i].aliases) {
+			continue
+		}
 		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases))
 	}
 	sort.Strings(lines)
+
+	if len(lines) == 0 {
+		_ = h.postResponse(log, responseURL, noChannelAliasesMessage)
+		return
+	}
 
 	if hasMore && unresolved > 0 {
 		// A bound tunnel resolved to alias-only AND the page reports more
@@ -178,6 +201,21 @@ func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Clie
 		out[page.Resources[i].ResourceID] = page.Resources[i]
 	}
 	return out, page.HasMore
+}
+
+// hasNonSlugAlias reports whether a group carries a channel alias other than
+// the tunnel's own slug. The install flow auto-binds `$<slug>` as a channel
+// alias, so a tunnel with no user-defined alias still has one entry equal to
+// its slug; that isn't a real alias and shouldn't list under /qurl aliases.
+// A resource-less or slug-unresolved group (slug == "") has no slug to
+// exclude, so any alias it carries counts.
+func hasNonSlugAlias(slug string, aliases []string) bool {
+	for _, a := range aliases {
+		if a != slug {
+			return true
+		}
+	}
+	return false
 }
 
 // aliasGroup collects every channel alias bound to one resource, so

@@ -86,6 +86,32 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 	}
 }
 
+// TestHandleList_ExcludesRevokedTunnels fences that /qurl list drops revoked
+// tunnels. The list endpoint is status-visible for active AND revoked rows (a
+// revoke is a soft delete; the row is hard-deleted only after a retention
+// window), so without the filter a revoked tunnel keeps showing — with a
+// "Create qURL" button that can't mint against it.
+func TestHandleList_ExcludesRevokedTunnels(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: "r_revoked_01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dead-db", testKeyStatus: client.StatusRevoked},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$prod-db`") {
+		t.Errorf("active tunnel missing from list: %q", async)
+	}
+	if strings.Contains(async, "dead-db") {
+		t.Errorf("revoked tunnel should be filtered from /qurl list: %q", async)
+	}
+}
+
 // TestHandleList_ShowsBoundAliases fences the slug + bound-alias
 // rendering: a tunnel with several channel `$alias` shortcuts shows the
 // slug as the token and the OTHER aliases as "(aliases: …)", sorted, with
