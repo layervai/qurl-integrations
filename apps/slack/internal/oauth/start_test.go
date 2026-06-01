@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -27,7 +28,7 @@ func TestStartHappyPath(t *testing.T) {
 		t.Fatalf("MintState: %v", err)
 	}
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 
@@ -58,6 +59,12 @@ func TestStartHappyPath(t *testing.T) {
 	}
 	if q.Get("prompt") != "consent" {
 		t.Errorf("prompt: got %q want %q (rotation forces consent)", q.Get("prompt"), "consent")
+	}
+	if q.Get("connection") != "" {
+		t.Errorf("connection: got %q want empty for legacy setup", q.Get("connection"))
+	}
+	if q.Get("login_hint") != "" {
+		t.Errorf("login_hint: got %q want empty for legacy setup", q.Get("login_hint"))
 	}
 	if !strings.Contains(q.Get("scope"), "qurl:write") || !strings.Contains(q.Get("scope"), "qurl:read") {
 		t.Errorf("scope missing qurl:write/read: %q", q.Get("scope"))
@@ -100,6 +107,62 @@ func TestStartHappyPath(t *testing.T) {
 	}
 }
 
+func TestStartEmailSetupUsesPasswordlessConnectionHint(t *testing.T) {
+	cfg := newStartCfg()
+	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "Admin@Example.COM", cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStateWithEmail: %v", err)
+	}
+	h := Start(cfg)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	q := u.Query()
+	if q.Get("connection") != "email" {
+		t.Errorf("connection: got %q want email", q.Get("connection"))
+	}
+	if q.Get("login_hint") != "admin@example.com" {
+		t.Errorf("login_hint: got %q want normalized email", q.Get("login_hint"))
+	}
+	if q.Get("state") != state {
+		t.Errorf("state: got %q want %q", q.Get("state"), state)
+	}
+}
+
+func TestStartEmailSetupUsesConfiguredPasswordlessConnection(t *testing.T) {
+	cfg := newStartCfg()
+	cfg.Auth0EmailConnection = "passwordless-email"
+	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStateWithEmail: %v", err)
+	}
+	h := Start(cfg)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := u.Query().Get("connection"); got != "passwordless-email" {
+		t.Errorf("connection: got %q want configured connection", got)
+	}
+}
+
 // TestAuthorizeURLAndAPIKeyScopesAgree locks the contract that the
 // scopes requested at /authorize match the scopes carried by the
 // downstream qurl-service mint. A drift here would surface as an
@@ -108,7 +171,7 @@ func TestStartHappyPath(t *testing.T) {
 // expected.
 func TestAuthorizeURLAndAPIKeyScopesAgree(t *testing.T) {
 	cfg := newStartCfg()
-	authURL := authorizeURL(cfg, "irrelevant")
+	authURL := authorizeURL(cfg, "irrelevant", VerifiedState{})
 	u, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatalf("parse authorize URL: %v", err)

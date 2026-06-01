@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -34,6 +36,8 @@ var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
 // limiting distinctly so the slash-command follow-up can give the operator a
 // retry-shaped action instead of a generic setup failure.
 var ErrSlackRateLimited = errors.New("slack views.open rate limited")
+
+var errSetupUsage = errors.New("setup usage")
 
 // SlackRateLimitError preserves Slack's Retry-After hint while still matching
 // [ErrSlackRateLimited] through errors.Is. OpenView implementations return it
@@ -100,6 +104,7 @@ const ackBusy = ":warning: Slack bot is busy — please retry in a moment."
 const (
 	headerSlackSignature = "X-Slack-Signature"
 	headerSlackTimestamp = "X-Slack-Request-Timestamp"
+	setupVerb            = "setup"
 )
 
 const (
@@ -805,8 +810,15 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 
 	command := values.Get(fieldCommand)
 	text := strings.TrimSpace(values.Get(fieldText))
+	// Parse before dispatch so setup emails are redacted even when a user types
+	// the setup verb on the admin slash-command surface.
+	setupEmail, setupMatched, setupErr := parseSetupSubcommand(text)
 
-	slog.Info("slash command", "command", command, "text", text)
+	logText := text
+	if setupMatched && text != setupVerb {
+		logText = "setup <email>"
+	}
+	slog.Info("slash command", "command", command, "text", logText)
 
 	// Normalize an empty command (malformed/synthetic payload) to the prod
 	// user literal once, here at the HTTP entry, so dispatch, help, and the
@@ -843,7 +855,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// command from a valid non-prod env command (`/qurl-sandbox`)
 		// without a registry, so this is left as-is; it's unreachable given
 		// Slack only dispatches registered commands.
-		h.dispatchUserCommand(w, command, text, values)
+		h.dispatchUserCommand(w, command, text, values, setupEmail, setupMatched, setupErr)
 	}
 }
 
@@ -851,14 +863,22 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // list, aliases, help. Admin verbs typed on `/qurl` get a redirect to
 // `/qurl-admin` instead of the generic unknown-subcommand reply, so an
 // admin who fat-fingers the command gets a direct correction.
-func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values) {
+func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values, setupEmail string, setupMatched bool, setupErr error) {
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, h.userHelpMessage(command))
-	case text == "setup":
+	case setupMatched:
+		if setupErr != nil {
+			if errors.Is(setupErr, errSetupUsage) {
+				respondSlack(w, fmt.Sprintf("Usage: `%s setup` or `%s setup <email>`.", command, command))
+				return
+			}
+			respondSlack(w, fmt.Sprintf("That doesn't look like a valid email address. Use `%s setup <email>` or `%s setup`.", command, command))
+			return
+		}
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
 		// see handleSetup for why it lives on the open user surface.
-		h.handleSetup(w, values)
+		h.handleSetup(w, values, setupEmail)
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel
@@ -969,6 +989,42 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	}
 }
 
+func parseSetupSubcommand(text string) (email string, matched bool, err error) {
+	rest, matched := setupVerbRest(text)
+	if !matched {
+		return "", false, nil
+	}
+	if rest == "" {
+		return "", true, nil
+	}
+	parts := strings.Fields(rest)
+	if len(parts) != 1 {
+		return "", true, errSetupUsage
+	}
+	// Normalize here for user-facing copy. MintStateWithEmail validates again
+	// at the state boundary so callers outside this handler cannot bypass it.
+	email, err = oauth.NormalizeEmail(parts[0])
+	if err != nil {
+		return "", true, err
+	}
+	return email, true, nil
+}
+
+func setupVerbRest(text string) (rest string, matched bool) {
+	if text == setupVerb {
+		return "", true
+	}
+	suffix, ok := strings.CutPrefix(text, setupVerb)
+	if !ok || suffix == "" {
+		return text, false
+	}
+	r, _ := utf8.DecodeRuneInString(suffix)
+	if !unicode.IsSpace(r) {
+		return text, false
+	}
+	return strings.TrimSpace(suffix), true
+}
+
 // handleSetup mints a workspace-bound state token and replies with the
 // /oauth/qurl/start URL. team_id + user_id come from the Slack form
 // payload, which has already passed signing-secret verification — that
@@ -1002,7 +1058,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 // fresh install. That is a separate short-circuit from the oauthSetup==nil
 // check below, which is the branch that returns "qURL OAuth is not
 // configured" (and which fires first, before AdminStore is consulted).
-func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEmail string) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
 		return
@@ -1082,13 +1138,25 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
+	var (
+		state string
+		err   error
+	)
+	if setupEmail != "" {
+		state, err = oauth.MintStateWithEmail(h.oauthSetup.StateSecret, teamID, userID, setupEmail, h.now())
+	} else {
+		state, err = oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
+	}
 	if err != nil {
 		slog.Error("/qurl setup: MintState failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
+	if setupEmail != "" {
+		respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will email a one-time code after you continue. This link is valid for 5 minutes and only works for you.")
+		return
+	}
 	respondSlack(w, "Click to connect qURL to your Slack workspace: <"+setupURL+"|Connect qURL>\n\nThis link is valid for 5 minutes and only works for you.")
 }
 
@@ -1143,7 +1211,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	// the sandbox/no-DDB path the owner gate in handleSetup is skipped, so
 	// re-running /setup just mints again. Append the owner parenthetical
 	// only there so the help text matches the deployment's actual behavior.
-	setupLine := "• `/qurl setup` — Connect qURL to your Slack workspace"
+	setupLine := "• `/qurl setup [email]` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
 		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
 	}

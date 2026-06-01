@@ -34,6 +34,30 @@ func TestMintAndVerifyStateRoundTrip(t *testing.T) {
 	if got.UserID != testStateUserID {
 		t.Errorf("userID round-trip: got %q want %q", got.UserID, testStateUserID)
 	}
+	if got.Email != "" {
+		t.Errorf("legacy state email: got %q want empty", got.Email)
+	}
+}
+
+func TestMintAndVerifyStateWithEmailRoundTrip(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	tok, err := MintStateWithEmail(testSecret, testStateTeamID, testStateUserID, "Admin+Setup@Example.COM", now)
+	if err != nil {
+		t.Fatalf("MintStateWithEmail: %v", err)
+	}
+	got, err := VerifyState(testSecret, tok, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("VerifyState: %v", err)
+	}
+	if got.TeamID != testStateTeamID {
+		t.Errorf("teamID round-trip: got %q want %q", got.TeamID, testStateTeamID)
+	}
+	if got.UserID != testStateUserID {
+		t.Errorf("userID round-trip: got %q want %q", got.UserID, testStateUserID)
+	}
+	if got.Email != "admin+setup@example.com" {
+		t.Errorf("email round-trip: got %q want normalized email", got.Email)
+	}
 }
 
 func TestVerifyStateRejectsExpired(t *testing.T) {
@@ -106,6 +130,9 @@ func TestMintStateRejectsSeparatorInIDs(t *testing.T) {
 	}
 	if _, err := MintState(testSecret, testStateTeamID, "U|EVIL", now); !errors.Is(err, errStateIDHasSeparator) {
 		t.Errorf("userID with separator: want errStateIDHasSeparator, got %v", err)
+	}
+	if _, err := MintStateWithEmail(testSecret, testStateTeamID, testStateUserID, "admin|evil@example.com", now); !errors.Is(err, errStateIDHasSeparator) {
+		t.Errorf("email with separator: want errStateIDHasSeparator, got %v", err)
 	}
 }
 

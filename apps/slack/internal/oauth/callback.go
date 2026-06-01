@@ -191,17 +191,19 @@ type auth0TokenResponse struct {
 //  3. Verify id_token signature against Auth0 JWKS — extract `sub`
 //     (workspace OwnerID; mandatory) and `email` (best-effort for the
 //     success-page readout).
-//  4. Bind workspace_mappings via AdminStore.BindWorkspace — the
+//  4. If setup state carried an email, require the verified Auth0
+//     email claim to match it before any bind or key mint.
+//  5. Bind workspace_mappings via AdminStore.BindWorkspace — the
 //     installer becomes the first admin. A rebind conflict against a
 //     different admin (or unverified) renders the rebind-refused page
 //     and short-circuits BEFORE we touch any key state, so a refused
 //     install can't overwrite the existing admin's stored API key.
 //     Same-caller re-entry is idempotent success.
-//  5. POST to qurl-service /v1/api-keys to mint the workspace key.
-//  6. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
+//  6. POST to qurl-service /v1/api-keys to mint the workspace key.
+//  7. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
 //     revoke on qurl-service to bound the orphan-key window.
-//  7. DM the admin (fire-and-forget; failure doesn't block the page).
-//  8. Render success HTML.
+//  8. DM the admin (fire-and-forget; failure doesn't block the page).
+//  9. Render success HTML.
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API-surface friction.
 func Callback(cfg Config) http.HandlerFunc {
@@ -238,6 +240,9 @@ func Callback(cfg Config) http.HandlerFunc {
 		}
 
 		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
+		if !checkSetupEmailMatches(w, verified, qurlEmail) {
+			return
+		}
 
 		// Bind BEFORE mint so a rebind-refused install can't overwrite
 		// the existing admin's encrypted qurl_api_key row with a key
@@ -273,6 +278,19 @@ func Callback(cfg Config) http.HandlerFunc {
 
 		renderSuccess(w, verified.TeamID, keyPrefix, qurlEmail)
 	}
+}
+
+func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlEmail string) bool {
+	if verified.Email == "" {
+		return true
+	}
+	normalized, err := NormalizeEmail(qurlEmail)
+	if err != nil || normalized != verified.Email {
+		slog.Warn("oauth/callback email mismatch for setup flow")
+		http.Error(w, "authenticated email did not match setup email — run /qurl setup again", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // validateCallbackRequest verifies the request envelope: method, query
@@ -347,10 +365,11 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 }
 
 // verifyIDTokenClaims extracts email + sub from the id_token. Email
-// is best-effort (failure logged, returned ""); sub is mandatory for
-// the downstream bind (failure returned as "" so checkBindAllowed
-// can fail-closed). Both verifies are skipped cleanly when idToken
-// is empty or the verifier is unwired.
+// is best-effort for legacy setup (failure logged, returned ""), but
+// becomes mandatory when the signed setup state carries an email; sub
+// is mandatory for the downstream bind (failure returned as "" so
+// checkBindAllowed can fail-closed). Both verifies are skipped cleanly
+// when idToken is empty or the verifier is unwired.
 //
 // In production the verifier is non-nil by construction —
 // cmd/main.go's buildOAuthConfig fails-fast at boot when AdminStore
