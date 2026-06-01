@@ -19,7 +19,7 @@ func NormalizeEmail(raw string) (string, error) {
 	if email == "" || len(email) > maxSetupEmailBytes {
 		return "", errEmailInvalid
 	}
-	if strings.ContainsAny(email, " \t\r\n<>") || strings.ContainsRune(email, stateSeparatorRune) {
+	if strings.ContainsAny(email, " \t\r\n<>`") || strings.ContainsRune(email, stateSeparatorRune) {
 		return "", errEmailInvalid
 	}
 	addr, err := mail.ParseAddress(email)

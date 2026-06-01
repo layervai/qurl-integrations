@@ -16,6 +16,7 @@ func TestNormalizeEmail(t *testing.T) {
 		{name: "display name rejected", raw: "Admin <admin@example.com>", wantErr: true},
 		{name: "angle address rejected", raw: "<admin@example.com>", wantErr: true},
 		{name: "pipe rejected", raw: "admin|evil@example.com", wantErr: true},
+		{name: "backtick rejected", raw: "admin`setup@example.com", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

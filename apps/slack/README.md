@@ -59,7 +59,10 @@ modifiers enabled by the current bot deployment.
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying
   an email address on setup stores it in signed state, sends Auth0
   `connection=email` + `login_hint`, and requires the verified Auth0
-  email claim to match before any workspace bind or key mint. Keys are
+  email claim to match before any workspace bind or key mint. Tenants using
+  `/qurl setup <email>` need an Auth0 passwordless email connection named
+  `email`; the callback's security gate is the verified email claim, not the
+  connection hint by itself. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
 - **Slack app install:** Customer workspaces install qURL through

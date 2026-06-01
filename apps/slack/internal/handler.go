@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -762,8 +764,13 @@ func slashVerb(text string, verbs ...string) (matched bool, rest string) {
 		if text == verb {
 			return true, ""
 		}
-		if strings.HasPrefix(text, verb+" ") {
-			return true, strings.TrimSpace(strings.TrimPrefix(text, verb))
+		suffix, ok := strings.CutPrefix(text, verb)
+		if !ok || suffix == "" {
+			continue
+		}
+		r, _ := utf8.DecodeRuneInString(suffix)
+		if unicode.IsSpace(r) {
+			return true, strings.TrimSpace(suffix)
 		}
 	}
 	return false, text
@@ -865,7 +872,11 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		respondSlack(w, h.userHelpMessage(command))
 	case setupMatched:
 		if setupErr != nil {
-			respondSlack(w, fmt.Sprintf("Usage: `%s setup` or `%s setup <email>`.", command, command))
+			if errors.Is(setupErr, errSetupUsage) {
+				respondSlack(w, fmt.Sprintf("Usage: `%s setup` or `%s setup <email>`.", command, command))
+				return
+			}
+			respondSlack(w, fmt.Sprintf("That doesn't look like a valid email address. Use `%s setup <email>` or `%s setup`.", command, command))
 			return
 		}
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
@@ -993,6 +1004,8 @@ func parseSetupSubcommand(text string) (email string, matched bool, err error) {
 	if len(parts) != 1 {
 		return "", true, errSetupUsage
 	}
+	// Normalize here for user-facing copy. MintStateWithEmail validates again
+	// at the state boundary so callers outside this handler cannot bypass it.
 	email, err = oauth.NormalizeEmail(parts[0])
 	if err != nil {
 		return "", true, err

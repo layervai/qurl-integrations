@@ -814,7 +814,7 @@ func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T
 
 	body := url.Values{
 		"command": {commandUser},
-		"text":    {"setup Admin+Setup@Example.COM"},
+		"text":    {"setup\tAdmin+Setup@Example.COM"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},
 	}.Encode()
@@ -879,8 +879,8 @@ func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "Usage: `/qurl setup`") {
-		t.Errorf("expected setup usage reply, got %q", result["text"])
+	if !strings.Contains(result["text"], "doesn't look like a valid email") {
+		t.Errorf("expected invalid-email reply, got %q", result["text"])
 	}
 }
 
