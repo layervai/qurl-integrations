@@ -195,6 +195,18 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 	})
 }
 
+func TestFormatTunnelEditSummary_EscapesToken(t *testing.T) {
+	// A token can be an upstream slug that never passed the alias charset fence,
+	// so a backtick must be escaped or it breaks the code span (defense-in-depth).
+	out := formatTunnelEditSummary("ev`il", nil, &aliasReconcileResult{})
+	if strings.Contains(out, "ev`il") {
+		t.Errorf("raw backtick token leaked into the summary: %q", out)
+	}
+	if !strings.Contains(out, "evˊil") {
+		t.Errorf("expected the token's backtick escaped to ˊ, got: %q", out)
+	}
+}
+
 // --- list render ---------------------------------------------------------
 
 // editButtonValues collects the value of every Edit button across the list's
@@ -860,6 +872,72 @@ func TestHandleTunnelEdit_NamePatchFailureLeavesAliasesUntouched(t *testing.T) {
 	// The old alias must still be bound — the reconcile never ran.
 	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, testEditOldAlias); !found || rid != testEditResourceID {
 		t.Errorf("alias must be untouched after a failed name PATCH: rid=%q found=%v", rid, found)
+	}
+}
+
+// TestHandleTunnelEdit_ReplayCrossChecks fences the modal-replay access
+// boundary: a view_submission whose Slack-signed envelope (team/user) doesn't
+// match the private_metadata — or whose metadata is unparseable/incomplete — is
+// rejected with an error view before any mutation. Mirrors the install modal's
+// posture.
+func TestHandleTunnelEdit_ReplayCrossChecks(t *testing.T) {
+	baseMeta := func() TunnelEditModalMetadata {
+		return TunnelEditModalMetadata{
+			TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+			ResponseURL: "https://hooks.slack.com/x", ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		}
+	}
+	cases := []struct {
+		name            string
+		rawMetadata     string // used verbatim when non-empty (e.g. unparseable)
+		mutate          func(*TunnelEditModalMetadata)
+		payloadTeamID   string
+		payloadUserID   string
+		wantErrContains string
+	}{
+		{name: "unparseable metadata", rawMetadata: "not json", payloadTeamID: testAdminTeamID, payloadUserID: testAdminUserID, wantErrContains: "Could not verify this dialog"},
+		{name: "incomplete metadata", mutate: func(m *TunnelEditModalMetadata) { m.ResourceID = "" }, payloadTeamID: testAdminTeamID, payloadUserID: testAdminUserID, wantErrContains: "Could not verify this dialog"},
+		{name: "team mismatch", payloadTeamID: "T_other", payloadUserID: testAdminUserID, wantErrContains: "different workspace"},
+		{name: "user mismatch", payloadTeamID: testAdminTeamID, payloadUserID: "U_other", wantErrContains: "Only the admin who opened"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			ts.addCustomer(http.MethodPatch, "/v1/resources/"+testEditResourceID, func(http.ResponseWriter, *http.Request) {
+				t.Errorf("PATCH reached despite a failed replay cross-check")
+			})
+			h := newAdminTestHandler(t, ts)
+			h.SetAliasStore(h.cfg.AdminStore)
+			h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+			pm := tc.rawMetadata
+			if pm == "" {
+				m := baseMeta()
+				if tc.mutate != nil {
+					tc.mutate(&m)
+				}
+				b, err := json.Marshal(m)
+				if err != nil {
+					t.Fatalf("marshal meta: %v", err)
+				}
+				pm = string(b)
+			}
+			body := viewSubmissionBody(t, "V_replay", callbackIDTunnelEdit, pm, tc.payloadTeamID, tc.payloadUserID,
+				map[string]map[string]interactionStateValue{
+					tunnelEditBlockDisplayName: {tunnelEditActionDisplayName: {Value: "Renamed"}},
+					tunnelEditBlockAliases:     {tunnelEditActionAliases: {Value: ""}},
+				})
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+			h.Wait()
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), tc.wantErrContains) {
+				t.Errorf("response missing %q: %s", tc.wantErrContains, w.Body.String())
+			}
+		})
 	}
 }
 

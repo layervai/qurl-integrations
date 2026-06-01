@@ -392,11 +392,12 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 }
 
 // formatTunnelEditSummary renders the admin-facing ephemeral summarizing an
-// edit. Aliases are shown as `$<alias>` code spans; the token is echoed as the
-// tunnel's id. Everything interpolated here is charset-validated (token/alias)
-// or char-fenced (display name handled upstream), so it's safe in mrkdwn.
+// edit. Aliases are shown as `$<alias>` code spans (charset-validated, so
+// backtick-free); the token is the tunnel's id and CAN be an upstream slug that
+// never passed the alias charset fence, so it's escaped for the code span as
+// defense-in-depth — same posture as the modal's tunnelEditTokenLabel.
 func formatTunnelEditSummary(token string, changes []string, res *aliasReconcileResult) string {
-	lines := []string{fmt.Sprintf("✅ Updated tunnel `$%s`.", token)}
+	lines := []string{fmt.Sprintf("✅ Updated tunnel `$%s`.", escapeMrkdwnCode(token))}
 	lines = append(lines, changes...)
 	if len(res.added) > 0 {
 		lines = append(lines, "Added alias(es): "+joinAliasCodes(res.added))
