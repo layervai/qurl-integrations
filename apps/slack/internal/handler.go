@@ -25,7 +25,7 @@ import (
 
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
-	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup` to connect it."
+	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
 )
 
 // ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
@@ -870,10 +870,10 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 	case setupMatched:
 		if setupErr != nil {
 			if errors.Is(setupErr, errSetupUsage) {
-				respondSlack(w, fmt.Sprintf("Usage: `%s setup` or `%s setup <email>`.", command, command))
+				respondSlack(w, fmt.Sprintf("Usage: `%s setup <email>`.", command))
 				return
 			}
-			respondSlack(w, fmt.Sprintf("That doesn't look like a valid email address. Use `%s setup <email>` or `%s setup`.", command, command))
+			respondSlack(w, fmt.Sprintf("That doesn't look like a valid email address. Use `%s setup <email>`.", command))
 			return
 		}
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
@@ -982,7 +982,11 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// A user verb typed on the admin command — redirect to the user one.
 		// Echoed text has backticks stripped (see the /qurl-side redirect).
 		userCmd := userCommandName(command)
-		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), userCmd, userCmd, echoText(text), userCmd))
+		suggestedText := echoText(text)
+		if text == setupVerb {
+			suggestedText = setupVerb + " <email>"
+		}
+		respondSlack(w, fmt.Sprintf("`%s` belongs on `%s`. Use `%s %s` instead, or run `%s help`.", echoText(firstWord(text)), userCmd, userCmd, suggestedText, userCmd))
 	default:
 		slog.Info("unknown admin slash subcommand", "command", command, "text", text)
 		respondSlack(w, fmt.Sprintf("Unknown admin subcommand: `%s`. Try `%s help`.", echoText(text), command))
@@ -994,9 +998,8 @@ func parseSetupSubcommand(text string) (email string, matched bool, err error) {
 	if !matched {
 		return "", false, nil
 	}
-	if rest == "" {
-		return "", true, nil
-	}
+	// strings.Fields("") returns an empty slice, so the bare-setup case folds
+	// into the len != 1 check — same errSetupUsage either way.
 	parts := strings.Fields(rest)
 	if len(parts) != 1 {
 		return "", true, errSetupUsage
@@ -1124,7 +1127,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 			// the mention surface.
 			if looksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
-				respondSlack(w, fmt.Sprintf("`/qurl setup` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
+				respondSlack(w, fmt.Sprintf("`/qurl setup <email>` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
 				return
 			}
 			// Shape-bad owner_id → a pre-pivot Auth0 sub left behind by
@@ -1138,26 +1141,14 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	var (
-		state string
-		err   error
-	)
-	if setupEmail != "" {
-		state, err = oauth.MintStateWithEmail(h.oauthSetup.StateSecret, teamID, userID, setupEmail, h.now())
-	} else {
-		state, err = oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
-	}
+	state, err := oauth.MintStateWithEmail(h.oauthSetup.StateSecret, teamID, userID, setupEmail, h.now())
 	if err != nil {
-		slog.Error("/qurl setup: MintState failed", "error", err)
+		slog.Error("/qurl setup: MintStateWithEmail failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
-	if setupEmail != "" {
-		respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will email a one-time code after you continue. This link is valid for 5 minutes and only works for you.")
-		return
-	}
-	respondSlack(w, "Click to connect qURL to your Slack workspace: <"+setupURL+"|Connect qURL>\n\nThis link is valid for 5 minutes and only works for you.")
+	respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will email a one-time code after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
 // authenticatedClient resolves an API key for the team and returns a configured client.
@@ -1211,7 +1202,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	// the sandbox/no-DDB path the owner gate in handleSetup is skipped, so
 	// re-running /setup just mints again. Append the owner parenthetical
 	// only there so the help text matches the deployment's actual behavior.
-	setupLine := "• `/qurl setup [email]` — Connect qURL to your Slack workspace"
+	setupLine := "• `/qurl setup <email>` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
 		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
 	}

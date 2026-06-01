@@ -139,9 +139,10 @@ func mintState(secret []byte, teamID, userID, email string, now time.Time) (stri
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// MintState produces a fresh state token binding (teamID, userID) under
-// secret. Exported so the slash-command handler in package internal can
-// mint state from a Slack-signature-verified /qurl setup dispatch.
+// MintState produces a legacy no-email state token binding (teamID, userID)
+// under secret. New /qurl setup dispatches require an email address and call
+// MintStateWithEmail; this helper remains for tests that exercise the shared
+// verifier and old no-email setup links minted before that requirement.
 //
 // Returns errStateShortKey if secret is shorter than StateMinSecret.
 func MintState(secret []byte, teamID, userID string, now time.Time) (string, error) {

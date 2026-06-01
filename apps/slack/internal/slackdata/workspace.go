@@ -51,7 +51,7 @@ const (
 	ErrCodeWorkspaceBindUnverified = "workspace_bind_unverified"
 	// ErrCodeWorkspaceNotBound is surfaced by AddAdmin/RemoveAdmin/
 	// ListAdmins when the (team_id) row hasn't been claimed yet —
-	// the handler renders "run `/qurl setup` first" copy.
+	// the handler renders "run `/qurl setup <email>` first" copy.
 	ErrCodeWorkspaceNotBound = "workspace_not_bound"
 	// ErrCodeAdminAlreadyExists is surfaced by AddAdmin when the
 	// target user is already on the admin set — idempotent no-op
