@@ -20,6 +20,10 @@ import (
 // user learns the grammar rather than seeing the terse sentinel. "qURL bot
 // admin" (not "workspace admin") is deliberate: membership is the bot's own
 // admin set, not Slack's workspace-admin role.
+//
+// Keep this action roster in sync with the `/qurl-admin help` listing in
+// handler.go — the two are maintained independently and would otherwise drift
+// when an admin action is added or renamed.
 const adminUsageMessage = "Usage:\n• `/qurl-admin admin add @user` — promote a Slack user to qURL bot admin\n• `/qurl-admin admin remove @user` — demote a qURL bot admin\n• `/qurl-admin admin list` — show who connected qURL (the owner) and current bot admins\n• `/qurl-admin admin revoke <qurl_id>` — revoke a single qURL"
 
 // handleAdmin parses the `admin <verb> ...` form via the shared parser
