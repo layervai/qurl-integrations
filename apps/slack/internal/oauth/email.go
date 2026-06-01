@@ -33,5 +33,7 @@ func NormalizeEmail(raw string) (string, error) {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", errEmailInvalid
 	}
+	// Auth0 and the setup flow treat addresses case-insensitively; normalize the
+	// whole address so command input and the verified Auth0 claim compare the same.
 	return strings.ToLower(addr.Address), nil
 }

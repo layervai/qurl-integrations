@@ -48,19 +48,21 @@ import (
 // workspace_state plumbing. Acceptable for v1; revisit if install-flow
 // logs show legitimate replay.
 const (
-	stateMaxAge         = 5 * time.Minute
-	stateLegacyParts    = 5
-	stateEmailParts     = 6
-	stateNonceLen       = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
-	StateMinSecret      = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
-	stateFutureSkew     = 30 * time.Second
-	stateSeparator      = "|"
-	stateSeparatorB     = byte('|')
-	stateSeparatorRune  = '|'
-	stateUserIDIndex    = 1
-	stateTeamIDIndex    = 0
-	stateNonceIndex     = 2
-	stateTSIndex        = 3
+	stateMaxAge        = 5 * time.Minute
+	stateLegacyParts   = 5
+	stateEmailParts    = 6
+	stateNonceLen      = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
+	StateMinSecret     = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
+	stateFutureSkew    = 30 * time.Second
+	stateSeparator     = "|"
+	stateSeparatorB    = byte('|')
+	stateSeparatorRune = '|'
+	stateUserIDIndex   = 1
+	stateTeamIDIndex   = 0
+	stateNonceIndex    = 2
+	stateTSIndex       = 3
+	// Slot 4 is the legacy signature; email states put the email there and
+	// shift the signature to slot 5.
 	stateLegacySigIndex = 4
 	stateEmailIndex     = 4
 	stateEmailSigIndex  = 5
