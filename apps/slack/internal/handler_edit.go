@@ -82,6 +82,7 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 		ResourceID:  snapshot.ResourceID,
 		Token:       snapshot.Token,
 		DisplayName: snapshot.DisplayName,
+		Aliases:     snapshot.Aliases,
 	}
 	view, err := TunnelEditModal(&meta, snapshot.DisplayName, snapshot.Aliases)
 	if err != nil {
@@ -138,7 +139,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		return
 	}
 
-	displayName, nameChanged, aliases, fieldErrors := parseTunnelEditModalArgs(payload.View.State.Values, meta.Token, meta.DisplayName)
+	displayName, nameChanged, aliases, fieldErrors := parseTunnelEditModalArgs(payload.View.State.Values, &meta)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)
 		return
@@ -193,11 +194,11 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 // untouched bad name would otherwise be un-saveable; (2) normalizing both
 // sides means surrounding whitespace/quotes on the stored value don't register
 // as a change and fire a spurious PATCH on an alias-only edit.
-func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue, token, currentName string) (displayName string, nameChanged bool, aliases []string, fieldErrors map[string]string) {
+func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue, meta *TunnelEditModalMetadata) (displayName string, nameChanged bool, aliases []string, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
 	rawName := normalizeDisplayNameInput(interactionStateText(values, tunnelEditBlockDisplayName, tunnelEditActionDisplayName))
-	nameChanged = rawName != normalizeDisplayNameInput(currentName)
+	nameChanged = rawName != normalizeDisplayNameInput(meta.DisplayName)
 	if nameChanged {
 		if rawName == "" {
 			fieldErrors[tunnelEditBlockDisplayName] = "Enter a display name."
@@ -206,7 +207,7 @@ func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue
 		}
 	}
 
-	aliases, aliasMsg := parseEditAliasLines(interactionStateText(values, tunnelEditBlockAliases, tunnelEditActionAliases), token)
+	aliases, aliasMsg := parseEditAliasLines(interactionStateText(values, tunnelEditBlockAliases, tunnelEditActionAliases), meta.Token, meta.Aliases)
 	if aliasMsg != "" {
 		fieldErrors[tunnelEditBlockAliases] = aliasMsg
 	}
@@ -221,9 +222,10 @@ func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue
 // validated, deduped, order-preserving set of channel aliases (sigil-free). A
 // leading `$` is optional per line (matching how the field pre-fills). The
 // primary token is silently dropped if typed — the tunnel's own name is
-// managed automatically, not through this field. Returns the first invalid
-// line's reason as userMsg.
-func parseEditAliasLines(raw, token string) (aliases []string, userMsg string) {
+// managed automatically, not through this field. prefilled is the set the modal
+// opened with; only NEWLY-added aliases count against listEditMaxAliases.
+// Returns the first invalid line's reason as userMsg.
+func parseEditAliasLines(raw, token string, prefilled []string) (aliases []string, userMsg string) {
 	seen := make(map[string]struct{})
 	for _, line := range strings.Split(raw, "\n") {
 		tok := strings.TrimSpace(line)
@@ -246,8 +248,24 @@ func parseEditAliasLines(raw, token string) (aliases []string, userMsg string) {
 		seen[alias] = struct{}{}
 		aliases = append(aliases, alias)
 	}
-	if len(aliases) > listEditMaxAliases {
-		return nil, fmt.Sprintf("Too many aliases (max %d). Remove some lines.", listEditMaxAliases)
+	// Cap only NEWLY-added aliases (those not already pre-filled), so a tunnel
+	// that already carries more than listEditMaxAliases stays editable for a
+	// name-only or removal-only change — the admin isn't forced to delete lines
+	// they never added. New binds are what this bounds; removals are unbinds of
+	// the pre-filled set, itself bounded by the button-value cap that gated the
+	// Edit affordance in the first place.
+	was := make(map[string]struct{}, len(prefilled))
+	for _, a := range prefilled {
+		was[a] = struct{}{}
+	}
+	added := 0
+	for _, a := range aliases {
+		if _, ok := was[a]; !ok {
+			added++
+		}
+	}
+	if added > listEditMaxAliases {
+		return nil, fmt.Sprintf("Too many new aliases (max %d). Remove some lines.", listEditMaxAliases)
 	}
 	return aliases, ""
 }

@@ -259,6 +259,11 @@ type TunnelEditModalMetadata struct {
 	// effectively idempotent, so a late submission just re-applies the admin's
 	// intent.
 	DisplayName string `json:"display_name,omitempty"`
+	// Aliases is the extra-alias set (sigil-free, token excluded) the modal was
+	// pre-filled with. The submit handler caps only NEWLY-added aliases against
+	// it, so a tunnel that already carries more than listEditMaxAliases aliases
+	// stays editable for a name-only or removal-only change.
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.

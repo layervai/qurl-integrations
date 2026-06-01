@@ -61,8 +61,24 @@ func TestBuildTunnelEditButtonValue(t *testing.T) {
 }
 
 func TestParseEditAliasLines(t *testing.T) {
+	// aliasLines builds n distinct `$alias-…` lines.
+	aliasLines := func(n int) []string {
+		out := make([]string, n)
+		for i := 0; i < n; i++ {
+			out[i] = fmt.Sprintf("$alias-%03d-%s", i, strings.Repeat("z", 10))
+		}
+		return out
+	}
+	sigilless := func(lines []string) []string {
+		out := make([]string, len(lines))
+		for i, l := range lines {
+			out[i] = strings.TrimPrefix(l, "$")
+		}
+		return out
+	}
+
 	t.Run("happy with optional sigil, dedup, token excluded", func(t *testing.T) {
-		got, msg := parseEditAliasLines("$primary\nstaging\n\n$primary\n"+testEditToken, testEditToken)
+		got, msg := parseEditAliasLines("$primary\nstaging\n\n$primary\n"+testEditToken, testEditToken, nil)
 		if msg != "" {
 			t.Fatalf("unexpected rejection: %s", msg)
 		}
@@ -71,20 +87,37 @@ func TestParseEditAliasLines(t *testing.T) {
 		}
 	})
 	t.Run("invalid alias rejected", func(t *testing.T) {
-		if _, msg := parseEditAliasLines("$Bad_Alias", testEditToken); msg == "" {
+		if _, msg := parseEditAliasLines("$Bad_Alias", testEditToken, nil); msg == "" {
 			t.Error("expected rejection for an out-of-charset alias")
 		}
 	})
-	t.Run("too many aliases rejected", func(t *testing.T) {
-		var b strings.Builder
-		for i := 0; i < listEditMaxAliases+1; i++ {
-			b.WriteString("$alias-")
-			b.WriteByte(byte('a' + i%26))
-			b.WriteString(strings.Repeat("z", i)) // keep each distinct
-			b.WriteByte('\n')
-		}
-		if _, msg := parseEditAliasLines(b.String(), testEditToken); !strings.Contains(msg, "Too many") {
+	t.Run("too many NEW aliases rejected", func(t *testing.T) {
+		lines := aliasLines(listEditMaxAliases + 1)
+		if _, msg := parseEditAliasLines(strings.Join(lines, "\n"), testEditToken, nil); !strings.Contains(msg, "Too many") {
 			t.Errorf("expected too-many rejection, got %q", msg)
+		}
+	})
+	t.Run("untouched over-cap pre-filled set is allowed", func(t *testing.T) {
+		// A tunnel already carrying >listEditMaxAliases aliases: submitting them
+		// unchanged (a name-only edit) must NOT trip the cap.
+		lines := aliasLines(listEditMaxAliases + 5)
+		got, msg := parseEditAliasLines(strings.Join(lines, "\n"), testEditToken, sigilless(lines))
+		if msg != "" {
+			t.Fatalf("untouched over-cap pre-filled set rejected: %s", msg)
+		}
+		if len(got) != listEditMaxAliases+5 {
+			t.Errorf("alias count = %d, want %d", len(got), listEditMaxAliases+5)
+		}
+	})
+	t.Run("too many aliases ADDED on top of pre-filled rejected", func(t *testing.T) {
+		prefilled := []string{"keepa", "keepb", "keepc"} // sigil-free, already bound
+		lines := make([]string, 0, len(prefilled)+listEditMaxAliases+1)
+		for _, p := range prefilled {
+			lines = append(lines, "$"+p)
+		}
+		lines = append(lines, aliasLines(listEditMaxAliases+1)...) // distinct brand-new
+		if _, msg := parseEditAliasLines(strings.Join(lines, "\n"), testEditToken, prefilled); !strings.Contains(msg, "Too many") {
+			t.Errorf("expected too-many rejection for >cap newly-added, got %q", msg)
 		}
 	})
 }
@@ -97,8 +130,13 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 		}
 	}
 
+	// meta builds modal metadata pre-filled with the given current Display Name.
+	meta := func(currentName string) *TunnelEditModalMetadata {
+		return &TunnelEditModalMetadata{Token: testEditToken, DisplayName: currentName}
+	}
+
 	t.Run("happy", func(t *testing.T) {
-		name, changed, aliases, fe := parseTunnelEditModalArgs(values("New Name", "$one\n$two"), testEditToken, testEditDisplay)
+		name, changed, aliases, fe := parseTunnelEditModalArgs(values("New Name", "$one\n$two"), meta(testEditDisplay))
 		if len(fe) != 0 {
 			t.Fatalf("unexpected field errors: %v", fe)
 		}
@@ -110,19 +148,19 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 		}
 	})
 	t.Run("empty display name is a field error when changed", func(t *testing.T) {
-		_, _, _, fe := parseTunnelEditModalArgs(values("   ", ""), testEditToken, testEditDisplay)
+		_, _, _, fe := parseTunnelEditModalArgs(values("   ", ""), meta(testEditDisplay))
 		if _, ok := fe[tunnelEditBlockDisplayName]; !ok {
 			t.Errorf("expected a display-name field error, got %v", fe)
 		}
 	})
 	t.Run("mrkdwn-injecting display name rejected when changed", func(t *testing.T) {
-		_, _, _, fe := parseTunnelEditModalArgs(values("<!channel> hi", ""), testEditToken, testEditDisplay)
+		_, _, _, fe := parseTunnelEditModalArgs(values("<!channel> hi", ""), meta(testEditDisplay))
 		if _, ok := fe[tunnelEditBlockDisplayName]; !ok {
 			t.Errorf("expected display-name char rejection, got %v", fe)
 		}
 	})
 	t.Run("bad alias is a field error", func(t *testing.T) {
-		_, _, _, fe := parseTunnelEditModalArgs(values("ok", "$NOPE"), testEditToken, testEditDisplay)
+		_, _, _, fe := parseTunnelEditModalArgs(values("ok", "$NOPE"), meta(testEditDisplay))
 		if _, ok := fe[tunnelEditBlockAliases]; !ok {
 			t.Errorf("expected an aliases field error, got %v", fe)
 		}
@@ -131,7 +169,7 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 		// A stored name carrying a now-disallowed backtick, pre-filled and left
 		// untouched, must NOT block an alias-only edit.
 		const legacy = "Prod `db`"
-		_, changed, aliases, fe := parseTunnelEditModalArgs(values(legacy, "$one"), testEditToken, legacy)
+		_, changed, aliases, fe := parseTunnelEditModalArgs(values(legacy, "$one"), meta(legacy))
 		if len(fe) != 0 {
 			t.Fatalf("untouched legacy name should not error: %v", fe)
 		}
@@ -145,7 +183,7 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 	t.Run("whitespace-only difference is not a change", func(t *testing.T) {
 		// Stored name with surrounding whitespace, pre-filled and untouched: the
 		// trim must not register as a change (which would fire a spurious PATCH).
-		_, changed, _, fe := parseTunnelEditModalArgs(values("  "+testEditDisplay+"  ", ""), testEditToken, testEditDisplay)
+		_, changed, _, fe := parseTunnelEditModalArgs(values("  "+testEditDisplay+"  ", ""), meta(testEditDisplay))
 		if len(fe) != 0 {
 			t.Fatalf("unexpected field errors: %v", fe)
 		}
@@ -492,6 +530,59 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 	}
 	if _, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "old-alias"); found {
 		t.Errorf("old-alias should have been unbound")
+	}
+}
+
+// TestHandleTunnelEdit_NoOpSubmission fences the no-op path: submitting the
+// pre-filled values verbatim (same name, same aliases) skips the PATCH (name
+// unchanged) and the alias reconcile is a no-op, so the admin sees "No changes."
+// and the bindings are untouched.
+func TestHandleTunnelEdit_NoOpSubmission(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// token + one extra alias bound; the submission keeps both unchanged.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+		testEditAlias: testEditResourceID,
+	})
+	ts.addCustomer(http.MethodPatch, "/v1/resources/"+testEditResourceID, func(http.ResponseWriter, *http.Request) {
+		t.Errorf("PATCH reached on a no-op (name-unchanged) submission")
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		close(done)
+	}))
+	t.Cleanup(srv.Close)
+
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken,
+		DisplayName: testEditDisplay, Aliases: []string{testEditAlias},
+	}
+	// Submit the pre-filled values verbatim: same name, same single extra alias.
+	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "$"+testEditAlias)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("submission ack = %d %q, want 200 {}", w.Code, w.Body.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "No changes.") {
+		t.Errorf("summary = %q, want it to contain \"No changes.\"", summary)
+	}
+	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, testEditAlias); !found || rid != testEditResourceID {
+		t.Errorf("extra alias should remain bound: rid=%q found=%v", rid, found)
 	}
 }
 
