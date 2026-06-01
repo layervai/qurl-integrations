@@ -44,9 +44,10 @@ const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <displa
 // lenient superset — accepting the sigil form a user copies from `/qurl
 // list`, not enforcing it. Stripping here rather than widening
 // tunnelSlugPattern keeps the slug grammar (shared with install) intact, and
-// the invalid-id message echoes the stripped id (matching parseAliasToken,
-// which echoes the post-`$` value). Returns (id, "") on success or
-// ("", userMsg) with the ephemeral copy to surface.
+// the invalid-id message echoes the *stripped* id — the post-`$` value, as
+// parseAliasToken does (the Slack-escaping helper differs: echoText here,
+// truncateForError there). Returns (id, "") on success or ("", userMsg) with
+// the ephemeral copy to surface.
 func parseDisplayNameID(tok string) (id, userMsg string) {
 	id = strings.TrimPrefix(tok, "$")
 	if id == "" {
