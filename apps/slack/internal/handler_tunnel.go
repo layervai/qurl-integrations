@@ -941,7 +941,7 @@ const (
 	// that passes is always within the character limit. At worst a multibyte
 	// run (e.g. the em-dash in the prose) trips slightly early and drops the
 	// whole message to the always-deliverable plain-text post — the safe
-	// direction. A prose run over this drops the whole message back to text.
+	// direction.
 	slackSectionTextMaxBytes = 3000
 	// slackRichTextMaxBytes caps a single rich_text_preformatted code segment.
 	// rich_text `text` elements carry NO documented length limit (unlike the
