@@ -15,8 +15,9 @@ import (
 // Repeated test literals, named to satisfy goconst and keep the
 // expected-copy assertions in one place.
 const (
-	testDisplayNameProdAPI    = "Prod API"
-	testDisplayNameMissingMsg = "Missing Display Name"
+	testDisplayNameProdAPI      = "Prod API"
+	testDisplayNameMissingMsg   = "Missing Display Name"
+	testDisplayNameInvalidIDMsg = "valid tunnel id"
 )
 
 // --- install-default constructor -----------------------------------------
@@ -50,13 +51,23 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		{name: "surrounding whitespace trimmed", input: id + "    Prod API   ", wantID: id, wantName: testDisplayNameProdAPI},
 		{name: "name with internal punctuation kept", input: id + " Staging DB (replica)", wantID: id, wantName: "Staging DB (replica)"},
 		{name: "lone quote kept as part of name", input: id + ` it's fine`, wantID: id, wantName: "it's fine"},
+		{name: "dollar-prefixed id accepted", input: "$" + id + ` "Prod API"`, wantID: id, wantName: testDisplayNameProdAPI},
 
 		{name: "missing everything", input: "", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "lone dollar id rejected", input: "$ Prod API", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		// Bare `$` with no name: the empty-id check fires before the missing-name
+		// check, so this is "Missing tunnel id" (not "Missing Display Name").
+		{name: "lone dollar no name rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "dollar then invalid id rejected", input: "$Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
+		// TrimPrefix strips exactly one `$`, so `$$prod-dashboard` becomes
+		// `$prod-dashboard`, which still fails the slug check (matching
+		// parseAliasToken's single-strip). Pins that double-sigil doesn't resolve.
+		{name: "double dollar strips one, rejected", input: "$$prod-dashboard foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		{name: "id only, no name", input: id, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then only whitespace", input: id + "    ", wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then empty quotes", input: id + ` ""`, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
-		{name: "invalid id (uppercase)", input: "Prod foo", wantErr: true, wantMsgSub: "valid tunnel id"},
-		{name: "invalid id (too short)", input: "ab foo", wantErr: true, wantMsgSub: "valid tunnel id"},
+		{name: "invalid id (uppercase)", input: "Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
+		{name: "invalid id (too short)", input: "ab foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		{name: "name too long rejected", input: id + " " + strings.Repeat("a", displayNameMaxLen+1), wantErr: true, wantMsgSub: "too long"},
 		{name: "name at length cap accepted", input: id + " " + strings.Repeat("a", displayNameMaxLen), wantID: id, wantName: strings.Repeat("a", displayNameMaxLen)},
 		{name: "control byte in name rejected", input: id + " bad\x01name", wantErr: true, wantMsgSub: "control characters"},
@@ -97,11 +108,17 @@ func TestParseUnsetDisplayNameArgs(t *testing.T) {
 		input   string
 		wantErr bool
 		wantID  string
+		// wantMsgSub, when set on a wantErr case, pins which rejection copy
+		// fired — the lone-`$` path returns the shared helper's "Missing
+		// tunnel id", distinct from the arity path's "Provide exactly one".
+		wantMsgSub string
 	}{
 		{name: "happy", input: id, wantID: id},
-		{name: "missing id", input: "", wantErr: true},
-		{name: "trailing args rejected", input: id + " extra", wantErr: true},
-		{name: "invalid id rejected", input: "Prod", wantErr: true},
+		{name: "dollar-prefixed id accepted", input: "$" + id, wantID: id},
+		{name: "missing id", input: "", wantErr: true, wantMsgSub: "Provide exactly one tunnel id"},
+		{name: "lone dollar rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "trailing args rejected", input: id + " extra", wantErr: true, wantMsgSub: "Provide exactly one tunnel id"},
+		{name: "invalid id rejected", input: "Prod", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +126,9 @@ func TestParseUnsetDisplayNameArgs(t *testing.T) {
 			if tc.wantErr {
 				if msg == "" {
 					t.Fatalf("expected rejection, got id=%q", gotID)
+				}
+				if tc.wantMsgSub != "" && !strings.Contains(msg, tc.wantMsgSub) {
+					t.Errorf("rejection copy = %q, want substring %q", msg, tc.wantMsgSub)
 				}
 				return
 			}
@@ -220,6 +240,38 @@ func TestSetDisplayName_MultiWordQuoted(t *testing.T) {
 	}
 }
 
+// TestSetDisplayName_DollarPrefixedID exercises the `$<id>` sigil form
+// end-to-end (parser → admin gate → resolve → PATCH), not just at the parser
+// layer: the leading `$` is stripped, the bare slug resolves the tunnel, the
+// description is PATCHed, and the success copy echoes the stripped id.
+func TestSetDisplayName_DollarPrefixedID(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameQURLServer(t, testTunnelSlug, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	_, ack, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name $"+testTunnelSlug+" Prod API gateway", testAliasTeamID, "U_alias_admin")
+
+	if ack != ackWorkingOnIt {
+		t.Fatalf("ack = %q, want async working copy", ack)
+	}
+	// Success copy echoes the STRIPPED id (no `$`), proving the sigil was
+	// removed before the resolve rather than carried into the PATCH target.
+	if !strings.Contains(async, "Display Name updated") || !strings.Contains(async, "`"+testTunnelSlug+"`") {
+		t.Errorf("async reply = %q, want success copy with stripped id", async)
+	}
+	if strings.Contains(async, "$"+testTunnelSlug) {
+		t.Errorf("async reply = %q, leaked the `$` sigil into the id echo", async)
+	}
+	if capPatch.calls.Load() != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (the `$<id>` form must resolve end-to-end)", capPatch.calls.Load())
+	}
+	if capPatch.description == nil || *capPatch.description != "Prod API gateway" {
+		t.Errorf("PATCH description = %v, want pointer to %q", capPatch.description, "Prod API gateway")
+	}
+}
+
 func TestUnsetDisplayName_Happy(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	capPatch := &capturedPatch{}
@@ -238,6 +290,31 @@ func TestUnsetDisplayName_Happy(t *testing.T) {
 	// Unset REVERTS to the install default, it does not blank: the PATCH
 	// carries the same string a fresh install would have written, so the
 	// tunnel still has a Display Name.
+	want := defaultTunnelDisplayName(testTunnelSlug)
+	if capPatch.description == nil || *capPatch.description != want {
+		t.Errorf("PATCH description = %v, want pointer to %q (install default)", capPatch.description, want)
+	}
+}
+
+// TestUnsetDisplayName_DollarPrefixedID is the unset counterpart to
+// TestSetDisplayName_DollarPrefixedID: `unset-display-name $<id>` strips the
+// sigil, resolves the tunnel, and PATCHes the description back to the install
+// default end-to-end.
+func TestUnsetDisplayName_DollarPrefixedID(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameQURLServer(t, testTunnelSlug, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("unset-display-name $"+testTunnelSlug, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "Display Name reset") || !strings.Contains(async, "`"+testTunnelSlug+"`") {
+		t.Errorf("async reply = %q, want reset copy with stripped id", async)
+	}
+	if capPatch.calls.Load() != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (the `$<id>` form must resolve end-to-end)", capPatch.calls.Load())
+	}
 	want := defaultTunnelDisplayName(testTunnelSlug)
 	if capPatch.description == nil || *capPatch.description != want {
 		t.Errorf("PATCH description = %v, want pointer to %q (install default)", capPatch.description, want)

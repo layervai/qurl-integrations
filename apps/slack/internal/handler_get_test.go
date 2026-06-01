@@ -187,10 +187,10 @@ func TestHandleGet_MintTransportError(t *testing.T) {
 	}
 }
 
-// TestHandleGet_MissingAlias fences the parser-level "missing $alias"
-// surface. The slash-command body has `get` with no positional arg
-// → the handler replies synchronously with a Usage hint and never
-// kicks off async work.
+// TestHandleGet_MissingAlias fences the bare-`get` surface. The
+// slash-command body has `get` with no positional arg → the handler
+// replies synchronously with the `$<id>|$<alias>` Usage hint (the
+// getUsageMessage copy) and never kicks off async work.
 func TestHandleGet_MissingAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
@@ -200,8 +200,33 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "$alias argument") {
-		t.Errorf("ack missing alias-hint: %q", ack)
+	if !strings.Contains(ack, "$id|$alias") {
+		t.Errorf("ack missing get usage hint: %q", ack)
+	}
+	if !strings.Contains(ack, "/qurl list") {
+		t.Errorf("ack missing /qurl list pointer: %q", ack)
+	}
+}
+
+// TestHandleGet_LoneSigil fences the `get $` surface — a lone `$` with no
+// slug/alias body. parseAliasToken returns ErrEmptyResource for the bare
+// sigil, so `get $` reaches the same getUsageMessage hint as bare `get` but
+// via a DISTINCT parse path (the ErrEmptyResource branch, not the no-arg
+// one), and likewise never kicks off async work.
+func TestHandleGet_LoneSigil(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	status, ack := inv.invokeAdmin("get $", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "$id|$alias") {
+		t.Errorf("ack missing get usage hint: %q", ack)
+	}
+	if !strings.Contains(ack, "/qurl list") {
+		t.Errorf("ack missing /qurl list pointer: %q", ack)
 	}
 }
 

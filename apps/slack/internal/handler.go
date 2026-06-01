@@ -1276,6 +1276,9 @@ func (h *Handler) adminHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl-admin set-display-name <id> <display name>` — Set a tunnel's friendly Display Name shown in `/qurl list` (admin only)",
 			"• `/qurl-admin unset-display-name <id>` — Reset a tunnel's Display Name to the default (admin only)",
+			// admin add/remove/list/revoke: keep this action set in sync with
+			// adminUsageMessage (handler_admin.go), the bare-`admin` arg hint —
+			// the verb roster must match, not the prose.
 			"• `/qurl-admin admin add @user` — Promote a Slack user to bot admin (admin only)",
 			"• `/qurl-admin admin remove @user` — Demote a Slack user from bot admin (admin only)",
 			"• `/qurl-admin admin list` — List who connected qURL (the owner) and the current bot admins (admin only)",

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -819,7 +820,9 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 // --- Dispatch-shell tests ---
 
 // TestHandleAdmin_BareAdminVerb fences the bare `admin` form — a
-// parser error, not a panic in the verb-dispatch switch.
+// parser error surfaced as the action-roster usage hint, not a panic
+// in the verb-dispatch switch or the terse "missing admin action"
+// sentinel.
 func TestHandleAdmin_BareAdminVerb(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -830,6 +833,55 @@ func TestHandleAdmin_BareAdminVerb(t *testing.T) {
 	_, reply := inv.invokeAdmin("admin", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, ":warning:") {
 		t.Errorf("reply missing parser-error surface: %q", reply)
+	}
+	// The bare-admin hint lists the available actions rather than echoing
+	// the terse sentinel, so the user learns the grammar.
+	for _, want := range []string{"admin add", "admin remove", "admin list", "admin revoke"} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("bare-admin hint missing %q: %q", want, reply)
+		}
+	}
+}
+
+// TestAdminRosters_InSync is the drift guard for the two independently
+// maintained admin-action rosters: adminUsageMessage (the bare-`admin` arg
+// hint, handler_admin.go) and the `/qurl-admin help` listing (adminHelpMessage,
+// handler.go). A cross-reference comment can't enforce parity, so this fails
+// CI if a future admin action is added to (or dropped from) one roster but not
+// the other.
+func TestAdminRosters_InSync(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	// adminHelpMessage gates the admin add/remove/list/revoke lines on
+	// AdminStore (the same condition the verbs use at runtime), so seed it.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	help := h.adminHelpMessage(commandAdmin)
+
+	// Both rosters render each action as `<cmd> admin <verb>`, and <cmd> itself
+	// ends in `-admin`, so the verb is the token right after `admin admin`.
+	// That anchor skips the trailing `(admin only)` and the set-display-name
+	// lines, which contain a single `admin` only.
+	re := regexp.MustCompile(`admin admin (\w+)`)
+	extract := func(s string) map[string]bool {
+		set := map[string]bool{}
+		for _, m := range re.FindAllStringSubmatch(s, -1) {
+			set[m[1]] = true
+		}
+		return set
+	}
+	hint, listing := extract(adminUsageMessage), extract(help)
+
+	if len(hint) == 0 || len(listing) == 0 {
+		t.Fatalf("extracted empty action set (hint=%v listing=%v) — a roster's `<cmd> admin <verb>` shape drifted", hint, listing)
+	}
+	for v := range hint {
+		if !listing[v] {
+			t.Errorf("bare-`admin` hint lists action %q that `/qurl-admin help` omits — rosters out of sync", v)
+		}
+	}
+	for v := range listing {
+		if !hint[v] {
+			t.Errorf("`/qurl-admin help` lists action %q that the bare-`admin` hint omits — rosters out of sync", v)
+		}
 	}
 }
 

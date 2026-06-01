@@ -19,6 +19,13 @@ import (
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 
+// getUsageMessage is the arg hint shown when `/qurl get` is invoked
+// with no token. Bare `get` parses to [ErrEmptyResource]; the
+// defensive empty-Alias guard below reuses the same copy so the user
+// learns the `$<id>|$<alias>` grammar rather than seeing a terse
+// sentinel.
+const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available."
+
 // Tunnel access limits applied to every `/qurl get` mint. `/qurl get` is
 // tunnel-only (raw URLs are unsupported — see urlNotSupportedGetMessage), so
 // these bound a shared tunnel link to a single short-lived viewer:
@@ -219,6 +226,13 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 			respondSlack(w, ":warning: "+resourceIDNotSupportedGetMessage)
 			return
 		}
+		// Bare `get` (no token) parses to ErrEmptyResource. Surface the
+		// arg hint instead of the terse sentinel text so the user learns
+		// the grammar — same copy as the defensive empty-Alias guard below.
+		if errors.Is(err, ErrEmptyResource) {
+			respondSlack(w, ":warning: "+getUsageMessage)
+			return
+		}
 		respondSlack(w, ":warning: "+err.Error())
 		return
 	}
@@ -234,7 +248,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 	// change adds a form that leaves Alias empty; surface the usage hint
 	// rather than silently dispatching an unmintable command.
 	if cmd.Alias == "" {
-		respondSlack(w, ":warning: Usage: `/qurl get <$id|$alias>` to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available.")
+		respondSlack(w, ":warning: "+getUsageMessage)
 		return
 	}
 
