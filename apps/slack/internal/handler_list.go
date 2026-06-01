@@ -368,15 +368,22 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	_ = h.postResponseBlocks(log, responseURL, body, blocks)
 }
 
-// filterTunnelResources returns only the tunnel-type resources from the
-// fetched page. `/qurl list` is tunnel-scoped; URL/transit resources are
+// filterTunnelResources returns only the live tunnel-type resources from
+// the fetched page. `/qurl list` is tunnel-scoped; URL/transit resources are
 // dropped. Keys on r.Type == [client.ResourceTypeTunnel] (the upstream
 // discriminator), NOT on an empty target_url, so a non-tunnel row with a
 // transient empty target isn't mis-included.
+//
+// Revoked tunnels are dropped too. The list endpoint is status-visible for
+// both active AND revoked rows (a revoke is a soft delete; the row is
+// hard-deleted only after a retention window), so without this guard a
+// revoked tunnel would keep appearing — with a "Create qURL" button that
+// can't mint against it. A missing/empty status is treated as live, so the
+// guard can only ever hide an explicitly revoked row.
 func filterTunnelResources(resources []client.Resource) []client.Resource {
 	out := make([]client.Resource, 0, len(resources))
 	for i := range resources {
-		if resources[i].Type == client.ResourceTypeTunnel {
+		if resources[i].Type == client.ResourceTypeTunnel && resources[i].Status != client.StatusRevoked {
 			out = append(out, resources[i])
 		}
 	}
