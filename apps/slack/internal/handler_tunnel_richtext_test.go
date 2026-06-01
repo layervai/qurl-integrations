@@ -92,7 +92,7 @@ func sectionTexts(t *testing.T, blocks []any) []string {
 // lands in a copyable rich_text_preformatted block and never leaks into a
 // prose section, and every code segment is within the per-block cap. This
 // doubles as the size measurement: an oversize real snippet would flip ok to
-// false and fail here, surfacing the need to bump slackBlockTextMaxBytes.
+// false and fail here, surfacing the need to bump slackRichTextMaxBytes.
 func TestInstallMessageBlocks_AllEnvironments(t *testing.T) {
 	for _, env := range []tunnelInstallEnvironment{
 		tunnelEnvDocker,

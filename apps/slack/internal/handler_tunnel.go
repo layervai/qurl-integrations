@@ -972,8 +972,9 @@ var installFencedCodeBlock = regexp.MustCompile("(?s)```\\n(.*?)\\n```")
 // fallback, so the two renderings cannot drift.
 //
 // Returns (blocks, true) on success, or (nil, false) when the message carries
-// no code fence to enrich, a single segment exceeds [slackBlockTextMaxBytes],
-// or the block count would exceed [slackMessageBlockMax]. A false result is the
+// no code fence to enrich, a prose segment exceeds [slackSectionTextMaxBytes]
+// or a code segment exceeds [slackRichTextMaxBytes], or the block count would
+// exceed [slackMessageBlockMax]. A false result is the
 // caller's signal to post the plain-text message instead: the install flow
 // MUST stay deliverable (an unconfirmed delivery revokes the bootstrap key), so
 // blocks are strictly a best-effort enhancement over the always-safe text post.
