@@ -62,6 +62,11 @@ const listCreateButtonLabel = "Create qURL"
 // would refuse to render. Tunnels are created deliberately (via `/qurl
 // tunnel install`), so a real workspace is far below this; see
 // [listResourcesScanLimit].
+//
+// NOTE: [listEditButtonMaxRows] is derived as this/2 to keep admin (2-block)
+// rows under the same ceiling, so bumping this to an odd value or adding
+// another always-on block erodes the edit path's 3-block margin — keep the
+// 2*listEditButtonMaxRows+3 <= 50 invariant in mind when changing it.
 const listCreateButtonMaxRows = 45
 
 // listEditButtonLabel is the text on the admin-only "Edit" button rendered
@@ -76,14 +81,19 @@ const listEditButtonLabel = "Edit"
 // [listCreateButtonMaxRows]'s row budget — derived from it (not a separate
 // magic number) so the two can't drift. At 22 rows the message is header (1) +
 // 2N + footer (1) + optional has-more (1) = 47 blocks, under Slack's 50-block
-// ceiling. Past this, the per-row Edit button is dropped but Create qURL
-// buttons still render (one block per row, like any caller's list); only past
-// [listCreateButtonMaxRows] does the listing degrade to plain text.
+// ceiling (invariant: 2*listEditButtonMaxRows + 3 <= 50). Past this, the per-row
+// Edit button is dropped but Create qURL buttons still render (one block per
+// row, like any caller's list); only past [listCreateButtonMaxRows] does the
+// listing degrade to plain text.
 const listEditButtonMaxRows = listCreateButtonMaxRows / 2
 
 // slackButtonValueMaxBytes is Slack's documented cap on a button element's
 // `value`. The Edit button carries a [tunnelEditButtonValue] JSON snapshot; if
 // it would exceed this, the row falls back to a Create-only button (no Edit).
+// The guard compares byte length, which is intentionally conservative against
+// Slack's character cap (bytes >= runes) — so a multibyte Display Name in the
+// snapshot can never slip past it. Don't "fix" this to rune-counting; that
+// would loosen the guard.
 const slackButtonValueMaxBytes = 2000
 
 const (
