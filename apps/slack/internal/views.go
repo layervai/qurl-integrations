@@ -49,7 +49,6 @@ const listEditTunnelActionID = "list_edit_tunnel"
 const (
 	blockKitFieldActionID        = "action_id"
 	blockKitFieldValue           = "value"
-	blockKitFieldElements        = "elements"
 	blockKitTypeActions          = "actions"
 	blockKitFieldBlocks          = "blocks"
 	blockKitFieldCallbackID      = "callback_id"

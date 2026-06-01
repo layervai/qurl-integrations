@@ -550,6 +550,49 @@ func TestBindWorkspace_TransportErrorMapsTo503(t *testing.T) {
 	}
 }
 
+// TestCheckAdmin_OwnerIsAdminOffOwnerID fences the owner→admin self-heal:
+// the owner is recorded in owner_id, but a legacy row or an idempotent
+// setup rerun can leave them off admin_slack_user_ids. CheckAdmin must
+// still report the owner as admin (off owner_id) so they keep every admin
+// affordance — including the /qurl list Edit button — while a stranger who
+// is neither owner nor on the admin set stays denied (no over-grant).
+func TestCheckAdmin_OwnerIsAdminOffOwnerID(t *testing.T) {
+	newStoreOwnerOffAdminSet := func() *Store {
+		return newStore(&stubDDB{
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID:       &ddbtypes.AttributeValueMemberS{Value: "T"},
+					attrOwnerID:           &ddbtypes.AttributeValueMemberS{Value: testOwnerSlackID},
+					attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{testOtherSlackID}},
+				}}, nil
+			},
+		})
+	}
+
+	t.Run("owner absent from admin set is still admin", func(t *testing.T) {
+		isAdmin, ownerID, err := newStoreOwnerOffAdminSet().CheckAdmin(context.Background(), "T", testOwnerSlackID)
+		if err != nil {
+			t.Fatalf("CheckAdmin err: %v", err)
+		}
+		if !isAdmin {
+			t.Errorf("isAdmin = false for owner not on admin set, want true")
+		}
+		if ownerID != testOwnerSlackID {
+			t.Errorf("ownerID = %q, want %q", ownerID, testOwnerSlackID)
+		}
+	})
+
+	t.Run("stranger neither owner nor on admin set is denied", func(t *testing.T) {
+		isAdmin, _, err := newStoreOwnerOffAdminSet().CheckAdmin(context.Background(), "T", testCallerSlackID)
+		if err != nil {
+			t.Fatalf("CheckAdmin err: %v", err)
+		}
+		if isAdmin {
+			t.Errorf("isAdmin = true for non-owner, non-admin caller, want false (over-grant)")
+		}
+	})
+}
+
 // TestLookupChannelAlias_ValidationGuards fences the empty-input
 // contract: empty teamID, channelID, or aliasName all return a
 // 400-bracketed *Error before the DDB call. The handler layer guards
