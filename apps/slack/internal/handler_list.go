@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -63,10 +64,99 @@ const listCreateButtonLabel = "Create qURL"
 // [listResourcesScanLimit].
 const listCreateButtonMaxRows = 45
 
+// listEditButtonLabel is the text on the admin-only "Edit" button rendered
+// alongside "Create qURL" on each `/qurl list` row for qURL bot admins.
+// Clicking it opens the TunnelEditModal pre-filled with the tunnel's Display
+// Name and channel aliases.
+const listEditButtonLabel = "Edit"
+
+// listEditButtonMaxRows caps interactive rows when the Edit button is shown.
+// An admin row renders TWO blocks (a section line + an actions block carrying
+// Create qURL + Edit) versus one for the Create-only path, so the per-message
+// 50-block ceiling halves: header (1) + 2N + footer (1) + optional has-more (1)
+// stays under 50 at N=22 (47 blocks). Above this, the listing degrades to plain
+// text — every tunnel still shown, just without buttons — see
+// [listCreateButtonMaxRows].
+const listEditButtonMaxRows = 22
+
+// slackButtonValueMaxBytes is Slack's documented cap on a button element's
+// `value`. The Edit button carries a [tunnelEditButtonValue] JSON snapshot; if
+// it would exceed this, the row falls back to a Create-only button (no Edit).
+const slackButtonValueMaxBytes = 2000
+
 const (
 	commonListResourcesFailedPrefix = "Failed to list qURL tunnels"
 	listResourcesFailedLogMessage   = "list: list resources failed"
 )
+
+// tunnelEditButtonValue is the JSON snapshot carried on a `/qurl list` Edit
+// button's `value`, so opening the edit modal needs no extra upstream read
+// (keeping it inside Slack's ~3s trigger_id window). Short JSON keys keep it
+// under [slackButtonValueMaxBytes]. Aliases is the EXTRA-alias set — the
+// channel aliases bound to this tunnel other than the row's primary Token — so
+// the modal never offers to unbind the tunnel's own canonical name.
+type tunnelEditButtonValue struct {
+	ResourceID  string   `json:"r"`
+	Token       string   `json:"t"`
+	DisplayName string   `json:"d,omitempty"`
+	Aliases     []string `json:"a,omitempty"`
+}
+
+// buildTunnelEditButtonValue marshals a row's edit snapshot. boundAliases is
+// the full channel-alias set for the resource; the primary token is excluded
+// (the modal manages only the extra aliases). Returns ("", false) when the
+// marshaled value would exceed Slack's button-value cap, so the caller renders
+// a Create-only button instead.
+func buildTunnelEditButtonValue(resourceID, token, displayName string, boundAliases []string) (string, bool) {
+	v := tunnelEditButtonValue{
+		ResourceID:  resourceID,
+		Token:       token,
+		DisplayName: displayName,
+		Aliases:     aliasesExcluding(boundAliases, token),
+	}
+	b, err := json.Marshal(v)
+	if err != nil || len(b) > slackButtonValueMaxBytes {
+		return "", false
+	}
+	return string(b), true
+}
+
+// aliasesExcluding returns boundAliases without the primary token, preserving
+// order. The token's binding is the tunnel's canonical channel name and is
+// never managed through the edit modal.
+func aliasesExcluding(boundAliases []string, token string) []string {
+	out := make([]string, 0, len(boundAliases))
+	for _, a := range boundAliases {
+		if a != token {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// listCallerCanEdit reports whether the `/qurl list` caller should see the
+// admin-only Edit button. It requires the full edit wiring — the modal opener
+// (OpenView), the alias store (to reconcile bindings on submit), and the admin
+// store (to gate) — plus the caller being a qURL bot admin. A CheckAdmin error
+// hides the button (fail-closed for the affordance) WITHOUT failing the
+// listing: the list still renders with Create qURL buttons. Runs on the async
+// worker ctx, bounded by adminGateBudget like the other admin gates.
+func (h *Handler) listCallerCanEdit(ctx context.Context, log *slog.Logger, teamID, userID string) bool {
+	if h.cfg.OpenView == nil || h.aliasStore == nil || h.cfg.AdminStore == nil {
+		return false
+	}
+	if teamID == "" || userID == "" {
+		return false
+	}
+	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+	if err != nil {
+		log.Debug("list: admin check for Edit button failed — hiding Edit", "error", err, "team_id", teamID)
+		return false
+	}
+	return isAdmin
+}
 
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
@@ -182,11 +272,24 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// plain-text `body` Slack uses as the block fallback. useButtons is
 	// false when the tunnel set exceeds Slack's per-message block ceiling
 	// (see listCreateButtonMaxRows) — then only the text path renders.
-	useButtons := len(resources) <= listCreateButtonMaxRows
+	//
+	// Admin callers (with the modal/alias/admin wiring present) also get an
+	// Edit button per row. The list is ephemeral — only the caller sees it —
+	// so gating the button on the caller's admin status is the whole access
+	// boundary for the affordance; the mutation it opens is re-gated at
+	// view_submission time (see handleTunnelEditSubmission).
+	editable := h.listCallerCanEdit(ctx, log, teamID, values.Get(fieldUserID))
+	// An editable row renders two blocks (section + actions), so halve the row
+	// cap to keep the message under Slack's 50-block ceiling.
+	maxButtonRows := listCreateButtonMaxRows
+	if editable {
+		maxButtonRows = listEditButtonMaxRows
+	}
+	useButtons := len(resources) <= maxButtonRows
 	lines := make([]string, 0, len(resources))
 	var blocks []any
 	if useButtons {
-		blocks = make([]any, 0, len(resources)+3)
+		blocks = make([]any, 0, len(resources)*2+3)
 		blocks = append(blocks, sectionBlock("*Protected Tunnel Resources:*"))
 	}
 	for i := range resources {
@@ -198,11 +301,25 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		// displayTok is "" only for a slug-less, alias-less tunnel — the
 		// "(no slug …)" row, which has no `$<token>` that `/qurl get` (or
 		// the button) could mint against — so that row gets no button.
-		if tok := displayTok[resources[i].ResourceID]; tok != "" {
-			blocks = append(blocks, sectionWithButton(line, listCreateButtonLabel, listCreateQurlActionID, tok))
-		} else {
+		tok := displayTok[resources[i].ResourceID]
+		if tok == "" {
 			blocks = append(blocks, sectionBlock(line))
+			continue
 		}
+		// Admin rows get Create qURL + Edit in an actions block; the Edit
+		// button carries the row's edit snapshot so opening the modal needs no
+		// extra read. A snapshot too large for a button value falls back to the
+		// Create-only accessory button.
+		if editable {
+			if editVal, ok := buildTunnelEditButtonValue(resources[i].ResourceID, tok, resources[i].Description, aliasMap[resources[i].ResourceID]); ok {
+				blocks = append(blocks, sectionBlock(line), actionsBlock(
+					buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
+					buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
+				))
+				continue
+			}
+		}
+		blocks = append(blocks, sectionWithButton(line, listCreateButtonLabel, listCreateQurlActionID, tok))
 	}
 
 	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"

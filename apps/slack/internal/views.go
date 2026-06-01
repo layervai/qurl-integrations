@@ -24,6 +24,7 @@ import (
 const (
 	callbackIDSetAliasRebind = "setalias_rebind_confirm"
 	callbackIDTunnelInstall  = "tunnel_install"
+	callbackIDTunnelEdit     = "tunnel_edit"
 )
 
 // listCreateQurlActionID is the action_id on the "Create qURL" button
@@ -36,7 +37,20 @@ const (
 // clicked row is identified by the button's value, not its action_id.
 const listCreateQurlActionID = "list_create_qurl"
 
+// listEditTunnelActionID is the action_id on the admin-only "Edit" button
+// rendered alongside "Create qURL" on each `/qurl list` row when the caller is
+// a qURL bot admin (and the modal/alias/admin wiring is present). The
+// block_actions handler matches on it to open the [TunnelEditModal]
+// pre-filled from the button's value snapshot. Like listCreateQurlActionID it
+// is reused across rows — the clicked tunnel is identified by the button's
+// value (a [tunnelEditButtonValue] JSON snapshot), not the action_id.
+const listEditTunnelActionID = "list_edit_tunnel"
+
 const (
+	blockKitFieldActionID        = "action_id"
+	blockKitFieldValue           = "value"
+	blockKitFieldElements        = "elements"
+	blockKitTypeActions          = "actions"
 	blockKitFieldBlocks          = "blocks"
 	blockKitFieldCallbackID      = "callback_id"
 	blockKitFieldClose           = "close"
@@ -70,6 +84,13 @@ const (
 	tunnelInstallActionLocalPort   = "local_port_input"
 	tunnelInstallBlockWebRef       = "web_container"
 	tunnelInstallActionWebRef      = "web_container_input"
+)
+
+const (
+	tunnelEditBlockDisplayName  = "edit_display_name"
+	tunnelEditActionDisplayName = "edit_display_name_input"
+	tunnelEditBlockAliases      = "edit_aliases"
+	tunnelEditActionAliases     = "edit_aliases_input"
 )
 
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
@@ -202,6 +223,92 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// TunnelEditErrorModal replaces a submitted edit modal with a form-level
+// error, for the rare structural failures (stale/forged metadata, admin
+// re-check denial, missing wiring) that aren't tied to a specific input field.
+// Per-field validation problems use response_action:errors instead.
+func TunnelEditErrorModal(message string) ([]byte, error) {
+	payload := map[string]any{
+		blockKitFieldType:  blockKitTypeModal,
+		blockKitFieldTitle: plainTextObj("Edit tunnel"),
+		blockKitFieldClose: plainTextObj("Close"),
+		blockKitFieldBlocks: []any{
+			sectionBlock(":warning: " + message),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// TunnelEditModalMetadata is carried through Slack private_metadata from the
+// `/qurl list` Edit button click (block_actions) to the later view_submission.
+// ResourceID is the PATCH/alias-bind target; Token is the displayed `$<token>`
+// (slug or promoted alias) shown in the modal context and excluded from the
+// editable alias set so the tunnel's own name is never unbound by the modal.
+// ResponseURL is the list message's, where the async edit result is posted.
+// CreatedAtUnix lets the submit handler reject a stale modal.
+type TunnelEditModalMetadata struct {
+	TeamID      string `json:"team_id"`
+	ChannelID   string `json:"channel_id"`
+	UserID      string `json:"user_id"`
+	ResponseURL string `json:"response_url"`
+	ResourceID  string `json:"resource_id"`
+	Token       string `json:"token"`
+	// DisplayName is the tunnel's Display Name at the moment the modal opened.
+	// The submit handler diffs the submitted name against it to skip a no-op
+	// PATCH (so an alias-only edit can't clobber a concurrent display-name
+	// change). No freshness/TTL field: the edit mints no secret and is
+	// effectively idempotent, so a late submission just re-applies the admin's
+	// intent.
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+// TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.
+// It pre-fills the tunnel's current Display Name and its additional channel
+// aliases (the bound aliases other than the row's primary `$<token>`), so the
+// admin edits an authoritative snapshot rather than re-typing from scratch.
+// `aliases` is the extra-alias set (sigil-free); they render one per line with
+// a leading `$` to match how the admin types them.
+func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases []string) ([]byte, error) {
+	privateMeta, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private_metadata: %w", err)
+	}
+	if len(privateMeta) > slackPrivateMetadataMaxBytes {
+		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
+	}
+	aliasInitial := ""
+	if len(aliases) > 0 {
+		aliasInitial = "$" + strings.Join(aliases, "\n$")
+	}
+	payload := map[string]any{
+		blockKitFieldType:            blockKitTypeModal,
+		blockKitFieldCallbackID:      callbackIDTunnelEdit,
+		blockKitFieldTitle:           plainTextObj("Edit tunnel"),
+		blockKitFieldSubmit:          plainTextObj("Save"),
+		blockKitFieldClose:           plainTextObj("Cancel"),
+		blockKitFieldPrivateMetadata: string(privateMeta),
+		blockKitFieldBlocks: []any{
+			contextBlock("Editing tunnel " + tunnelEditTokenLabel(meta.Token)),
+			inputBlock(tunnelEditBlockDisplayName, "Display name", "Shown next to the tunnel in /qurl list.", false,
+				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
+			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this tunnel in this channel; the tunnel's own name always works and isn't listed here. Clear a line to remove that alias.", true,
+				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// tunnelEditTokenLabel renders the edited tunnel's `$<token>` for the modal
+// context line. The token is a charset-validated slug/alias, but it is escaped
+// for the mrkdwn code span as defense-in-depth (same posture as the rebind
+// modal's target labels).
+func tunnelEditTokenLabel(token string) string {
+	if token == "" {
+		return "this tunnel"
+	}
+	return "`$" + escapeMrkdwnCode(token) + "`"
+}
+
 func slackChannelMention(channelID string) string {
 	channelID = strings.TrimSpace(channelID)
 	if !slackChannelIDPattern.MatchString(channelID) {
@@ -306,12 +413,35 @@ func sectionWithButton(text, buttonText, actionID, value string) map[string]any 
 			"type": "mrkdwn",
 			"text": text,
 		},
-		"accessory": map[string]any{
-			"type":      "button",
-			"text":      plainTextObj(buttonText),
-			"action_id": actionID,
-			"value":     value,
-		},
+		"accessory": buttonElement(buttonText, actionID, value),
+	}
+}
+
+// buttonElement returns a `button` block element: an action_id plus an opaque
+// `value` echoed back in the block_actions payload when the button is clicked.
+// Used both as a section accessory (sectionWithButton) and inside an
+// actionsBlock (the multi-button admin `/qurl list` rows).
+func buttonElement(buttonText, actionID, value string) map[string]any {
+	return map[string]any{
+		"type":                "button",
+		"text":                plainTextObj(buttonText),
+		blockKitFieldActionID: actionID,
+		blockKitFieldValue:    value,
+	}
+}
+
+// actionsBlock returns an `actions` block holding the given button elements as
+// a row beneath a section. A `section` accessory holds only a single element,
+// so a row that carries more than one action (Create qURL + the admin-only
+// Edit) uses this instead.
+func actionsBlock(elements ...map[string]any) map[string]any {
+	els := make([]any, len(elements))
+	for i := range elements {
+		els[i] = elements[i]
+	}
+	return map[string]any{
+		blockKitFieldType:     blockKitTypeActions,
+		blockKitFieldElements: els,
 	}
 }
 
@@ -320,7 +450,7 @@ func sectionWithButton(text, buttonText, actionID, value string) map[string]any 
 func contextBlock(text string) map[string]any {
 	return map[string]any{
 		"type": "context",
-		"elements": []any{
+		blockKitFieldElements: []any{
 			map[string]any{
 				"type": "mrkdwn",
 				"text": text,
@@ -358,8 +488,8 @@ func inputBlock(blockID, label, hint string, optional bool, element map[string]a
 
 func plainTextInput(actionID, placeholder, initialValue string) map[string]any {
 	element := map[string]any{
-		"type":      "plain_text_input",
-		"action_id": actionID,
+		"type":                "plain_text_input",
+		blockKitFieldActionID: actionID,
 	}
 	if placeholder != "" {
 		element["placeholder"] = plainTextObj(placeholder)
@@ -370,18 +500,26 @@ func plainTextInput(actionID, placeholder, initialValue string) map[string]any {
 	return element
 }
 
+// multilinePlainTextInput is plainTextInput with multiline enabled — used by
+// the edit modal's one-alias-per-line aliases field.
+func multilinePlainTextInput(actionID, placeholder, initialValue string) map[string]any {
+	element := plainTextInput(actionID, placeholder, initialValue)
+	element["multiline"] = true
+	return element
+}
+
 func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
 	return map[string]any{
-		"type":           "static_select",
-		"action_id":      actionID,
-		"options":        options,
-		"initial_option": initial,
+		"type":                "static_select",
+		blockKitFieldActionID: actionID,
+		"options":             options,
+		"initial_option":      initial,
 	}
 }
 
 func optionObj(text, value string) map[string]any {
 	return map[string]any{
-		"text":  plainTextObj(text),
-		"value": value,
+		"text":             plainTextObj(text),
+		blockKitFieldValue: value,
 	}
 }

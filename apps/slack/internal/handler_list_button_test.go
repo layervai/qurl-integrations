@@ -53,8 +53,8 @@ func listCreateQurlBlockActionsBody(t *testing.T, teamID, userID, channelID, res
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
 		"type":         "block_actions",
-		"team":         map[string]any{"id": teamID},
-		"user":         map[string]any{"id": userID},
+		payloadKeyTeam: map[string]any{"id": teamID},
+		payloadKeyUser: map[string]any{"id": userID},
 		"channel":      map[string]any{"id": channelID},
 		"trigger_id":   "trigger_test",
 		"response_url": responseURL,

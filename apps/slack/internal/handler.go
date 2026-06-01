@@ -1334,6 +1334,10 @@ const (
 	respFieldResponseType = "response_type"
 	respFieldText         = "text"
 	respTypeEphemeral     = "ephemeral"
+	// respFieldResponseAction / respFieldView are the view_submission reply
+	// keys (response_action: "errors"|"update" + the replacement view).
+	respFieldResponseAction = "response_action"
+	respFieldView           = "view"
 )
 
 func respondSlack(w http.ResponseWriter, text string) {

@@ -71,25 +71,31 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 	if name == "" {
 		return "", "", "Missing Display Name.\n\n" + displayNameUsage
 	}
-	if len([]rune(name)) > displayNameMaxLen {
-		return "", "", fmt.Sprintf("Display Name is too long (max %d characters).\n\n%s", displayNameMaxLen, displayNameUsage)
-	}
-	// Reject backticks, angle brackets, and control bytes. The Display Name
-	// is stored in `description` and rendered to EVERY user who runs
-	// `/qurl list` or `/qurl aliases` (not just the admin who set it), inside
-	// an inline-code fence (`` `<id>` — <name> ``). A backtick breaks the
-	// fence (running an unterminated code span into the next row); a control
-	// byte garbles the line; and Slack mrkdwn `<…>` is an injection vector —
-	// `<https://evil|Prod>` renders a disguised link and `<!channel>` /
-	// `<!here>` ping the workspace. Admins are trusted, but a stored value
-	// shown to all users is worth fencing at the parser (the alias-target
-	// parser rejects backticks for the same hygiene reason).
-	for _, r := range name {
-		if r == '`' || r == '<' || r == '>' || !unicode.IsPrint(r) {
-			return "", "", "Display Name can't contain backticks, angle brackets, or control characters. Use plain text only.\n\n" + displayNameUsage
-		}
+	if msg := validateDisplayNameChars(name); msg != "" {
+		return "", "", msg + "\n\n" + displayNameUsage
 	}
 	return idTok, name, ""
+}
+
+// validateDisplayNameChars rejects a Display Name that is too long or carries
+// characters unsafe in the shared `/qurl list` / `/qurl aliases` surfaces: a
+// backtick breaks the inline-code fence the id is rendered in, mrkdwn `<…>` is
+// an injection vector (`<https://evil|Prod>` disguised links, `<!channel>` /
+// `<!here>` pings), and a control byte garbles the line. The Display Name is
+// stored in `description` and shown to EVERY workspace member, so this fence is
+// applied wherever a name is set — the set-display-name verb here AND the
+// `/qurl list` Edit modal (handler_edit.go). Returns "" when ok, else the
+// user-facing reason WITHOUT a usage dump (callers append their own context).
+func validateDisplayNameChars(name string) string {
+	if len([]rune(name)) > displayNameMaxLen {
+		return fmt.Sprintf("Display Name is too long (max %d characters).", displayNameMaxLen)
+	}
+	for _, r := range name {
+		if r == '`' || r == '<' || r == '>' || !unicode.IsPrint(r) {
+			return "Display Name can't contain backticks, angle brackets, or control characters. Use plain text only."
+		}
+	}
+	return ""
 }
 
 // parseUnsetDisplayNameArgs validates a `unset-display-name <id>` body:
