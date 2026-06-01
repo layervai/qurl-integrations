@@ -101,13 +101,17 @@ func TestParseUnsetDisplayNameArgs(t *testing.T) {
 		input   string
 		wantErr bool
 		wantID  string
+		// wantMsgSub, when set on a wantErr case, pins which rejection copy
+		// fired — the lone-`$` path returns the shared helper's "Missing
+		// tunnel id", distinct from the arity path's "Provide exactly one".
+		wantMsgSub string
 	}{
 		{name: "happy", input: id, wantID: id},
 		{name: "dollar-prefixed id accepted", input: "$" + id, wantID: id},
-		{name: "missing id", input: "", wantErr: true},
-		{name: "lone dollar rejected", input: "$", wantErr: true},
-		{name: "trailing args rejected", input: id + " extra", wantErr: true},
-		{name: "invalid id rejected", input: "Prod", wantErr: true},
+		{name: "missing id", input: "", wantErr: true, wantMsgSub: "Provide exactly one tunnel id"},
+		{name: "lone dollar rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "trailing args rejected", input: id + " extra", wantErr: true, wantMsgSub: "Provide exactly one tunnel id"},
+		{name: "invalid id rejected", input: "Prod", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,6 +119,9 @@ func TestParseUnsetDisplayNameArgs(t *testing.T) {
 			if tc.wantErr {
 				if msg == "" {
 					t.Fatalf("expected rejection, got id=%q", gotID)
+				}
+				if tc.wantMsgSub != "" && !strings.Contains(msg, tc.wantMsgSub) {
+					t.Errorf("rejection copy = %q, want substring %q", msg, tc.wantMsgSub)
 				}
 				return
 			}
