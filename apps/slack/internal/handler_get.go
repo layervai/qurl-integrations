@@ -19,6 +19,45 @@ import (
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
 
+// Tunnel access limits applied to every `/qurl get` mint. `/qurl get` is
+// tunnel-only (raw URLs are unsupported — see urlNotSupportedGetMessage), so
+// these bound a shared tunnel link to a single short-lived viewer:
+//   - tunnelLinkExpiry: the link only admits a NEW visitor session for this
+//     long after minting (qurl-service `expires_in`).
+//   - tunnelSessionDuration: how long an admitted visitor session lasts
+//     (qurl-service `session_duration`).
+//   - tunnelMaxSessions: max concurrent visitor sessions (qurl-service
+//     `max_sessions`).
+//
+// How the four limits stack (the OneTimeUse=true mint plus these three):
+// OneTimeUse burns the link on its first redemption, so in steady state only
+// one session is ever established and tunnelMaxSessions=1 is belt-and-
+// suspenders — it makes the "one viewer" intent explicit on the wire and
+// stays correct if the one-time-use default is ever relaxed. tunnelLinkExpiry
+// bounds the window to redeem; tunnelSessionDuration bounds how long that one
+// session then lives.
+//
+// Enforcement is entirely server-side (qurl-service + qurl-router); this just
+// sets the policy at mint time and requires the qurl-service tunnel
+// session-limit support to be deployed (otherwise create returns 400 —
+// hence the gating in the PR). Per-visitor identity is IP-based for now;
+// layervai/qurl-service#777 tracks the cookie follow-up.
+//
+// As of qurl-service#778 these values are ALSO the server-side tunnel
+// defaults (session_duration→1h, and one_time_use→single-visitor when
+// max_sessions<=1), so setting them explicitly here is belt-and-suspenders:
+// it pins the bot's intent on the wire and decouples it from any future
+// change to the server defaults, rather than being load-bearing.
+const (
+	tunnelLinkExpiry      = "1m"
+	tunnelSessionDuration = "1h"
+	tunnelMaxSessions     = 1
+	// tunnelLinkExpiryHuman is the user-facing rendering of tunnelLinkExpiry
+	// for the Slack reply — "1 minute" reads clearer to a recipient than the
+	// terse "1m" duration syntax. Keep in sync with tunnelLinkExpiry above.
+	tunnelLinkExpiryHuman = "1 minute"
+)
+
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL
 // `/qurl get`. The parser flags the case with the terse
 // [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
@@ -52,28 +91,16 @@ const tunnelDisabledMessage = "Tunnel resources are not yet enabled for this wor
 // the user knows a retry is the right next move.
 const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
-// serviceUnreachableMessageWith builds the retry-friendly message
-// augmented with the upstream's bounded Title and the opaque
-// RequestID for support correlation. Detail is suppressed — it can
-// carry internal hostnames / DB error strings. Mirrors the
-// pre-consolidation /qurl create behavior (sanitizeAPIError) so
-// users keep the reference handle they previously had for support
-// tickets; on-call can paste the RequestID directly into
-// qurl-service CloudWatch to find the failed request server-side.
-// Falls back to [serviceUnreachableMessage] when neither field is
-// present.
+// serviceUnreachableMessageWith builds the retry-friendly message plus
+// the opaque RequestID support handle. Upstream Title and Detail are
+// intentionally suppressed because either can carry operator-grade text
+// under service regressions. Falls back to [serviceUnreachableMessage]
+// when no RequestID is present.
 func serviceUnreachableMessageWith(apiErr *client.APIError) string {
-	if apiErr == nil || (apiErr.Title == "" && apiErr.RequestID == "") {
+	if apiErr == nil || apiErr.RequestID == "" {
 		return serviceUnreachableMessage
 	}
-	msg := "Could not reach qURL"
-	if apiErr.Title != "" {
-		msg += ": " + strings.TrimRight(apiErr.Title, ".")
-	}
-	if apiErr.RequestID != "" {
-		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
-	}
-	return msg + ". Please try again."
+	return appendSlackReference("Could not reach qURL", apiErr.RequestID) + ". Please try again."
 }
 
 // channelRequiredMessage is the user-facing copy surfaced when a
@@ -151,13 +178,6 @@ type userError struct{ msg string }
 
 // Error returns the user-facing message verbatim.
 func (e *userError) Error() string { return e.msg }
-
-// userErrorf builds a [*userError] using fmt.Sprintf semantics. The
-// returned error's text is the literal Slack message — no extra
-// wrapping, no "context: …" prefix.
-func userErrorf(format string, args ...any) error {
-	return &userError{msg: fmt.Sprintf(format, args...)}
-}
 
 // errAdminStoreNotConfigured is returned by getWork when the handler's
 // AdminStore is nil (sandbox / no-DDB deployment). Surfaces as a user-
@@ -314,8 +334,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		Reason: args.cmd.Reason(),
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
-		OneTimeUse:     true,
-		IdempotencyKey: IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
+		OneTimeUse: true,
+		// Tunnel access limits — see the const block above.
+		ExpiresIn:       tunnelLinkExpiry,
+		SessionDuration: tunnelSessionDuration,
+		MaxSessions:     tunnelMaxSessions,
+		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
 	}
 
 	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
@@ -345,7 +369,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 			return "", &userError{msg: commonGetMintFailedMessage}
 		}
 		if !ok {
-			return "", userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
+			return "", &userError{msg: rateLimitMessage(retry, "")}
 		}
 	}
 
@@ -360,9 +384,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// Unconditional suffix — every `/qurl get` link is one-time use
-	// (see OneTimeUse above).
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use)"
+	// Unconditional suffix — every `/qurl get` link is one-time use (see
+	// OneTimeUse above) AND only admits a session within tunnelLinkExpiry of
+	// minting. That admit window is tight, so surface it at the point of
+	// sharing: a recipient who clicks after it lapses gets a dead link, and
+	// the suffix tells them why.
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}
@@ -524,7 +551,7 @@ func mapMintError(log *slog.Logger, err error) error {
 		switch apiErr.StatusCode {
 		case http.StatusTooManyRequests:
 			retry := time.Duration(apiErr.RetryAfter) * time.Second
-			return userErrorf("Rate limit hit. Try again in %s.", humanizeRetry(retry))
+			return &userError{msg: rateLimitMessage(retry, apiErr.RequestID)}
 		case http.StatusForbidden:
 			if apiErr.Code == "tunnel_disabled" {
 				return &userError{msg: tunnelDisabledMessage}
@@ -532,15 +559,15 @@ func mapMintError(log *slog.Logger, err error) error {
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
-			log.Error("get: mint rejected with 403 — unmapped error code", "code", apiErr.Code, "detail", apiErr.Detail)
+			log.Error("get: mint rejected with 403 — unmapped error code", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadRequest:
 			// `mutually_exclusive_fields` → server contract drift,
 			// not a user error. Surface friendly + log loud.
-			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", "code", apiErr.Code, "detail", apiErr.Detail)
+			log.Error("get: mint rejected with 400 — check resource_id/target_url contract", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			log.Warn("get: mint failed with transport-class error", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+			log.Warn("get: mint failed with transport-class error", withRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 			return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 		default:
 			// Unmapped 5xx (e.g. 500, 599) is server-side trouble —
@@ -549,14 +576,14 @@ func mapMintError(log *slog.Logger, err error) error {
 			// would tell the user "permanent failure, do not retry"
 			// when the upstream is actually transient.
 			if apiErr.StatusCode >= 500 && apiErr.StatusCode < 600 {
-				log.Warn("get: mint failed with unmapped 5xx", "status", apiErr.StatusCode, "code", apiErr.Code, "request_id", apiErr.RequestID)
+				log.Warn("get: mint failed with unmapped 5xx", withRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code)...)
 				return &userError{msg: serviceUnreachableMessageWith(apiErr)}
 			}
 			// Other unmapped statuses (401, 404, 422, etc.) are
 			// permanent-class — log loud so the operator sees the
 			// contract surprise, surface the generic message so the
 			// user isn't told to retry forever.
-			log.Error("get: mint rejected with unmapped status", "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)
+			log.Error("get: mint rejected with unmapped status", withRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		}
 	}
