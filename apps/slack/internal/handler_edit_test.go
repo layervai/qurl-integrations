@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -97,30 +98,59 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 	}
 
 	t.Run("happy", func(t *testing.T) {
-		name, aliases, fe := parseTunnelEditModalArgs(values("New Name", "$one\n$two"), testEditToken)
+		name, changed, aliases, fe := parseTunnelEditModalArgs(values("New Name", "$one\n$two"), testEditToken, testEditDisplay)
 		if len(fe) != 0 {
 			t.Fatalf("unexpected field errors: %v", fe)
+		}
+		if !changed {
+			t.Errorf("nameChanged = false, want true (New Name != %q)", testEditDisplay)
 		}
 		if name != "New Name" || strings.Join(aliases, ",") != "one,two" {
 			t.Errorf("got name=%q aliases=%v", name, aliases)
 		}
 	})
-	t.Run("empty display name is a field error", func(t *testing.T) {
-		_, _, fe := parseTunnelEditModalArgs(values("   ", ""), testEditToken)
+	t.Run("empty display name is a field error when changed", func(t *testing.T) {
+		_, _, _, fe := parseTunnelEditModalArgs(values("   ", ""), testEditToken, testEditDisplay)
 		if _, ok := fe[tunnelEditBlockDisplayName]; !ok {
 			t.Errorf("expected a display-name field error, got %v", fe)
 		}
 	})
-	t.Run("mrkdwn-injecting display name rejected", func(t *testing.T) {
-		_, _, fe := parseTunnelEditModalArgs(values("<!channel> hi", ""), testEditToken)
+	t.Run("mrkdwn-injecting display name rejected when changed", func(t *testing.T) {
+		_, _, _, fe := parseTunnelEditModalArgs(values("<!channel> hi", ""), testEditToken, testEditDisplay)
 		if _, ok := fe[tunnelEditBlockDisplayName]; !ok {
 			t.Errorf("expected display-name char rejection, got %v", fe)
 		}
 	})
 	t.Run("bad alias is a field error", func(t *testing.T) {
-		_, _, fe := parseTunnelEditModalArgs(values("ok", "$NOPE"), testEditToken)
+		_, _, _, fe := parseTunnelEditModalArgs(values("ok", "$NOPE"), testEditToken, testEditDisplay)
 		if _, ok := fe[tunnelEditBlockAliases]; !ok {
 			t.Errorf("expected an aliases field error, got %v", fe)
+		}
+	})
+	t.Run("untouched legacy name skips validation (alias-only edit)", func(t *testing.T) {
+		// A stored name carrying a now-disallowed backtick, pre-filled and left
+		// untouched, must NOT block an alias-only edit.
+		const legacy = "Prod `db`"
+		_, changed, aliases, fe := parseTunnelEditModalArgs(values(legacy, "$one"), testEditToken, legacy)
+		if len(fe) != 0 {
+			t.Fatalf("untouched legacy name should not error: %v", fe)
+		}
+		if changed {
+			t.Errorf("nameChanged = true for an untouched pre-filled name")
+		}
+		if strings.Join(aliases, ",") != "one" {
+			t.Errorf("aliases = %v, want [one]", aliases)
+		}
+	})
+	t.Run("whitespace-only difference is not a change", func(t *testing.T) {
+		// Stored name with surrounding whitespace, pre-filled and untouched: the
+		// trim must not register as a change (which would fire a spurious PATCH).
+		_, changed, _, fe := parseTunnelEditModalArgs(values("  "+testEditDisplay+"  ", ""), testEditToken, testEditDisplay)
+		if len(fe) != 0 {
+			t.Fatalf("unexpected field errors: %v", fe)
+		}
+		if changed {
+			t.Errorf("nameChanged = true for a whitespace-only difference (would fire a spurious PATCH)")
 		}
 	})
 }
@@ -219,6 +249,63 @@ func TestHandleList_NoEditButtonWithoutWiring(t *testing.T) {
 	}
 	if vals := createQurlButtonValues(t, blocks); len(vals) != 1 {
 		t.Errorf("Create qURL accessory button missing: %v", vals)
+	}
+}
+
+// TestHandleList_OverCapRowFallsBackToCreateOnly fences the snapshot-size guard
+// at the render level: a row whose Edit snapshot would exceed Slack's
+// button-value cap (here a tunnel with a large bound-alias set) degrades to the
+// Create-only accessory button, while a normal sibling row keeps Edit.
+func TestHandleList_OverCapRowFallsBackToCreateOnly(t *testing.T) {
+	const (
+		normalRID = "r_normal"
+		normalTok = "normal-tun"
+		bigRID    = "r_big"
+		bigTok    = "big-tun"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: normalRID, testKeyType: client.ResourceTypeTunnel, testKeySlug: normalTok, testKeyDescription: "Normal"},
+			{testKeyResourceID: bigRID, testKeyType: client.ResourceTypeTunnel, testKeySlug: bigTok, testKeyDescription: "Big"},
+		}, "", false)
+	})
+	// Bind both rows' primary slugs, plus a large extra-alias set on bigRID that
+	// pushes its snapshot past slackButtonValueMaxBytes.
+	bindings := map[string]string{normalTok: normalRID, bigTok: bigRID}
+	for i := 0; i < 80; i++ {
+		bindings[fmt.Sprintf("big-alias-%02d-%s", i, strings.Repeat("z", 20))] = bigRID
+	}
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, bindings)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	inv := newAdminSlashInvoker(t, h) // default channel_id "C_test" == testEditChannel
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status != 200")
+	}
+	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+
+	// Only the normal row carries an Edit button.
+	editVals := editButtonValues(t, blocks)
+	if len(editVals) != 1 {
+		t.Fatalf("Edit button count = %d, want 1 (the over-cap row must drop Edit)", len(editVals))
+	}
+	var snap tunnelEditButtonValue
+	if err := json.Unmarshal([]byte(editVals[0]), &snap); err != nil {
+		t.Fatalf("Edit value not JSON: %v", err)
+	}
+	if snap.ResourceID != normalRID {
+		t.Errorf("Edit button is for %q, want the normal row %q", snap.ResourceID, normalRID)
+	}
+	// The over-cap row degrades to a Create-only accessory button (sectionWithButton,
+	// not an actions block), so it's still mintable — just without Edit.
+	createVals := createQurlButtonValues(t, blocks)
+	if len(createVals) != 1 || createVals[0] != bigTok {
+		t.Errorf("over-cap row Create-only accessory = %v, want [%s]", createVals, bigTok)
 	}
 }
 

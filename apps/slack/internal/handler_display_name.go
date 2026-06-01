@@ -67,7 +67,7 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 	if !found {
 		return "", "", "Missing Display Name.\n\n" + displayNameUsage
 	}
-	name = strings.TrimSpace(stripSurroundingQuotes(strings.TrimSpace(rest)))
+	name = normalizeDisplayNameInput(rest)
 	if name == "" {
 		return "", "", "Missing Display Name.\n\n" + displayNameUsage
 	}
@@ -109,6 +109,15 @@ func parseUnsetDisplayNameArgs(text string) (id, userMsg string) {
 		return "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(tokens[0]), displayNameUsage)
 	}
 	return tokens[0], ""
+}
+
+// normalizeDisplayNameInput canonicalizes a raw Display Name: trim, drop a
+// matched surrounding quote pair, trim again. Shared by the set-display-name
+// verb and the `/qurl list` Edit modal so both interpret a typed/pre-filled
+// name identically — the modal also diffs against this form to decide whether
+// the name actually changed (see parseTunnelEditModalArgs).
+func normalizeDisplayNameInput(s string) string {
+	return strings.TrimSpace(stripSurroundingQuotes(strings.TrimSpace(s)))
 }
 
 // stripSurroundingQuotes removes one matched pair of surrounding single or

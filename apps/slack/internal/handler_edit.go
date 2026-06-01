@@ -112,12 +112,12 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 	var meta TunnelEditModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
 		slog.Warn("tunnel edit modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		h.respondTunnelEditModalError(w, "Could not verify this dialog. Run /qurl list and tap Edit again.")
+		respondTunnelEditModalError(w, "Could not verify this dialog. Run /qurl list and tap Edit again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" || meta.ResourceID == "" {
 		slog.Warn("tunnel edit modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		h.respondTunnelEditModalError(w, "Could not verify this dialog. Run /qurl list and tap Edit again.")
+		respondTunnelEditModalError(w, "Could not verify this dialog. Run /qurl list and tap Edit again.")
 		return
 	}
 	// Slack signs the request envelope including private_metadata, so these
@@ -125,20 +125,20 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 	// across workspaces.
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
 		slog.Warn("tunnel edit modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
-		h.respondTunnelEditModalError(w, "This dialog was opened for a different workspace. Run /qurl list and tap Edit again.")
+		respondTunnelEditModalError(w, "This dialog was opened for a different workspace. Run /qurl list and tap Edit again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel edit modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
-		h.respondTunnelEditModalError(w, "Only the admin who opened this dialog can submit it. Run /qurl list and tap Edit again.")
+		respondTunnelEditModalError(w, "Only the admin who opened this dialog can submit it. Run /qurl list and tap Edit again.")
 		return
 	}
 	if h.cfg.AdminStore == nil || h.aliasStore == nil {
-		h.respondTunnelEditModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		respondTunnelEditModalError(w, "Admin features are not configured on this Slack bot deployment.")
 		return
 	}
 
-	displayName, aliases, fieldErrors := parseTunnelEditModalArgs(payload.View.State.Values, meta.Token)
+	displayName, nameChanged, aliases, fieldErrors := parseTunnelEditModalArgs(payload.View.State.Values, meta.Token, meta.DisplayName)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)
 		return
@@ -153,12 +153,12 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		slog.Error("tunnel edit modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		h.respondTunnelEditModalError(w, "Could not verify admin status. Retry in a moment.")
+		respondTunnelEditModalError(w, "Could not verify admin status. Retry in a moment.")
 		return
 	}
 	if !isAdmin {
 		slog.Warn("tunnel edit modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
-		h.respondTunnelEditModalError(w, "This action is admin-only.")
+		respondTunnelEditModalError(w, "This action is admin-only.")
 		return
 	}
 
@@ -171,27 +171,39 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelEdit(ctx, log, &meta, displayName, aliases)
+		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases)
 	}) {
-		h.respondTunnelEditModalError(w, "Slack bot is busy. Retry in a moment.")
+		respondTunnelEditModalError(w, "Slack bot is busy. Retry in a moment.")
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
 }
 
 // parseTunnelEditModalArgs validates the Edit modal's submitted state: the
-// Display Name (required, char-fenced via the shared validateDisplayNameChars)
-// and the multiline aliases field. token is the row's primary `$<token>`,
-// excluded from the editable alias set. Returns the cleaned Display Name and
-// the deduped, validated extra-alias set, or a per-field error map.
-func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue, token string) (displayName string, aliases []string, fieldErrors map[string]string) {
+// Display Name (char-fenced via the shared validateDisplayNameChars) and the
+// multiline aliases field. token is the row's primary `$<token>`, excluded
+// from the editable alias set; currentName is the pre-filled Display Name the
+// modal opened with. Returns the cleaned Display Name, whether it actually
+// changed, the deduped/validated extra-alias set, or a per-field error map.
+//
+// The name is diffed against the IDENTICALLY-normalized currentName, and is
+// validated ONLY when it changed. Two reasons: (1) a legacy or API-set name
+// that predates this fence (a backtick / `<…>` / control byte) must not block
+// an alias-only edit the admin never touched — the modal pre-fills it, so an
+// untouched bad name would otherwise be un-saveable; (2) normalizing both
+// sides means surrounding whitespace/quotes on the stored value don't register
+// as a change and fire a spurious PATCH on an alias-only edit.
+func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue, token, currentName string) (displayName string, nameChanged bool, aliases []string, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
-	rawName := strings.TrimSpace(stripSurroundingQuotes(strings.TrimSpace(interactionStateText(values, tunnelEditBlockDisplayName, tunnelEditActionDisplayName))))
-	if rawName == "" {
-		fieldErrors[tunnelEditBlockDisplayName] = "Enter a display name."
-	} else if msg := validateDisplayNameChars(rawName); msg != "" {
-		fieldErrors[tunnelEditBlockDisplayName] = msg
+	rawName := normalizeDisplayNameInput(interactionStateText(values, tunnelEditBlockDisplayName, tunnelEditActionDisplayName))
+	nameChanged = rawName != normalizeDisplayNameInput(currentName)
+	if nameChanged {
+		if rawName == "" {
+			fieldErrors[tunnelEditBlockDisplayName] = "Enter a display name."
+		} else if msg := validateDisplayNameChars(rawName); msg != "" {
+			fieldErrors[tunnelEditBlockDisplayName] = msg
+		}
 	}
 
 	aliases, aliasMsg := parseEditAliasLines(interactionStateText(values, tunnelEditBlockAliases, tunnelEditActionAliases), token)
@@ -200,9 +212,9 @@ func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue
 	}
 
 	if len(fieldErrors) > 0 {
-		return "", nil, fieldErrors
+		return "", false, nil, fieldErrors
 	}
-	return rawName, aliases, nil
+	return rawName, nameChanged, aliases, nil
 }
 
 // parseEditAliasLines parses the modal's one-alias-per-line field into a
@@ -245,7 +257,7 @@ func parseEditAliasLines(raw, token string) (aliases []string, userMsg string) {
 // clobber a concurrent display-name change), reconciles the channel aliases to
 // the submitted set, and posts an outcome summary to the list message's
 // response_url.
-func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, desiredAliases []string) {
+func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, nameChanged bool, desiredAliases []string) {
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
 		log.Error("tunnel edit: API key lookup failed", "error", err)
@@ -254,10 +266,10 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 	}
 
 	var changes []string
-	// Display Name: skip the PATCH when unchanged (the modal pre-fills the
-	// current value, so an unchanged field means the admin only touched
-	// aliases — don't overwrite a concurrent set-display-name).
-	if displayName != meta.DisplayName {
+	// Display Name: PATCH only when it actually changed (computed in
+	// parseTunnelEditModalArgs against the normalized pre-filled value), so an
+	// alias-only edit doesn't overwrite a concurrent set-display-name.
+	if nameChanged {
 		if _, err := c.UpdateResource(ctx, meta.ResourceID, &client.UpdateResourceInput{Description: &displayName}); err != nil {
 			log.Error("tunnel edit: display name update failed", "error", err, "resource_id", meta.ResourceID)
 			_ = h.postResponse(log, meta.ResponseURL, sanitizeAPIError(err, "Failed to update the Display Name"))
@@ -375,7 +387,7 @@ func joinAliasCodes(aliases []string) string {
 // form-level error notice (structural/auth failures only; per-field problems
 // use respondViewErrors). Falls back to a field-level error if the view render
 // fails, so the submitter always sees a failure rather than a stuck modal.
-func (h *Handler) respondTunnelEditModalError(w http.ResponseWriter, message string) {
+func respondTunnelEditModalError(w http.ResponseWriter, message string) {
 	view, err := TunnelEditErrorModal(message)
 	if err != nil {
 		slog.Error("tunnel edit modal error render failed", "error", err)
