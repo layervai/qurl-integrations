@@ -2,24 +2,15 @@ package internal
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
-
-// aliasesResourceFanoutLimit bounds the parallelism of per-row
-// alias→target resolution. A channel's alias_bindings map can hold
-// dozens of aliases; sequential fetches against a slow customer API
-// would chew through asyncWorkTimeout (25s). 8 parallel workers
-// leaves comfortable headroom (~200ms nominal × ceil(N/8) batches).
-const aliasesResourceFanoutLimit = 8
 
 // handleAliases implements `/qurl aliases`. Lists the aliases bound
 // to the current channel via a single GetItem on channel_policies
@@ -28,15 +19,15 @@ const aliasesResourceFanoutLimit = 8
 // Async-defer pattern:
 //  1. Ack 200 + spinner.
 //  2. Goroutine reads channel_policies via the DDB-direct AdminStore,
-//     fans out customer-API resource fetches to render human-readable
-//     target/alias fields, and POSTs the result to response_url.
+//     resolves each bound tunnel's slug from a single ListResources
+//     call (the same source `/qurl list` uses — the one the API
+//     actually returns slugs on), and POSTs the result to response_url.
 //
-// TODO: rate-limit. /qurl aliases is read-amplified — one DDB
-// GetItem plus N customer-API reads (N = the channel's
-// `alias_bindings` size, capped only by the channel's own size).
-// A user spamming the verb amplifies upstream load by ~N. The in-bot
-// rate-limit gate (slackdata.CheckRateLimit) is a stub today for
-// /qurl get; once that lands, the same gate should cover /qurl
+// TODO: rate-limit. /qurl aliases costs one DDB GetItem plus one
+// ListResources page per invocation (constant, no longer amplified by
+// the channel's alias count). A user can still spam the verb; the
+// in-bot rate-limit gate (slackdata.CheckRateLimit) is a stub today
+// for /qurl get, and once it lands the same gate should cover /qurl
 // aliases. Tracked alongside the /qurl get rate-limit TODO in
 // SLACK_QURL_ROLLOUT.md.
 func (h *Handler) handleAliases(w http.ResponseWriter, values url.Values) {
@@ -91,18 +82,102 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 
 	// Collapse the per-alias bindings into one group per tunnel: several
 	// aliases can point to the same slug, so the listing shows the slug
-	// once followed by every alias that resolves to it here. Per-group
-	// resource fetch is best-effort — a failed fetch degrades to an
-	// alias-only line (never the opaque resource_id) rather than dropping
-	// the group.
+	// once followed by every alias that resolves to it here.
 	groups := groupAliasEntriesByResource(entries)
-	lines := fanoutAliasGroups(ctx, log, c, groups, aliasesResourceFanoutLimit)
+
+	// Resolve each group's slug from the workspace tunnel list — the SAME
+	// source `/qurl list` reads (and the one the API actually populates
+	// slugs on; the per-id `GET /v1/resources/{id}` path does not). One
+	// fetch covers every group, joined by resource_id. Best-effort: a
+	// failed fetch degrades each row to its channel aliases alone (never
+	// the opaque resource_id). Skipped entirely when every group is
+	// resource-less (all-legacy channel) — there's nothing to join, so we
+	// don't spend an upstream call.
+	var byID map[string]client.Resource
+	var hasMore bool
+	if groupsNeedResolution(groups) {
+		byID, hasMore = resourcesByResourceID(ctx, log, c)
+	}
+	lines := make([]string, 0, len(groups))
+	unresolved := 0
+	for i := range groups {
+		// Resource-less groups (the "\x00"-keyed legacy/synthetic rows)
+		// never participate in the join — skip the lookup. For a real
+		// resource_id, a miss (nil map from a failed fetch, or absent from
+		// the scanned page) leaves r as the zero-value Resource, which
+		// formatAliasGroupLine degrades to the alias-only row, and counts
+		// toward the pagination-gap signal below.
+		var r client.Resource
+		if rid := groups[i].resourceID; rid != "" {
+			var ok bool
+			if r, ok = byID[rid]; !ok {
+				unresolved++
+			}
+		}
+		lines = append(lines, formatAliasGroupLine(r.TargetURL, r.Slug, r.Description, groups[i].aliases))
+	}
 	sort.Strings(lines)
+
+	if hasMore && unresolved > 0 {
+		// A bound tunnel resolved to alias-only AND the page reports more
+		// resources past it. Two causes share this signal because
+		// page.HasMore is a master-list flag ("more resources of any
+		// type", not "more tunnels" — until the #531 server-side filter):
+		// the bound resource may be paginated out, OR the binding may be
+		// stale (its resource was deleted but the DDB row remains). The
+		// message names both so operators don't only chase pagination.
+		// One triage line for "why doesn't `$foo` show its slug?"; arms
+		// the #555 follow-up. Additive only — the rendered rows are
+		// unchanged.
+		log.Warn("aliases: listing may be incomplete — a bound resource was not on the scanned page (paginated out, or the binding is stale)",
+			"unresolved_groups", unresolved, "scan_limit", listResourcesScanLimit, "team_id", teamID, "channel_id", channelID)
+	}
 
 	body := "*Aliases configured for this channel:*\n" +
 		"_Format: `$<id>` → the aliases that resolve to it. Run `/qurl get` with the ID or any alias._\n" +
 		strings.Join(lines, "\n")
 	_ = h.postResponse(log, responseURL, body)
+}
+
+// groupsNeedResolution reports whether any group carries a resource_id —
+// i.e. whether the ListResources slug join is worth an upstream call. A
+// channel whose bindings are all resource-less (legacy/synthetic) renders
+// alias-only with no fetch.
+func groupsNeedResolution(groups []aliasGroup) bool {
+	for i := range groups {
+		if groups[i].resourceID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// resourcesByResourceID fetches one page of the workspace's resources
+// and indexes them by resource_id for the slug join in processAliases
+// (see the call site for why the list path, not the per-id path, is the
+// reliable slug source). Every resource on the page is indexed —
+// intentionally NOT filtered to type=tunnel like /qurl list — so a
+// legacy URL binding still resolves its target_url and renders the
+// "<url> (legacy URL) → $alias" line.
+//
+// Best-effort: a fetch failure yields (nil, false) — a nil-map lookup
+// returns the zero-value Resource, so the caller degrades each row to
+// alias-only. Bounded to one [listResourcesScanLimit] page; hasMore
+// reports page.HasMore so the caller can flag a binding that may simply
+// be paginated out. (Same cap as /qurl list; the incomplete-listing
+// follow-up is tracked in #555, which depends on the #531 server-side
+// type=tunnel filter.)
+func resourcesByResourceID(ctx context.Context, log *slog.Logger, c *client.Client) (map[string]client.Resource, bool) {
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	if err != nil {
+		log.Warn("aliases: list resources for slug resolution failed — rendering alias-only", "error", err)
+		return nil, false
+	}
+	out := make(map[string]client.Resource, len(page.Resources))
+	for i := range page.Resources {
+		out[page.Resources[i].ResourceID] = page.Resources[i]
+	}
+	return out, page.HasMore
 }
 
 // aliasGroup collects every channel alias bound to one resource, so
@@ -147,70 +222,6 @@ func groupAliasEntriesByResource(entries []slackdata.PolicyEntry) []aliasGroup {
 		sort.Strings(groups[i].aliases)
 	}
 	return groups
-}
-
-// fanoutAliasGroups renders the per-group alias lines using a bounded
-// worker pool — one resource fetch per group, NOT per alias (grouping by
-// resource_id means two aliases on the same tunnel cost a single fetch).
-// The dispatcher honors ctx.Done() while waiting for a semaphore slot —
-// without this, a cancellation that fires while the loop is queuing rows
-// (more groups than `limit`) would block on `sem <- {}` indefinitely
-// (the workers only honor ctx through their downstream HTTP call).
-// Groups that don't get dispatched fall back to alias-only lines via
-// [formatAliasGroupLine] so the user still sees one line per group.
-//
-// Output order is non-deterministic — the caller sorts before rendering.
-func fanoutAliasGroups(ctx context.Context, log *slog.Logger, c *client.Client, groups []aliasGroup, limit int) []string {
-	if limit < 1 {
-		limit = 1
-	}
-	lines := make([]string, len(groups))
-	sem := make(chan struct{}, limit)
-	var wg sync.WaitGroup
-loop:
-	for i := range groups {
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			// Fill un-dispatched tail with alias-only fallbacks — no fetch
-			// happened, so there's no slug and (by design) no resource_id.
-			for j := i; j < len(groups); j++ {
-				lines[j] = formatAliasGroupLine("", "", "", groups[j].aliases)
-			}
-			break loop
-		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			g := &groups[idx]
-			target, slug, description := "", "", ""
-			if g.resourceID != "" {
-				// Resolve the group's canonical resource directly by the
-				// resource_id we already hold from channel_policies, via
-				// GET /v1/resources/{id}. The response carries the full
-				// Resource: a tunnel has a Slug and no TargetURL; a legacy
-				// URL binding the reverse. One fetch covers the whole group
-				// — every alias in it points at this same resource_id.
-				if r, rerr := c.GetResource(ctx, g.resourceID); rerr == nil {
-					target = r.TargetURL
-					slug = r.Slug
-					description = r.Description
-				} else if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
-					// Distinct log from the 404/5xx branch so operators
-					// can tell "request was cut short by SIGTERM /
-					// asyncWorkTimeout" apart from "upstream rejected
-					// this id" when triaging.
-					log.Debug("aliases: resource fetch canceled before completion", "error", rerr, "resource_id", g.resourceID)
-				} else {
-					log.Debug("aliases: resource fetch failed in fanout", "error", rerr, "resource_id", g.resourceID)
-				}
-			}
-			lines[idx] = formatAliasGroupLine(target, slug, description, g.aliases)
-		}(i)
-	}
-	wg.Wait()
-	return lines
 }
 
 // formatAliasGroupLine renders one /qurl aliases line as
