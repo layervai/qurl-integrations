@@ -59,6 +59,10 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		// check, so this is "Missing tunnel id" (not "Missing Display Name").
 		{name: "lone dollar no name rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
 		{name: "dollar then invalid id rejected", input: "$Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
+		// TrimPrefix strips exactly one `$`, so `$$prod-dashboard` becomes
+		// `$prod-dashboard`, which still fails the slug check (matching
+		// parseAliasToken's single-strip). Pins that double-sigil doesn't resolve.
+		{name: "double dollar strips one, rejected", input: "$$prod-dashboard foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		{name: "id only, no name", input: id, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then only whitespace", input: id + "    ", wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then empty quotes", input: id + ` ""`, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
