@@ -40,6 +40,7 @@ const (
 	blockKitFieldBlocks          = "blocks"
 	blockKitFieldCallbackID      = "callback_id"
 	blockKitFieldClose           = "close"
+	blockKitFieldElements        = "elements"
 	blockKitFieldPrivateMetadata = "private_metadata"
 	blockKitFieldSubmit          = "submit"
 	blockKitFieldTitle           = "title"
@@ -293,6 +294,34 @@ func sectionBlock(text string) map[string]any {
 	}
 }
 
+// richTextPreformattedBlock returns a `rich_text` block wrapping a single
+// `rich_text_preformatted` element — Slack's structured code block. Unlike a
+// triple-backtick mrkdwn fence inside a `section`, the preformatted element
+// renders with a copy affordance in the Slack client and never risks
+// fence-escaping issues, so it is the right surface for the multi-line shell /
+// YAML / JSON snippets the tunnel installer hands operators to paste.
+//
+// `code` is emitted verbatim as a single `text` element. Rich-text
+// `text` elements are NOT mrkdwn-parsed, so the snippet's own backticks,
+// `<…>`, and `*` render literally — exactly what a copy-paste block wants.
+// Callers pass raw, already-validated snippet text.
+func richTextPreformattedBlock(code string) map[string]any {
+	return map[string]any{
+		"type": "rich_text",
+		blockKitFieldElements: []any{
+			map[string]any{
+				"type": "rich_text_preformatted",
+				blockKitFieldElements: []any{
+					map[string]any{
+						"type": "text",
+						"text": code,
+					},
+				},
+			},
+		},
+	}
+}
+
 // sectionWithButton returns a `section` block whose accessory is a
 // button. Slack renders an accessory to the RIGHT of the section text —
 // Block Kit has no leading/left accessory slot, so the right-aligned
@@ -320,7 +349,7 @@ func sectionWithButton(text, buttonText, actionID, value string) map[string]any 
 func contextBlock(text string) map[string]any {
 	return map[string]any{
 		"type": "context",
-		"elements": []any{
+		blockKitFieldElements: []any{
 			map[string]any{
 				"type": "mrkdwn",
 				"text": text,

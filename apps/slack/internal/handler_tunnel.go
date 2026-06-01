@@ -513,7 +513,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		return
 	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
-	if !h.postResponse(log, responseURL, msg) {
+	if !h.postInstallInstructions(log, responseURL, msg) {
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
 		// revoke notice. The key is still revoked because delivery was not
@@ -932,4 +932,107 @@ func slackCodeBlock(body string) (string, error) {
 		return "", errors.New("slack code block body contains nested triple-backtick fence")
 	}
 	return "```\n" + body + "\n```", nil
+}
+
+const (
+	// slackSectionTextMaxBytes is Slack's documented per-`section` mrkdwn text
+	// limit. A prose run in the install message that exceeds it drops the whole
+	// message back to the plain-text post.
+	slackSectionTextMaxBytes = 3000
+	// slackRichTextMaxBytes caps a single rich_text_preformatted code segment.
+	// rich_text `text` elements carry NO documented length limit (unlike the
+	// 3000-char cap on `text`/mrkdwn composition objects), and Slack accepts
+	// multi-KB code blocks, so this is a defensive ceiling rather than a hard
+	// Slack bound: it sits well above the largest real install snippet (~3.8 KB,
+	// the Docker Compose shell block) with headroom for installer growth, and
+	// far below Slack's 40000-char message-text ceiling. An oversize segment
+	// drops to the plain-text post — and [Handler.postInstallInstructions]
+	// retries as text even if Slack ever rejects an over-large blocks payload —
+	// so this is a first-try optimization, not the delivery safety boundary.
+	slackRichTextMaxBytes = 12000
+	// slackMessageBlockMax is Slack's per-message block ceiling. The install
+	// message produces roughly two blocks per code segment plus prose, far
+	// below this; the guard is defensive against a future renderer that fans
+	// out far more segments.
+	slackMessageBlockMax = 50
+)
+
+// installFencedCodeBlock matches a single ```\n<body>\n``` fence as produced by
+// slackCodeBlock. The body can never contain a nested ``` (slackCodeBlock
+// rejects that), so the non-greedy capture segments a rendered install message
+// unambiguously into code vs. surrounding prose.
+var installFencedCodeBlock = regexp.MustCompile("(?s)```\\n(.*?)\\n```")
+
+// installMessageBlocks converts a fully-rendered install message — prose
+// interleaved with ```\n…\n``` code fences (see
+// [preparedTunnelInstallMessage.render]) — into Block Kit blocks: each prose
+// run becomes a `section` mrkdwn block and each fenced snippet becomes a
+// [richTextPreformattedBlock] (a copyable code block). It derives the blocks
+// from the SAME string that is also posted as the message's plain-text
+// fallback, so the two renderings cannot drift.
+//
+// Returns (blocks, true) on success, or (nil, false) when the message carries
+// no code fence to enrich, a single segment exceeds [slackBlockTextMaxBytes],
+// or the block count would exceed [slackMessageBlockMax]. A false result is the
+// caller's signal to post the plain-text message instead: the install flow
+// MUST stay deliverable (an unconfirmed delivery revokes the bootstrap key), so
+// blocks are strictly a best-effort enhancement over the always-safe text post.
+func installMessageBlocks(msg string) ([]any, bool) {
+	matches := installFencedCodeBlock.FindAllStringSubmatchIndex(msg, -1)
+	if len(matches) == 0 {
+		return nil, false
+	}
+	blocks := make([]any, 0, len(matches)*2+1)
+	appendProse := func(s string) bool {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return true
+		}
+		if len(s) > slackSectionTextMaxBytes {
+			return false
+		}
+		blocks = append(blocks, sectionBlock(s))
+		return true
+	}
+	last := 0
+	for _, m := range matches {
+		// m[0:2] is the full fence; m[2:4] is the captured body.
+		if !appendProse(msg[last:m[0]]) {
+			return nil, false
+		}
+		code := msg[m[2]:m[3]]
+		if len(code) > slackRichTextMaxBytes {
+			return nil, false
+		}
+		blocks = append(blocks, richTextPreformattedBlock(code))
+		last = m[1]
+	}
+	if !appendProse(msg[last:]) {
+		return nil, false
+	}
+	if len(blocks) == 0 || len(blocks) > slackMessageBlockMax {
+		return nil, false
+	}
+	return blocks, true
+}
+
+// postInstallInstructions delivers the rendered install message, preferring the
+// Block Kit rendering (copyable rich_text_preformatted snippets) and falling
+// back to the plain-text post on any block-path miss. Returns whether SOME
+// rendering was delivered — the caller revokes the bootstrap key only when
+// delivery is unconfirmed, so this reports false only when neither the blocks
+// NOR the text post landed.
+//
+// The text post is the same single-call delivery the install flow used before
+// blocks existed, so this path is never worse than that baseline: a Slack-side
+// rejection of the blocks payload (non-2xx) is retried as plain text before the
+// caller treats delivery as failed.
+func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) bool {
+	if blocks, ok := installMessageBlocks(msg); ok {
+		if h.postResponseBlocks(log, responseURL, msg, blocks) {
+			return true
+		}
+		log.Warn("tunnel install: Block Kit follow-up delivery failed; retrying as plain text")
+	}
+	return h.postResponse(log, responseURL, msg)
 }
