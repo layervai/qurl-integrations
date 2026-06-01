@@ -280,7 +280,6 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// so gating the button on the caller's admin status is the whole access
 	// boundary for the affordance; the mutation it opens is re-gated at
 	// view_submission time (see handleTunnelEditSubmission).
-	editable := h.listCallerCanEdit(ctx, log, teamID, values.Get(fieldUserID))
 	// Buttons render whenever the tunnel set fits the per-message block ceiling
 	// (listCreateButtonMaxRows). An admin row carries an extra block (Edit lives
 	// in its own actions block), so per-row Edit only fits under the halved
@@ -288,8 +287,13 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// buttons every caller gets — just no per-row Edit — rather than the whole
 	// list collapsing to text (which would be a surprising admin-only regression
 	// versus the same tunnel count for a non-admin).
+	//
+	// listCallerCanEdit costs a CheckAdmin read, so the size gate is checked
+	// first (&& short-circuits): a list too large to carry Edit buttons skips the
+	// read entirely, since the answer can't change the output.
 	useButtons := len(resources) <= listCreateButtonMaxRows
-	showEdit := editable && len(resources) <= listEditButtonMaxRows
+	showEdit := len(resources) <= listEditButtonMaxRows &&
+		h.listCallerCanEdit(ctx, log, teamID, values.Get(fieldUserID))
 	lines := make([]string, 0, len(resources))
 	var blocks []any
 	if useButtons {

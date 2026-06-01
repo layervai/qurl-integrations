@@ -201,7 +201,9 @@ func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue
 	nameChanged = rawName != normalizeDisplayNameInput(meta.DisplayName)
 	if nameChanged {
 		if rawName == "" {
-			fieldErrors[tunnelEditBlockDisplayName] = "Enter a display name."
+			// Reached only when clearing a previously-set name (empty + unchanged
+			// is a no-op). This modal renames; clearing entirely is a separate verb.
+			fieldErrors[tunnelEditBlockDisplayName] = "Enter a display name, or run /qurl-admin unset-display-name to remove it."
 		} else if msg := validateDisplayNameChars(rawName); msg != "" {
 			fieldErrors[tunnelEditBlockDisplayName] = msg
 		}
