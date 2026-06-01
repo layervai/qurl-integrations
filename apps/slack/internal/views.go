@@ -245,7 +245,6 @@ func TunnelEditErrorModal(message string) ([]byte, error) {
 // (slug or promoted alias) shown in the modal context and excluded from the
 // editable alias set so the tunnel's own name is never unbound by the modal.
 // ResponseURL is the list message's, where the async edit result is posted.
-// CreatedAtUnix lets the submit handler reject a stale modal.
 type TunnelEditModalMetadata struct {
 	TeamID      string `json:"team_id"`
 	ChannelID   string `json:"channel_id"`

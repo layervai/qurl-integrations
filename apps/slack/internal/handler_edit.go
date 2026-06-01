@@ -246,10 +246,6 @@ func parseEditAliasLines(raw, token string) (aliases []string, userMsg string) {
 // the submitted set, and posts an outcome summary to the list message's
 // response_url.
 func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, desiredAliases []string) {
-	if meta.ChannelID == "" {
-		_ = h.postResponse(log, meta.ResponseURL, ":warning: "+channelRequiredMessage)
-		return
-	}
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
 		log.Error("tunnel edit: API key lookup failed", "error", err)

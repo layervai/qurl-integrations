@@ -72,12 +72,13 @@ const listEditButtonLabel = "Edit"
 
 // listEditButtonMaxRows caps interactive rows when the Edit button is shown.
 // An admin row renders TWO blocks (a section line + an actions block carrying
-// Create qURL + Edit) versus one for the Create-only path, so the per-message
-// 50-block ceiling halves: header (1) + 2N + footer (1) + optional has-more (1)
-// stays under 50 at N=22 (47 blocks). Above this, the listing degrades to plain
-// text — every tunnel still shown, just without buttons — see
-// [listCreateButtonMaxRows].
-const listEditButtonMaxRows = 22
+// Create qURL + Edit) versus one for the Create-only path, so it halves
+// [listCreateButtonMaxRows]'s row budget — derived from it (not a separate
+// magic number) so the two can't drift. At 22 rows the message is header (1) +
+// 2N + footer (1) + optional has-more (1) = 47 blocks, under Slack's 50-block
+// ceiling. Above this, the listing degrades to plain text — every tunnel still
+// shown, just without buttons.
+const listEditButtonMaxRows = listCreateButtonMaxRows / 2
 
 // slackButtonValueMaxBytes is Slack's documented cap on a button element's
 // `value`. The Edit button carries a [tunnelEditButtonValue] JSON snapshot; if
