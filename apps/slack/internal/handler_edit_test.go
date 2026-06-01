@@ -284,6 +284,26 @@ func TestHandleList_RendersEditButtonForAdmin(t *testing.T) {
 	}
 }
 
+// TestHandleList_RendersEditButtonForOwnerNotOnAdminSet fences the owner→admin
+// self-heal at the /qurl list surface: the bot-assigned owner (recorded by
+// `/qurl setup`) sees the Edit button even when they are NOT on
+// admin_slack_user_ids. editableListHandler seeds owner=testAdminOwnerID with
+// the admin set holding only testAdminUserID, so the owner is deliberately off
+// the set — pre-fix this rendered Create-only and the owner was locked out of
+// Edit (the reported regression).
+func TestHandleList_RendersEditButtonForOwnerNotOnAdminSet(t *testing.T) {
+	h, _ := editableListHandler(t)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminOwnerID); status != http.StatusOK {
+		t.Fatalf("status != 200")
+	}
+	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+	if vals := editButtonValues(t, blocks); len(vals) != 1 {
+		t.Fatalf("Edit button count = %d for owner caller not on admin set, want 1; blocks=%v", len(vals), blocks)
+	}
+}
+
 // TestHandleList_NoEditButtonWithoutWiring fences that the Edit button is
 // gated: with OpenView unset (modal can't be opened), the list renders only
 // the Create qURL accessory button — no Edit.

@@ -42,9 +42,10 @@ func seedWorkspaceAdmin(teamID, ownerID, slackUserID string, configuredAt time.T
 }
 
 // seedWorkspaceAdmins is seedWorkspaceAdmin with more than one user on the
-// admin set. CheckAdmin only honors the admin SS (the owner is not
-// auto-admin), so the alias-gate helper needs both of its test callers
-// ("U_admin" and "U_alias_admin") listed here.
+// admin set. CheckAdmin grants admin to the owner (off owner_id) AND to any
+// user on the admin SS, so a caller that isn't the owner must be listed here
+// — hence the alias-gate helper lists both of its test callers ("U_admin"
+// and "U_alias_admin").
 func seedWorkspaceAdmins(teamID, ownerID string, adminUserIDs []string, configuredAt time.Time) map[string]ddbtypes.AttributeValue {
 	at := configuredAt.UTC().Format(time.RFC3339)
 	return map[string]ddbtypes.AttributeValue{
