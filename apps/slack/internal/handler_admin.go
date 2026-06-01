@@ -14,6 +14,14 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// adminUsageMessage is the arg hint shown when `/qurl-admin admin` is
+// invoked with no action (bare `admin`, which parses to
+// [ErrMissingAdminAction]). Lists the membership + revoke actions so the
+// user learns the grammar rather than seeing the terse sentinel. "qURL bot
+// admin" (not "workspace admin") is deliberate: membership is the bot's own
+// admin set, not Slack's workspace-admin role.
+const adminUsageMessage = "Usage:\n• `/qurl-admin admin add @user` — promote a Slack user to qURL bot admin\n• `/qurl-admin admin remove @user` — demote a qURL bot admin\n• `/qurl-admin admin list` — show who connected qURL (the owner) and current bot admins\n• `/qurl-admin admin revoke <qurl_id>` — revoke a single qURL"
+
 // handleAdmin parses the `admin <verb> ...` form via the shared parser
 // and dispatches to the action-specific handler. Every recognized verb
 // is sync — one DDB GetItem/UpdateItem or one qURL API DELETE — so the
@@ -38,6 +46,15 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
 	if err != nil {
+		// Bare `admin` (no action) parses to ErrMissingAdminAction. List the
+		// available actions instead of the terse sentinel so the user learns
+		// the grammar. The action roster is public (it's in `/qurl-admin help`),
+		// so this hint is ungated — the admin gate is on execution, not
+		// discovery, matching the set-alias / set-display-name usage paths.
+		if errors.Is(err, ErrMissingAdminAction) {
+			respondSlack(w, ":warning: "+adminUsageMessage)
+			return
+		}
 		respondSlack(w, ":warning: "+err.Error())
 		return
 	}

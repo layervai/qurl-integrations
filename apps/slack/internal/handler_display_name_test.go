@@ -15,8 +15,9 @@ import (
 // Repeated test literals, named to satisfy goconst and keep the
 // expected-copy assertions in one place.
 const (
-	testDisplayNameProdAPI    = "Prod API"
-	testDisplayNameMissingMsg = "Missing Display Name"
+	testDisplayNameProdAPI      = "Prod API"
+	testDisplayNameMissingMsg   = "Missing Display Name"
+	testDisplayNameInvalidIDMsg = "valid tunnel id"
 )
 
 // --- install-default constructor -----------------------------------------
@@ -50,13 +51,16 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		{name: "surrounding whitespace trimmed", input: id + "    Prod API   ", wantID: id, wantName: testDisplayNameProdAPI},
 		{name: "name with internal punctuation kept", input: id + " Staging DB (replica)", wantID: id, wantName: "Staging DB (replica)"},
 		{name: "lone quote kept as part of name", input: id + ` it's fine`, wantID: id, wantName: "it's fine"},
+		{name: "dollar-prefixed id accepted", input: "$" + id + ` "Prod API"`, wantID: id, wantName: testDisplayNameProdAPI},
 
 		{name: "missing everything", input: "", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "lone dollar id rejected", input: "$ Prod API", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "dollar then invalid id rejected", input: "$Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		{name: "id only, no name", input: id, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then only whitespace", input: id + "    ", wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then empty quotes", input: id + ` ""`, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
-		{name: "invalid id (uppercase)", input: "Prod foo", wantErr: true, wantMsgSub: "valid tunnel id"},
-		{name: "invalid id (too short)", input: "ab foo", wantErr: true, wantMsgSub: "valid tunnel id"},
+		{name: "invalid id (uppercase)", input: "Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
+		{name: "invalid id (too short)", input: "ab foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		{name: "name too long rejected", input: id + " " + strings.Repeat("a", displayNameMaxLen+1), wantErr: true, wantMsgSub: "too long"},
 		{name: "name at length cap accepted", input: id + " " + strings.Repeat("a", displayNameMaxLen), wantID: id, wantName: strings.Repeat("a", displayNameMaxLen)},
 		{name: "control byte in name rejected", input: id + " bad\x01name", wantErr: true, wantMsgSub: "control characters"},
@@ -99,7 +103,9 @@ func TestParseUnsetDisplayNameArgs(t *testing.T) {
 		wantID  string
 	}{
 		{name: "happy", input: id, wantID: id},
+		{name: "dollar-prefixed id accepted", input: "$" + id, wantID: id},
 		{name: "missing id", input: "", wantErr: true},
+		{name: "lone dollar rejected", input: "$", wantErr: true},
 		{name: "trailing args rejected", input: id + " extra", wantErr: true},
 		{name: "invalid id rejected", input: "Prod", wantErr: true},
 	}

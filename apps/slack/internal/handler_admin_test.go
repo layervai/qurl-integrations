@@ -819,7 +819,9 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 // --- Dispatch-shell tests ---
 
 // TestHandleAdmin_BareAdminVerb fences the bare `admin` form — a
-// parser error, not a panic in the verb-dispatch switch.
+// parser error surfaced as the action-roster usage hint, not a panic
+// in the verb-dispatch switch or the terse "missing admin action"
+// sentinel.
 func TestHandleAdmin_BareAdminVerb(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -830,6 +832,13 @@ func TestHandleAdmin_BareAdminVerb(t *testing.T) {
 	_, reply := inv.invokeAdmin("admin", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, ":warning:") {
 		t.Errorf("reply missing parser-error surface: %q", reply)
+	}
+	// The bare-admin hint lists the available actions rather than echoing
+	// the terse sentinel, so the user learns the grammar.
+	for _, want := range []string{"admin add", "admin remove", "admin list", "admin revoke"} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("bare-admin hint missing %q: %q", want, reply)
+		}
 	}
 }
 

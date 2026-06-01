@@ -187,10 +187,10 @@ func TestHandleGet_MintTransportError(t *testing.T) {
 	}
 }
 
-// TestHandleGet_MissingAlias fences the parser-level "missing $alias"
-// surface. The slash-command body has `get` with no positional arg
-// → the handler replies synchronously with a Usage hint and never
-// kicks off async work.
+// TestHandleGet_MissingAlias fences the bare-`get` surface. The
+// slash-command body has `get` with no positional arg → the handler
+// replies synchronously with the `$<id>|$<alias>` Usage hint (the
+// getUsageMessage copy) and never kicks off async work.
 func TestHandleGet_MissingAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
@@ -200,8 +200,11 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "$alias argument") {
-		t.Errorf("ack missing alias-hint: %q", ack)
+	if !strings.Contains(ack, "$id|$alias") {
+		t.Errorf("ack missing get usage hint: %q", ack)
+	}
+	if !strings.Contains(ack, "/qurl list") {
+		t.Errorf("ack missing /qurl list pointer: %q", ack)
 	}
 }
 

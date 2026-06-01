@@ -33,7 +33,7 @@ func defaultTunnelDisplayName(slug string) string {
 // displayNameUsage is the help-text body returned when set-display-name /
 // unset-display-name is invoked with an obvious typo. Centralized so the
 // missing-arg path and the validation-rejection path share one copy.
-const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <display name>`\n• `/qurl-admin unset-display-name <id>`\n\nThe id is the tunnel token shown by `/qurl list` (without the `$`). The Display Name is free text up to 500 characters."
+const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <display name>`\n• `/qurl-admin unset-display-name <id>`\n\nThe id is the tunnel token shown by `/qurl list` (the leading `$` is optional). The Display Name is free text up to 500 characters."
 
 // parseSetDisplayNameArgs splits a `set-display-name <id> <display name>`
 // body into the tunnel id (first whitespace-delimited token) and the
@@ -58,6 +58,11 @@ func parseSetDisplayNameArgs(text string) (id, name, userMsg string) {
 		idTok, rest = text[:i], strings.TrimLeftFunc(text[i:], unicode.IsSpace)
 		found = true
 	}
+	// Accept an optional leading `$` on the id so set-display-name matches
+	// every other tunnel-id/alias command (`/qurl get`, `/qurl-admin set-alias`),
+	// which all take the `$<id>` sigil form `/qurl list` prints. Strip it here
+	// rather than widening tunnelSlugPattern (which the slug grammar shares).
+	idTok = strings.TrimPrefix(idTok, "$")
 	if idTok == "" {
 		return "", "", "Missing tunnel id.\n\n" + displayNameUsage
 	}
@@ -99,10 +104,16 @@ func parseUnsetDisplayNameArgs(text string) (id, userMsg string) {
 	if len(tokens) != 1 {
 		return "", "Provide exactly one tunnel id.\n\n" + displayNameUsage
 	}
-	if !tunnelSlugPattern.MatchString(tokens[0]) {
-		return "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(tokens[0]), displayNameUsage)
+	// Accept an optional leading `$` on the id, matching parseSetDisplayNameArgs
+	// and the rest of the tunnel-id/alias commands.
+	id = strings.TrimPrefix(tokens[0], "$")
+	if id == "" {
+		return "", "Missing tunnel id.\n\n" + displayNameUsage
 	}
-	return tokens[0], ""
+	if !tunnelSlugPattern.MatchString(id) {
+		return "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(id), displayNameUsage)
+	}
+	return id, ""
 }
 
 // stripSurroundingQuotes removes one matched pair of surrounding single or
