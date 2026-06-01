@@ -815,6 +815,54 @@ func TestHandleTunnelEdit_BindErrorSurfacesWarning(t *testing.T) {
 	}
 }
 
+// TestHandleTunnelEdit_NamePatchFailureLeavesAliasesUntouched fences the
+// fail-fast ordering: when the Display Name PATCH fails, processTunnelEdit
+// returns before the alias reconcile, so a combined name+alias edit leaves the
+// aliases unchanged and surfaces the name-update failure.
+func TestHandleTunnelEdit_NamePatchFailureLeavesAliasesUntouched(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken:    testEditResourceID,
+		testEditOldAlias: testEditResourceID,
+	})
+	ts.addCustomer(http.MethodPatch, "/v1/resources/"+testEditResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken,
+		DisplayName: testEditDisplay, Aliases: []string{testEditOldAlias},
+	}
+	// Change the name (PATCH will 500) AND drop the old alias: the alias change
+	// must not apply because the name PATCH fails first.
+	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, "Renamed", "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Failed to update the Display Name") {
+		t.Errorf("expected display-name failure message, got: %s", summary)
+	}
+	// The old alias must still be bound — the reconcile never ran.
+	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, testEditOldAlias); !found || rid != testEditResourceID {
+		t.Errorf("alias must be untouched after a failed name PATCH: rid=%q found=%v", rid, found)
+	}
+}
+
 // TestHandleTunnelEdit_NonAdminDenied fences the mutation gate: a non-admin
 // submitter is refused with an error view and nothing is PATCHed or bound.
 func TestHandleTunnelEdit_NonAdminDenied(t *testing.T) {

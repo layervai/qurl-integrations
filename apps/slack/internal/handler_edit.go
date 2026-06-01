@@ -407,7 +407,10 @@ func formatTunnelEditSummary(token string, changes []string, res *aliasReconcile
 	if len(res.conflicts) > 0 {
 		lines = append(lines, "Skipped (already used by another tunnel in this channel): "+joinAliasCodes(res.conflicts))
 	}
-	if len(changes) == 0 && len(res.added) == 0 && len(res.removed) == 0 && len(res.conflicts) == 0 {
+	// "No changes." only when nothing happened AND nothing errored — a failed
+	// bind/unbind leaves all buckets empty but isn't a clean no-op, so the
+	// warning below speaks for it instead.
+	if !res.hadError && len(changes) == 0 && len(res.added) == 0 && len(res.removed) == 0 && len(res.conflicts) == 0 {
 		lines = append(lines, "No changes.")
 	}
 	if res.hadError {
