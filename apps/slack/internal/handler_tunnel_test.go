@@ -2688,19 +2688,5 @@ func tunnelInstallViewSubmissionBodyWithIdentity(t *testing.T, meta TunnelInstal
 	if err != nil {
 		t.Fatalf("marshal private_metadata: %v", err)
 	}
-	payload, err := json.Marshal(map[string]any{
-		testKeyType: "view_submission",
-		"team":      map[string]any{"id": payloadTeamID},
-		"user":      map[string]any{"id": payloadUserID},
-		"view": map[string]any{
-			"id":                         "V_test_tunnel",
-			testFieldCallbackID:          callbackIDTunnelInstall,
-			blockKitFieldPrivateMetadata: string(pm),
-			"state":                      map[string]any{"values": values},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal interaction payload: %v", err)
-	}
-	return url.Values{"payload": {string(payload)}}.Encode()
+	return viewSubmissionBody(t, "V_test_tunnel", callbackIDTunnelInstall, string(pm), payloadTeamID, payloadUserID, values)
 }

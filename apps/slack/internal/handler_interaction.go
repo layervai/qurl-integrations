@@ -48,6 +48,8 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		switch payload.View.CallbackID {
 		case callbackIDTunnelInstall:
 			h.handleTunnelInstallSubmission(w, payload)
+		case callbackIDTunnelEdit:
+			h.handleTunnelEditSubmission(w, payload)
 		default:
 			// Unknown callback_id — ack 200 (Slack hangs the modal
 			// otherwise) and log so a future view drift is visible.
@@ -61,17 +63,25 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 	}
 }
 
-// handleBlockActions routes Slack block_actions interactions (button
-// clicks in posted messages). The only button today is "Create qURL" on
-// each `/qurl list` row, which mints a one-time qURL for that row's
-// tunnel — the same resolve→authorize→mint work as `/qurl get $<slug>`.
+// handleBlockActions routes Slack block_actions interactions (button clicks in
+// posted messages) from `/qurl list` rows: "Create qURL" (mint a one-time qURL,
+// same resolve→authorize→mint work as `/qurl get $<slug>`) and the admin-only
+// "Edit" (open the tunnel edit modal).
 //
-// Slack requires a fast 200 ack on the interaction, so the mint runs on
-// the bounded async pool and the link is delivered out-of-band via the
+// Slack requires a fast 200 ack on the interaction, so the mint runs on the
+// bounded async pool and the link is delivered out-of-band via the
 // interaction's response_url as a NEW ephemeral message (replace_original
-// defaults to false), leaving the list message itself intact.
+// defaults to false), leaving the list message itself intact. The Edit button
+// opens a modal (views.open) inside Slack's trigger window — see
+// handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
-	action, ok := findListCreateQurlAction(payload.Actions)
+	// Edit is checked first so a row carrying both buttons routes to the modal
+	// opener rather than the mint when Edit is the clicked element.
+	if editAction, ok := findActionByID(payload.Actions, listEditTunnelActionID); ok {
+		h.handleListEditClick(w, payload, editAction)
+		return
+	}
+	action, ok := findActionByID(payload.Actions, listCreateQurlActionID)
 	if !ok {
 		// A button we don't handle (or an empty actions array). Ack and
 		// ignore so Slack doesn't surface an error to the clicking user.
@@ -148,14 +158,14 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 	h.finishGet(log, responseURL, text, err)
 }
 
-// findListCreateQurlAction returns the first "Create qURL" list-row button
-// from a block_actions payload's actions array. Slack sends one entry per
-// clicked element, so a single button click yields exactly one match and
-// taking the first is correct for that contract. Matches on action_id so
-// an unrelated button on a future message doesn't trigger a mint.
-func findListCreateQurlAction(actions []interactionAction) (interactionAction, bool) {
+// findActionByID returns the first action in a block_actions payload whose
+// action_id matches. Slack sends one entry per clicked element, so a single
+// button click yields exactly one match and taking the first is correct for
+// that contract. Matching on action_id keeps an unrelated button on a future
+// message from triggering the wrong handler.
+func findActionByID(actions []interactionAction, actionID string) (interactionAction, bool) {
 	for _, a := range actions {
-		if a.ActionID == listCreateQurlActionID {
+		if a.ActionID == actionID {
 			return a, true
 		}
 	}
@@ -352,8 +362,8 @@ func interactionStateTextOK(values map[string]map[string]interactionStateValue, 
 
 func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 	respondJSON(w, http.StatusOK, map[string]any{
-		"response_action": "errors",
-		"errors":          fieldErrors,
+		respFieldResponseAction: "errors",
+		"errors":                fieldErrors,
 	})
 }
 
@@ -368,8 +378,8 @@ func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		"response_action": "update",
-		"view":            json.RawMessage(view),
+		respFieldResponseAction: "update",
+		respFieldView:           json.RawMessage(view),
 	})
 }
 
