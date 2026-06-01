@@ -53,6 +53,7 @@ const (
 	blockKitFieldBlocks          = "blocks"
 	blockKitFieldCallbackID      = "callback_id"
 	blockKitFieldClose           = "close"
+	blockKitFieldElements        = "elements"
 	blockKitFieldPrivateMetadata = "private_metadata"
 	blockKitFieldSubmit          = "submit"
 	blockKitFieldTitle           = "title"
