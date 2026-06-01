@@ -286,6 +286,7 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 	}
 	normalized, err := NormalizeEmail(qurlEmail)
 	if err != nil || normalized != verified.Email {
+		slog.Warn("oauth/callback email mismatch for setup flow")
 		http.Error(w, "authenticated email did not match setup email — run /qurl setup again", http.StatusBadRequest)
 		return false
 	}
