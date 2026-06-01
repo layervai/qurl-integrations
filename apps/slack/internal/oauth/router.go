@@ -364,7 +364,7 @@ func (c Config) Validate() error {
 // /qurl setup ends in a fresh Auth0 prompt → new key → new DDB row.
 //
 //nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
-func authorizeURL(cfg Config, state string) string {
+func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 	u := url.URL{
 		Scheme: "https",
 		Host:   cfg.Auth0Domain,
@@ -381,6 +381,10 @@ func authorizeURL(cfg Config, state string) string {
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
 	q.Set("prompt", "consent")
+	if verified.Email != "" {
+		q.Set("connection", "email")
+		q.Set("login_hint", verified.Email)
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }

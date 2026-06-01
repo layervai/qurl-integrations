@@ -36,7 +36,8 @@ func Start(cfg Config) http.HandlerFunc {
 			http.Error(w, "missing state parameter — start setup from the /qurl setup slash command", http.StatusBadRequest)
 			return
 		}
-		if _, err := VerifyState(cfg.OAuthStateSecret, stateParam, now()); err != nil {
+		verified, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
+		if err != nil {
 			reason := "invalid"
 			switch {
 			case errors.Is(err, errStateExpired):
@@ -61,6 +62,6 @@ func Start(cfg Config) http.HandlerFunc {
 		// header the response is committed and a deferred Set-Cookie is
 		// silently dropped.
 		setStateCookie(w, stateParam)
-		http.Redirect(w, r, authorizeURL(cfg, stateParam), http.StatusFound)
+		http.Redirect(w, r, authorizeURL(cfg, stateParam, verified), http.StatusFound)
 	}
 }

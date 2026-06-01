@@ -45,11 +45,16 @@ func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { r
 type fakeMinter struct {
 	apiKey, keyID, keyPrefix string
 	mintErr                  error
+	mintCalls                int
+	mintMu                   sync.Mutex
 	revoked                  bool
 	revokeMu                 sync.Mutex
 }
 
 func (f *fakeMinter) MintAPIKey(_ context.Context, _, _ string, _ []string) (apiKey, keyID, keyPrefix string, err error) {
+	f.mintMu.Lock()
+	f.mintCalls++
+	f.mintMu.Unlock()
 	return f.apiKey, f.keyID, f.keyPrefix, f.mintErr
 }
 func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
@@ -192,6 +197,15 @@ func mintTestState(t *testing.T, cfg *Config) string {
 	return state
 }
 
+func mintTestStateWithEmail(t *testing.T, cfg *Config, email string) string {
+	t.Helper()
+	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testTeamID, testUserID, email, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStateWithEmail: %v", err)
+	}
+	return state
+}
+
 func callbackRequest(state string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
@@ -268,6 +282,47 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 	if minter.revoked {
 		t.Error("happy path should not revoke")
+	}
+}
+
+func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: "different@example.com"}
+	state := mintTestStateWithEmail(t, &cfg, "admin@example.com")
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must not run when the Auth0 email does not match setup state")
+	}
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintAPIKey calls: got %d want 0 on email mismatch", minter.mintCalls)
+	}
+}
+
+func TestCallbackEmailSetupAcceptsCaseInsensitiveVerifiedEmail(t *testing.T) {
+	cfg, _, store, _ := newCallbackCfg(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: "Admin@Example.COM"}
+	state := mintTestStateWithEmail(t, &cfg, "admin@example.com")
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKey not called")
 	}
 }
 

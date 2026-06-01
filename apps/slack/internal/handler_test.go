@@ -807,6 +807,83 @@ func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
 	}
 }
 
+func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup Admin+Setup@Example.COM"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text := result["text"]
+	if !strings.Contains(text, "Continue setup") {
+		t.Fatalf("missing Continue setup copy: %q", text)
+	}
+	if !strings.Contains(text, "`admin+setup@example.com`") {
+		t.Fatalf("setup reply missing normalized email: %q", text)
+	}
+	start := strings.Index(text, "state=")
+	if start < 0 {
+		t.Fatalf("no state= in reply: %q", text)
+	}
+	rest := text[start+len("state="):]
+	end := strings.IndexAny(rest, "|>")
+	if end >= 0 {
+		rest = rest[:end]
+	}
+	stateRaw, err := url.QueryUnescape(rest)
+	if err != nil {
+		t.Fatalf("unescape state: %v", err)
+	}
+	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("minted state failed VerifyState: %v", err)
+	}
+	if verified.Email != "admin+setup@example.com" {
+		t.Errorf("state email: got %q want normalized command email", verified.Email)
+	}
+}
+
+func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup not-an-email"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "Usage: `/qurl setup`") {
+		t.Errorf("expected setup usage reply, got %q", result["text"])
+	}
+}
+
 // TestSetOAuthSetupPanicsOnDoubleCall locks the documented "called
 // exactly once before Serve" contract. The field is read without a
 // lock on the request hot path; the panic is the safety net for a
