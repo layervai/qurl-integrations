@@ -55,6 +55,9 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 
 		{name: "missing everything", input: "", wantErr: true, wantMsgSub: "Missing tunnel id"},
 		{name: "lone dollar id rejected", input: "$ Prod API", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		// Bare `$` with no name: the empty-id check fires before the missing-name
+		// check, so this is "Missing tunnel id" (not "Missing Display Name").
+		{name: "lone dollar no name rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
 		{name: "dollar then invalid id rejected", input: "$Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		{name: "id only, no name", input: id, wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
 		{name: "id then only whitespace", input: id + "    ", wantErr: true, wantMsgSub: testDisplayNameMissingMsg},
