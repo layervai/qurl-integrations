@@ -36,18 +36,13 @@ func defaultTunnelDisplayName(slug string) string {
 const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <display name>`\n• `/qurl-admin unset-display-name <id>`\n\nThe id is the tunnel token shown by `/qurl list` (the leading `$` is optional). The Display Name is free text up to 500 characters."
 
 // parseDisplayNameID strips an optional leading `$` from a tunnel-id token
-// and validates it against tunnelSlugPattern. Shared by the set/unset
-// display-name parsers so both accept the `$<id>` sigil form `/qurl list`
-// prints. Note the sigil is *optional* here (bare and `$`-prefixed both
-// parse); `/qurl get` and `/qurl-admin set-alias` instead *require* it (a
-// missing `$` is ErrMissingSigil in parseAliasToken). So these verbs are the
-// lenient superset — accepting the sigil form a user copies from `/qurl
-// list`, not enforcing it. Stripping here rather than widening
-// tunnelSlugPattern keeps the slug grammar (shared with install) intact, and
-// the invalid-id message echoes the *stripped* id — the post-`$` value, as
-// parseAliasToken does (the Slack-escaping helper differs: echoText here,
-// truncateForError there). Returns (id, "") on success or ("", userMsg) with
-// the ephemeral copy to surface.
+// and validates it against tunnelSlugPattern. Shared by both display-name
+// parsers so set/unset accept the `$<id>` form `/qurl list` prints and reject
+// identically. The sigil is optional here, whereas `/qurl get`/`set-alias`
+// require it (missing → ErrMissingSigil) — these verbs are the lenient
+// superset. Stripping beats widening tunnelSlugPattern (shared with install),
+// and the invalid-id echo shows the stripped id, matching parseAliasToken.
+// Returns (id, "") on success or ("", userMsg).
 func parseDisplayNameID(tok string) (id, userMsg string) {
 	id = strings.TrimPrefix(tok, "$")
 	if id == "" {
