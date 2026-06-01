@@ -1142,7 +1142,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
 	if setupEmail != "" {
-		respondSlack(w, "Continue setup for `"+setupEmail+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will email a one-time code after you continue. This link is valid for 5 minutes and only works for you.")
+		respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will email a one-time code after you continue. This link is valid for 5 minutes and only works for you.")
 		return
 	}
 	respondSlack(w, "Click to connect qURL to your Slack workspace: <"+setupURL+"|Connect qURL>\n\nThis link is valid for 5 minutes and only works for you.")

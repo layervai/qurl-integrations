@@ -308,6 +308,29 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	}
 }
 
+func TestCallbackEmailSetupRequiresNonEmptyVerifiedEmail(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: ""}
+	state := mintTestStateWithEmail(t, &cfg, "admin@example.com")
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must not run when Auth0 does not return a verified setup email")
+	}
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintAPIKey calls: got %d want 0 on empty verified email", minter.mintCalls)
+	}
+}
+
 func TestCallbackEmailSetupAcceptsCaseInsensitiveVerifiedEmail(t *testing.T) {
 	cfg, _, store, _ := newCallbackCfg(t)
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: "Admin@Example.COM"}
