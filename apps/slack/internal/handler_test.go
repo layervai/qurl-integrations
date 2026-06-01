@@ -21,7 +21,10 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-const testSigningSecret = "test-secret"
+const (
+	testSigningSecret     = "test-secret"
+	setupAdminExampleText = "setup admin@example.com"
+)
 
 // noopQURLServer is a stand-in upstream that 200s every request. Tests
 // that exercise routing/auth (not the QURL API contract) use this so the
@@ -181,7 +184,7 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	// setup is a user verb (first-come-claims) — the user surface must
 	// advertise it so the first claimant of an unbound workspace can find
 	// it.
-	if !strings.Contains(userHelp, "/qurl setup") {
+	if !strings.Contains(userHelp, "/qurl setup <email>") {
 		t.Errorf("/qurl help missing setup verb: %q", userHelp)
 	}
 	if !strings.Contains(userHelp, "/qurl-admin help") {
@@ -239,13 +242,16 @@ func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 		}
 	}
 
-	// User verbs on /qurl-admin → redirect to /qurl. setup is included:
-	// `/qurl-admin setup` points the user back at `/qurl setup`.
-	for _, text := range []string{"get $prod-db", "list", "aliases", "setup"} {
+	// User verbs on /qurl-admin → redirect to /qurl.
+	for _, text := range []string{string(SubcmdGet) + " $prod-db", string(SubcmdList), string(SubcmdAliases), setupAdminExampleText} {
 		reply := slashReply(t, h, commandAdmin, text)
 		if !strings.Contains(reply, "belongs on `/qurl`") || !strings.Contains(reply, "/qurl ") {
 			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)
 		}
+	}
+	reply := slashReply(t, h, commandAdmin, "setup")
+	if !strings.Contains(reply, "Use `/qurl setup <email>` instead") {
+		t.Errorf("/qurl-admin setup: want email-required redirect, got %q", reply)
 	}
 }
 
@@ -747,19 +753,10 @@ func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
 	}
 }
 
-// TestSlashCommandSetup_RepliesWithStartURL exercises the /qurl setup
-// subcommand path: SetOAuthSetup wires the state secret + base URL,
-// /qurl setup mints a signed state from the slash-command-verified
-// team_id + user_id, and replies ephemerally with a /oauth/qurl/start
-// URL carrying that state. The URL-encoded state must round-trip
-// through oauth.VerifyState — that's the bridge from Slack's signing
-// secret to the OAuth callback's HMAC.
-func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
+func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
 	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
-	// newTestHandler already pins h.now to fixedNow, which is the clock
-	// /qurl setup uses to mint state.
 
 	body := url.Values{
 		"command": {"/qurl"},
@@ -782,28 +779,11 @@ func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
 		t.Errorf("response_type: got %q want ephemeral", result["response_type"])
 	}
 	text := result["text"]
-	if !strings.Contains(text, "https://slack-bot.example/oauth/qurl/start?state=") {
-		t.Fatalf("missing /start URL in setup reply: %q", text)
+	if !strings.Contains(text, "Usage: `/qurl setup <email>`.") {
+		t.Fatalf("missing setup email usage in setup reply: %q", text)
 	}
-
-	// Extract the state query value and verify it parses through the
-	// oauth package — that's the load-bearing property of this whole
-	// flow.
-	start := strings.Index(text, "state=")
-	if start < 0 {
-		t.Fatalf("no state= in reply: %q", text)
-	}
-	rest := text[start+len("state="):]
-	end := strings.IndexAny(rest, "|>") // strip Slack mrkdwn link suffix.
-	if end >= 0 {
-		rest = rest[:end]
-	}
-	stateRaw, err := url.QueryUnescape(rest)
-	if err != nil {
-		t.Fatalf("unescape state: %v", err)
-	}
-	if _, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second)); err != nil {
-		t.Errorf("minted state failed VerifyState: %v", err)
+	if strings.Contains(text, "/oauth/qurl/start?state=") {
+		t.Fatalf("bare setup should not mint a setup URL: %q", text)
 	}
 }
 
@@ -891,7 +871,7 @@ func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 
 	body := url.Values{
 		"command": {commandUser},
-		"text":    {"setup admin@example.com extra"},
+		"text":    {setupAdminExampleText + " extra"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},
 	}.Encode()
@@ -905,7 +885,7 @@ func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "Usage: `/qurl setup` or `/qurl setup <email>`") {
+	if !strings.Contains(result["text"], "Usage: `/qurl setup <email>`") {
 		t.Errorf("expected setup usage reply, got %q", result["text"])
 	}
 }
@@ -931,7 +911,7 @@ func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
 	// SetOAuthSetup deliberately NOT called → oauthSetup == nil.
 	body := url.Values{
 		"command": {"/qurl"},
-		"text":    {"setup"},
+		"text":    {setupAdminExampleText},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},
 	}.Encode()

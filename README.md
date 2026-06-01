@@ -40,7 +40,7 @@ All integrations connect to the qURL API. The endpoint is configurable via the `
 
 ## Slack Tunnel Onboarding
 
-Customer onboarding is install-first: install the qURL Slack app, run `/qurl setup`, then use `/qurl-admin tunnel install` or `/qurl get`. The Slack app install stores the workspace bot token for modal support; customers do not manually provide a bot token. Admin verbs live under a separate `/qurl-admin` slash command (registered against the same request URL as `/qurl`); user verbs — including `setup` — stay on `/qurl`.
+Customer onboarding is install-first: install the qURL Slack app, run `/qurl setup <email>`, then use `/qurl-admin tunnel install` or `/qurl get`. The Slack app install stores the workspace bot token for modal support; customers do not manually provide a bot token. Admin verbs live under a separate `/qurl-admin` slash command (registered against the same request URL as `/qurl`); user verbs — including `setup` — stay on `/qurl`.
 
 Slack admins can run `/qurl-admin tunnel install` to generate a guided install for the qURL reverse-tunnel sidecar. The workflow asks for the customer-facing tunnel ID, an optional channel shortcut, the local HTTP port, and the target runtime. Slack then returns copy/paste output tailored for Docker, Docker Compose, AWS ECS/Fargate, or Kubernetes.
 

@@ -96,7 +96,7 @@ func TestHandleAdminRevoke_InvalidQURLID(t *testing.T) {
 }
 
 // TestHandleAdminRevoke_AuthRejected fences the 401/403 surface: a
-// rotated workspace API key surfaces a "re-run /qurl setup" hint
+// rotated workspace API key surfaces a "re-run /qurl setup <email>" hint
 // instead of the generic upstream-error copy, so the admin has a
 // concrete next step.
 //
@@ -116,7 +116,7 @@ func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 		inv := newAdminSlashInvoker(t, h)
 
 		_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(reply, "re-run `/qurl setup`") {
+		if !strings.Contains(reply, "re-run `/qurl setup <email>`") {
 			t.Errorf("status %d: reply missing rotate-hint: %q", status, reply)
 		}
 	}
@@ -126,7 +126,7 @@ func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
 // surface: a 5xx from qurl-service surfaces the generic
 // "failed to revoke" copy + the detailed slog.Error for triage. The
 // 5xx path is distinct from the 401/403 auth-rejected path (which
-// renders the "re-run /qurl setup" hint) and the 404 path (which
+// renders the "re-run /qurl setup <email>" hint) and the 404 path (which
 // renders the "already revoked or typo'd" hint).
 func TestHandleAdminRevoke_Upstream5xx(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -144,7 +144,7 @@ func TestHandleAdminRevoke_Upstream5xx(t *testing.T) {
 		t.Errorf("reply missing generic-error surface: %q", reply)
 	}
 	// Should NOT misclassify as auth-rejected or not-found.
-	if strings.Contains(reply, "re-run `/qurl setup`") {
+	if strings.Contains(reply, "re-run `/qurl setup <email>`") {
 		t.Errorf("5xx misclassified as auth-rejected: %q", reply)
 	}
 	if strings.Contains(reply, "already revoked") {
@@ -277,7 +277,7 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 //
 // Coverage gap (known, not fixed): the handler-layer mapping of that
 // store error to the user-visible "Workspace isn't bound — run
-// `/qurl setup` first" copy isn't fenced end-to-end here, because
+// `/qurl setup <email>` first" copy isn't fenced end-to-end here, because
 // requireAdminSync short-circuits on the same missing row (CheckAdmin
 // returns isAdmin=false → "admin-only" reply). The handler arm IS
 // marked "unreachable in practice; kept for safety against gate
@@ -1031,7 +1031,7 @@ func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
 }
 
 // TestHandleSetup_OwnerGate exercises the slash-command-level owner
-// gate on `/qurl setup`. Three branches: fresh install (no workspace
+// gate on `/qurl setup <email>`. Three branches: fresh install (no workspace
 // row → anyone allowed), owner reruns setup (idempotent → URL minted),
 // non-owner attempts setup (refuse with friendly copy mentioning the
 // owner).
@@ -1057,19 +1057,18 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		})
 	}
 
-	const setupText = "setup"
 	invokeSetup := func(t *testing.T, h *Handler, userID string) string {
 		t.Helper()
 		body := url.Values{
 			fieldCommand: {testSlashCmd},
-			fieldText:    {setupText},
+			fieldText:    {setupAdminExampleText},
 			fieldTeamID:  {team},
 			fieldUserID:  {userID},
 		}.Encode()
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
 		if w.Code != http.StatusOK {
-			t.Fatalf("/qurl setup status: %d body=%s", w.Code, w.Body.String())
+			t.Fatalf("/qurl setup <email> status: %d body=%s", w.Code, w.Body.String())
 		}
 		return parseSlackText(t, w.Body.Bytes())
 	}

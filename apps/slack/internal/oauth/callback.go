@@ -125,7 +125,7 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <body>
 <div class="card">
 <h1><span class="warn">&#9888;</span> qURL setup blocked</h1>
-<p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup</code> was not applied.</p>
+<p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup &lt;email&gt;</code> was not applied.</p>
 <p>Please ask the existing qURL admin in your workspace to add you, or contact LayerV support if the original admin is no longer reachable.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
@@ -235,7 +235,7 @@ func Callback(cfg Config) http.HandlerFunc {
 		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code)
 		if err != nil {
 			slog.Error("oauth/callback Auth0 token exchange failed", "error", err)
-			http.Error(w, "authorization failed — run /qurl setup again to retry", http.StatusBadGateway)
+			http.Error(w, "authorization failed — run /qurl setup <email> again to retry", http.StatusBadGateway)
 			return
 		}
 
@@ -287,7 +287,7 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 	normalized, err := NormalizeEmail(qurlEmail)
 	if err != nil || normalized != verified.Email {
 		slog.Warn("oauth/callback email mismatch for setup flow")
-		http.Error(w, "authenticated email did not match setup email — run /qurl setup again", http.StatusBadRequest)
+		http.Error(w, "authenticated email did not match setup email — run /qurl setup <email> again", http.StatusBadRequest)
 		return false
 	}
 	return true
@@ -319,7 +319,7 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		// On the success path, the cookie clears after verify; this
 		// closes the same-browser-replay window on Auth0 reject too.
 		clearStateCookie(w)
-		http.Error(w, "authorization failed — run /qurl setup again to retry", http.StatusBadRequest)
+		http.Error(w, "authorization failed — run /qurl setup <email> again to retry", http.StatusBadRequest)
 		return VerifiedState{}, "", false
 	}
 	code = q.Get("code")
@@ -445,7 +445,7 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 	if qurlSub == "" {
 		slog.Error("oauth/callback bind skipped — id_token sub unavailable", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", verified.TeamID)
-		http.Error(w, "workspace identity could not be confirmed — run /qurl setup again", http.StatusInternalServerError)
+		http.Error(w, "workspace identity could not be confirmed — run /qurl setup <email> again", http.StatusInternalServerError)
 		return false
 	}
 	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
@@ -496,7 +496,7 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 	default:
 		slog.Error("oauth/callback BindWorkspace failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID, "error", bindErr)
-		http.Error(w, "workspace not bound — run /qurl setup again", http.StatusInternalServerError)
+		http.Error(w, "workspace not bound — run /qurl setup <email> again", http.StatusInternalServerError)
 		return false
 	}
 }
@@ -557,11 +557,11 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 			// is plan-dependent (free 3 / growth 50 / unlimited) and is
 			// qurl-service's to own.
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Each run of /qurl setup creates a new key — revoke one you no longer use, then run /qurl setup again.")
+				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Each run of /qurl setup <email> creates a new key — revoke one you no longer use, then run /qurl setup <email> again.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-			"Something went wrong while creating your qURL API key. Run /qurl setup again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"Something went wrong while creating your qURL API key. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 
@@ -582,7 +582,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		// has started but before persist returns) escapes this branch
 		// and leaks an orphan. Closes when #265's ConditionExpression
 		// shift lets us detect the lost-race case end-to-end.
-		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
+		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again", http.StatusInternalServerError)
 		return "", false
 	}
 	return keyPrefix, true
