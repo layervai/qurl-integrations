@@ -81,8 +81,12 @@ func sectionTexts(t *testing.T, blocks []any) []string {
 		if !ok || bm[blockKeyType] != blockTypeSection {
 			continue
 		}
-		txt, _ := bm[blockKeyText].(map[string]any)[blockKeyText].(string)
-		out = append(out, txt)
+		txtObj, ok := bm[blockKeyText].(map[string]any)
+		if !ok {
+			t.Fatalf("section block text is not a composition object: %#v", bm)
+		}
+		s, _ := txtObj[blockKeyText].(string)
+		out = append(out, s)
 	}
 	return out
 }
@@ -157,15 +161,35 @@ func TestInstallMessageBlocks_PreservesOrderAndProse(t *testing.T) {
 	}
 }
 
-// TestInstallMessageBlocks_FallbackPaths fences the (nil,false) signals that
-// route the caller to the always-safe plain-text post: no code fence to
-// enrich, and a single code segment over the per-block cap.
+// TestInstallMessageBlocks_FallbackPaths fences every (nil,false) signal that
+// routes the caller to the always-safe plain-text post: no code fence to
+// enrich, an empty fence, an oversize prose run, an oversize code segment, and
+// a block count over the per-message cap.
 func TestInstallMessageBlocks_FallbackPaths(t *testing.T) {
-	if _, ok := installMessageBlocks("just prose, no code fence at all"); ok {
-		t.Error("want ok=false when the message has no code fence")
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"no fence", "just prose, no code fence at all"},
+		{"empty fence", "intro\n\n```\n\n```\n\nfooter"},
+		{
+			"oversize prose",
+			strings.Repeat("p", slackSectionTextMaxBytes+1) + "\n\n```\ncode\n```",
+		},
+		{
+			"oversize code",
+			"intro\n\n```\n" + strings.Repeat("x", slackRichTextMaxBytes+1) + "\n```\n\nfooter",
+		},
+		{
+			"too many blocks",
+			strings.Repeat("```\nx\n```\n\n", slackMessageBlockMax+1),
+		},
 	}
-	oversize := "intro\n\n```\n" + strings.Repeat("x", slackRichTextMaxBytes+1) + "\n```\n\nfooter"
-	if _, ok := installMessageBlocks(oversize); ok {
-		t.Error("want ok=false when a code segment exceeds slackRichTextMaxBytes")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := installMessageBlocks(tc.msg); ok {
+				t.Errorf("want ok=false for %s (should drop to plain-text post)", tc.name)
+			}
+		})
 	}
 }

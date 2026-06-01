@@ -976,9 +976,9 @@ var installFencedCodeBlock = regexp.MustCompile("(?s)```\\n(.*?)\\n```")
 // fallback, so the two renderings cannot drift.
 //
 // Returns (blocks, true) on success, or (nil, false) when the message carries
-// no code fence to enrich, a prose segment exceeds [slackSectionTextMaxBytes]
-// or a code segment exceeds [slackRichTextMaxBytes], or the block count would
-// exceed [slackMessageBlockMax]. A false result is the
+// no code fence to enrich, a fence is empty, a prose segment exceeds
+// [slackSectionTextMaxBytes] or a code segment exceeds [slackRichTextMaxBytes],
+// or the block count would exceed [slackMessageBlockMax]. A false result is the
 // caller's signal to post the plain-text message instead: the install flow
 // MUST stay deliverable (an unconfirmed delivery revokes the bootstrap key), so
 // blocks are strictly a best-effort enhancement over the always-safe text post.
@@ -1006,7 +1006,11 @@ func installMessageBlocks(msg string) ([]any, bool) {
 			return nil, false
 		}
 		code := msg[m[2]:m[3]]
-		if len(code) > slackRichTextMaxBytes {
+		if code == "" || len(code) > slackRichTextMaxBytes {
+			// An empty fence would produce a rich_text_preformatted element
+			// with an empty `text`, which Slack rejects outright; an oversize
+			// one trips the defensive ceiling. Neither is reachable from
+			// today's renderers, but both drop to the always-safe text post.
 			return nil, false
 		}
 		blocks = append(blocks, richTextPreformattedBlock(code))
@@ -1034,6 +1038,11 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // blocks existed, so this path is never worse than that baseline: a Slack-side
 // rejection of the blocks payload (non-2xx) is retried as plain text before the
 // caller treats delivery as failed.
+//
+// If Slack actually persists the blocks post but the client reports failure
+// (e.g. a timeout), the text retry posts a second copy. Both carry the same
+// still-valid key and the key is not revoked, so this is benign — at worst the
+// operator sees two ephemeral install messages, never a leaked or stale key.
 func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) bool {
 	if blocks, ok := installMessageBlocks(msg); ok {
 		if h.postResponseBlocks(log, responseURL, msg, blocks) {
