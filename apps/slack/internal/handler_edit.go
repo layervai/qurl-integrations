@@ -309,26 +309,30 @@ type aliasReconcileResult struct {
 	hadError  bool     // a non-conflict bind/unbind or the policy read failed
 }
 
-// reconcileChannelAliases brings the channel's alias bindings for this tunnel
-// in line with the submitted desired set. It diffs against the CURRENT bindings
-// (read fresh, excluding the primary token), binds the additions, and unbinds
-// the removals. Best-effort: a per-alias failure is logged and flagged in the
-// result rather than aborting the whole reconcile.
+// reconcileChannelAliases applies the admin's alias edit. Additions are desired
+// aliases not already bound to this tunnel (read fresh, primary token excluded).
+// Removals are scoped to the pre-filled snapshot (meta.Aliases): only an alias
+// the admin SAW and deleted from the field — and that is still bound — gets
+// unbound. Best-effort: a per-alias failure is logged and flagged in the result
+// rather than aborting the whole reconcile.
 //
-// The submitted set is authoritative (last-write-wins): an alias bound to this
-// tunnel by ANOTHER admin after this modal opened is present in the fresh
-// `current` set but absent from `desired`, so it is unbound. This is broader
-// than a concurrent rename — it can drop an alias this admin never saw — and is
-// an accepted, documented rare race for an admin tool (two admins editing the
-// same tunnel's aliases at once). The cap-on-newly-added in parseEditAliasLines
-// is scoped to the pre-filled set, but the bind/unbind reconcile here is not.
+// Diffing removals against the snapshot baseline rather than the full fresh set
+// is deliberate. It closes two ways the "whole field is authoritative" model
+// could destroy data the admin never touched: (a) an alias bound to this tunnel
+// by ANOTHER admin after the modal opened isn't in the snapshot, so it's never
+// unbound (broader than a concurrent rename); and (b) a stale or transiently
+// EMPTY snapshot (channelAliasesByResourceID returns nil on a transient policy
+// read failure) can't wipe the real bindings — a rename-only edit with an empty
+// snapshot removes nothing. The remaining race (the snapshot is stale, so an
+// alias the admin kept is re-bound, or one they deleted was already gone) is
+// benign and matches the admin's visible intent.
 func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, desired []string) aliasReconcileResult {
 	var res aliasReconcileResult
 
 	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, meta.TeamID, meta.ChannelID)
 	if err != nil {
-		// Without the current set we can't compute removals safely. Report the
-		// read failure rather than guessing.
+		// Without the current set we can't compute adds/removes safely. Report
+		// the read failure rather than guessing.
 		log.Error("tunnel edit: channel policy read failed", "error", err, "resource_id", meta.ResourceID)
 		res.hadError = true
 		return res
@@ -358,8 +362,17 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 			res.added = append(res.added, a)
 		}
 	}
-	for a := range current {
-		if _, ok := desiredSet[a]; ok {
+	// Removals come from the snapshot the admin edited, not the full fresh set —
+	// see the doc comment. Only unbind a pre-filled alias the admin dropped that
+	// is still bound to this tunnel.
+	for _, a := range meta.Aliases {
+		if a == "" || a == meta.Token {
+			continue
+		}
+		if _, keep := desiredSet[a]; keep {
+			continue
+		}
+		if _, bound := current[a]; !bound {
 			continue
 		}
 		switch err := h.aliasStore.UnbindChannelAlias(ctx, meta.TeamID, meta.ChannelID, a); {

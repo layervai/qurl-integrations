@@ -23,6 +23,7 @@ const (
 	testEditToken      = "prod-db"
 	testEditDisplay    = "Prod database"
 	testEditAlias      = "primary"
+	testEditOldAlias   = "old-alias"
 
 	// Slack interaction-payload top-level keys, shared by the block_actions
 	// and view_submission test builders.
@@ -508,8 +509,8 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 	ts.seedAdmin(t)
 	// Current channel state: token + "old-alias" bound to this resource.
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
-		testEditToken: testEditResourceID,
-		"old-alias":   testEditResourceID,
+		testEditToken:    testEditResourceID,
+		testEditOldAlias: testEditResourceID,
 	})
 	var patched string
 	ts.addCustomer(http.MethodPatch, "/v1/resources/"+testEditResourceID, func(w http.ResponseWriter, r *http.Request) {
@@ -533,8 +534,9 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 	meta := TunnelEditModalMetadata{
 		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
 		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		Aliases: []string{testEditOldAlias}, // snapshot the modal pre-filled with
 	}
-	// New display name + new alias; "old-alias" dropped.
+	// New display name + new alias; "old-alias" dropped (it was in the snapshot).
 	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, "Renamed Prod", "$new-alias")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -551,7 +553,7 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 		t.Errorf("PATCHed description = %q, want %q", patched, "Renamed Prod")
 	}
 	summary := parseSlackText(t, got)
-	for _, want := range []string{"Updated tunnel `$" + testEditToken + "`", "new-alias", "old-alias"} {
+	for _, want := range []string{"Updated tunnel `$" + testEditToken + "`", "new-alias", testEditOldAlias} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary missing %q: %s", want, summary)
 		}
@@ -560,7 +562,7 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "new-alias"); !found || rid != testEditResourceID {
 		t.Errorf("new-alias not bound: rid=%q found=%v", rid, found)
 	}
-	if _, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "old-alias"); found {
+	if _, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, testEditOldAlias); found {
 		t.Errorf("old-alias should have been unbound")
 	}
 }
@@ -670,6 +672,66 @@ func TestHandleTunnelEdit_EmptyNameAliasOnly(t *testing.T) {
 	}
 	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "fresh"); !found || rid != testEditResourceID {
 		t.Errorf("'fresh' alias should be bound: rid=%q found=%v", rid, found)
+	}
+}
+
+// TestHandleTunnelEdit_EmptySnapshotRenamePreservesAliases fences the
+// stale/empty-snapshot data-loss window: if the modal opened with an empty
+// alias snapshot (e.g. the list-render policy fetch transiently failed) while
+// the tunnel actually has aliases bound, a rename-only edit must NOT unbind
+// those aliases — removals are scoped to what the admin saw, which was empty.
+func TestHandleTunnelEdit_EmptySnapshotRenamePreservesAliases(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// The tunnel really has an extra alias bound, but meta.Aliases (the snapshot)
+	// is empty — the admin never saw "keepme".
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+		"keepme":      testEditResourceID,
+	})
+	var patched string
+	ts.addCustomer(http.MethodPatch, "/v1/resources/"+testEditResourceID, func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Description *string `json:"description"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.Description != nil {
+			patched = *in.Description
+		}
+		respondQURLEnvelope(t, w, map[string]any{testKeyResourceID: testEditResourceID, testKeyType: client.ResourceTypeTunnel, testKeyStatus: client.StatusActive})
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken,
+		DisplayName: testEditDisplay, Aliases: nil, // empty/stale snapshot
+	}
+	// Rename only; aliases box left empty (matching the empty snapshot).
+	body := tunnelEditViewSubmissionBody(t, &meta, testAdminTeamID, testAdminUserID, "Renamed", "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	if patched != "Renamed" {
+		t.Errorf("PATCHed description = %q, want %q", patched, "Renamed")
+	}
+	// The alias the admin never saw must survive a rename-only edit.
+	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "keepme"); !found || rid != testEditResourceID {
+		t.Errorf("'keepme' must NOT be unbound by an empty-snapshot rename: rid=%q found=%v", rid, found)
+	}
+	if summary := parseSlackText(t, got); strings.Contains(summary, "Removed") {
+		t.Errorf("no removals expected on an empty-snapshot rename: %s", summary)
 	}
 }
 
