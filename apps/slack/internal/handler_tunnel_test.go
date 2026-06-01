@@ -354,11 +354,18 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
 	status, ack := inv.invokeAdmin(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID)
-	var asyncEnvelope map[string]string
+	// The install message now posts as Block Kit (copyable rich_text snippets)
+	// with the full text carried as the accessibility/notification fallback, so
+	// the response_url body carries both `text` and `blocks` — decode into
+	// map[string]any (a map[string]string unmarshal fails on the blocks array).
+	var asyncEnvelope map[string]any
 	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
 		t.Fatalf("unmarshal tunnel install response_url body: %v", err)
 	}
-	async := asyncEnvelope[respFieldText]
+	async, _ := asyncEnvelope[respFieldText].(string)
+	if asyncEnvelope[blockKitFieldBlocks] == nil {
+		t.Errorf("tunnel install body missing blocks (expected Block Kit rendering)")
+	}
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -480,11 +487,11 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 	if _, ack := inv.invokeAdmin(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID); !strings.Contains(ack, "Working") {
 		t.Fatalf("ack = %q, want async working copy", ack)
 	}
-	var asyncEnvelope map[string]string
+	var asyncEnvelope map[string]any
 	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
 		t.Fatalf("unmarshal tunnel install response_url body: %v", err)
 	}
-	async := asyncEnvelope[respFieldText]
+	async, _ := asyncEnvelope[respFieldText].(string)
 
 	if !strings.Contains(async, existingDisplayName) {
 		t.Errorf("re-install confirmation missing the admin's existing Display Name %q:\n%s", existingDisplayName, async)
@@ -2220,11 +2227,104 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
-	if len(responseBodies) == 0 || !strings.Contains(responseBodies[0], testTunnelAPIKey) {
-		t.Fatalf("first response_url body = %v, want original install body with bootstrap key", responseBodies)
+	// When Slack rejects every post, the delivery sequence is: the Block Kit
+	// install post, the plain-text retry (postInstallInstructions' fallback),
+	// then the revoked-key discard notice. The key is revoked because none were
+	// confirmed; the first post still carries the bootstrap key and the last is
+	// the discard notice.
+	if len(responseBodies) != 3 {
+		t.Fatalf("response_url posts = %d, want 3 (blocks attempt, text retry, discard notice): %v", len(responseBodies), responseBodies)
 	}
-	if len(responseBodies) != 2 || !strings.Contains(responseBodies[1], "bootstrap key was revoked") || !strings.Contains(responseBodies[1], "discard it") {
-		t.Fatalf("response_url bodies = %v, want original delivery plus revoked-key discard follow-up", responseBodies)
+	if !strings.Contains(responseBodies[0], testTunnelAPIKey) {
+		t.Fatalf("first response_url body = %v, want original install body with bootstrap key", responseBodies[0])
+	}
+	last := responseBodies[len(responseBodies)-1]
+	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard it") {
+		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
+	}
+}
+
+// TestTunnelInstallFallsBackToTextWhenBlocksRejected fences the delivery safety
+// net: if Slack rejects the Block Kit install post (e.g. an over-large
+// rich_text payload) but accepts a plain-text post, postInstallInstructions
+// retries as text, the install is delivered, and the bootstrap key is NOT
+// revoked. This is the property that lets the rich_text rendering be a
+// best-effort enhancement layered over the always-safe plain-text post.
+func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	var revokeHits int
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// bodyHasBlocks decodes a response_url payload and reports whether it
+	// carries a Block Kit `blocks` array — a structural check rather than a
+	// substring match on the JSON key spelling. Pure (no t.Fatalf), so it is
+	// safe to call from the server goroutine below.
+	bodyHasBlocks := func(body string) bool {
+		var env map[string]any
+		_ = json.Unmarshal([]byte(body), &env)
+		return env[blockKitFieldBlocks] != nil
+	}
+	var posts []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		posts = append(posts, string(body))
+		// Reject the Block Kit post (carries a blocks array); accept the
+		// plain-text retry.
+		if bodyHasBlocks(string(body)) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, h.now())
+
+	if revokeHits != 0 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 0 (plain-text fallback delivered the install)", revokeHits)
+	}
+	if len(posts) != 2 {
+		t.Fatalf("response_url posts = %d, want 2 (rejected blocks, then accepted text): %v", len(posts), posts)
+	}
+	if !bodyHasBlocks(posts[0]) {
+		t.Errorf("first post should be the Block Kit attempt: %s", posts[0])
+	}
+	if bodyHasBlocks(posts[1]) {
+		t.Errorf("second post (text retry) should not carry blocks: %s", posts[1])
+	}
+	if !strings.Contains(posts[1], testTunnelAPIKey) {
+		t.Errorf("text retry should carry the bootstrap key: %s", posts[1])
 	}
 }
 
