@@ -2275,7 +2275,15 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	blocksMarker := `"` + blockKitFieldBlocks + `"`
+	// bodyHasBlocks decodes a response_url payload and reports whether it
+	// carries a Block Kit `blocks` array — a structural check rather than a
+	// substring match on the JSON key spelling. Pure (no t.Fatalf), so it is
+	// safe to call from the server goroutine below.
+	bodyHasBlocks := func(body string) bool {
+		var env map[string]any
+		_ = json.Unmarshal([]byte(body), &env)
+		return env[blockKitFieldBlocks] != nil
+	}
 	var posts []string
 	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -2285,7 +2293,7 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 		posts = append(posts, string(body))
 		// Reject the Block Kit post (carries a blocks array); accept the
 		// plain-text retry.
-		if strings.Contains(string(body), blocksMarker) {
+		if bodyHasBlocks(string(body)) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -2309,10 +2317,10 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	if len(posts) != 2 {
 		t.Fatalf("response_url posts = %d, want 2 (rejected blocks, then accepted text): %v", len(posts), posts)
 	}
-	if !strings.Contains(posts[0], blocksMarker) {
+	if !bodyHasBlocks(posts[0]) {
 		t.Errorf("first post should be the Block Kit attempt: %s", posts[0])
 	}
-	if strings.Contains(posts[1], blocksMarker) {
+	if bodyHasBlocks(posts[1]) {
 		t.Errorf("second post (text retry) should not carry blocks: %s", posts[1])
 	}
 	if !strings.Contains(posts[1], testTunnelAPIKey) {

@@ -935,9 +935,13 @@ func slackCodeBlock(body string) (string, error) {
 }
 
 const (
-	// slackSectionTextMaxBytes is Slack's documented per-`section` mrkdwn text
-	// limit. A prose run in the install message that exceeds it drops the whole
-	// message back to the plain-text post.
+	// slackSectionTextMaxBytes guards a `section` mrkdwn run against Slack's
+	// 3000-*character* per-section limit. The guard measures bytes, an
+	// intentionally conservative proxy: byte length >= rune count, so a run
+	// that passes is always within the character limit. At worst a multibyte
+	// run (e.g. the em-dash in the prose) trips slightly early and drops the
+	// whole message to the always-deliverable plain-text post — the safe
+	// direction. A prose run over this drops the whole message back to text.
 	slackSectionTextMaxBytes = 3000
 	// slackRichTextMaxBytes caps a single rich_text_preformatted code segment.
 	// rich_text `text` elements carry NO documented length limit (unlike the
@@ -1011,7 +1015,9 @@ func installMessageBlocks(msg string) ([]any, bool) {
 	if !appendProse(msg[last:]) {
 		return nil, false
 	}
-	if len(blocks) == 0 || len(blocks) > slackMessageBlockMax {
+	// blocks is non-empty here: len(matches) > 0, and every match appends a
+	// rich_text block, so only the upper bound can trip.
+	if len(blocks) > slackMessageBlockMax {
 		return nil, false
 	}
 	return blocks, true
