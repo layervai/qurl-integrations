@@ -208,6 +208,28 @@ func TestHandleGet_MissingAlias(t *testing.T) {
 	}
 }
 
+// TestHandleGet_LoneSigil fences the `get $` surface — a lone `$` with no
+// slug/alias body. parseAliasToken returns ErrEmptyResource for the bare
+// sigil, so `get $` reaches the same getUsageMessage hint as bare `get` but
+// via a DISTINCT parse path (the ErrEmptyResource branch, not the no-arg
+// one), and likewise never kicks off async work.
+func TestHandleGet_LoneSigil(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	status, ack := inv.invokeAdmin("get $", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(ack, "$id|$alias") {
+		t.Errorf("ack missing get usage hint: %q", ack)
+	}
+	if !strings.Contains(ack, "/qurl list") {
+		t.Errorf("ack missing /qurl list pointer: %q", ack)
+	}
+}
+
 // TestHandleGet_AdminStoreNil fences the fail-closed posture when
 // AdminStore is nil (sandbox / no-DDB deployment) and the user
 // requested the alias form: the channel-scoped lookup can't run, so
