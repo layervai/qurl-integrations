@@ -764,13 +764,8 @@ func slashVerb(text string, verbs ...string) (matched bool, rest string) {
 		if text == verb {
 			return true, ""
 		}
-		suffix, ok := strings.CutPrefix(text, verb)
-		if !ok || suffix == "" {
-			continue
-		}
-		r, _ := utf8.DecodeRuneInString(suffix)
-		if unicode.IsSpace(r) {
-			return true, strings.TrimSpace(suffix)
+		if strings.HasPrefix(text, verb+" ") {
+			return true, strings.TrimSpace(strings.TrimPrefix(text, verb))
 		}
 	}
 	return false, text
@@ -815,6 +810,8 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 
 	command := values.Get(fieldCommand)
 	text := strings.TrimSpace(values.Get(fieldText))
+	// Parse before dispatch so setup emails are redacted even when a user types
+	// the setup verb on the admin slash-command surface.
 	setupEmail, setupMatched, setupErr := parseSetupSubcommand(text)
 
 	logText := text
@@ -993,7 +990,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 }
 
 func parseSetupSubcommand(text string) (email string, matched bool, err error) {
-	matched, rest := slashVerb(text, setupVerb)
+	rest, matched := setupVerbRest(text)
 	if !matched {
 		return "", false, nil
 	}
@@ -1011,6 +1008,21 @@ func parseSetupSubcommand(text string) (email string, matched bool, err error) {
 		return "", true, err
 	}
 	return email, true, nil
+}
+
+func setupVerbRest(text string) (rest string, matched bool) {
+	if text == setupVerb {
+		return "", true
+	}
+	suffix, ok := strings.CutPrefix(text, setupVerb)
+	if !ok || suffix == "" {
+		return text, false
+	}
+	r, _ := utf8.DecodeRuneInString(suffix)
+	if !unicode.IsSpace(r) {
+		return text, false
+	}
+	return strings.TrimSpace(suffix), true
 }
 
 // handleSetup mints a workspace-bound state token and replies with the

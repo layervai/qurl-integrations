@@ -884,6 +884,32 @@ func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 	}
 }
 
+func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup admin@example.com extra"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "Usage: `/qurl setup` or `/qurl setup <email>`") {
+		t.Errorf("expected setup usage reply, got %q", result["text"])
+	}
+}
+
 // TestSetOAuthSetupPanicsOnDoubleCall locks the documented "called
 // exactly once before Serve" contract. The field is read without a
 // lock on the request hot path; the panic is the safety net for a

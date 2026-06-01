@@ -60,6 +60,12 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("prompt") != "consent" {
 		t.Errorf("prompt: got %q want %q (rotation forces consent)", q.Get("prompt"), "consent")
 	}
+	if q.Get("connection") != "" {
+		t.Errorf("connection: got %q want empty for legacy setup", q.Get("connection"))
+	}
+	if q.Get("login_hint") != "" {
+		t.Errorf("login_hint: got %q want empty for legacy setup", q.Get("login_hint"))
+	}
 	if !strings.Contains(q.Get("scope"), "qurl:write") || !strings.Contains(q.Get("scope"), "qurl:read") {
 		t.Errorf("scope missing qurl:write/read: %q", q.Get("scope"))
 	}

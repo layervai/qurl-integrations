@@ -21,6 +21,11 @@ import (
 //
 // where hmac_hex signs every payload field before it.
 //
+// State is integrity-protected, not encrypted: a copied setup link can be
+// base64url-decoded to read the Slack IDs and optional setup email. Keep secrets
+// out of state; the current fields are slash-command verified identifiers and
+// the requester-typed email used only for Auth0 account selection.
+//
 // teamID + userID are carried in the signed payload (recovered at
 // /callback) so the workspace identity isn't taken from an unsigned
 // query parameter. The only thing that can mint a valid state is the
