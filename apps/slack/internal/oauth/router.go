@@ -38,6 +38,10 @@ const (
 	callbackPath = "/oauth/qurl/callback"
 )
 
+// DefaultAuth0EmailConnection is the Auth0 passwordless email connection name
+// used when a deployment does not override it.
+const DefaultAuth0EmailConnection = "email"
+
 // oauthHandlerTimeout caps the per-request budget for the OAuth surface.
 // The Slack bot's parent http.Server runs with WriteTimeout=15s, which
 // is appropriate for the /slack/* surface (slash-command handlers ack
@@ -217,6 +221,9 @@ type Config struct {
 	// qurl-service API), pasted into the `audience` param so the
 	// returned access_token actually carries the qurl:* scopes.
 	Auth0Audience string
+	// Auth0EmailConnection is the passwordless email connection name used for
+	// email-bound setup states. Empty falls back to DefaultAuth0EmailConnection.
+	Auth0EmailConnection string
 
 	// SlackBaseURL is the public origin of the Slack bot (e.g.
 	// https://slack-bot.example.com). The redirect_uri threaded to
@@ -382,7 +389,11 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 	q.Set("state", state)
 	q.Set("prompt", "consent")
 	if verified.Email != "" {
-		q.Set("connection", "email")
+		connection := cfg.Auth0EmailConnection
+		if connection == "" {
+			connection = DefaultAuth0EmailConnection
+		}
+		q.Set("connection", connection)
 		q.Set("login_hint", verified.Email)
 	}
 	u.RawQuery = q.Encode()

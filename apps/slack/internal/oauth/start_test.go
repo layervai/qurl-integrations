@@ -138,6 +138,31 @@ func TestStartEmailSetupUsesPasswordlessConnectionHint(t *testing.T) {
 	}
 }
 
+func TestStartEmailSetupUsesConfiguredPasswordlessConnection(t *testing.T) {
+	cfg := newStartCfg()
+	cfg.Auth0EmailConnection = "passwordless-email"
+	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStateWithEmail: %v", err)
+	}
+	h := Start(cfg)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := u.Query().Get("connection"); got != "passwordless-email" {
+		t.Errorf("connection: got %q want configured connection", got)
+	}
+}
+
 // TestAuthorizeURLAndAPIKeyScopesAgree locks the contract that the
 // scopes requested at /authorize match the scopes carried by the
 // downstream qurl-service mint. A drift here would surface as an

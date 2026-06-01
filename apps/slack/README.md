@@ -58,11 +58,12 @@ modifiers enabled by the current bot deployment.
 - **Auth:** Per-workspace qURL API key, minted via `/qurl setup` →
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying
   an email address on setup stores it in signed state, sends Auth0
-  `connection=email` + `login_hint`, and requires the verified Auth0
+  `connection` + `login_hint`, and requires the verified Auth0
   email claim to match before any workspace bind or key mint. Tenants using
-  `/qurl setup <email>` need an Auth0 passwordless email connection named
-  `email`; the callback's security gate is the verified email claim, not the
-  connection hint by itself. Keys are
+  `/qurl setup <email>` need an Auth0 passwordless email connection; the
+  connection name defaults to `email` and can be overridden with
+  `AUTH0_EMAIL_CONNECTION`. The callback's security gate is the verified email
+  claim, not the connection hint by itself. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
 - **Slack app install:** Customer workspaces install qURL through
@@ -157,6 +158,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the bot |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
+| `AUTH0_EMAIL_CONNECTION` | No | Auth0 passwordless email connection name used by `/qurl setup <email>`. Empty defaults to `email`. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl-admin tunnel install`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |

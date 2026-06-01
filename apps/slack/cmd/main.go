@@ -654,6 +654,10 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
+	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
+	if emailConnection == "" {
+		emailConnection = oauth.DefaultAuth0EmailConnection
+	}
 	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
 	qurlEndpoint := strings.TrimRight(os.Getenv("QURL_ENDPOINT"), "/")
@@ -724,18 +728,19 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	}
 
 	return oauth.Config{
-		Auth0Domain:       domain,
-		Auth0ClientID:     clientID,
-		Auth0ClientSecret: clientSecret,
-		Auth0Audience:     audience,
-		SlackBaseURL:      baseURL,
-		OAuthStateSecret:  []byte(stateSecret),
-		Provider:          provider,
-		IDTokenVerifier:   verifier,
-		Minter:            &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
-		AsyncTracker:      tracker,
-		AdminStore:        adminStore,
-		BindClassifyError: classifyBindError,
+		Auth0Domain:          domain,
+		Auth0ClientID:        clientID,
+		Auth0ClientSecret:    clientSecret,
+		Auth0Audience:        audience,
+		Auth0EmailConnection: emailConnection,
+		SlackBaseURL:         baseURL,
+		OAuthStateSecret:     []byte(stateSecret),
+		Provider:             provider,
+		IDTokenVerifier:      verifier,
+		Minter:               &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
+		AsyncTracker:         tracker,
+		AdminStore:           adminStore,
+		BindClassifyError:    classifyBindError,
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil

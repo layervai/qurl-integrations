@@ -112,6 +112,7 @@ func applyEnv(t *testing.T, kvs map[string]string) {
 	for _, k := range oauthEnvKeys {
 		t.Setenv(k, kvs[k])
 	}
+	t.Setenv("AUTH0_EMAIL_CONNECTION", kvs["AUTH0_EMAIL_CONNECTION"])
 }
 
 func applySlackInstallEnv(t *testing.T, kvs map[string]string) {
@@ -145,11 +146,31 @@ func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	if cfg.Auth0Domain != "example.auth0.com" {
 		t.Errorf("Auth0Domain: got %q", cfg.Auth0Domain)
 	}
+	if cfg.Auth0EmailConnection != oauth.DefaultAuth0EmailConnection {
+		t.Errorf("Auth0EmailConnection: got %q want default %q", cfg.Auth0EmailConnection, oauth.DefaultAuth0EmailConnection)
+	}
 	if string(cfg.OAuthStateSecret) != validStateSecret {
 		t.Errorf("OAuthStateSecret not threaded through")
 	}
 	if cfg.IDTokenVerifier == nil {
 		t.Error("IDTokenVerifier should be wired when the stubbed factory returns nil err")
+	}
+}
+
+func TestBuildOAuthConfigEmailConnectionOverride(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env["AUTH0_EMAIL_CONNECTION"] = "passwordless-email"
+	applyEnv(t, env)
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true with all required env vars set")
+	}
+	if cfg.Auth0EmailConnection != "passwordless-email" {
+		t.Errorf("Auth0EmailConnection: got %q want override", cfg.Auth0EmailConnection)
 	}
 }
 
