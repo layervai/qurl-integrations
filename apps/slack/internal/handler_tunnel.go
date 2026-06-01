@@ -962,9 +962,13 @@ const (
 )
 
 // installFencedCodeBlock matches a single ```\n<body>\n``` fence as produced by
-// slackCodeBlock. The body can never contain a nested ``` (slackCodeBlock
-// rejects that), so the non-greedy capture segments a rendered install message
-// unambiguously into code vs. surrounding prose.
+// slackCodeBlock. Segmentation is unambiguous only because slackCodeBlock is the
+// SOLE producer of ``` fences in install messages and the hand-written prose
+// contains no literal ```: so every fence is one it emitted, and a body can't
+// nest ``` (slackCodeBlock rejects that), letting the non-greedy capture cleanly
+// split code from surrounding prose. A future renderer that emitted a literal
+// ``` into prose could mis-segment — but only ever into the always-safe text
+// fallback, never a key leak.
 var installFencedCodeBlock = regexp.MustCompile("(?s)```\\n(.*?)\\n```")
 
 // installMessageBlocks converts a fully-rendered install message — prose
