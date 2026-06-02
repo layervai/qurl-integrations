@@ -187,6 +187,19 @@ describe('apply-discord-metadata helpers', () => {
     expect(uri).toMatch(/^data:image\/png;base64,/);
   });
 
+  test('reads PNG dimensions only from the leading IHDR chunk', () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x10,
+    ]);
+    const nonIhdr = Buffer.from(png);
+    nonIhdr.write('tEXt', 12, 'ascii');
+
+    expect(detectImageDimensions(png, 'image/png')).toEqual({ width: 32, height: 16 });
+    expect(detectImageDimensions(nonIhdr, 'image/png')).toBeUndefined();
+  });
+
   test('rejects referenced assets with the wrong local dimensions', () => {
     expect(() => dataUri(metadata.application.cover_image, 'application.icon')).toThrow(/expected approximately 1:1/);
     expect(() => dataUri(metadata.application.icon, 'application.cover_image')).toThrow(/expected approximately 16:9/);

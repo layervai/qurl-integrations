@@ -142,7 +142,8 @@ function detectImageMime(bytes) {
 }
 
 function detectImageDimensions(bytes, mime) {
-  if (mime === 'image/png' && bytes.length >= 24) {
+  if (mime === 'image/png') {
+    if (bytes.length < 24 || bytes.toString('ascii', 12, 16) !== 'IHDR') return undefined;
     return {
       width: bytes.readUInt32BE(16),
       height: bytes.readUInt32BE(20),
