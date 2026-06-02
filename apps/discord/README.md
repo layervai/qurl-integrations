@@ -87,6 +87,10 @@ Preview the API payload without making changes:
 npm run apply-discord-metadata -- --dry-run
 ```
 
+Discord rate-limits bot username/avatar/banner updates. If a sub-field
+returns `429`, the script prints `retry_after` when Discord provides it and
+exits non-zero so automation does not treat a partial apply as complete.
+
 ### 2. Configure GitHub OAuth
 
 1. https://github.com/settings/developers → New OAuth App

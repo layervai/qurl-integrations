@@ -23,6 +23,9 @@ function validateMetadata(doc = metadata) {
 function dataUri(relPath, baseRoot = root) {
   if (!relPath) return undefined;
   const filePath = path.join(baseRoot, relPath);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Discord metadata asset ${relPath} does not exist at ${filePath}. Check discord-metadata.json.`);
+  }
   const ext = path.extname(filePath).toLowerCase();
   const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
   return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
@@ -50,6 +53,7 @@ async function request(method, apiPath, body) {
     const err = new Error(`${method} ${apiPath} failed with ${res.status}`);
     err.status = res.status;
     err.body = parsed;
+    err.retryAfter = res.headers.get('retry-after') || parsed.retry_after;
     throw err;
   }
   return parsed;
@@ -69,6 +73,11 @@ function botTag(user) {
   return user.username;
 }
 
+function errorDetails(err) {
+  const retry = err.retryAfter ? ` retry_after=${err.retryAfter}s` : '';
+  return `${err.status || 'error'}${retry} ${JSON.stringify(err.body || err.message)}`;
+}
+
 function assertExpectedApplication(app, doc = metadata) {
   if (String(app.id) !== doc.application.id) {
     throw new Error(`DISCORD_TOKEN belongs to application ${app.id}; expected LayerV application ${doc.application.id}. Refusing to update the wrong Discord app.`);
@@ -81,6 +90,7 @@ function assertExpectedApplication(app, doc = metadata) {
 
 async function main() {
   validateMetadata();
+  let hadPartialFailure = false;
 
   const botUsernamePatch = { username: metadata.bot.username };
   const botAvatarPatch = metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar) } : null;
@@ -134,7 +144,8 @@ async function main() {
         console.warn(`Application name remains ${JSON.stringify(renamedApp.name)}; update it in Discord Developer Portal.`);
       }
     } catch (err) {
-      console.warn(`Application name must be updated in Discord Developer Portal: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
+      hadPartialFailure = true;
+      console.warn(`Application name must be updated in Discord Developer Portal: ${errorDetails(err)}`);
     }
   }
 
@@ -145,7 +156,8 @@ async function main() {
       const updatedUser = await request('PATCH', '/users/@me', botUsernamePatch);
       console.log(`Updated bot username: ${botTag(updatedUser)}`);
     } catch (err) {
-      console.warn(`Bot username update skipped: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
+      hadPartialFailure = true;
+      console.warn(`Bot username update skipped: ${errorDetails(err)}`);
     }
   }
 
@@ -154,7 +166,8 @@ async function main() {
       const avatarUser = await request('PATCH', '/users/@me', botAvatarPatch);
       console.log(`Updated bot avatar: ${Boolean(avatarUser.avatar)}`);
     } catch (err) {
-      console.warn(`Bot avatar update skipped: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
+      hadPartialFailure = true;
+      console.warn(`Bot avatar update skipped: ${errorDetails(err)}`);
     }
   }
 
@@ -163,11 +176,15 @@ async function main() {
       const bannerUser = await request('PATCH', '/users/@me', botBannerPatch);
       console.log(`Updated bot banner: ${Boolean(bannerUser.banner)}`);
     } catch (err) {
-      console.warn(`Bot banner update skipped: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
+      hadPartialFailure = true;
+      console.warn(`Bot banner update skipped: ${errorDetails(err)}`);
     }
   }
 
   console.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
+  if (hadPartialFailure) {
+    throw new Error('Discord metadata apply completed with skipped fields; see warnings above.');
+  }
 }
 
 if (require.main === module) {
@@ -180,6 +197,8 @@ if (require.main === module) {
 
 module.exports = {
   assertExpectedApplication,
+  botTag,
   dataUri,
+  summarize,
   validateMetadata,
 };
