@@ -19,11 +19,16 @@ class PortalActionRequiredError extends Error {
 function validateMetadata(doc = metadata) {
   if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
   if (!doc.application?.name) throw new Error('discord-metadata.json must set application.name.');
+  if (!doc.application?.description) throw new Error('discord-metadata.json must set application.description.');
   if (!doc.application?.id || !/^\d+$/.test(doc.application.id)) {
     throw new Error('discord-metadata.json must set application.id to the LayerV Discord application ID.');
   }
   if (!doc.application?.public_key || !/^[a-f0-9]{64}$/.test(doc.application.public_key)) {
     throw new Error('discord-metadata.json must set application.public_key to the LayerV Discord public key.');
+  }
+  const scopes = doc.application?.install_params?.scopes;
+  if (!Array.isArray(scopes) || !scopes.includes('bot') || !scopes.includes('applications.commands')) {
+    throw new Error('discord-metadata.json must set application.install_params.scopes to include bot and applications.commands.');
   }
   if (!/^\d+$/.test(doc.application?.install_params?.permissions || '')) {
     throw new Error('discord-metadata.json must set application.install_params.permissions to a numeric string.');
@@ -185,6 +190,8 @@ async function main({
 
   if (currentUser.username === metadata.bot.username) {
     logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
+  } else if (currentUser.username.toLowerCase() === metadata.bot.username.toLowerCase()) {
+    logger.warn(`Bot username is ${currentUser.username}; Discord may normalize username casing. Skipping case-only update to avoid rate-limit churn; verify the live username outcome in #860.`);
   } else {
     try {
       // Keep username separate from bot images so a name conflict/rate limit

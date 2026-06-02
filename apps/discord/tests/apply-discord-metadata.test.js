@@ -95,8 +95,19 @@ describe('apply-discord-metadata helpers', () => {
     })).toThrow(/application\.name/);
     expect(() => validateMetadata({
       ...metadata,
+      application: { ...metadata.application, description: '' },
+    })).toThrow(/application\.description/);
+    expect(() => validateMetadata({
+      ...metadata,
       application: { ...metadata.application, public_key: 'not-a-public-key' },
     })).toThrow(/application\.public_key/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: {
+        ...metadata.application,
+        install_params: { ...metadata.application.install_params, scopes: ['bot'] },
+      },
+    })).toThrow(/install_params\.scopes/);
     expect(() => validateMetadata({
       ...metadata,
       application: {
@@ -188,6 +199,36 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('main resolves after successfully patching the bot username', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: 'Qurl Bot' }),
+      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
+    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.username}`);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('main skips a case-only username update when Discord normalizes casing', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.username.toLowerCase() }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/normalize username casing/));
   });
 
   test('main dry-run emits a summary without a token or network calls', async () => {
