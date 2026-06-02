@@ -885,7 +885,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// `$slug` or a channel `$alias`. Surface a deprecation hint
 		// instead of an "unknown subcommand" so existing users hitting
 		// muscle memory get a direct redirect to the new shape.
-		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$id|$alias>` instead — run `/qurl list` to see your tunnels.")
+		respondSlack(w, "`/qurl create` is no longer supported. Use `/qurl get <$id|$alias>` instead — run `/qurl list` to see your resources.")
 	case text == "list":
 		// Exact match only: the looser `HasPrefix(text, "list")` form
 		// matched `listing`, `lists`, `list-foo` (silently routing
@@ -1219,19 +1219,19 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
-			"_`$id` identifies a tunnel. A `$alias` is an alternate name for a tunnel in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
+			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
 			"",
-			"• `/qurl get <$id|$alias>` — Mint a one-time qURL for a tunnel `$id` or a `$alias` configured in this channel",
+			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
 		if h.cfg.PostDM != nil {
 			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
-			"• `/qurl get <$id|$alias> reason:\"…\"` — Mint a one-time qURL, recording a reason in the audit log",
+			"• `/qurl get <$id|$alias> reason:\"…\"` — Create a qURL, recording a reason in the audit log",
 		)
 	}
 	lines = append(lines,
-		"• `/qurl list` — List the tunnels available to you",
+		"• `/qurl list` — List the resources available to you",
 	)
 	if h.cfg.AdminStore != nil {
 		// aliases reads channel_policies through the AdminStore (NOT the
@@ -1240,13 +1240,13 @@ func (h *Handler) userHelpMessage(command string) string {
 		// otherwise help could advertise `/qurl aliases` on a deploy where
 		// it replies ":warning: not configured".
 		lines = append(lines,
-			"• `/qurl aliases` — List this channel's aliases and the tunnel each one points to",
+			"• `/qurl aliases` — List this channel's aliases and the resource each one points to",
 		)
 	}
 	lines = append(lines,
 		"• `/qurl help` — Show this help message",
 		"",
-		"Admins: run `/qurl-admin help` for tunnel install, alias, and admin commands.",
+		"Admins: run `/qurl-admin help` for resource setup, alias, and admin commands.",
 	)
 	// The lines are authored with the prod command names (`/qurl`,
 	// `/qurl-admin`). Rewrite the `/qurl` prefix to the invoked user

@@ -953,6 +953,9 @@ func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	if strings.Contains(noStore, "/qurl get") {
 		t.Errorf("user help advertised /qurl get with no AdminStore: %q", noStore)
 	}
+	if strings.Contains(strings.ToLower(noStore), "tunnel") {
+		t.Errorf("user help leaked tunnel terminology with no AdminStore: %q", noStore)
+	}
 	seedAliasAdminGate(t, h, testAliasTeamID)
 	withStore := h.userHelpMessage(commandUser)
 	if !strings.Contains(withStore, "/qurl aliases`") {
@@ -960,6 +963,9 @@ func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	}
 	if !strings.Contains(withStore, "/qurl get") {
 		t.Errorf("user help omitted /qurl get with AdminStore wired: %q", withStore)
+	}
+	if strings.Contains(strings.ToLower(withStore), "tunnel") {
+		t.Errorf("user help leaked tunnel terminology with AdminStore wired: %q", withStore)
 	}
 }
 

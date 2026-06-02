@@ -71,7 +71,7 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Protected Tunnel Resources") {
+	if !strings.Contains(async, "Protected Resources") {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	if !strings.Contains(async, "`$prod-db`") {
@@ -349,8 +349,14 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 		t.Run("empty/"+channelID, func(t *testing.T) {
 			inv := newAdminSlashInvokerOnChannel(t, h, channelID)
 			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-			if !strings.Contains(async, "No tunnels are available in this channel") {
+			if !strings.Contains(async, "No protected resources are available in this channel") {
 				t.Errorf("expected the channel empty state in %s: %q", channelID, async)
+			}
+			if !strings.Contains(async, "/qurl-admin tunnel install") {
+				t.Errorf("admin empty state should include setup command in %s: %q", channelID, async)
+			}
+			if !strings.Contains(async, "Edit") {
+				t.Errorf("admin empty state should include expose-via-Edit hint in %s: %q", channelID, async)
 			}
 			if strings.Contains(async, "`$"+testListAliasProdDB+"`") || strings.Contains(async, "`$"+testListAliasSecret+"`") {
 				t.Errorf("a tunnel leaked into %s, where none is exposed: %q", channelID, async)
@@ -428,33 +434,64 @@ func TestHandleList_EmptyChannelRejected(t *testing.T) {
 }
 
 // TestHandleList_EmptyChannel fences the friendly empty-state copy when no
-// tunnel is available in the invoker's channel — here, nothing is exposed to
-// C_test, so the channel allow-set is empty and the listing short-circuits to
-// the empty state WITHOUT an upstream call. The copy is channel-framed and
-// offers both recovery paths (install here, or expose from `/qurl list` →
-// Edit). A failing /v1/resources stub asserts the short-circuit really avoided
-// the upstream: if the scope read regressed and the handler fell through to
-// ListResources, this would surface the upstream error instead of the empty
-// state.
+// protected resource is available in the invoker's channel. Non-admins get a
+// plain admin handoff; confirmed admins get the admin setup command and the
+// expose-via-Edit recovery hint. A failing /v1/resources stub asserts the
+// empty allow-set short-circuits before the upstream call.
 func TestHandleList_EmptyChannel(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		t.Errorf("ListResources called despite an empty channel allow-set (scope short-circuit regressed)")
-		writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "should not be called")
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
+	for _, tc := range []struct {
+		name    string
+		seed    func(*testing.T, *adminTestServers)
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "admin sees setup command",
+			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
+			want:    []string{"/qurl-admin tunnel install", "Edit"},
+			notWant: []string{"Ask a Slack admin"},
+		},
+		{
+			name:    "non-admin gets admin handoff",
+			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
+			want:    []string{"Ask a Slack admin"},
+			notWant: []string{"/qurl-admin tunnel install", "Edit", "tunnel"},
+		},
+		{
+			name: "admin check error gets admin handoff",
+			seed: func(t *testing.T, ts *adminTestServers) {
+				ts.seedAdmin(t)
+				ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected workspace read failure"))
+			},
+			want:    []string{"Ask a Slack admin"},
+			notWant: []string{"/qurl-admin tunnel install", "Edit", "tunnel"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			tc.seed(t, ts)
+			ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				t.Errorf("ListResources called despite an empty channel allow-set (scope short-circuit regressed)")
+				writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "should not be called")
+			})
+			h := newAdminTestHandler(t, ts)
+			inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No tunnels are available in this channel") {
-		t.Errorf("async reply missing channel empty-state copy: %q", async)
-	}
-	if !strings.Contains(async, "/qurl-admin tunnel install") {
-		t.Errorf("async reply missing tunnel-install hint: %q", async)
-	}
-	if !strings.Contains(async, "Edit") {
-		t.Errorf("async reply missing the expose-via-Edit recovery hint: %q", async)
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+			if !strings.Contains(async, "No protected resources are available in this channel") {
+				t.Errorf("async reply missing empty-state copy: %q", async)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(async, want) {
+					t.Errorf("async reply missing %q: %q", want, async)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(async, notWant) {
+					t.Errorf("async reply leaked %q: %q", notWant, async)
+				}
+			}
+		})
 	}
 }
 
@@ -741,7 +778,7 @@ func TestMapListResourcesErrorPermanentClassUsesGenericListFailure(t *testing.T)
 			t.Errorf("list permanent-class response leaked %q: %q", leak, msg)
 		}
 	}
-	if !strings.Contains(msg, "Failed to list qURL tunnels") {
+	if !strings.Contains(msg, "Failed to list qURL resources") {
 		t.Errorf("list permanent-class response missing generic list failure: %q", msg)
 	}
 	if strings.Contains(msg, "Could not reach qURL") {

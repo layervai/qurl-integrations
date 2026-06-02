@@ -37,26 +37,27 @@ import (
 // `/qurl aliases` triage warning in [Handler.processAliases].
 const listResourcesScanLimit = 100
 
-// listTunnelsEmptyMessage is the friendly empty-state copy when no tunnel is
-// available in THIS channel — either the channel has no allow-set entries or
-// none of the workspace's tunnels are exposed here. `/qurl list` is now
-// channel-scoped, so the copy is channel-framed and offers both recovery
-// paths: install a new tunnel here, or expose an existing one to this channel
-// from a channel where it already appears (`/qurl list` → *Edit*). Both name
-// admin-only actions without imperatively telling every member to run them —
-// a non-admin reading this is routed implicitly to their Slack admin.
-const listTunnelsEmptyMessage = ":mag: No tunnels are available in this channel yet. A Slack admin can install one here with `/qurl-admin tunnel install <id>`, or expose an existing tunnel to this channel from `/qurl list` → *Edit* in a channel where it already appears."
+const (
+	// listResourcesEmptyMessage is the friendly empty-state copy when no
+	// protected resource is available in THIS channel. It avoids admin-only
+	// tunnel setup terminology for ordinary users.
+	listResourcesEmptyMessage = ":mag: No protected resources are available in this channel yet. Ask a Slack admin to set one up or expose one to this channel."
+
+	// listResourcesEmptyAdminMessage is shown only after a successful admin
+	// check, so it can name the admin-only setup command and Edit recovery path.
+	listResourcesEmptyAdminMessage = ":mag: No protected resources are available in this channel yet. Install one here with `/qurl-admin tunnel install <id>`, or expose an existing resource to this channel from `/qurl list` → *Edit* in a channel where it already appears."
+)
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
-// Clicking it mints a one-time qURL for that row's tunnel — the same work
+// Clicking it creates a qURL for that row's resource — the same work
 // as typing `/qurl get $<slug>`. (Brand spelling: lowercase q, uppercase URL.)
 const listCreateButtonLabel = "Create qURL"
 
 // listHeaderBlockText titles the interactive /qurl list. It rides on a `header`
 // block, whose text object is plain_text — so the `:lock:` shortcode renders as
-// an icon but there is no mrkdwn bold. The bold "*Protected Tunnel Resources:*"
+// an icon but there is no mrkdwn bold. The bold "*Protected Resources:*"
 // form still leads the plain-text fallback `body`.
-const listHeaderBlockText = ":lock: Protected Tunnel Resources"
+const listHeaderBlockText = ":lock: Protected Resources"
 
 // listCreateButtonMaxRows caps how many tunnel rows /qurl list renders as
 // interactive section+button blocks. Slack rejects a message with more
@@ -104,7 +105,7 @@ const listEditButtonMaxRows = listCreateButtonMaxRows / 2
 const slackButtonValueMaxBytes = 2000
 
 const (
-	commonListResourcesFailedPrefix = "Failed to list qURL tunnels"
+	commonListResourcesFailedPrefix = "Failed to list qURL resources"
 	listResourcesFailedLogMessage   = "list: list resources failed"
 )
 
@@ -177,19 +178,42 @@ func (h *Handler) listCallerCanEdit(ctx context.Context, log *slog.Logger, teamI
 	return isAdmin
 }
 
+// listResourcesEmptyMessageForCaller returns the empty-state copy for /qurl
+// list. Non-admins never see the admin-only tunnel setup command. Admins get a
+// direct setup hint, but only on a successful CheckAdmin read; failures degrade
+// to the ordinary user copy so the list path stays fail-soft. This read happens
+// only on the zero-resource path, where the extra hint changes the otherwise
+// empty response without adding a per-row gate.
+func (h *Handler) listResourcesEmptyMessageForCaller(ctx context.Context, log *slog.Logger, teamID, userID string) string {
+	if h.cfg.AdminStore == nil || teamID == "" || userID == "" {
+		return listResourcesEmptyMessage
+	}
+	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+	if err != nil {
+		log.Debug("list: admin check for empty-state hint failed — hiding admin setup hint", "error", err, "team_id", teamID)
+		return listResourcesEmptyMessage
+	}
+	if !isAdmin {
+		return listResourcesEmptyMessage
+	}
+	return listResourcesEmptyAdminMessage
+}
+
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
 // message when the tunnel set is too large for per-row buttons (see
 // [listCreateButtonMaxRows]). It names the typed path and the
 // one-time-use default; the button path is named only in
 // [listFooterButtons], shown when the buttons are actually present.
-const listFooterText = "Each `$<id>` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel. Copy an ID or an alias and run `/qurl get` on it to mint a one-time qURL link — it opens access once, then expires."
+const listFooterText = "Each `$<id>` identifies a resource; the `(alias: …)` entries are alternate names for it in this channel. Copy an ID or an alias and run `/qurl get` on it to create a qURL link — it opens access once, then expires."
 
 // listFooterButtons is the guidance line beneath the interactive /qurl
 // list (the version with a per-row Create qURL button). It names BOTH
 // ways to mint — tapping the button and the typed command — and the
 // one-time-use default.
-const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$id` or `$alias` and run `/qurl get`, to mint a one-time qURL link — it opens access once, then expires. A `$id` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel."
+const listFooterButtons = "Tap *Create qURL* on any resource, or copy a `$id` or `$alias` and run `/qurl get`, to create a qURL link — it opens access once, then expires. A `$id` identifies a resource; the `(alias: …)` entries are alternate names for it in this channel."
 
 // handleListResources implements `/qurl list`. It lists the tunnel resources
 // available in THIS channel (type=tunnel only — URL/transit resources are
@@ -230,7 +254,7 @@ func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) 
 //     ListResources call (the common case for a channel with no tunnels).
 //
 // On success it returns the non-empty allow-set and true.
-func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID string) (map[string]struct{}, bool) {
+func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID, userID string) (map[string]struct{}, bool) {
 	if channelID == "" {
 		log.Warn("list: empty channel_id; refusing workspace-wide list")
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
@@ -248,7 +272,7 @@ func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, respon
 		return nil, false
 	}
 	if len(allowed) == 0 {
-		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
+		_ = h.postResponse(log, responseURL, h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID))
 		return nil, false
 	}
 	return allowed, true
@@ -258,13 +282,14 @@ func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, respon
 func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, values url.Values) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
+	userID := strings.TrimSpace(values.Get(fieldUserID))
 	channelID := values.Get(fieldChannelID)
 
 	// Resolve the channel scope first. This handles every fail-closed
 	// short-circuit (no channel, no AdminStore, read error, nothing exposed)
 	// and, on the common "nothing exposed here" path, avoids the upstream
 	// ListResources call entirely.
-	allowed, ok := h.listChannelScope(ctx, log, responseURL, teamID, channelID)
+	allowed, ok := h.listChannelScope(ctx, log, responseURL, teamID, channelID, userID)
 	if !ok {
 		return
 	}
@@ -296,7 +321,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	resources := filterResourcesAllowedInChannel(filterTunnelResources(page.Resources), allowed)
 
 	if len(resources) == 0 {
-		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
+		_ = h.postResponse(log, responseURL, h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID))
 		return
 	}
 
@@ -360,7 +385,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// read entirely, since the answer can't change the output.
 	useButtons := len(resources) <= listCreateButtonMaxRows
 	showEdit := len(resources) <= listEditButtonMaxRows &&
-		h.listCallerCanEdit(ctx, log, teamID, values.Get(fieldUserID))
+		h.listCallerCanEdit(ctx, log, teamID, userID)
 	lines := make([]string, 0, len(resources))
 	var blocks []any
 	if useButtons {
@@ -412,7 +437,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		blocks = append(blocks, sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok)))
 	}
 
-	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
+	body := "*Protected Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
 	if useButtons {
 		blocks = append(blocks, contextBlock(listFooterButtons))
 	}
@@ -422,7 +447,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		// even when every tunnel is already shown. See the #531 caveat
 		// on listResourcesScanLimit; until then we warn rather than
 		// risk implying the listing is exhaustive.
-		hasMore := fmt.Sprintf("…more resources past the first %d-row scan — some tunnels may not be shown.", listResourcesScanLimit)
+		hasMore := fmt.Sprintf("…more resources past the first %d-row scan — some resources may not be shown.", listResourcesScanLimit)
 		body += "\n_" + hasMore + "_"
 		if useButtons {
 			blocks = append(blocks, contextBlock(hasMore))

@@ -17,14 +17,14 @@ import (
 // the user when the multi-hop `/qurl get` work fails on a branch we
 // don't have a more specific message for. Lifted to a constant
 // because three different mapMintError branches need it.
-const commonGetMintFailedMessage = "Failed to mint qURL. Please try again."
+const commonGetMintFailedMessage = "Failed to create qURL. Please try again."
 
 // getUsageMessage is the arg hint shown when `/qurl get` is invoked
 // with no token. Bare `get` parses to [ErrEmptyResource]; the
 // defensive empty-Alias guard below reuses the same copy so the user
 // learns the `$<id>|$<alias>` grammar rather than seeing a terse
 // sentinel.
-const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to mint a one-time qURL for a tunnel. Run `/qurl list` to see what's available."
+const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to create a qURL for a resource. Run `/qurl list` to see what's available."
 
 // Tunnel access limits applied to every `/qurl get` mint. `/qurl get` is
 // tunnel-only (raw URLs are unsupported — see urlNotSupportedGetMessage), so
@@ -71,14 +71,14 @@ const (
 // renders so multi-sentence prose stays out of the parser's error
 // values (repo convention).
 // The breadcrumb points only at `/qurl list` (not `/qurl aliases`): list is
-// ungated and now renders each tunnel's channel `$alias` shortcuts inline, so
+// ungated and now renders each resource's channel `$alias` shortcuts inline, so
 // it's the single surface that always works and shows both slugs and aliases.
-const urlNotSupportedGetMessage = "`/qurl get` only works with a `$id` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your tunnels and their channel aliases."
+const urlNotSupportedGetMessage = "`/qurl get` only works with a `$id` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your resources and their channel aliases."
 
 // resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
 // `/qurl get` (the resource-id form is gone). Same terse-sentinel
 // ([ErrResourceIDNotSupportedGet]) → rich-handler-copy split as the URL case.
-const resourceIDNotSupportedGetMessage = "`/qurl get` takes a tunnel `$id` or a channel `$alias`, not a resource ID. Run `/qurl list` and copy the `$id` instead."
+const resourceIDNotSupportedGetMessage = "`/qurl get` takes a `$id` or a channel `$alias`, not an internal `r_...` identifier. Run `/qurl list` and copy the `$id` instead."
 
 // unexpectedGetShapeMessage is the reply for getWork's defensive
 // empty-alias arm; it routes the user to their operator rather than
@@ -90,11 +90,11 @@ const unexpectedGetShapeMessage = "Couldn't process that command. Please contact
 // `tunnel_disabled` error code (the workspace doesn't have
 // tunnel-resource minting enabled yet). Lifted because both alias
 // resolution and mint can surface this.
-const tunnelDisabledMessage = "Tunnel resources are not yet enabled for this workspace. Ask LayerV support."
+const tunnelDisabledMessage = "Protected resources are not yet enabled for this workspace. Ask LayerV support."
 
 // serviceUnreachableMessage is the "honest retry-friendly" copy
 // surfaced for transport-class failures (5xx, dial errors, network
-// errors). Distinct from the generic "Failed to mint qURL" copy so
+// errors). Distinct from the generic "Failed to create qURL" copy so
 // the user knows a retry is the right next move.
 const serviceUnreachableMessage = "Could not reach qURL. Please try again."
 
@@ -146,7 +146,7 @@ func noResourceForAliasMessage(alias string) string {
 // DDB; resolving one would hand a URL to `POST /v1/resources/<url>/qurls`
 // and surface as the generic retry-friendly [commonGetMintFailedMessage],
 // stranding the user. Name the dead shortcut plainly and route to the
-// admin (only an admin can re-point it at a tunnel). Same posture as
+// admin (only an admin can re-point it at a resource). Same posture as
 // [noResourceForAliasMessage].
 //
 // `alias` is interpolated verbatim into the reply AND a `/qurl-admin set-alias
@@ -157,9 +157,9 @@ func noResourceForAliasMessage(alias string) string {
 // caller can't reopen the Slack-fence-escaping surface the parser guards.
 func legacyAliasBindingMessage(alias string) string {
 	if !aliasCharsetPattern.MatchString(alias) {
-		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias`."
+		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a resource with `/qurl-admin set-alias`."
 	}
-	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a tunnel with `/qurl-admin set-alias $%s $<id>`.", alias, alias)
+	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a resource with `/qurl-admin set-alias $%s $<id>`.", alias, alias)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key

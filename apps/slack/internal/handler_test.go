@@ -193,8 +193,7 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	// User help must NOT advertise admin verbs as runnable commands —
 	// they live on /qurl-admin. Check for the command-line forms (the
 	// `/qurl-admin tunnel install` advert and the `/qurl set-alias`
-	// bullet), not bare words: the "Admins: run /qurl-admin help …"
-	// pointer line legitimately mentions "tunnel install"/"alias" in prose.
+	// bullet), not bare words.
 	for _, leaked := range []string{"/qurl-admin tunnel install", "/qurl set-alias", "/qurl-admin admin", "/qurl-admin set-alias"} {
 		if strings.Contains(userHelp, leaked) {
 			t.Errorf("/qurl help leaked admin command %q: %q", leaked, userHelp)
