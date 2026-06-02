@@ -335,6 +335,10 @@ func primaryCreateButtonPresent(blocks []any) bool {
 func TestHandleList_PolishedDesignMarkers(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	// `/qurl list` is channel-scoped: a tunnel renders only where it's exposed.
+	// Expose prod-db to the invoker's default channel (C_test) so the design
+	// markers below are exercised on a rendered row rather than the empty state.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB, testKeyDescription: "Prod database"},

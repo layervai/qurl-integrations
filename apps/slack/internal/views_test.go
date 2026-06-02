@@ -260,7 +260,7 @@ func TestTunnelEditModal_RendersChannelsSelect(t *testing.T) {
 		Token:           testEditToken,
 		ExposedChannels: []string{testEditHomeChannel, testEditExtraChannel},
 	}
-	raw, err := TunnelEditModal(meta, "Prod database", []string{"primary"})
+	raw, err := TunnelEditModal(meta, "Prod database", []string{testEditAlias})
 	if err != nil {
 		t.Fatalf("TunnelEditModal: %v", err)
 	}
