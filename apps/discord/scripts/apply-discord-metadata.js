@@ -306,8 +306,8 @@ async function main({
   // Build payloads before the dry-run branch so dry-run validates local assets.
   const botUsernamePatch = { username: apiUsername };
   const botImagePatch = {
-    ...(doc.bot.avatar ? { avatar: dataUri(doc.bot.avatar, 'bot.avatar') } : {}),
-    ...(doc.bot.banner ? { banner: dataUri(doc.bot.banner, 'bot.banner') } : {}),
+    avatar: dataUri(doc.bot.avatar, 'bot.avatar'),
+    banner: dataUri(doc.bot.banner, 'bot.banner'),
   };
   // Discord returns stored asset hashes, not source-file hashes; keep this
   // authoritative PATCH fatal instead of guessing at image no-op detection.
@@ -327,7 +327,7 @@ async function main({
         public_key: doc.application.public_key,
       },
       bot_username: summarize(botUsernamePatch),
-      bot_images: Object.keys(botImagePatch).length ? summarize(botImagePatch) : null,
+      bot_images: summarize(botImagePatch),
       application: summarize(appPatch),
       application_name: doc.application.name,
       portal_only: {
@@ -362,7 +362,9 @@ async function main({
     logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
     // Case-insensitive matches with mixed casing or a legacy discriminator are
-    // not fully migrated to Discord's lowercase unique-username state.
+    // not fully migrated to Discord's lowercase unique-username state. Do not
+    // spend another username PATCH on a case-only value; #860 verifies the live
+    // account once Discord reports the exact lowercase migrated username.
     hadPartialFailure = true;
     const discriminator = currentUser.discriminator ?? 'unknown';
     logger.warn(`Bot username is ${currentUser.username} with discriminator ${discriminator}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
@@ -378,24 +380,22 @@ async function main({
     }
   }
 
-  if (Object.keys(botImagePatch).length) {
-    try {
-      // Discord returns stored asset hashes, not source-file hashes; upload bot
-      // images together to limit request count until safe no-op detection exists.
-      const imageUser = await request('PATCH', '/users/@me', botImagePatch, requestOptions);
-      if (botImagePatch.avatar && !imageUser.avatar) {
-        hadPartialFailure = true;
-        logger.warn('Bot avatar update skipped: Discord response did not include an avatar hash.');
-      }
-      if (botImagePatch.banner && !imageUser.banner) {
-        hadPartialFailure = true;
-        logger.warn('Bot banner update skipped: Discord response did not include a banner hash.');
-      }
-      logger.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
-    } catch (err) {
+  try {
+    // Discord returns stored asset hashes, not source-file hashes; upload bot
+    // images together to limit request count until safe no-op detection exists.
+    const imageUser = await request('PATCH', '/users/@me', botImagePatch, requestOptions);
+    if (!imageUser.avatar) {
       hadPartialFailure = true;
-      logger.warn(`Bot image update skipped: ${errorDetails(err)}`);
+      logger.warn('Bot avatar update skipped: Discord response did not include an avatar hash.');
     }
+    if (!imageUser.banner) {
+      hadPartialFailure = true;
+      logger.warn('Bot banner update skipped: Discord response did not include a banner hash.');
+    }
+    logger.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
+  } catch (err) {
+    hadPartialFailure = true;
+    logger.warn(`Bot image update skipped: ${errorDetails(err)}`);
   }
 
   let updatedApp;

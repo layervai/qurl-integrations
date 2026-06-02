@@ -100,11 +100,15 @@ and matches the local dimension rules.
 
 Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands
-in https://github.com/layervai/qurl-integrations/issues/588.
+in https://github.com/layervai/qurl-integrations/issues/588. Username and
+image updates are separate Discord `/users/@me` PATCHes, so respect
+`retry_after` and rerun instead of looping if either edit is rate-limited.
 
 After the live metadata apply, run `npm run register` with the same token/app
 pair so Discord's slash-command picker receives the updated command
-descriptions.
+descriptions. Keep `DISCORD_CLIENT_ID` aligned with the metadata application
+ID; the script verifies the token's app, while command registration and invite
+links read the client ID from environment/SSM/infra wiring.
 
 Exit codes:
 - `0` — API fields applied, including the lowercase unique username `qurl`;
