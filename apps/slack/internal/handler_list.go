@@ -340,22 +340,25 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			blocks = append(blocks, sectionBlock(sectionText))
 			continue
 		}
-		// Create qURL is the headline action, so it renders as the primary
-		// (filled) button. Admin rows pair it with Edit in an actions block; the
+		// Create qURL is the row's headline action. It renders as the primary
+		// (filled) button ONLY when an Edit button sits beside it — admin rows,
+		// where primary expresses the Create-over-Edit hierarchy. A create-only
+		// row has nothing to outrank, and a whole column of lone primaries reads
+		// as noise (Slack advises using `primary` sparingly), so it gets a
+		// default-style button. Admin rows pair the two in an actions block; the
 		// Edit button carries the row's edit snapshot so opening the modal needs
 		// no extra read. A snapshot too large for a button value falls through to
 		// the Create-only accessory path below.
-		create := primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, tok)
 		if showEdit {
 			if editVal, ok := buildTunnelEditButtonValue(resources[i].ResourceID, tok, resources[i].Description, aliasMap[resources[i].ResourceID]); ok {
 				blocks = append(blocks, sectionBlock(sectionText), actionsBlock(
-					create,
+					primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
 					buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
 				))
 				continue
 			}
 		}
-		blocks = append(blocks, sectionWithAccessory(sectionText, create))
+		blocks = append(blocks, sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok)))
 	}
 
 	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"

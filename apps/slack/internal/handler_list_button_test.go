@@ -320,9 +320,10 @@ func primaryCreateButtonPresent(blocks []any) bool {
 	return false
 }
 
-// TestHandleList_PolishedDesignMarkers fences the /qurl list visual redesign: a
-// `header` block titles the list, each row's section uses the bold multi-line
-// `*$id*` layout, and the "Create qURL" button renders as the primary style.
+// TestHandleList_PolishedDesignMarkers fences the /qurl list visual redesign on
+// a create-only (non-admin) list: a `header` block titles the list, each row's
+// section uses the bold multi-line `*$id*` layout, and the lone Create qURL
+// button is the DEFAULT style — not primary, since it has no Edit to outrank.
 func TestHandleList_PolishedDesignMarkers(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -357,8 +358,49 @@ func TestHandleList_PolishedDesignMarkers(t *testing.T) {
 		t.Errorf("row section missing bold `*$id*` layout: %s", body)
 	}
 
-	// Create qURL renders as the primary (filled) button.
-	if !primaryCreateButtonPresent(blocks) {
-		t.Errorf("Create qURL button is not styled primary; blocks=%v", blocks)
+	// A create-only row's Create button is present but NOT primary (no Edit to
+	// outrank — see [TestHandleList_PrimaryCreateScopedToAdminRows]).
+	if vals := createQurlButtonValues(t, blocks); len(vals) != 1 {
+		t.Errorf("Create qURL accessory missing on create-only row: %v", vals)
 	}
+	if primaryCreateButtonPresent(blocks) {
+		t.Errorf("lone Create qURL should be default style, not primary; blocks=%v", blocks)
+	}
+}
+
+// TestHandleList_PrimaryCreateScopedToAdminRows fences that the primary (filled)
+// Create button is reserved for rows that ALSO carry an Edit button — where it
+// expresses the Create-over-Edit hierarchy. An admin (edit-wired) row gets the
+// primary Create; the same row with the modal opener dropped (create-only) gets
+// a default-style Create.
+func TestHandleList_PrimaryCreateScopedToAdminRows(t *testing.T) {
+	t.Run("admin row pairs primary Create with Edit", func(t *testing.T) {
+		h, _ := editableListHandler(t)
+		inv := newAdminSlashInvoker(t, h)
+		if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+			t.Fatalf("status != 200")
+		}
+		blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+		if len(editButtonValues(t, blocks)) != 1 {
+			t.Fatalf("expected an Edit button on the admin row; blocks=%v", blocks)
+		}
+		if !primaryCreateButtonPresent(blocks) {
+			t.Errorf("Create qURL beside Edit should be primary; blocks=%v", blocks)
+		}
+	})
+	t.Run("create-only row uses default Create", func(t *testing.T) {
+		h, _ := editableListHandler(t)
+		h.cfg.OpenView = nil // drop the modal opener → no Edit → create-only row
+		inv := newAdminSlashInvoker(t, h)
+		if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+			t.Fatalf("status != 200")
+		}
+		blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+		if primaryCreateButtonPresent(blocks) {
+			t.Errorf("lone Create qURL should be default style, not primary; blocks=%v", blocks)
+		}
+		if vals := createQurlButtonValues(t, blocks); len(vals) != 1 {
+			t.Errorf("Create qURL accessory missing on create-only row: %v", vals)
+		}
+	})
 }
