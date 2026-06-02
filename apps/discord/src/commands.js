@@ -2120,7 +2120,7 @@ async function executeSendPipeline(interaction, {
     const audience = mode === RECIPIENT_MODE_VOICE
       ? 'everyone in this voice channel'
       : 'everyone in this server';
-    const notifyMsg = `📩 **${safeName}** shared something with ${audience} via **qURL Bot** — check your DMs from qURL Bot.`;
+    const notifyMsg = `📩 **${safeName}** shared something with ${audience} via **qURL** — check your DMs from qURL.`;
     sendChannelMessage(interaction.channelId, { content: notifyMsg })
       .then((result) => {
         if (!result.ok) {
@@ -8372,7 +8372,7 @@ const commands = [
             cmd: '`/qurl send`',
           };
         return interaction.reply({
-          content: '**qURL Bot — Help**\n\n' +
+          content: '**qURL — Help**\n\n' +
             `**Getting started — ${mapCopy.sectionVerb} securely via one-time links:**\n` +
             '  `/qurl send` — share a file with users via one-time qURL links\n' +
             mapCopy.bullet +

@@ -56,8 +56,23 @@ linking and auto Contributor-role assignment for community members.
 ### 1. Configure Discord
 
 1. https://discord.com/developers/applications → your bot
-2. Enable **Server Members Intent** under Bot → Privileged Gateway Intents.
-3. Copy the bot token.
+2. General Information → set the application name to **qURL**, upload
+   `assets/discord-app-icon.png`, add the description from
+   `discord-metadata.json`, and set the privacy/terms URLs listed there.
+3. Bot → set the bot username to **qURL**, upload
+   `assets/discord-avatar.png`, and enable **Server Members Intent** under
+   Privileged Gateway Intents.
+4. Installation → default install settings should request `bot` and
+   `applications.commands` with permissions `2147503104`.
+5. Copy the bot token.
+
+The repeatable metadata source of truth is `discord-metadata.json`. With a
+target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
+that Discord exposes through API:
+
+```bash
+npm run apply-discord-metadata
+```
 
 ### 2. Configure GitHub OAuth
 
