@@ -10,8 +10,16 @@ const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
 const dryRun = process.argv.includes('--dry-run');
 const token = process.env.DISCORD_TOKEN;
 
+class PortalActionRequiredError extends Error {
+  constructor(message) {
+    super(message);
+    this.exitCode = 2;
+  }
+}
+
 function validateMetadata(doc = metadata) {
   if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
+  if (!doc.application?.name) throw new Error('discord-metadata.json must set application.name.');
   if (!doc.application?.id || !/^\d+$/.test(doc.application.id)) {
     throw new Error('discord-metadata.json must set application.id to the LayerV Discord application ID.');
   }
@@ -27,7 +35,16 @@ function dataUri(relPath) {
     throw new Error(`Discord metadata asset ${relPath} does not exist at ${filePath}. Check discord-metadata.json.`);
   }
   const ext = path.extname(filePath).toLowerCase();
-  const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+  const mimeByExt = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+  };
+  const mime = mimeByExt[ext];
+  if (!mime) {
+    throw new Error(`Discord metadata asset ${relPath} uses unsupported image extension ${ext || '(none)'}. Use PNG, JPEG, or WebP.`);
+  }
   return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
 }
 
@@ -89,10 +106,13 @@ function assertExpectedApplication(app, doc = metadata) {
 async function main() {
   validateMetadata();
   let hadPartialFailure = false;
+  let hadPortalActionRequired = false;
 
   const botUsernamePatch = { username: metadata.bot.username };
-  const botAvatarPatch = metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar) } : null;
-  const botBannerPatch = metadata.bot.banner ? { banner: dataUri(metadata.bot.banner) } : null;
+  const botImagePatch = {
+    ...(metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar) } : {}),
+    ...(metadata.bot.banner ? { banner: dataUri(metadata.bot.banner) } : {}),
+  };
   const appPatch = {
     description: metadata.application.description,
     icon: dataUri(metadata.application.icon),
@@ -108,8 +128,7 @@ async function main() {
         public_key: metadata.application.public_key,
       },
       bot_username: summarize(botUsernamePatch),
-      bot_avatar: botAvatarPatch ? summarize(botAvatarPatch) : null,
-      bot_banner: botBannerPatch ? summarize(botBannerPatch) : null,
+      bot_images: Object.keys(botImagePatch).length ? summarize(botImagePatch) : null,
       application: summarize(appPatch),
       application_name: metadata.application.name,
       portal_only: {
@@ -134,8 +153,8 @@ async function main() {
   console.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
   if (metadata.application.name !== updatedApp.name) {
-    hadPartialFailure = true;
-    console.warn(`Application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
+    hadPortalActionRequired = true;
+    console.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
   }
 
   if (currentUser.username === metadata.bot.username) {
@@ -150,29 +169,24 @@ async function main() {
     }
   }
 
-  if (botAvatarPatch) {
+  if (Object.keys(botImagePatch).length) {
     try {
-      const avatarUser = await request('PATCH', '/users/@me', botAvatarPatch);
-      console.log(`Updated bot avatar: ${Boolean(avatarUser.avatar)}`);
+      // Discord returns stored asset hashes, not source-file hashes; upload bot
+      // images together to limit request count until safe no-op detection exists.
+      const imageUser = await request('PATCH', '/users/@me', botImagePatch);
+      console.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
     } catch (err) {
       hadPartialFailure = true;
-      console.warn(`Bot avatar update skipped: ${errorDetails(err)}`);
-    }
-  }
-
-  if (botBannerPatch) {
-    try {
-      const bannerUser = await request('PATCH', '/users/@me', botBannerPatch);
-      console.log(`Updated bot banner: ${Boolean(bannerUser.banner)}`);
-    } catch (err) {
-      hadPartialFailure = true;
-      console.warn(`Bot banner update skipped: ${errorDetails(err)}`);
+      console.warn(`Bot image update skipped: ${errorDetails(err)}`);
     }
   }
 
   console.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
   if (hadPartialFailure) {
     throw new Error('Discord metadata apply completed with skipped fields; see warnings above.');
+  }
+  if (hadPortalActionRequired) {
+    throw new PortalActionRequiredError('Discord metadata API apply completed, but Developer Portal action is still required; see warnings above.');
   }
 }
 
@@ -181,7 +195,7 @@ if (require.main === module) {
     console.error(err.message);
     if (err.retryAfter) console.error(`retry_after=${err.retryAfter}s`);
     if (err.body) console.error(JSON.stringify(err.body));
-    process.exit(1);
+    process.exit(err.exitCode || 1);
   });
 }
 
@@ -189,6 +203,7 @@ module.exports = {
   assertExpectedApplication,
   dataUri,
   errorDetails,
+  PortalActionRequiredError,
   summarize,
   validateMetadata,
 };

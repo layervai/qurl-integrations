@@ -3,6 +3,7 @@ const {
   assertExpectedApplication,
   dataUri,
   errorDetails,
+  PortalActionRequiredError,
   summarize,
   validateMetadata,
 } = require('../scripts/apply-discord-metadata');
@@ -43,6 +44,10 @@ describe('apply-discord-metadata helpers', () => {
     })).toThrow(/application\.id/);
     expect(() => validateMetadata({
       ...metadata,
+      application: { ...metadata.application, name: '' },
+    })).toThrow(/application\.name/);
+    expect(() => validateMetadata({
+      ...metadata,
       application: { ...metadata.application, public_key: 'not-a-public-key' },
     })).toThrow(/application\.public_key/);
   });
@@ -54,6 +59,10 @@ describe('apply-discord-metadata helpers', () => {
 
   test('fails with a guided error when an asset is missing', () => {
     expect(() => dataUri('assets/does-not-exist.png')).toThrow(/does not exist/);
+  });
+
+  test('fails with a guided error for unsupported asset types', () => {
+    expect(() => dataUri('discord-metadata.json')).toThrow(/unsupported image extension \.json/);
   });
 
   test('redacts image data in dry-run summaries', () => {
@@ -72,5 +81,9 @@ describe('apply-discord-metadata helpers', () => {
       retryAfter: '12.5',
       body: { message: 'You are being rate limited.' },
     })).toContain('retry_after=12.5s');
+  });
+
+  test('marks portal-only drift with a distinct exit code', () => {
+    expect(new PortalActionRequiredError('portal step pending').exitCode).toBe(2);
   });
 });

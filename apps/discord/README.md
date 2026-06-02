@@ -74,8 +74,10 @@ developer-portal app:
 
 The repeatable metadata source of truth is `discord-metadata.json`. With a
 target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
-that Discord exposes through API. The script refuses to run if the token
-belongs to any Discord application other than LayerV app `1511450217789128885`.
+that Discord exposes through API (`description`, `icon`, `cover_image`, tags,
+install params, bot username, avatar, and banner). The script refuses to run if
+the token belongs to any Discord application other than LayerV app
+`1511450217789128885`.
 
 ```bash
 npm run apply-discord-metadata
@@ -90,9 +92,13 @@ npm run apply-discord-metadata -- --dry-run
 Dry-run also verifies that every asset referenced by `discord-metadata.json`
 exists and can be read.
 
-Discord rate-limits bot username/avatar/banner updates. If a sub-field
-returns `429`, the script prints `retry_after` when Discord provides it and
-exits non-zero so automation does not treat a partial apply as complete.
+Discord rate-limits bot username/avatar/banner updates. The script sends
+avatar and banner together to limit request count, but if a sub-field returns
+`429`, it prints `retry_after` when Discord provides it and exits `1` so
+automation does not treat a partial apply as complete. Application name and
+legal URLs are Developer Portal-only; if API writes succeed but the app name
+still differs from `discord-metadata.json`, the script exits `2` after printing
+the required portal action.
 
 ### 2. Configure GitHub OAuth
 
