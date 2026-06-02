@@ -76,6 +76,11 @@ type DynamoDBClient interface {
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
+	// Query backs [Store.ChannelsForResource] — the only Query caller — which
+	// pages every channel_policies row for a team to find the channels a
+	// resource is exposed to. It requires the dynamodb:Query action on the
+	// channel_policies table; the other ops only need item-level grants.
+	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 }
 
 // Store is the DDB-direct replacement for the old `AdminClient`. It

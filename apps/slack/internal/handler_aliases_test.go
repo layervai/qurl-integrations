@@ -16,6 +16,35 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// TestHandleAliases_ScopedToChannel pins requirement #2 of the channel-scoping
+// fix: /qurl aliases shows only the aliases bound in THIS channel. An alias
+// bound in another channel must not appear here (GetChannelPolicy is a point
+// read on the current (team, channel) row, so this has always held — this
+// fences it against a regression that widened the read workspace-wide).
+func TestHandleAliases_ScopedToChannel(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// A real alias bound in a DIFFERENT channel.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_other", map[string]string{
+		"grafana": "r_graf01",
+	})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_graf01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "graf-tun"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvokerOnChannel(t, h, "C_test") // nothing bound here
+
+	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if strings.Contains(async, "grafana") {
+		t.Errorf("alias bound only in C_other leaked into C_test's /qurl aliases: %q", async)
+	}
+	if !strings.Contains(async, "No aliases are configured for this channel") {
+		t.Errorf("expected the channel empty state for C_test: %q", async)
+	}
+}
+
 // TestHandleAliases_HappyPath fences the canonical /qurl aliases
 // flow: GetChannelPolicy → resolve slugs from a single ListResources
 // page (joined by resource_id) → rendered list. Single alias binding.

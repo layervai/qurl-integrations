@@ -128,17 +128,14 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // admin can run setalias.
 //
 // The `/qurl aliases` breadcrumb is channel-scoped (it shows aliases
-// bound here), so it stays accurate even though `/qurl list` is now
-// workspace-wide. If `/qurl aliases` ever widens to workspace-wide too,
-// this breadcrumb deserves the same treatment.
-//
-// TODO(#460): a user can see `$<alias>` rendered by `/qurl list`
-// (workspace-wide post-revert of #234) and still hit this surface
-// when minting from a channel without the binding. Followup tracks
-// either an inline "alias resolves in: #channel-a, …" annotation on
-// the list output or a clearer error here distinguishing
-// "alias does not exist anywhere" from "alias not bound here, but
-// bound in: …".
+// bound here), and so is `/qurl list` now — both surface only what
+// resolves in this channel, so the breadcrumb stays accurate. This also
+// closes the former list/mint asymmetry once tracked by TODO(#460): list,
+// aliases, and mint share one channel-scoped set ([Handler.resourceAllowedInChannel]),
+// so a user sees here exactly what they can mint here. The remaining UX
+// nicety — telling a user which OTHER channels an alias is bound in — is
+// deliberately not surfaced (that cross-channel disclosure is what the
+// scoping closes).
 func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }
@@ -420,11 +417,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //     that authorizes a resource for use here.
 //  2. Tunnel-slug fallback. When no binding matches, the token may
 //     still be a tunnel slug: `/qurl list` renders `$<slug>` for tunnels
-//     surfaced via admin-sees-all or `allowed_resource_ids` that have no
-//     `alias_bindings` row in this channel (e.g. a tunnel installed in
-//     another channel, or granted via cross-channel allow). Resolve the
+//     granted to this channel via `allowed_resource_ids` that have no
+//     `alias_bindings` entry here (e.g. a tunnel exposed to this channel
+//     from the `/qurl list` Edit modal without an alias). Resolve the
 //     slug to its resource_id and gate it through the channel allow-set
-//     ([Handler.resourceAllowedForUser]) so the list→get round-trip the
+//     ([Handler.resourceAllowedInChannel]) so the list→get round-trip the
 //     list advertises stays honest — the user references the `$<slug>`,
 //     never the opaque resource_id.
 //
@@ -480,7 +477,7 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		log.Warn("get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
-	allowed, authErr := h.resourceAllowedForUser(ctx, log, teamID, channelID, userID, slugResourceID)
+	allowed, authErr := h.resourceAllowedInChannel(ctx, log, teamID, channelID, slugResourceID)
 	if authErr != nil {
 		return "", authErr
 	}
@@ -497,35 +494,33 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 	return slugResourceID, nil
 }
 
-// resourceAllowedForUser reports whether userID may mint against
-// resourceID in channelID. Workspace admins may always (so the
-// list-and-get round-trip works in the admin's unfiltered list view);
-// non-admins only when the ID is in `AllowedResourceIDsForChannel` (the
-// union of `alias_bindings.values()` and `allowed_resource_ids`).
+// resourceAllowedInChannel reports whether resourceID may be minted from
+// channelID: true iff the ID is in `AllowedResourceIDsForChannel` (the union
+// of `alias_bindings.values()` and `allowed_resource_ids`). The gate is purely
+// channel-scoped — it does NOT depend on who the caller is.
 //
-// Post-revert of #234 (PR #459), `/qurl list` is workspace-wide, so a
-// non-admin can see `$<slug>` tokens for tunnels they can't mint in.
-// This gate keeps mintability channel-scoped despite the widened list
-// visibility — the asymmetry is intentional but surfaces a UX gap
-// tracked by TODO(#460).
+// No admin bypass: a workspace admin who runs `/qurl get $<slug>` from a
+// channel the tunnel isn't exposed to is refused exactly like anyone else.
+// (A prior version let admins mint anything because `/qurl list` was
+// workspace-wide, so an admin "saw" every slug. Now that list, aliases, and
+// mint all share this one channel-scoped definition, the bypass would be a
+// hole: someone who learned a slug/alias/channel-id elsewhere must still not
+// be able to mint a tunnel from a channel it isn't exposed to.) Admins manage
+// where a tunnel is exposed via `/qurl-admin tunnel install` and the
+// `/qurl list` Edit modal — not by minting from arbitrary channels. This also
+// closes the former TODO(#460) list/mint asymmetry: you can only see what you
+// can mint here, and only mint what you can see here.
 //
-// Returns (false, [*userError]) on AdminStore-nil or allow-set fetch
-// failure so callers fail closed. Used by the tunnel-slug fallback in
-// resolveTokenForGet to gate a slug that has no channel alias binding.
-func (h *Handler) resourceAllowedForUser(ctx context.Context, log *slog.Logger, teamID, channelID, userID, resourceID string) (bool, error) {
-	// Needs an AdminStore for the admin probe + the channel allow-set.
-	// Same fail-closed posture as alias-form on a no-DDB sandbox.
+// Returns (false, [*userError]) on AdminStore-nil or allow-set fetch failure
+// so callers fail closed. Used by the tunnel-slug fallback in
+// resolveTokenForGet to gate a slug that has no channel alias binding (the
+// alias-binding path is already channel-scoped by the binding's presence).
+func (h *Handler) resourceAllowedInChannel(ctx context.Context, log *slog.Logger, teamID, channelID, resourceID string) (bool, error) {
+	// Needs an AdminStore for the channel allow-set. Same fail-closed posture
+	// as the alias-form lookup on a no-DDB sandbox.
 	if h.cfg.AdminStore == nil {
 		log.Warn("get: AdminStore is nil; authorization unavailable", "team_id", teamID)
 		return false, errAdminStoreNotConfigured
-	}
-	isAdmin, _, adminErr := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
-	if adminErr != nil {
-		log.Warn("get: admin probe failed — treating as non-admin", "error", adminErr, "team_id", teamID, "user_id", userID)
-		isAdmin = false
-	}
-	if isAdmin {
-		return true, nil
 	}
 	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
 	if err != nil {

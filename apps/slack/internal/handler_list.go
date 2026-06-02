@@ -37,14 +37,15 @@ import (
 // `/qurl aliases` triage warning in [Handler.processAliases].
 const listResourcesScanLimit = 100
 
-// listTunnelsEmptyMessage is the friendly empty-state copy for a
-// workspace with zero tunnels. `/qurl-admin tunnel install` is admin-only,
-// so the copy names the command without imperatively telling every
-// member to run it — a non-admin reading this is routed implicitly to
-// their Slack admin. Post-revert of #234 (#459) `/qurl list` no longer
-// probes admin status, so there is a single empty-state for everyone
-// rather than the old admin/non-admin branch.
-const listTunnelsEmptyMessage = ":mag: No tunnels found in this workspace. A Slack admin can set one up with `/qurl-admin tunnel install <id>`."
+// listTunnelsEmptyMessage is the friendly empty-state copy when no tunnel is
+// available in THIS channel — either the channel has no allow-set entries or
+// none of the workspace's tunnels are exposed here. `/qurl list` is now
+// channel-scoped, so the copy is channel-framed and offers both recovery
+// paths: install a new tunnel here, or expose an existing one to this channel
+// from a channel where it already appears (`/qurl list` → *Edit*). Both name
+// admin-only actions without imperatively telling every member to run them —
+// a non-admin reading this is routed implicitly to their Slack admin.
+const listTunnelsEmptyMessage = ":mag: No tunnels are available in this channel yet. A Slack admin can install one here with `/qurl-admin tunnel install <id>`, or expose an existing tunnel to this channel from `/qurl list` → *Edit* in a channel where it already appears."
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
 // Clicking it mints a one-time qURL for that row's tunnel — the same work
@@ -190,40 +191,83 @@ const listFooterText = "Each `$<id>` identifies a tunnel; the `(alias: …)` ent
 // one-time-use default.
 const listFooterButtons = "Tap *Create qURL* on any tunnel, or copy a `$id` or `$alias` and run `/qurl get`, to mint a one-time qURL link — it opens access once, then expires. A `$id` identifies a tunnel; the `(alias: …)` entries are alternate names for it in this channel."
 
-// handleListResources implements `/qurl list`. It lists the workspace's
-// tunnel resources (type=tunnel only — URL/transit resources are
+// handleListResources implements `/qurl list`. It lists the tunnel resources
+// available in THIS channel (type=tunnel only — URL/transit resources are
 // filtered out) so each line is a copy-paste-ready `$<slug>` token the
 // user can pipe into `/qurl get $<slug>` without a manual lookup. The
 // slug is the same stable handle `/qurl-admin tunnel install <slug>` binds as
 // a channel alias, so the listed token resolves directly in `/qurl get`.
 //
-// The listing is unscoped: every workspace member sees every tunnel,
-// in every channel including DMs. #234 had added a non-admin
-// channel-policy filter here; #459 reverted it because the gate
-// dead-ended workspace owners who weren't Slack-admins — their only
-// `/qurl list` output was a fail-closed empty state with no recoverable
-// path — while adding no real capability boundary. Capability gating
-// still happens at mint time: `/qurl get $r_<id>` enforces the channel
-// allow-set for non-admins via [Handler.resourceAllowedForUser], and
-// `/qurl get $<slug>` / `$<alias>` resolve through the per-channel
-// binding. So dropping the list-side filter widens disclosure within a
-// workspace (every member sees every tunnel's slug) but not capability.
+// The listing is CHANNEL-SCOPED: a member sees only the tunnels in this
+// channel's [slackdata.Store.AllowedResourceIDsForChannel] set (the union of
+// its `allowed_resource_ids` and `alias_bindings` values) — the same
+// definition `/qurl get` mints against and `/qurl aliases` lists. A tunnel
+// installed in another channel does not appear here until an admin exposes it
+// to this channel via the Edit modal. This restores #234's per-channel
+// disclosure (reverted in #459) but with the recoverable path #459 lacked:
+// the empty state names the Edit-modal expose flow, and the gate applies to
+// admins too (an admin who wants a tunnel here exposes it, rather than seeing
+// every workspace tunnel from every channel). List, alias, and mint now share
+// one channel-scoped definition, closing the former list/mint asymmetry
+// (TODO(#460)).
 func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processListResources(ctx, log, values)
 	})
 }
 
+// listChannelScope resolves the channel allow-set that scopes /qurl list — the
+// union of the channel's allowed_resource_ids and alias_bindings values, the
+// SAME set `/qurl get` mints against. It handles every fail-closed
+// short-circuit by posting the right message and returning proceed=false:
+//
+//   - empty channel_id (synthetic payload): refuse rather than fan out
+//     workspace-wide — the disclosure this scoping closes. Mirrors /qurl aliases.
+//   - AdminStore nil (no-DDB sandbox): the scope can't be computed, so fail
+//     closed rather than disclose everything — same posture as aliases/get.
+//   - allow-set read error: fail CLOSED (never fall back to an unscoped list).
+//   - nothing exposed here: the channel empty state, WITHOUT the upstream
+//     ListResources call (the common case for a channel with no tunnels).
+//
+// On success it returns the non-empty allow-set and true.
+func (h *Handler) listChannelScope(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID string) (map[string]struct{}, bool) {
+	if channelID == "" {
+		log.Warn("list: empty channel_id; refusing workspace-wide list")
+		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
+		return nil, false
+	}
+	if h.cfg.AdminStore == nil {
+		log.Warn("list: AdminStore is nil; cannot scope listing to channel")
+		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
+		return nil, false
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
+	if err != nil {
+		log.Warn("list: channel allow-set fetch failed — failing closed", "error", err, "team_id", teamID, "channel_id", channelID)
+		_ = h.postResponse(log, responseURL, ":warning: "+serviceUnreachableMessage)
+		return nil, false
+	}
+	if len(allowed) == 0 {
+		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
+		return nil, false
+	}
+	return allowed, true
+}
+
 // processListResources is the async-worker body for /qurl list.
 func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, values url.Values) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
-	// The tunnel listing is workspace-wide (unscoped post-#459), but the
-	// per-row alias annotations are channel-scoped — channelAliasesByResourceID
-	// reads THIS channel's alias_bindings so each row can show the shortcuts
-	// that resolve here. Empty channelID (synthetic payload / DM) degrades to
-	// slug-only rows inside the helper.
 	channelID := values.Get(fieldChannelID)
+
+	// Resolve the channel scope first. This handles every fail-closed
+	// short-circuit (no channel, no AdminStore, read error, nothing exposed)
+	// and, on the common "nothing exposed here" path, avoids the upstream
+	// ListResources call entirely.
+	allowed, ok := h.listChannelScope(ctx, log, responseURL, teamID, channelID)
+	if !ok {
+		return
+	}
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
@@ -238,11 +282,18 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return
 	}
 
-	// `/qurl list` shows tunnels only. The API has no server-side type
-	// filter, so drop URL/transit resources here. The result is the
-	// full workspace tunnel set — unscoped post-revert of #234 (#459),
-	// so every member sees the same listing regardless of channel.
-	resources := filterTunnelResources(page.Resources)
+	// `/qurl list` shows tunnels only (the API has no server-side type filter,
+	// so drop URL/transit resources here), then scopes to the channel allow-set
+	// so only tunnels exposed to THIS channel render — every member sees exactly
+	// the tunnels they could `/qurl get` here, no more.
+	//
+	// Known gap (#590): only the first listResourcesScanLimit (100) upstream
+	// resources are scanned before filtering, so a tunnel exposed to this channel
+	// but sorting past row 100 won't render here. It's fail-safe (under-disclosure,
+	// not a leak) and doesn't affect mintability — `/qurl get` gates on the
+	// allow-set directly, not this scan — so a missing row here is not a bug
+	// elsewhere. Driving the listing by the allow-set IDs is tracked in #590.
+	resources := filterResourcesAllowedInChannel(filterTunnelResources(page.Resources), allowed)
 
 	if len(resources) == 0 {
 		_ = h.postResponse(log, responseURL, listTunnelsEmptyMessage)
@@ -401,6 +452,21 @@ func filterTunnelResources(resources []client.Resource) []client.Resource {
 	out := make([]client.Resource, 0, len(resources))
 	for i := range resources {
 		if resources[i].Type == client.ResourceTypeTunnel && resources[i].Status != client.StatusRevoked {
+			out = append(out, resources[i])
+		}
+	}
+	return out
+}
+
+// filterResourcesAllowedInChannel keeps only the resources whose ResourceID is
+// in `allowed` (the channel's AllowedResourceIDsForChannel set). This is the
+// disclosure half of the channel-scoping invariant: a member sees exactly the
+// tunnels they could mint here. The caller has already dropped non-tunnel and
+// revoked rows; this drops tunnels not exposed to the current channel.
+func filterResourcesAllowedInChannel(resources []client.Resource, allowed map[string]struct{}) []client.Resource {
+	out := make([]client.Resource, 0, len(resources))
+	for i := range resources {
+		if _, ok := allowed[resources[i].ResourceID]; ok {
 			out = append(out, resources[i])
 		}
 	}
@@ -572,10 +638,13 @@ func extraAliasTokens(boundAliases []string, token string) []string {
 // render slug-only) — the listing must still render.
 //
 // Cost: one GetChannelPolicy (GetItem) per /qurl list, purely for the
-// cosmetic alias display. Post-#459 the list is unscoped — the admin
-// gate / channel-policy filter (scopeResourcesForUser) was removed — so
-// there's no longer an allow-set read on this path to fold this into;
-// it's a standalone read. Acceptable for the discovery surface.
+// cosmetic alias display — a second point read of the same channel_policies
+// row the scope gate already read via AllowedResourceIDsForChannel. The two
+// have different shapes (this returns alias→resource entries; the gate returns
+// the membership set), so they're kept as separate reads rather than folded;
+// both are cheap GetItems on a tiny row behind the dominant upstream
+// ListResources call. Acceptable for the discovery surface; fold into one read
+// if this path ever gets hot.
 func (h *Handler) channelAliasesByResourceID(ctx context.Context, log *slog.Logger, teamID, channelID string) map[string][]string {
 	if h.cfg.AdminStore == nil || channelID == "" {
 		return nil

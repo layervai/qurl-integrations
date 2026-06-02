@@ -59,6 +59,7 @@ const (
 	blockKitFieldTitle           = "title"
 	blockKitFieldType            = "type"
 	blockKitTypeModal            = "modal"
+	blockKitTypeMultiConvSelect  = "multi_conversations_select"
 	// Slack caps private_metadata at 3000 bytes. Today's tunnel metadata is
 	// small; this guard is mainly defense against future field additions or a
 	// pathological response_url making modal submission fail only after open.
@@ -91,6 +92,8 @@ const (
 	tunnelEditActionDisplayName = "edit_display_name_input"
 	tunnelEditBlockAliases      = "edit_aliases"
 	tunnelEditActionAliases     = "edit_aliases_input"
+	tunnelEditBlockChannels     = "edit_channels"
+	tunnelEditActionChannels    = "edit_channels_select"
 )
 
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
@@ -264,14 +267,27 @@ type TunnelEditModalMetadata struct {
 	// it, so a tunnel that already carries more than listEditMaxAliases aliases
 	// stays editable for a name-only or removal-only change.
 	Aliases []string `json:"aliases,omitempty"`
+	// ExposedChannels is the set of channel IDs the tunnel was already exposed
+	// to when the modal opened (its ChannelsForResource result), used both to
+	// pre-fill the channels multi-select and as the reconcile baseline on
+	// submit: only a channel the admin SAW here and de-selected is revoked, so
+	// a partial enumeration (e.g. the Query grant is missing) can never cause
+	// the submit to drop a channel the admin never saw. Always includes the
+	// current channel (ChannelID), which the reconcile never revokes.
+	ExposedChannels []string `json:"exposed_channels,omitempty"`
 }
 
 // TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.
-// It pre-fills the tunnel's current Display Name and its additional channel
-// aliases (the bound aliases other than the row's primary `$<token>`), so the
+// It pre-fills the tunnel's current Display Name, its additional channel
+// aliases (the bound aliases other than the row's primary `$<token>`), and the
+// channels the tunnel is currently exposed to (meta.ExposedChannels), so the
 // admin edits an authoritative snapshot rather than re-typing from scratch.
 // `aliases` is the extra-alias set (sigil-free); they render one per line with
-// a leading `$` to match how the admin types them.
+// a leading `$` to match how the admin types them. The channels field is a
+// multi_conversations_select pre-selected with meta.ExposedChannels — adding a
+// channel exposes the tunnel there (it shows in that channel's `/qurl list`
+// and is mintable via `/qurl get`); removing one revokes it (except the
+// channel being edited from, which the submit handler always keeps).
 func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases []string) ([]byte, error) {
 	privateMeta, err := json.Marshal(meta)
 	if err != nil {
@@ -303,6 +319,8 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
 			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this tunnel in this channel; the tunnel's own name always works and isn't listed here. Clear a line to remove that alias.", true,
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
+			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this tunnel shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to expose it there; remove one to revoke it.", true,
+				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
 		},
 	}
 	return json.Marshal(payload)
@@ -574,6 +592,32 @@ func staticSelect(actionID string, options []map[string]any, initial map[string]
 		"options":             options,
 		"initial_option":      initial,
 	}
+}
+
+// multiConversationsSelect returns a multi_conversations_select element — used
+// by the edit modal's "expose to channels" field. It is filtered to public and
+// private channels (DMs/group-DMs and externally-shared channels aren't
+// tunnel-exposure targets) and pre-selects initialConversations. An empty
+// initial set omits the initial_conversations key entirely — Slack rejects an
+// empty array there.
+func multiConversationsSelect(actionID string, initialConversations []string) map[string]any {
+	element := map[string]any{
+		"type":                blockKitTypeMultiConvSelect,
+		blockKitFieldActionID: actionID,
+		"placeholder":         plainTextObj("Select channels"),
+		"filter": map[string]any{
+			"include":                          []any{"public", "private"},
+			"exclude_external_shared_channels": true,
+		},
+	}
+	if len(initialConversations) > 0 {
+		conv := make([]any, len(initialConversations))
+		for i, c := range initialConversations {
+			conv[i] = c
+		}
+		element["initial_conversations"] = conv
+	}
+	return element
 }
 
 func optionObj(text, value string) map[string]any {

@@ -181,6 +181,18 @@ func (ts *adminTestServers) seedPolicyAliasBindings(t *testing.T, teamID, channe
 	ts.ddb.seedItem(t, ts.tableNames.channelPolicy, seedChannelPolicyAliasBindings(teamID, channelID, bindings))
 }
 
+// seedChannelExposure exposes resourceIDs in (teamID, channelID) by seeding the
+// channel's allowed_resource_ids SS — the channel-scoping that `/qurl list`
+// (disclosure) and `/qurl get` (mint) now require for a tunnel to appear/mint
+// there. Thin alias for seedPolicySet(alias="") that reads as intent at the
+// call sites updated for channel-scoped `/qurl list`. Pass every resource_id
+// the test's /v1/resources fixture returns that should be visible in the
+// channel.
+func (ts *adminTestServers) seedChannelExposure(t *testing.T, teamID, channelID string, resourceIDs ...string) {
+	t.Helper()
+	ts.seedPolicySet(t, teamID, channelID, "", resourceIDs)
+}
+
 // failOnAdminMutation installs a hook that fails the test if any
 // UpdateItem hits the table set. Used to assert the admin-only gate
 // short-circuits before any policy or admin-set mutation.

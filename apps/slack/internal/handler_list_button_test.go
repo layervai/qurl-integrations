@@ -84,6 +84,9 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 			{testKeyResourceID: "r_noslug0001", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
+	// Expose all three to C_test (incl. the slug-less row, so its "no ID" line
+	// still renders) — /qurl list is channel-scoped.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, "r_stage_db_bb", "r_noslug0001")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -238,9 +241,12 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	ts.seedAdmin(t)
 	n := listCreateButtonMaxRows + 1 // one past the cap → text-only path
 	resources := make([]map[string]any, 0, n)
+	rids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
+		rid := fmt.Sprintf("r_tun_%03d", i)
+		rids = append(rids, rid)
 		resources = append(resources, map[string]any{
-			testKeyResourceID: fmt.Sprintf("r_tun_%03d", i),
+			testKeyResourceID: rid,
 			testKeyType:       client.ResourceTypeTunnel,
 			testKeySlug:       fmt.Sprintf("tun-%03d", i),
 		})
@@ -248,6 +254,8 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, resources, "", false)
 	})
+	// All exposed to C_test so the full set reaches the block-ceiling guard.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", rids...)
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -327,6 +335,10 @@ func primaryCreateButtonPresent(blocks []any) bool {
 func TestHandleList_PolishedDesignMarkers(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	// `/qurl list` is channel-scoped: a tunnel renders only where it's exposed.
+	// Expose prod-db to the invoker's default channel (C_test) so the design
+	// markers below are exercised on a rendered row rather than the empty state.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB, testKeyDescription: "Prod database"},

@@ -25,6 +25,12 @@ const (
 	testEditAlias      = "primary"
 	testEditOldAlias   = "old-alias"
 
+	// Slack conversation-id-shaped channel IDs for the "expose to channels"
+	// tests (must satisfy slackChannelIDPattern). Lifted to constants because
+	// they recur across the channel-reconcile tests and views_test.go.
+	testEditHomeChannel  = "C0home00000"
+	testEditExtraChannel = "C0extra0000"
+
 	// Slack interaction-payload top-level keys, shared by the block_actions
 	// and view_submission test builders.
 	payloadKeyTeam = "team"
@@ -198,7 +204,7 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 func TestFormatTunnelEditSummary_EscapesToken(t *testing.T) {
 	// A token can be an upstream slug that never passed the alias charset fence,
 	// so a backtick must be escaped or it breaks the code span (defense-in-depth).
-	out := formatTunnelEditSummary("ev`il", nil, &aliasReconcileResult{})
+	out := formatTunnelEditSummary("ev`il", nil, &aliasReconcileResult{}, &channelExposureResult{})
 	if strings.Contains(out, "ev`il") {
 		t.Errorf("raw backtick token leaked into the summary: %q", out)
 	}
@@ -391,13 +397,17 @@ func TestHandleList_AdminPastEditCapKeepsCreateButtons(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	resources := make([]map[string]any, n)
+	rids := make([]string, n)
 	for i := 0; i < n; i++ {
 		slug := fmt.Sprintf("tun-%03d", i)
+		rids[i] = "r_" + slug
 		resources[i] = map[string]any{testKeyResourceID: "r_" + slug, testKeyType: client.ResourceTypeTunnel, testKeySlug: slug}
 	}
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, resources, "", false)
 	})
+	// All exposed to C_test (channel-scoped list).
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", rids...)
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
@@ -998,4 +1008,338 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+// --- channel exposure (the "expose to channels" field) -------------------
+
+// tunnelEditViewSubmissionBodyWithChannels is tunnelEditViewSubmissionBody plus
+// a channels multi-select selection, for the channel-exposure reconcile tests.
+func tunnelEditViewSubmissionBodyWithChannels(t *testing.T, meta *TunnelEditModalMetadata, payloadTeamID, payloadUserID, displayName, aliasesText string, channels []string) string {
+	t.Helper()
+	pm, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal private_metadata: %v", err)
+	}
+	return viewSubmissionBody(t, "V_test_edit", callbackIDTunnelEdit, string(pm), payloadTeamID, payloadUserID,
+		map[string]map[string]interactionStateValue{
+			tunnelEditBlockDisplayName: {tunnelEditActionDisplayName: {Value: displayName}},
+			tunnelEditBlockAliases:     {tunnelEditActionAliases: {Value: aliasesText}},
+			tunnelEditBlockChannels:    {tunnelEditActionChannels: {SelectedConversations: channels}},
+		})
+}
+
+func TestParseEditChannelSelection(t *testing.T) {
+	meta := &TunnelEditModalMetadata{ChannelID: testEditHomeChannel}
+	withChannels := func(channels []string) map[string]map[string]interactionStateValue {
+		return map[string]map[string]interactionStateValue{
+			tunnelEditBlockChannels: {tunnelEditActionChannels: {SelectedConversations: channels}},
+		}
+	}
+	t.Run("force-includes current channel first and dedups", func(t *testing.T) {
+		got := parseEditChannelSelection(withChannels([]string{testEditExtraChannel, testEditExtraChannel}), meta)
+		if len(got) != 2 || got[0] != testEditHomeChannel || got[1] != testEditExtraChannel {
+			t.Errorf("got %v, want [%s %s]", got, testEditHomeChannel, testEditExtraChannel)
+		}
+	})
+	t.Run("drops malformed conversation ids", func(t *testing.T) {
+		got := parseEditChannelSelection(withChannels([]string{testEditHomeChannel, "bad id!", ""}), meta)
+		if len(got) != 1 || got[0] != testEditHomeChannel {
+			t.Errorf("got %v, want just the current channel (malformed dropped)", got)
+		}
+	})
+	t.Run("empty selection still keeps the current channel", func(t *testing.T) {
+		got := parseEditChannelSelection(map[string]map[string]interactionStateValue{}, meta)
+		if len(got) != 1 || got[0] != testEditHomeChannel {
+			t.Errorf("got %v, want [%s]", got, testEditHomeChannel)
+		}
+	})
+	t.Run("drops DM and other non-channel conversation ids", func(t *testing.T) {
+		// A `D…` (DM) id can only arrive via a hand-crafted submission — the
+		// multi-select filters to public/private channels — and must be dropped:
+		// exposing a tunnel into a DM is exactly the leak channel-scoping closes.
+		got := parseEditChannelSelection(withChannels([]string{"D0123456789", testEditExtraChannel}), meta)
+		if len(got) != 2 || got[0] != testEditHomeChannel || got[1] != testEditExtraChannel {
+			t.Errorf("got %v, want [%s %s] (DM dropped)", got, testEditHomeChannel, testEditExtraChannel)
+		}
+	})
+}
+
+// TestHandleTunnelEdit_ExposesNewChannel fences requirement #4: selecting a new
+// channel in the Edit modal grants the tunnel access there
+// (allowed_resource_ids), so it becomes visible in that channel's /qurl list
+// and mintable via /qurl get.
+func TestHandleTunnelEdit_ExposesNewChannel(t *testing.T) {
+	const newChannel = "C0newchan01"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// The tunnel lives in C_test via its slug alias; the modal opened showing
+	// only C_test as exposed.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		ExposedChannels: []string{testEditChannel}, // modal showed current channel only
+	}
+	// Keep the current channel, add a new one; no name/alias change.
+	body := tunnelEditViewSubmissionBodyWithChannels(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "", []string{testEditChannel, newChannel})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, newChannel)
+	if err != nil {
+		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+	}
+	if _, ok := allowed[testEditResourceID]; !ok {
+		t.Errorf("resource not exposed to the new channel; allow-set = %v", allowed)
+	}
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Exposed to:") || !strings.Contains(summary, newChannel) {
+		t.Errorf("summary missing expose line for the new channel: %s", summary)
+	}
+}
+
+// TestHandleTunnelEdit_RevokesDeselectedChannel fences the inverse: de-selecting
+// a channel the modal showed removes the tunnel's allow-set grant there.
+func TestHandleTunnelEdit_RevokesDeselectedChannel(t *testing.T) {
+	const extraChannel = "C0extra0001"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+	})
+	// Also exposed to extraChannel via its allow-set.
+	ts.seedChannelExposure(t, testAdminTeamID, extraChannel, testEditResourceID)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		ExposedChannels: []string{testEditChannel, extraChannel}, // modal showed both
+	}
+	// Admin de-selects extraChannel (keeps only the current channel).
+	body := tunnelEditViewSubmissionBodyWithChannels(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "", []string{testEditChannel})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, extraChannel)
+	if err != nil {
+		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+	}
+	if _, ok := allowed[testEditResourceID]; ok {
+		t.Errorf("resource should have been revoked from extraChannel; allow-set = %v", allowed)
+	}
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Revoked from:") || !strings.Contains(summary, extraChannel) {
+		t.Errorf("summary missing revoke line for the de-selected channel: %s", summary)
+	}
+}
+
+// TestHandleTunnelEdit_AliasBoundChannelReportedRetainedNotRevoked fences the
+// alias-bound revoke gap: de-selecting a (non-current) channel that exposes the
+// tunnel via an ALIAS binding can't be fully revoked by clearing
+// allowed_resource_ids alone — the alias keeps it in AllowedResourceIDsForChannel's
+// union — so it must be reported as still-available-via-alias rather than
+// "Revoked from", or the admin is told access was removed while the tunnel stays
+// listable/mintable there.
+func TestHandleTunnelEdit_AliasBoundChannelReportedRetainedNotRevoked(t *testing.T) {
+	const aliasChannel = "C0alias0001"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// Current channel exposed via its slug alias; aliasChannel exposed ONLY via a
+	// separate alias binding (no allowed_resource_ids grant there to clear).
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+	})
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, aliasChannel, map[string]string{
+		"staging": testEditResourceID,
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		ExposedChannels: []string{testEditChannel, aliasChannel}, // modal showed both
+	}
+	// Admin de-selects aliasChannel (keeps only the current channel).
+	body := tunnelEditViewSubmissionBodyWithChannels(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "", []string{testEditChannel})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	// The alias binding survives the revoke, so the resource is STILL in the
+	// channel's union — listable/mintable there.
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, aliasChannel)
+	if err != nil {
+		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+	}
+	if _, ok := allowed[testEditResourceID]; !ok {
+		t.Errorf("alias binding should keep the resource available in aliasChannel; allow-set = %v", allowed)
+	}
+	summary := parseSlackText(t, got)
+	if !strings.Contains(summary, "Still available via a channel alias") || !strings.Contains(summary, aliasChannel) {
+		t.Errorf("summary should flag aliasChannel as alias-retained, not revoked: %s", summary)
+	}
+	if strings.Contains(summary, "Revoked from:") {
+		t.Errorf("aliasChannel must not be reported as cleanly revoked: %s", summary)
+	}
+}
+
+// TestHandleTunnelEdit_CurrentChannelNeverRevoked fences that the channel the
+// admin is editing from keeps access even if it's de-selected — the tunnel must
+// not vanish from the very list the admin is managing it on. The current channel
+// is exposed via its allow-set here so a wrongful revoke WOULD remove it,
+// making the assertion bite.
+func TestHandleTunnelEdit_CurrentChannelNeverRevoked(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedChannelExposure(t, testAdminTeamID, testEditChannel, testEditResourceID)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		ExposedChannels: []string{testEditChannel},
+	}
+	// Admin clears the channels field entirely.
+	body := tunnelEditViewSubmissionBodyWithChannels(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, testEditChannel)
+	if err != nil {
+		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+	}
+	if _, ok := allowed[testEditResourceID]; !ok {
+		t.Errorf("current channel was revoked despite the never-revoke guard; allow-set = %v", allowed)
+	}
+	if summary := parseSlackText(t, got); strings.Contains(summary, "Revoked from:") {
+		t.Errorf("no revocation expected for a current-channel-only edit: %s", summary)
+	}
+}
+
+// TestHandleListEditClick_PrefillsExposedChannels fences the modal-open
+// enumeration: the channels multi-select is pre-filled with every channel the
+// tunnel is exposed to (current channel via alias + another via allow-set).
+func TestHandleListEditClick_PrefillsExposedChannels(t *testing.T) {
+	const otherChannel = "C0other0001"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+	})
+	ts.seedChannelExposure(t, testAdminTeamID, otherChannel, testEditResourceID)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	views := make(chan []byte, 1)
+	h.cfg.OpenView = func(_ context.Context, _ string, _ string, view []byte) error {
+		views <- view
+		return nil
+	}
+
+	snap, _ := buildTunnelEditButtonValue(testEditResourceID, testEditToken, testEditDisplay, nil)
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testEditChannel, "https://hooks.slack.com/edit", listEditTunnelActionID, snap)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var view []byte
+	select {
+	case view = <-views:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView not called")
+	}
+	js := string(view)
+	for _, want := range []string{blockKitTypeMultiConvSelect, "initial_conversations", testEditChannel, otherChannel} {
+		if !strings.Contains(js, want) {
+			t.Errorf("modal pre-fill missing %q: %s", want, js)
+		}
+	}
+}
+
+// TestHandleListEditClick_ChannelEnumerationDegrades fences the best-effort
+// degradation: when the enumeration Query fails (e.g. the dynamodb:Query grant
+// isn't deployed), the modal still opens with the channels field pre-filled
+// with just the current channel — the un-enumerable channel is absent, and
+// because it's not in the baseline the submit reconcile can't revoke it.
+func TestHandleListEditClick_ChannelEnumerationDegrades(t *testing.T) {
+	const otherChannel = "C0other0002"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{testEditToken: testEditResourceID})
+	ts.seedChannelExposure(t, testAdminTeamID, otherChannel, testEditResourceID)
+	ts.ddb.SetQueryErr(ts.tableNames.channelPolicy, errors.New("AccessDenied: dynamodb:Query"))
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	views := make(chan []byte, 1)
+	h.cfg.OpenView = func(_ context.Context, _ string, _ string, view []byte) error {
+		views <- view
+		return nil
+	}
+
+	snap, _ := buildTunnelEditButtonValue(testEditResourceID, testEditToken, testEditDisplay, nil)
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testEditChannel, "https://hooks.slack.com/edit", listEditTunnelActionID, snap)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var view []byte
+	select {
+	case view = <-views:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView not called — the modal must still open when enumeration fails")
+	}
+	js := string(view)
+	if !strings.Contains(js, blockKitTypeMultiConvSelect) || !strings.Contains(js, testEditChannel) {
+		t.Errorf("degraded modal missing channels field / current channel: %s", js)
+	}
+	if strings.Contains(js, otherChannel) {
+		t.Errorf("enumeration failed yet the other channel appeared in the pre-fill: %s", js)
+	}
 }
