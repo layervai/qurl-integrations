@@ -518,14 +518,15 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 // spells out that it can't be used until an admin sets an ID — matching the
 // fallback's "(no ID …)" honesty, which also retains the Display Name.
 func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
-	if token == "" {
-		s := "*`" + r.ResourceID + "`*"
-		if r.Description != "" {
-			s += "\n" + r.Description
-		}
-		return s + "\n_No ID set — ask your Slack admin to set one._"
-	}
 	var b strings.Builder
+	if token == "" {
+		b.WriteString("*`" + r.ResourceID + "`*")
+		if r.Description != "" {
+			b.WriteString("\n" + r.Description)
+		}
+		b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		return b.String()
+	}
 	b.WriteString("*`$" + token + "`*")
 	if r.Description != "" {
 		b.WriteString("\n" + r.Description)

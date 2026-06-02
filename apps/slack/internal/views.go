@@ -412,7 +412,9 @@ func sectionBlock(text string) map[string]any {
 
 // headerBlock returns a `header` block — Slack's large, bold title text. Its
 // text object must be plain_text, so `:emoji:` shortcodes render but mrkdwn
-// (e.g. `*bold*`) does not.
+// (e.g. `*bold*`) does not. Slack silently rejects a `header` whose text
+// exceeds 150 characters, so a caller passing a dynamic string must keep it
+// short; today the only caller uses the short [listHeaderBlockText] constant.
 func headerBlock(text string) map[string]any {
 	return map[string]any{
 		"type": "header",
