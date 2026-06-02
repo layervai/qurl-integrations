@@ -10,19 +10,19 @@ const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
 const dryRun = process.argv.includes('--dry-run');
 const token = process.env.DISCORD_TOKEN;
 
-function validateMetadata() {
-  if (!metadata.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
-  if (!metadata.application?.id || !/^\d+$/.test(metadata.application.id)) {
+function validateMetadata(doc = metadata) {
+  if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
+  if (!doc.application?.id || !/^\d+$/.test(doc.application.id)) {
     throw new Error('discord-metadata.json must set application.id to the LayerV Discord application ID.');
   }
-  if (!metadata.application?.public_key || !/^[a-f0-9]{64}$/.test(metadata.application.public_key)) {
+  if (!doc.application?.public_key || !/^[a-f0-9]{64}$/.test(doc.application.public_key)) {
     throw new Error('discord-metadata.json must set application.public_key to the LayerV Discord public key.');
   }
 }
 
-function dataUri(relPath) {
+function dataUri(relPath, baseRoot = root) {
   if (!relPath) return undefined;
-  const filePath = path.join(root, relPath);
+  const filePath = path.join(baseRoot, relPath);
   const ext = path.extname(filePath).toLowerCase();
   const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
   return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
@@ -69,13 +69,13 @@ function botTag(user) {
   return user.username;
 }
 
-function assertExpectedApplication(app) {
-  if (String(app.id) !== metadata.application.id) {
-    throw new Error(`DISCORD_TOKEN belongs to application ${app.id}; expected LayerV application ${metadata.application.id}. Refusing to update the wrong Discord app.`);
+function assertExpectedApplication(app, doc = metadata) {
+  if (String(app.id) !== doc.application.id) {
+    throw new Error(`DISCORD_TOKEN belongs to application ${app.id}; expected LayerV application ${doc.application.id}. Refusing to update the wrong Discord app.`);
   }
   const actualPublicKey = app.verify_key || app.public_key;
-  if (actualPublicKey && actualPublicKey !== metadata.application.public_key) {
-    throw new Error(`Discord application ${app.id} has public key ${actualPublicKey}; expected ${metadata.application.public_key}. Refusing to update mismatched app metadata.`);
+  if (actualPublicKey && actualPublicKey !== doc.application.public_key) {
+    throw new Error(`Discord application ${app.id} has public key ${actualPublicKey}; expected ${doc.application.public_key}. Refusing to update mismatched app metadata.`);
   }
 }
 
@@ -170,8 +170,16 @@ async function main() {
   console.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  if (err.body) console.error(JSON.stringify(err.body));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message);
+    if (err.body) console.error(JSON.stringify(err.body));
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  assertExpectedApplication,
+  dataUri,
+  validateMetadata,
+};
