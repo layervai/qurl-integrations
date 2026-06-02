@@ -70,7 +70,8 @@ developer-portal app:
    **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
    Intent** under Privileged Gateway Intents.
 4. Installation → default install settings should request `bot` and
-   `applications.commands` with permissions `2147503104`.
+   `applications.commands` with permissions `2147503104` (View Channels, Send
+   Messages, Embed Links, Use Slash Commands).
 5. Copy the bot token.
 
 The repeatable metadata source of truth is `discord-metadata.json`. With a
@@ -96,27 +97,25 @@ for its Discord surface.
 
 Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands
-in https://github.com/layervai/qurl-integrations/issues/588. Until then, a
-clean re-run can still re-upload images and return `1` if Discord rate-limits a
-no-op asset PATCH; wait for `retry_after` and rerun.
+in https://github.com/layervai/qurl-integrations/issues/588.
 
-Discord rate-limits bot username/avatar/banner updates. The script sends
-avatar and banner together to limit request count, but if a sub-field returns
-`429`, it prints `retry_after` when Discord provides it and exits `1` so
-automation does not treat a partial apply as complete. For Discord's unique
-username system (`discriminator: "0"`), a lowercase case-only match such as
-live `qurl` vs desired `qURL` is treated as applied with a warning because
-unique usernames are lowercase. A legacy case-only mismatch exits `1` after
-skipping the username PATCH so the operator can verify the live outcome without
-burning Discord's username rate limit; rerun after Discord reports
-`discriminator: "0"` to confirm the lowercase unique username converges.
-Application name and legal URLs are Developer Portal-only; if API writes
-succeed but the app name still differs from `discord-metadata.json`, the script
-exits `2` after printing the required portal action. If both happen in one run,
-the API partial failure keeps exit `1` and the portal action is included in the
-final error message. Discord's current-application API does not return the
-legal URLs, so verify the privacy and terms links directly in Developer Portal
-after editing them.
+Exit codes:
+- `0` — API fields applied, or Discord's unique-username system
+  (`discriminator: "0"`) stores a case-only bot username match lowercase
+  (`qurl`) while the application/profile branding remains **qURL**.
+- `1` — partial API apply. The script prints `retry_after` when Discord
+  rate-limits username/avatar/banner updates, flags ignored avatar/banner
+  writes, and keeps `1` if a portal action is also needed. Wait for
+  `retry_after` and rerun. For legacy case-only username drift, rerun after
+  Discord reports `discriminator: "0"` to confirm the lowercase unique
+  username converges.
+- `2` — API writes completed, but the application name still differs from
+  `discord-metadata.json`; update the name in Developer Portal.
+
+Application name and legal URLs are Developer Portal-only. Discord's
+current-application API does not return the legal URLs, so verify the privacy
+and terms links directly in Developer Portal after editing them.
+
 The live apply uses Discord v10's documented current-user fields
 (`username`, `avatar`, `banner`) and current-application fields (`description`,
 `icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure

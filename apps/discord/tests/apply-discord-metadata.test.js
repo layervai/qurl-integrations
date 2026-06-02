@@ -64,6 +64,13 @@ describe('apply-discord-metadata helpers', () => {
     }, metadata)).not.toThrow();
   });
 
+  test('accepts Discord application identity with a public_key field', () => {
+    expect(() => assertExpectedApplication({
+      id: metadata.application.id,
+      public_key: metadata.application.public_key,
+    }, metadata)).not.toThrow();
+  });
+
   test('rejects a bot token from the retired personal app before writes', () => {
     expect(() => assertExpectedApplication({
       id: '1495050474414411948',

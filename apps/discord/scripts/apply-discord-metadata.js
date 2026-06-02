@@ -111,7 +111,8 @@ function detectJpegDimensions(bytes) {
   let offset = 2;
   while (offset + 9 < bytes.length) {
     if (bytes[offset] !== 0xff) return undefined;
-    while (bytes[offset] === 0xff) offset += 1;
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) return undefined;
     const marker = bytes[offset];
     offset += 1;
     if (marker === 0xd9 || marker === 0xda) return undefined;
