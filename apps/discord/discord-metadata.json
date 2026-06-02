@@ -7,7 +7,7 @@
   "application": {
     "id": "1511450217789128885",
     "public_key": "f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea",
-    "name": "qURL",
+    "name": "qURL (sandbox)",
     "description": "Securely share files, maps, and links as one-time qURLs that expire on first access.",
     "icon": "assets/discord-app-icon.png",
     "cover_image": "assets/discord-cover.png",

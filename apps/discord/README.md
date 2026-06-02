@@ -55,14 +55,14 @@ linking and auto Contributor-role assignment for community members.
 
 ### 1. Configure Discord
 
-Use the LayerV-owned Discord application, not the previous personal
+Use the LayerV-owned sandbox Discord application, not the previous personal
 developer-portal app:
 
 - Application ID: `1511450217789128885`
 - Public Key: `f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea`
 
-1. https://discord.com/developers/applications → `qURL`
-2. General Information → set the application name to **qURL**, upload
+1. https://discord.com/developers/applications → `qURL (sandbox)`
+2. General Information → set the application name to **qURL (sandbox)**, upload
    `assets/discord-app-icon.png`, add the description from
    `discord-metadata.json`, and set the privacy/terms URLs listed there.
 3. Bot → set the bot username to **qURL**, upload
@@ -76,7 +76,7 @@ The repeatable metadata source of truth is `discord-metadata.json`. With a
 target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
 that Discord exposes through API (`description`, `icon`, `cover_image`, tags,
 install params, bot username, avatar, and banner). The script refuses to run if
-the token belongs to any Discord application other than LayerV app
+the token belongs to any Discord application other than LayerV sandbox app
 `1511450217789128885`.
 
 ```bash
