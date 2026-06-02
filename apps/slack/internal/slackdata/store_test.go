@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -840,5 +841,197 @@ func TestUnbindChannelAlias_NotFoundReturnsSentinel(t *testing.T) {
 	err := store.UnbindChannelAlias(context.Background(), "T1", "C1", "prod-dashboard")
 	if !errors.Is(err, ErrAliasNotFound) {
 		t.Fatalf("err = %v, want ErrAliasNotFound", err)
+	}
+}
+
+// testTargetResourceID is the resource the ChannelsForResource tests search
+// for; lifted to a constant to satisfy goconst.
+const testTargetResourceID = "r_target"
+
+// channelPolicyRow builds a channel_policies item for the ChannelsForResource
+// tests: optional allowed_resource_ids SS and/or alias_bindings map, on
+// (T1, channelID).
+func channelPolicyRow(channelID string, allowed []string, aliasBindings map[string]string) map[string]ddbtypes.AttributeValue {
+	item := map[string]ddbtypes.AttributeValue{
+		attrSlackTeamID:    stringAttr("T1"),
+		attrSlackChannelID: stringAttr(channelID),
+	}
+	if allowed != nil {
+		item[attrAllowedResourceIDs] = &ddbtypes.AttributeValueMemberSS{Value: allowed}
+	}
+	if aliasBindings != nil {
+		m := make(map[string]ddbtypes.AttributeValue, len(aliasBindings))
+		for a, r := range aliasBindings {
+			m[a] = stringAttr(r)
+		}
+		item[attrAliasBindings] = &ddbtypes.AttributeValueMemberM{Value: m}
+	}
+	return item
+}
+
+// TestExposeResourceToChannel_AddsToAllowedSet fences the expose write: a
+// set-union `ADD allowed_resource_ids :rids` on the (team, channel) row so the
+// grant is idempotent and materializes the row if absent.
+func TestExposeResourceToChannel_AddsToAllowedSet(t *testing.T) {
+	var got *dynamodb.UpdateItemInput
+	store := newStore(&stubDDB{
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			got = in
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	if err := store.ExposeResourceToChannel(context.Background(), "T1", "C9", "r_target01"); err != nil {
+		t.Fatalf("ExposeResourceToChannel: %v", err)
+	}
+	if got == nil {
+		t.Fatal("UpdateItem not called")
+	}
+	if exp := aws.ToString(got.UpdateExpression); exp != "ADD allowed_resource_ids :rids" {
+		t.Errorf("UpdateExpression = %q, want ADD allowed_resource_ids :rids", exp)
+	}
+	if tbl := aws.ToString(got.TableName); tbl != "cp" {
+		t.Errorf("TableName = %q, want cp", tbl)
+	}
+	if rids, ok := got.ExpressionAttributeValues[":rids"].(*ddbtypes.AttributeValueMemberSS); !ok || len(rids.Value) != 1 || rids.Value[0] != "r_target01" {
+		t.Errorf(":rids = %#v, want SS[r_target01]", got.ExpressionAttributeValues[":rids"])
+	}
+	if k, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); k == nil || k.Value != "T1" {
+		t.Errorf("Key team = %#v, want T1", got.Key[attrSlackTeamID])
+	}
+	if k, _ := got.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS); k == nil || k.Value != "C9" {
+		t.Errorf("Key channel = %#v, want C9", got.Key[attrSlackChannelID])
+	}
+}
+
+// TestRevokeResourceFromChannel_DeletesFromAllowedSet fences the revoke write:
+// a `DELETE allowed_resource_ids :rids` so removing a non-member (or the last
+// member) is a harmless no-op at DDB.
+func TestRevokeResourceFromChannel_DeletesFromAllowedSet(t *testing.T) {
+	var got *dynamodb.UpdateItemInput
+	store := newStore(&stubDDB{
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			got = in
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	if err := store.RevokeResourceFromChannel(context.Background(), "T1", "C9", "r_target01"); err != nil {
+		t.Fatalf("RevokeResourceFromChannel: %v", err)
+	}
+	if got == nil {
+		t.Fatal("UpdateItem not called")
+	}
+	if exp := aws.ToString(got.UpdateExpression); exp != "DELETE allowed_resource_ids :rids" {
+		t.Errorf("UpdateExpression = %q, want DELETE allowed_resource_ids :rids", exp)
+	}
+	if rids, ok := got.ExpressionAttributeValues[":rids"].(*ddbtypes.AttributeValueMemberSS); !ok || len(rids.Value) != 1 || rids.Value[0] != "r_target01" {
+		t.Errorf(":rids = %#v, want SS[r_target01]", got.ExpressionAttributeValues[":rids"])
+	}
+}
+
+// TestExposeRevokeChannel_RejectEmptyArgs fences the bad-request guards: an
+// empty team/channel/resource must fail before any write.
+func TestExposeRevokeChannel_RejectEmptyArgs(t *testing.T) {
+	store := newStore(&stubDDB{
+		updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			t.Fatal("UpdateItem must not be called on a bad-request guard")
+			return &dynamodb.UpdateItemOutput{}, nil // unreachable after Fatal; non-nil to satisfy nilnil
+		},
+	})
+	if err := store.ExposeResourceToChannel(context.Background(), "", "C1", "r1"); err == nil {
+		t.Error("ExposeResourceToChannel(empty team): want error")
+	}
+	if err := store.ExposeResourceToChannel(context.Background(), "T1", "C1", ""); err == nil {
+		t.Error("ExposeResourceToChannel(empty resource): want error")
+	}
+	if err := store.RevokeResourceFromChannel(context.Background(), "T1", "", "r1"); err == nil {
+		t.Error("RevokeResourceFromChannel(empty channel): want error")
+	}
+}
+
+// TestChannelsForResource_UnionSortAndQueryShape fences the enumeration: it
+// Queries the partition key and returns every channel whose row makes the
+// resource available via EITHER surface (allowed_resource_ids SS or
+// alias_bindings values), sorted, excluding unrelated channels.
+func TestChannelsForResource_UnionSortAndQueryShape(t *testing.T) {
+	var got *dynamodb.QueryInput
+	store := newStore(&stubDDB{
+		queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			got = in
+			return &dynamodb.QueryOutput{Items: []map[string]ddbtypes.AttributeValue{
+				channelPolicyRow("C_set", []string{testTargetResourceID, "r_other"}, nil),         // via allowed_resource_ids
+				channelPolicyRow("C_alias", nil, map[string]string{"dash": testTargetResourceID}), // via alias binding
+				channelPolicyRow("C_unrelated", []string{"r_nope"}, nil),                          // neither
+			}}, nil
+		},
+	})
+	channels, err := store.ChannelsForResource(context.Background(), "T1", testTargetResourceID)
+	if err != nil {
+		t.Fatalf("ChannelsForResource: %v", err)
+	}
+	if want := []string{"C_alias", "C_set"}; !reflect.DeepEqual(channels, want) {
+		t.Errorf("channels = %v, want %v (union of SS + alias values, sorted, unrelated excluded)", channels, want)
+	}
+	if exp := aws.ToString(got.KeyConditionExpression); exp != "slack_team_id = :tid" {
+		t.Errorf("KeyConditionExpression = %q, want slack_team_id = :tid", exp)
+	}
+	if tid, _ := got.ExpressionAttributeValues[":tid"].(*ddbtypes.AttributeValueMemberS); tid == nil || tid.Value != "T1" {
+		t.Errorf(":tid = %#v, want T1", got.ExpressionAttributeValues[":tid"])
+	}
+	if tbl := aws.ToString(got.TableName); tbl != "cp" {
+		t.Errorf("TableName = %q, want cp", tbl)
+	}
+}
+
+// TestChannelsForResource_PagesAllResults fences the LastEvaluatedKey paging
+// loop: results spanning two pages are all returned, and the second Query
+// carries the first page's LastEvaluatedKey as its ExclusiveStartKey.
+func TestChannelsForResource_PagesAllResults(t *testing.T) {
+	page := 0
+	store := newStore(&stubDDB{
+		queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			page++
+			if page == 1 {
+				if in.ExclusiveStartKey != nil {
+					t.Errorf("page 1 ExclusiveStartKey = %v, want nil", in.ExclusiveStartKey)
+				}
+				return &dynamodb.QueryOutput{
+					Items:            []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_p1", []string{testTargetResourceID}, nil)},
+					LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackChannelID: stringAttr("C_p1")},
+				}, nil
+			}
+			if len(in.ExclusiveStartKey) == 0 {
+				t.Errorf("page 2 ExclusiveStartKey is empty, want the prior LastEvaluatedKey")
+			}
+			return &dynamodb.QueryOutput{
+				Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_p2", []string{testTargetResourceID}, nil)},
+			}, nil
+		},
+	})
+	channels, err := store.ChannelsForResource(context.Background(), "T1", testTargetResourceID)
+	if err != nil {
+		t.Fatalf("ChannelsForResource: %v", err)
+	}
+	if want := []string{"C_p1", "C_p2"}; !reflect.DeepEqual(channels, want) {
+		t.Errorf("channels = %v, want %v (both pages)", channels, want)
+	}
+	if page != 2 {
+		t.Errorf("query pages = %d, want 2", page)
+	}
+}
+
+// TestChannelsForResource_QueryErrorSurfaces fences the failure paths: a Query
+// error (e.g. a missing dynamodb:Query grant surfacing as AccessDenied) and an
+// empty team both return an error so the caller can degrade.
+func TestChannelsForResource_QueryErrorSurfaces(t *testing.T) {
+	store := newStore(&stubDDB{
+		queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+			return nil, errors.New("AccessDenied: not authorized to perform dynamodb:Query")
+		},
+	})
+	if _, err := store.ChannelsForResource(context.Background(), "T1", testTargetResourceID); err == nil {
+		t.Error("ChannelsForResource: want error when Query fails")
+	}
+	if _, err := store.ChannelsForResource(context.Background(), "", testTargetResourceID); err == nil {
+		t.Error("ChannelsForResource(empty team): want bad-request error")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -51,16 +52,13 @@ func writeResourceListFixture(t *testing.T, w http.ResponseWriter, resources []m
 }
 
 // TestHandleList_RendersAllTunnels fences the happy path: /qurl list
-// renders every tunnel the master listing returns, with each row
-// showing the slug as the copy-paste-ready `$<slug>` token. Post-revert
-// of #234 (#459) the listing is unscoped — no channel-policy filter —
-// so this is what every workspace member sees.
+// renders every tunnel exposed to the invoker's channel, each row showing
+// the slug as the copy-paste-ready `$<slug>` token. The listing is
+// channel-scoped (see TestHandleList_ScopedToChannel), so both tunnels are
+// exposed to C_test here; the admin-vs-non-admin distinction does not affect
+// it (both see the same scoped set).
 func TestHandleList_RendersAllTunnels(t *testing.T) {
 	ts := newAdminTestServers(t)
-	// seedAdmin supplies the workspace_mappings / API-key fixture that
-	// authenticatedClient needs; the admin-vs-non-admin distinction no
-	// longer affects /qurl list, so this happy path renders identically
-	// for a non-admin (see TestHandleList_UnscopedAcrossChannels).
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
@@ -68,6 +66,7 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 			{testKeyResourceID: "r_stage_db_bb", testKeyType: client.ResourceTypeTunnel, testKeySlug: "stage-db"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, "r_stage_db_bb")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -100,6 +99,9 @@ func TestHandleList_ExcludesRevokedTunnels(t *testing.T) {
 			{testKeyResourceID: "r_revoked_01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dead-db", testKeyStatus: client.StatusRevoked},
 		}, "", false)
 	})
+	// Expose BOTH to C_test so the revoked-row exclusion is what hides dead-db,
+	// not the channel scope.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, "r_revoked_01")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -250,30 +252,31 @@ func TestChannelAliasesByResourceID(t *testing.T) {
 	})
 }
 
-// TestHandleList_UnscopedAcrossChannels pins the post-revert (#459)
-// disclosure surface: /qurl list is workspace-wide for everyone, so the
-// SAME complete tunnel listing renders regardless of the caller's
-// channel. It exercises the three channel shapes that diverged
-// pre-revert (#234) for a non-admin:
+// TestHandleList_ScopedToChannel is the keystone regression fence for the
+// channel-scoping fix: /qurl list shows only the tunnels exposed to the
+// invoker's channel — for ADMINS as well as non-admins (the reported bug was an
+// admin running `/qurl list` and seeing every tunnel in every channel,
+// including DMs). It exercises the three channel shapes:
 //
-//   - a channel carrying a restrictive channel_policies row (would have
-//     filtered the listing down to prod-db, hiding secret);
-//   - a channel with no policy row (would have fail-closed to empty);
-//   - a DM (`D…`) channel (would have fail-closed to empty) — the most
-//     user-surprising case, "I ran /qurl list in a 1:1 and saw URLs
-//     from #ops".
+//   - a channel where prod-db is exposed (C_with_policy): prod-db shows, the
+//     secret tunnel — exposed nowhere — does NOT;
+//   - a channel with no policy row (C_no_policy_here): the channel empty state;
+//   - a DM (`D…`) channel: the channel empty state (the most user-surprising
+//     pre-fix case, "I ran /qurl list in a 1:1 and saw tunnels from #ops").
 //
-// Post-revert all three must show every tunnel. The seedNonAdmin +
-// restrictive seedPolicySet below are load-bearing, not inert: the list
-// handler no longer reads them, but if any channel-policy filter were
-// re-introduced on /qurl list this non-admin caller would see the old
-// filtered/empty output and the test would fail.
-func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
+// The C_with_policy case runs for both an admin and a non-admin caller to pin
+// that the scope is channel-only — admins are NOT exempt. If the scope filter
+// regressed (e.g. an admin bypass, or dropping the allow-set read), the secret
+// tunnel would leak and these assertions would fail.
+func TestHandleList_ScopedToChannel(t *testing.T) {
+	const (
+		nonAdminUserID    = "UMEMBER01"
+		channelWithPolicy = "C_with_policy"
+	)
 	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	// A channel_policies row that, under the reverted gate, would have
-	// filtered the listing down to prod-db only (secret excluded).
-	ts.seedPolicySet(t, testAdminTeamID, "C_with_policy", testListAliasProdDB, []string{testListResIDProdDB})
+	ts.seedAdmin(t) // testAdminUserID is admin/owner; nonAdminUserID is not
+	// prod-db is exposed to channelWithPolicy; the secret tunnel is exposed nowhere.
+	ts.seedChannelExposure(t, testAdminTeamID, channelWithPolicy, testListResIDProdDB)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
@@ -282,52 +285,137 @@ func TestHandleList_UnscopedAcrossChannels(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 
-	// "D…" is a Slack DM channel ID; the others are a policy-bearing and
-	// a policy-free regular channel. All must render the full listing.
-	// Subtests so -run can target a single branch and PASS/FAIL is
-	// reported per channel.
-	for _, channelID := range []string{"C_with_policy", "C_no_policy_here", "D_direct_msg_1to1"} {
-		t.Run(channelID, func(t *testing.T) {
+	// In the channel where prod-db is exposed, both an admin and a non-admin see
+	// prod-db and NOT the unexposed secret tunnel.
+	for _, caller := range []struct{ name, userID string }{
+		{"admin-caller", testAdminUserID},
+		{"non-admin-caller", nonAdminUserID},
+	} {
+		t.Run(channelWithPolicy+"/"+caller.name, func(t *testing.T) {
+			inv := newAdminSlashInvokerOnChannel(t, h, channelWithPolicy)
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, caller.userID)
+			if !strings.Contains(async, "`$"+testListAliasProdDB+"`") {
+				t.Errorf("%s should see the exposed prod-db tunnel: %q", caller.name, async)
+			}
+			if strings.Contains(async, "`$"+testListAliasSecret+"`") || strings.Contains(async, "r_secret_xx") {
+				t.Errorf("%s saw the secret tunnel, which is exposed to no channel — scope leak: %q", caller.name, async)
+			}
+		})
+	}
+
+	// A channel with no policy row, and a DM, expose nothing → the channel
+	// empty state. (These are the cases #459's revert was meant to avoid
+	// dead-ending; the empty state now names the Edit recovery path.)
+	for _, channelID := range []string{"C_no_policy_here", "D_direct_msg_1to1"} {
+		t.Run("empty/"+channelID, func(t *testing.T) {
 			inv := newAdminSlashInvokerOnChannel(t, h, channelID)
 			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-			if !strings.Contains(async, "`$prod-db`") {
-				t.Errorf("non-admin should see prod-db tunnel (listing is unscoped post-revert): %q", async)
+			if !strings.Contains(async, "No tunnels are available in this channel") {
+				t.Errorf("expected the channel empty state in %s: %q", channelID, async)
 			}
-			if !strings.Contains(async, "`$secret`") {
-				t.Errorf("non-admin should see the secret tunnel (no per-channel filter post-revert): %q", async)
-			}
-			// Negative fence: a filter reintroduced on only one branch
-			// would surface the empty-state or the (removed) non-admin
-			// pagination-gap copy for this non-admin caller, even if
-			// another branch still rendered rows.
-			if strings.Contains(async, "No tunnels found") {
-				t.Errorf("empty-state copy fired — a channel filter may have dropped the listing: %q", async)
-			}
-			if strings.Contains(async, "past the first page") {
-				t.Errorf("removed non-admin pagination-gap copy reappeared: %q", async)
+			if strings.Contains(async, "`$"+testListAliasProdDB+"`") || strings.Contains(async, "`$"+testListAliasSecret+"`") {
+				t.Errorf("a tunnel leaked into %s, where none is exposed: %q", channelID, async)
 			}
 		})
 	}
 }
 
-// TestHandleList_EmptyWorkspace fences the friendly empty-state copy
-// for a workspace with zero tunnels. The hint nudges the user toward
-// `/qurl tunnel install`.
-func TestHandleList_EmptyWorkspace(t *testing.T) {
+// TestHandleList_ExposedViaAllowedSetShowsWithoutAlias fences that a tunnel
+// exposed to a channel purely via allowed_resource_ids (no alias binding —
+// the shape the Edit modal's "expose to channels" writes) is listed there. It
+// pins that the scope gate keys on the full AllowedResourceIDsForChannel union,
+// not just alias bindings.
+func TestHandleList_ExposedViaAllowedSetShowsWithoutAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_via_set01", testKeyType: client.ResourceTypeTunnel, testKeySlug: "set-exposed"},
+		}, "", false)
+	})
+	// allowed_resource_ids only — no alias_bindings entry in this channel.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_via_set01")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$set-exposed`") {
+		t.Errorf("tunnel exposed via allowed_resource_ids (no alias) should list: %q", async)
+	}
+}
+
+// TestHandleList_FailsClosedOnScopeReadError fences the fail-closed posture: if
+// the channel allow-set read errors, /qurl list surfaces service-unreachable and
+// does NOT fall back to an unscoped listing (the upstream is never even called).
+func TestHandleList_FailsClosedOnScopeReadError(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// Make the channel_policies read (AllowedResourceIDsForChannel) fail.
+	ts.ddb.SetGetItemErr(ts.tableNames.channelPolicy, errors.New("ddb unavailable"))
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("ListResources called despite a scope-read failure — must fail closed, not list unscoped")
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: "r_secret_x", testKeyType: client.ResourceTypeTunnel, testKeySlug: "secret"},
+		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No tunnels found") {
-		t.Errorf("async reply missing empty-state copy: %q", async)
+	if !strings.Contains(async, "Could not reach qURL") {
+		t.Errorf("scope-read failure should fail closed with service-unreachable: %q", async)
+	}
+	if strings.Contains(async, "secret") {
+		t.Errorf("a tunnel leaked when the scope read failed — must fail closed: %q", async)
+	}
+}
+
+// TestHandleList_EmptyChannelRejected fences the channel-required guard: a
+// synthetic payload with no channel_id can't be scoped, so the listing refuses
+// rather than fanning out workspace-wide (mirrors /qurl aliases).
+func TestHandleList_EmptyChannelRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("ListResources called for a channel-less list — must refuse before any read")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvokerOnChannel(t, h, "") // truly-empty channel_id
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, channelRequiredMessage) {
+		t.Errorf("empty channel_id should be refused with the channel-required copy: %q", async)
+	}
+}
+
+// TestHandleList_EmptyChannel fences the friendly empty-state copy when no
+// tunnel is available in the invoker's channel — here, nothing is exposed to
+// C_test, so the channel allow-set is empty and the listing short-circuits to
+// the empty state WITHOUT an upstream call. The copy is channel-framed and
+// offers both recovery paths (install here, or expose from `/qurl list` →
+// Edit). A failing /v1/resources stub asserts the short-circuit really avoided
+// the upstream: if the scope read regressed and the handler fell through to
+// ListResources, this would surface the upstream error instead of the empty
+// state.
+func TestHandleList_EmptyChannel(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("ListResources called despite an empty channel allow-set (scope short-circuit regressed)")
+		writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "should not be called")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "No tunnels are available in this channel") {
+		t.Errorf("async reply missing channel empty-state copy: %q", async)
 	}
 	if !strings.Contains(async, "/qurl-admin tunnel install") {
 		t.Errorf("async reply missing tunnel-install hint: %q", async)
+	}
+	if !strings.Contains(async, "Edit") {
+		t.Errorf("async reply missing the expose-via-Edit recovery hint: %q", async)
 	}
 }
 
@@ -345,6 +433,9 @@ func TestHandleList_URLResourcesFiltered(t *testing.T) {
 			{testKeyResourceID: "r_url_stray1", testKeyTargetURL: "https://c.example.com", testKeySlug: "stray-slug"},
 		}, "", false)
 	})
+	// Expose all three to C_test so the TYPE filter (not the channel scope) is
+	// what drops the URL resources.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_aaaaaa", "r_url_btarg1", "r_url_stray1")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -375,6 +466,7 @@ func TestHandleList_TunnelSlugIsToken(t *testing.T) {
 			{testKeyResourceID: "r_tunnel_slg", fAttrAlias: "dash-alias", testKeyType: client.ResourceTypeTunnel, testKeySlug: "prod-dashboard"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tunnel_slg")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -410,6 +502,7 @@ func TestHandleList_TunnelAliasFallbackWhenNoSlug(t *testing.T) {
 			{testKeyResourceID: "r_tunnel_aaa", fAttrAlias: "tun", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tunnel_aaa")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -436,6 +529,7 @@ func TestHandleList_TunnelResourceIDFallback(t *testing.T) {
 			{testKeyResourceID: "r_tunnel_noa", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tunnel_noa")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -463,6 +557,7 @@ func TestHandleList_TunnelWithDisplayName(t *testing.T) {
 			{testKeyResourceID: "r_tun_nodes", testKeyType: client.ResourceTypeTunnel, testKeySlug: "no-desc-tun"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_desc1", "r_tun_nodes")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -488,6 +583,7 @@ func TestHandleList_HasMoreFooter(t *testing.T) {
 			{testKeyResourceID: "r_one_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
 		}, "cursor_xyz", true)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_one_aa")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -506,6 +602,10 @@ func TestHandleList_UpstreamError(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(t, w, http.StatusBadGateway, "upstream_error", "Bad Gateway from internal API")
 	})
+	// A non-empty channel allow-set so the scope short-circuit doesn't skip the
+	// upstream call this test is exercising (the rid needn't match any fixture
+	// row — the upstream errors before filtering).
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_unused01")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -631,6 +731,7 @@ func TestHandleList_StableSortByToken(t *testing.T) {
 			{testKeyResourceID: "r_mmm_yyyyy", testKeyType: client.ResourceTypeTunnel, testKeySlug: "middle"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_zzz_aaaaa", "r_aaa_xxxxx", "r_mmm_yyyyy")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -665,6 +766,7 @@ func TestHandleList_SortTiebreakerOnTokenCollision(t *testing.T) {
 			{testKeyResourceID: "r_aaa_dup", testKeyType: client.ResourceTypeTunnel, testKeySlug: "dup", testKeyDescription: "alpha-desc"},
 		}, "", false)
 	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_bbb_dup", "r_aaa_dup")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 

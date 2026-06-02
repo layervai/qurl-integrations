@@ -3,6 +3,7 @@ package slackdata
 import (
 	"context"
 	"net/http"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -240,4 +241,145 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 		})
 	}
 	return entries, nil
+}
+
+// ExposeResourceToChannel grants resourceID visibility-and-mintability in
+// (teamID, channelID) by adding it to the channel_policies row's
+// `allowed_resource_ids` SS. This is the explicit "extra channel" grant the
+// `/qurl list` Edit modal writes when an admin exposes a tunnel beyond the
+// channel it was installed in.
+//
+// Idempotent: `ADD` on a string set is set-union, so re-exposing is a no-op,
+// and the UpdateItem materializes the row if it doesn't exist yet (matching
+// BindChannelAlias's lazy-create posture). It does NOT touch alias_bindings —
+// the install channel's implicit grant rides on the slug alias binding, and
+// [AllowedResourceIDsForChannel] unions both surfaces, so a tunnel is
+// "available in a channel" iff its id is in that union regardless of which
+// surface carries it.
+func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, resourceID string) error {
+	if teamID == "" || channelID == "" || resourceID == "" {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "ExposeResourceToChannel: team_id, channel_id, and resource_id are required",
+		}
+	}
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(channelID),
+		},
+		UpdateExpression: aws.String("ADD " + attrAllowedResourceIDs + " :rids"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+		},
+	})
+	if err != nil {
+		return ddbToError("ExposeResourceToChannel", err)
+	}
+	return nil
+}
+
+// RevokeResourceFromChannel removes resourceID from the (teamID, channelID)
+// row's `allowed_resource_ids` SS — the inverse of [ExposeResourceToChannel],
+// used when an admin de-selects a channel in the `/qurl list` Edit modal.
+//
+// Idempotent: `DELETE` on a set member that isn't present (or a missing
+// attribute / row) is a no-op, and removing the last member drops the
+// attribute (DDB forbids empty sets). It deliberately does NOT remove any
+// alias_bindings entry: a channel that still has a `$alias` bound to this
+// resource (e.g. the install channel's slug alias) stays in
+// [AllowedResourceIDsForChannel]'s union and remains available there. Fully
+// revoking such a channel means unbinding its aliases too (the Edit modal's
+// aliases field, or `/qurl-admin unset-alias`).
+func (s *Store) RevokeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) error {
+	if teamID == "" || channelID == "" || resourceID == "" {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "RevokeResourceFromChannel: team_id, channel_id, and resource_id are required",
+		}
+	}
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(channelID),
+		},
+		UpdateExpression: aws.String("DELETE " + attrAllowedResourceIDs + " :rids"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+		},
+	})
+	if err != nil {
+		return ddbToError("RevokeResourceFromChannel", err)
+	}
+	return nil
+}
+
+// ChannelsForResource returns the channel IDs in teamID whose channel_policies
+// row makes resourceID available — i.e. resourceID is in
+// [AllowedResourceIDsForChannel] for that channel (the union of
+// `allowed_resource_ids` and `alias_bindings.values()`). It backs the
+// `/qurl list` Edit modal's "expose to channels" pre-fill so an admin sees
+// every channel a tunnel already reaches before adding more — and so the
+// submit-side reconcile only revokes channels the admin actually saw.
+//
+// Issues a Query on the partition key (slack_team_id) and pages over
+// LastEvaluatedKey. Unlike the package's other reads this needs the
+// dynamodb:Query grant on the channel_policies table; callers treat a failure
+// as best-effort (an empty/partial pre-fill never causes data loss because
+// the reconcile only acts on the channels it returns). Result is sorted
+// ascending for a deterministic modal pre-fill.
+func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID string) ([]string, error) {
+	if teamID == "" || resourceID == "" {
+		return nil, &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "ChannelsForResource: team_id and resource_id are required",
+		}
+	}
+	var channels []string
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.ChannelPoliciesName),
+			KeyConditionExpression: aws.String(attrSlackTeamID + " = :tid"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":tid": stringAttr(teamID),
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return nil, ddbToError("ChannelsForResource", err)
+		}
+		for _, item := range out.Items {
+			channelID := readString(item, attrSlackChannelID)
+			if channelID != "" && channelItemAllowsResource(item, resourceID) {
+				channels = append(channels, channelID)
+			}
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	sort.Strings(channels)
+	return channels, nil
+}
+
+// channelItemAllowsResource reports whether a channel_policies item makes
+// resourceID available, mirroring [AllowedResourceIDsForChannel]'s union over
+// the same two surfaces: the `allowed_resource_ids` SS and the
+// `alias_bindings` map values.
+func channelItemAllowsResource(item map[string]ddbtypes.AttributeValue, resourceID string) bool {
+	for _, rid := range readStringSet(item, attrAllowedResourceIDs) {
+		if rid == resourceID {
+			return true
+		}
+	}
+	for _, rid := range readStringMap(item, attrAliasBindings) {
+		if rid == resourceID {
+			return true
+		}
+	}
+	return false
 }

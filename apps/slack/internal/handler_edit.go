@@ -19,6 +19,15 @@ import (
 // channel realistically binds a handful of aliases per tunnel; 20 is generous.
 const listEditMaxAliases = 20
 
+// listEditMaxChannels caps how many channels the Edit modal pre-fills (and thus
+// how many the reconcile baseline carries). A tunnel realistically reaches a
+// handful of channels; the cap keeps the modal's private_metadata under Slack's
+// 3000-byte limit and the multi-select pre-fill bounded. If a tunnel is exposed
+// to more than this, the pre-fill truncates — which is SAFE: the reconcile only
+// acts on channels in the (truncated) baseline, so an un-shown channel is never
+// revoked, it just keeps its access.
+const listEditMaxChannels = 30
+
 // listEditOpenFailedMessage is the ephemeral shown (via the list message's
 // response_url) when the Edit dialog can't be opened — a stale trigger, a
 // rate-limited views.open, or an unparseable button value.
@@ -38,15 +47,20 @@ func parseTunnelEditButtonValue(value string) (tunnelEditButtonValue, error) {
 }
 
 // handleListEditClick opens the [TunnelEditModal] in response to an admin
-// tapping the per-row Edit button on `/qurl list`. The modal is pre-filled
-// entirely from the button's value snapshot, so no upstream read is needed and
-// views.open fits inside Slack's ~3s trigger_id window.
+// tapping the per-row Edit button on `/qurl list`. Display Name and channel
+// aliases are pre-filled from the button's value snapshot; the channels
+// multi-select is pre-filled from a single [exposedChannelsForEdit] read. To
+// keep the ack prompt and views.open inside Slack's ~3s trigger window, the
+// enumeration + render + open all run on the async goroutine — the enumeration
+// on its own short budget so a slow Query can't starve the open — and the ack
+// returns immediately.
 //
 // Opening the modal is intentionally NOT admin-re-gated: the Edit button only
 // renders for admins, and the data the modal shows (Display Name + channel
-// aliases) is already visible to every member via `/qurl list` and `/qurl
-// aliases`, so opening it discloses nothing new. The MUTATION is gated at
-// submission time (handleTunnelEditSubmission re-checks CheckAdmin).
+// aliases + the channels the tunnel is exposed to) is already visible to every
+// member via `/qurl list` and `/qurl aliases`, so opening it discloses nothing
+// new. The MUTATION is gated at submission time (handleTunnelEditSubmission
+// re-checks CheckAdmin).
 func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
 	log := slog.With(
 		"command", "list_edit_tunnel",
@@ -84,22 +98,81 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 		DisplayName: snapshot.DisplayName,
 		Aliases:     snapshot.Aliases,
 	}
-	view, err := TunnelEditModal(&meta, snapshot.DisplayName, snapshot.Aliases)
-	if err != nil {
-		log.Error("list edit: modal render failed", "error", err)
-		failOpen()
-		return
-	}
 	teamID, triggerID := payload.Team.ID, payload.TriggerID
 	h.Go(func() {
-		ctx, cancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
-		defer cancel()
-		if err := h.cfg.OpenView(ctx, teamID, triggerID, view); err != nil {
+		// Bound the channel enumeration on its own short budget so a slow Query
+		// can't eat into the views.open trigger window; the open then gets the
+		// full slackTriggerOpenViewBudget. Both derive from h.baseCtx so a
+		// process shutdown cancels them coherently.
+		enumCtx, enumCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		meta.ExposedChannels = h.exposedChannelsForEdit(enumCtx, log, &meta)
+		enumCancel()
+
+		view, err := TunnelEditModal(&meta, snapshot.DisplayName, snapshot.Aliases)
+		if err != nil {
+			log.Error("list edit: modal render failed", "error", err)
+			_ = h.postResponse(log, responseURL, ":warning: "+listEditOpenFailedMessage)
+			return
+		}
+		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+		defer openCancel()
+		if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
 			log.Warn("list edit: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+listEditOpenFailedMessage)
 		}
 	})
 	respondJSON(w, http.StatusOK, map[string]any{})
+}
+
+// exposedChannelsForEdit returns the channels to pre-fill the Edit modal's
+// channels multi-select: every channel the tunnel is currently exposed to
+// (ChannelsForResource), always including the channel the modal was opened from
+// (meta.ChannelID), deduped and capped at [listEditMaxChannels]. It is also the
+// reconcile baseline carried in private_metadata, so a partial result is SAFE:
+// the submit reconcile only revokes channels present here, so a channel the
+// admin didn't see is never dropped.
+//
+// Best-effort: an enumeration failure (e.g. the dynamodb:Query grant isn't
+// deployed yet) degrades to the current channel only — the modal still opens,
+// the admin can still add channels, and nothing is revoked. AdminStore is
+// guaranteed non-nil here (the Edit button only renders when it is wired).
+func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata) []string {
+	seen := make(map[string]struct{})
+	channels := make([]string, 0, listEditMaxChannels)
+	add := func(c string) bool {
+		if c == "" {
+			return true
+		}
+		if _, dup := seen[c]; dup {
+			return true
+		}
+		if len(channels) >= listEditMaxChannels {
+			return false
+		}
+		seen[c] = struct{}{}
+		channels = append(channels, c)
+		return true
+	}
+	// The channel being edited from is always exposed and is never revoked, so
+	// it leads the pre-fill regardless of what enumeration returns.
+	add(meta.ChannelID)
+	if h.cfg.AdminStore == nil {
+		return channels
+	}
+	found, err := h.cfg.AdminStore.ChannelsForResource(ctx, meta.TeamID, meta.ResourceID)
+	if err != nil {
+		log.Warn("list edit: channel enumeration failed — pre-filling current channel only",
+			"error", err, "team_id", meta.TeamID, "resource_id", meta.ResourceID)
+		return channels
+	}
+	for _, c := range found {
+		if !add(c) {
+			log.Warn("list edit: exposed-channel count exceeds cap; truncating modal pre-fill (un-shown channels keep access)",
+				"cap", listEditMaxChannels, "resource_id", meta.ResourceID)
+			break
+		}
+	}
+	return channels
 }
 
 // handleTunnelEditSubmission processes the Edit modal's view_submission: it
@@ -144,6 +217,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		respondViewErrors(w, fieldErrors)
 		return
 	}
+	desiredChannels := parseEditChannelSelection(payload.View.State.Values, &meta)
 
 	// Mutation gate. Bounded so a slow store fails closed inside Slack's ack
 	// window; off h.baseCtx (not the request ctx) so a client abort can't
@@ -172,7 +246,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases)
+		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases, desiredChannels)
 	}) {
 		respondTunnelEditModalError(w, "Slack bot is busy. Retry in a moment.")
 		return
@@ -272,12 +346,47 @@ func parseEditAliasLines(raw, token string, prefilled []string) (aliases []strin
 	return aliases, ""
 }
 
+// parseEditChannelSelection reads the Edit modal's channels multi-select into
+// the DESIRED exposed-channel set: the admin's selection, validated to Slack
+// conversation-id shape and deduped, with the current channel force-included.
+// The channel the modal was opened from always keeps access — the reconcile
+// never revokes it — so including it here makes "kept" the default even if the
+// admin somehow cleared the field. Malformed IDs (not expected from a Slack
+// multi_conversations_select) are dropped rather than surfaced as a field
+// error: the field isn't free-text, so a bad value is a wire anomaly, not user
+// input to correct.
+func parseEditChannelSelection(values map[string]map[string]interactionStateValue, meta *TunnelEditModalMetadata) []string {
+	selected := interactionStateConversations(values, tunnelEditBlockChannels, tunnelEditActionChannels)
+	seen := make(map[string]struct{}, len(selected)+1)
+	out := make([]string, 0, len(selected)+1)
+	add := func(c string) {
+		if c == "" || !slackChannelIDPattern.MatchString(c) {
+			return
+		}
+		if _, dup := seen[c]; dup {
+			return
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	add(meta.ChannelID)
+	for _, c := range selected {
+		add(c)
+	}
+	return out
+}
+
 // processTunnelEdit is the async worker for an Edit modal submission. It
 // PATCHes the Display Name (only when changed, so an alias-only edit can't
-// clobber a concurrent display-name change), reconciles the channel aliases to
-// the submitted set, and posts an outcome summary to the list message's
-// response_url.
-func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, nameChanged bool, desiredAliases []string) {
+// clobber a concurrent display-name change), reconciles the channel aliases AND
+// the channel exposure to the submitted sets, and posts an outcome summary to
+// the list message's response_url.
+//
+// The name PATCH fails fast (returns before any reconcile) so a name failure
+// doesn't half-apply alias/channel changes. The two reconciles are each
+// best-effort and independent: a per-item failure is flagged in the summary
+// rather than aborting the rest.
+func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, nameChanged bool, desiredAliases, desiredChannels []string) {
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
 		log.Error("tunnel edit: API key lookup failed", "error", err)
@@ -298,8 +407,9 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 		changes = append(changes, "Display Name updated")
 	}
 
-	result := h.reconcileChannelAliases(ctx, log, meta, desiredAliases)
-	_ = h.postResponse(log, meta.ResponseURL, formatTunnelEditSummary(meta.Token, changes, &result))
+	aliasResult := h.reconcileChannelAliases(ctx, log, meta, desiredAliases)
+	channelResult := h.reconcileChannelExposure(ctx, log, meta, desiredChannels)
+	_ = h.postResponse(log, meta.ResponseURL, formatTunnelEditSummary(meta.Token, changes, &aliasResult, &channelResult))
 }
 
 // aliasReconcileResult buckets the outcome of reconciling a tunnel's channel
@@ -391,30 +501,115 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 	return res
 }
 
+// channelExposureResult buckets the outcome of reconciling a tunnel's channel
+// exposure for the edit summary.
+type channelExposureResult struct {
+	exposed  []string // channels newly granted access
+	revoked  []string // channels whose access was removed
+	hadError bool     // an expose/revoke write failed
+}
+
+// reconcileChannelExposure applies the admin's channel-exposure edit. The
+// DESIRED set is the multi-select selection (the current channel force-included
+// by parseEditChannelSelection); the BASELINE is meta.ExposedChannels — the
+// channels the modal actually SHOWED. Channels in desired but not baseline are
+// exposed ([slackdata.Store.ExposeResourceToChannel]); channels in baseline but
+// not desired are revoked ([slackdata.Store.RevokeResourceFromChannel]) — except
+// the channel being edited from (meta.ChannelID), which the reconcile never
+// writes or revokes: it's implicitly always available (the admin reached this
+// modal from a scoped /qurl list row there), so the admin can't make the tunnel
+// vanish from the list they're managing it on.
+//
+// Diffing removals against the SHOWN baseline (not a fresh enumeration) is the
+// same data-loss guard the alias reconcile uses: if the open-time enumeration
+// was partial (e.g. the dynamodb:Query grant isn't deployed, so the pre-fill
+// was current-channel-only), the un-shown channels aren't in the baseline and
+// so are never revoked — they keep their access. The remaining benign race (a
+// channel exposed by another admin after the modal opened) likewise isn't in
+// the baseline, so it survives. Best-effort per channel: a write failure is
+// flagged, not fatal.
+func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, desired []string) channelExposureResult {
+	var res channelExposureResult
+	baseline := make(map[string]struct{}, len(meta.ExposedChannels))
+	for _, c := range meta.ExposedChannels {
+		baseline[c] = struct{}{}
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, c := range desired {
+		desiredSet[c] = struct{}{}
+	}
+
+	for _, c := range desired {
+		if c == meta.ChannelID {
+			// The channel being edited from is implicitly always available
+			// (the admin reached this modal from a scoped /qurl list row there),
+			// so it's never written by this reconcile — nor revoked below.
+			continue
+		}
+		if _, already := baseline[c]; already {
+			continue
+		}
+		if err := h.cfg.AdminStore.ExposeResourceToChannel(ctx, meta.TeamID, c, meta.ResourceID); err != nil {
+			log.Error("tunnel edit: expose channel failed", "error", err, "channel_id", c, "resource_id", meta.ResourceID)
+			res.hadError = true
+			continue
+		}
+		res.exposed = append(res.exposed, c)
+	}
+	for _, c := range meta.ExposedChannels {
+		if c == meta.ChannelID {
+			// The channel being edited from always keeps access.
+			continue
+		}
+		if _, keep := desiredSet[c]; keep {
+			continue
+		}
+		if err := h.cfg.AdminStore.RevokeResourceFromChannel(ctx, meta.TeamID, c, meta.ResourceID); err != nil {
+			log.Error("tunnel edit: revoke channel failed", "error", err, "channel_id", c, "resource_id", meta.ResourceID)
+			res.hadError = true
+			continue
+		}
+		res.revoked = append(res.revoked, c)
+	}
+	sort.Strings(res.exposed)
+	sort.Strings(res.revoked)
+	return res
+}
+
 // formatTunnelEditSummary renders the admin-facing ephemeral summarizing an
 // edit. Aliases are shown as `$<alias>` code spans (charset-validated, so
 // backtick-free); the token is the tunnel's id and CAN be an upstream slug that
 // never passed the alias charset fence, so it's escaped for the code span as
-// defense-in-depth — same posture as the modal's tunnelEditTokenLabel.
-func formatTunnelEditSummary(token string, changes []string, res *aliasReconcileResult) string {
+// defense-in-depth — same posture as the modal's tunnelEditTokenLabel. Channel
+// changes render as `<#C…>` mentions so the admin sees the channel names.
+func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReconcileResult, chanRes *channelExposureResult) string {
 	lines := []string{fmt.Sprintf("✅ Updated tunnel `$%s`.", escapeMrkdwnCode(token))}
 	lines = append(lines, changes...)
-	if len(res.added) > 0 {
-		lines = append(lines, "Added alias(es): "+joinAliasCodes(res.added))
+	if len(aliasRes.added) > 0 {
+		lines = append(lines, "Added alias(es): "+joinAliasCodes(aliasRes.added))
 	}
-	if len(res.removed) > 0 {
-		lines = append(lines, "Removed alias(es): "+joinAliasCodes(res.removed))
+	if len(aliasRes.removed) > 0 {
+		lines = append(lines, "Removed alias(es): "+joinAliasCodes(aliasRes.removed))
 	}
-	if len(res.conflicts) > 0 {
-		lines = append(lines, "Skipped (already used by another tunnel in this channel): "+joinAliasCodes(res.conflicts))
+	if len(aliasRes.conflicts) > 0 {
+		lines = append(lines, "Skipped (already used by another tunnel in this channel): "+joinAliasCodes(aliasRes.conflicts))
+	}
+	if len(chanRes.exposed) > 0 {
+		lines = append(lines, "Exposed to: "+joinChannelMentions(chanRes.exposed))
+	}
+	if len(chanRes.revoked) > 0 {
+		lines = append(lines, "Revoked from: "+joinChannelMentions(chanRes.revoked))
 	}
 	// "No changes." only when nothing happened AND nothing errored — a failed
-	// bind/unbind leaves all buckets empty but isn't a clean no-op, so the
-	// warning below speaks for it instead.
-	if !res.hadError && len(changes) == 0 && len(res.added) == 0 && len(res.removed) == 0 && len(res.conflicts) == 0 {
+	// write leaves all buckets empty but isn't a clean no-op, so the warning
+	// below speaks for it instead.
+	nothingApplied := len(changes) == 0 &&
+		len(aliasRes.added) == 0 && len(aliasRes.removed) == 0 && len(aliasRes.conflicts) == 0 &&
+		len(chanRes.exposed) == 0 && len(chanRes.revoked) == 0
+	if !aliasRes.hadError && !chanRes.hadError && nothingApplied {
 		lines = append(lines, "No changes.")
 	}
-	if res.hadError {
+	if aliasRes.hadError || chanRes.hadError {
 		lines = append(lines, ":warning: Some changes may not have applied. Run `/qurl list` to check, and retry if needed.")
 	}
 	return strings.Join(lines, "\n")
@@ -426,6 +621,19 @@ func joinAliasCodes(aliases []string) string {
 		codes[i] = "`$" + a + "`"
 	}
 	return strings.Join(codes, ", ")
+}
+
+// joinChannelMentions renders channel IDs as `<#C…>` Slack mentions for the
+// edit summary, so the admin sees channel names rather than opaque IDs.
+// slackChannelMention validates each ID's shape and falls back to neutral text
+// for a malformed one (defense-in-depth; parseEditChannelSelection already
+// shape-checks).
+func joinChannelMentions(channels []string) string {
+	mentions := make([]string, len(channels))
+	for i, c := range channels {
+		mentions[i] = slackChannelMention(c)
+	}
+	return strings.Join(mentions, ", ")
 }
 
 // respondTunnelEditModalError replaces the submitted Edit modal with a

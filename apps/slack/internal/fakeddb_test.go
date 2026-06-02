@@ -60,6 +60,10 @@ type fakeDDB struct {
 	updateItemErrs map[string]error
 	// putItemErrs maps tableName → injected PutItem error.
 	putItemErrs map[string]error
+	// queryErrs maps tableName → injected Query error. Used to drive the
+	// best-effort degradation path in ChannelsForResource (e.g. a missing
+	// dynamodb:Query grant surfacing as AccessDenied).
+	queryErrs map[string]error
 	// getItemCounts tracks call counts per table for the
 	// SetGetItemErrAfter mechanism.
 	getItemCounts map[string]int
@@ -129,6 +133,18 @@ func (f *fakeDDB) SetPutItemErr(table string, err error) {
 		f.putItemErrs = map[string]error{}
 	}
 	f.putItemErrs[table] = err
+}
+
+// SetQueryErr injects an error returned on every Query against `table`.
+// Used to simulate a missing dynamodb:Query grant (AccessDenied) so tests
+// can assert ChannelsForResource degrades without losing data.
+func (f *fakeDDB) SetQueryErr(table string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.queryErrs == nil {
+		f.queryErrs = map[string]error{}
+	}
+	f.queryErrs[table] = err
 }
 
 // SetUpdateItemHook installs a callback invoked on every UpdateItem.
@@ -414,6 +430,39 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	}
 	delete(table, key)
 	return &dynamodb.DeleteItemOutput{}, nil
+}
+
+// Query implements [slackdata.DynamoDBClient]. Supports the single shape
+// [slackdata.Store.ChannelsForResource] emits — a partition-key match
+// `slack_team_id = :tid` over the channel_policies table — returning every
+// item whose PK equals :tid. Pagination (Limit / ExclusiveStartKey /
+// LastEvaluatedKey) is intentionally NOT modeled: the production caller sets
+// no Limit and the in-memory tables are tiny, so one page returns everything
+// and LastEvaluatedKey stays empty (terminating the caller's paging loop).
+// Honors an injected query error so the best-effort degradation path is
+// testable.
+func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name := aws.ToString(in.TableName)
+	if err, ok := f.queryErrs[name]; ok {
+		return nil, err
+	}
+	table, _, err := f.tableAndSchema(name)
+	if err != nil {
+		return nil, err
+	}
+	want, ok := in.ExpressionAttributeValues[":tid"].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		return nil, fmt.Errorf("fakeDDB.Query: expected a :tid string value (KeyConditionExpression %q)", aws.ToString(in.KeyConditionExpression))
+	}
+	var items []map[string]ddbtypes.AttributeValue
+	for _, item := range table {
+		if pk, ok := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS); ok && pk.Value == want.Value {
+			items = append(items, cloneItem(item))
+		}
+	}
+	return &dynamodb.QueryOutput{Items: items}, nil
 }
 
 // tableAndSchema looks up the table map and key schema, returning a

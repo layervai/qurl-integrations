@@ -360,6 +360,18 @@ func interactionStateTextOK(values map[string]map[string]interactionStateValue, 
 	return value.text(), true
 }
 
+// interactionStateConversations reads a multi_conversations_select's
+// selected_conversations from the submitted view state. Returns nil when the
+// block/action is absent — an optional channel multi-select left empty submits
+// with no entry, which the Edit modal treats as "no channels selected".
+func interactionStateConversations(values map[string]map[string]interactionStateValue, blockID, actionID string) []string {
+	block, ok := values[blockID]
+	if !ok {
+		return nil
+	}
+	return block[actionID].SelectedConversations
+}
+
 func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		respFieldResponseAction: "errors",
@@ -469,6 +481,10 @@ type interactionAction struct {
 type interactionStateValue struct {
 	Value          string                     `json:"value"`
 	SelectedOption *interactionSelectedOption `json:"selected_option"`
+	// SelectedConversations carries a multi_conversations_select's chosen
+	// conversation IDs (the /qurl list Edit modal's "expose to channels"
+	// field). Absent for plain inputs and static selects.
+	SelectedConversations []string `json:"selected_conversations"`
 }
 
 func (v interactionStateValue) text() string {

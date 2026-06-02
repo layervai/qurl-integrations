@@ -855,22 +855,53 @@ func TestHandleGet_DollarTokenBindingWinsOverSlug(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DollarSlugAdminBypassesAllowedSet fences the admin
-// round-trip: a workspace admin sees every tunnel in /qurl list
-// (unfiltered) and can mint its `$<slug>` even with no alias_binding
-// and no allow-set entry in the current channel.
-func TestHandleGet_DollarSlugAdminBypassesAllowedSet(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	addTunnelSlugResource(t, ts)
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		writeCreateFixture(t, w, "https://qurl.link/admin-slug", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
+// TestHandleGet_DollarSlugAdminAlsoChannelScoped is the security regression
+// fence for "even an admin can't /qurl get a tunnel from a channel it isn't
+// exposed to". The former admin bypass (admins could mint any slug from any
+// channel, because /qurl list was workspace-wide) is gone: list, alias, and
+// mint now share one channel-scoped definition. An admin minting `$<slug>` in a
+// channel where the resource has no alias binding and no allow-set entry is
+// refused with the same anti-enumeration "not configured for this channel" copy
+// a non-admin gets, and the mint never runs — but the admin DOES mint once the
+// tunnel is exposed to the channel.
+func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
+	t.Run("blocked when not exposed in this channel", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t) // the caller is a workspace admin
+		addTunnelSlugResource(t, ts)
+		var mintHits atomic.Int32
+		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+			mintHits.Add(1)
+			writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+		})
+		h := newAdminTestHandler(t, ts)
+		inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "https://qurl.link/admin-slug") {
-		t.Errorf("admin slug round-trip failed: %q", async)
-	}
+		_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
+			t.Errorf("admin was not channel-scoped — missing not-configured copy: %q", async)
+		}
+		if mintHits.Load() != 0 {
+			t.Errorf("admin minted a tunnel not exposed in this channel (hits = %d) — the bypass is back", mintHits.Load())
+		}
+	})
+
+	t.Run("mints when exposed in this channel", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		// Expose the slug's resource to C_test (allow-set, no alias) so the
+		// slug-fallback gate passes for the admin exactly as for anyone else.
+		ts.seedChannelExposure(t, testAdminTeamID, "C_test", testResourceIDFix)
+		addTunnelSlugResource(t, ts)
+		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+			writeCreateFixture(t, w, "https://qurl.link/admin-slug", testResourceIDFix)
+		})
+		h := newAdminTestHandler(t, ts)
+		inv := newAdminSlashInvoker(t, h)
+
+		_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "https://qurl.link/admin-slug") {
+			t.Errorf("admin should mint a tunnel exposed in this channel: %q", async)
+		}
+	})
 }

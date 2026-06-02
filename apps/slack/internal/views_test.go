@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// testEditModalResponseURL is a placeholder Slack response_url for the edit
+// modal render tests (the modal embeds it in private_metadata; it's never
+// dialed). Lifted to a constant to satisfy goconst.
+const testEditModalResponseURL = "https://hooks.slack.com/services/test"
+
 // TestSetAliasRebindModal_Shape fences the modal payload structure.
 // Slack rejects any modal missing `type`, `title`, or `callback_id`,
 // so each is non-optional in the schema-shape sense.
@@ -237,6 +242,78 @@ func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "private_metadata exceeds Slack limit") {
 		t.Fatalf("TunnelInstallModal err = %v, want private_metadata size error", err)
+	}
+}
+
+// TestTunnelEditModal_RendersChannelsSelect fences the new "expose to channels"
+// field: a multi_conversations_select pre-filled (initial_conversations) with
+// the tunnel's currently-exposed channels, filtered to public+private, and the
+// same channel set carried in private_metadata as the reconcile baseline.
+func TestTunnelEditModal_RendersChannelsSelect(t *testing.T) {
+	t.Parallel()
+	meta := &TunnelEditModalMetadata{
+		TeamID:          testAdminTeamID,
+		ChannelID:       testEditHomeChannel,
+		UserID:          testAdminUserID,
+		ResponseURL:     testEditModalResponseURL,
+		ResourceID:      "r_edit01",
+		Token:           testEditToken,
+		ExposedChannels: []string{testEditHomeChannel, testEditExtraChannel},
+	}
+	raw, err := TunnelEditModal(meta, "Prod database", []string{"primary"})
+	if err != nil {
+		t.Fatalf("TunnelEditModal: %v", err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		blockKitTypeMultiConvSelect,
+		tunnelEditActionChannels,
+		"initial_conversations",
+		testEditHomeChannel,
+		testEditExtraChannel,
+		`"include":["public","private"]`,
+		`"text":"Channels"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("edit modal missing %q: %s", want, body)
+		}
+	}
+	// private_metadata carries the exposed-channels baseline for the submit
+	// reconcile.
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	pm, _ := got[blockKitFieldPrivateMetadata].(string)
+	var rt TunnelEditModalMetadata
+	if err := json.Unmarshal([]byte(pm), &rt); err != nil {
+		t.Fatalf("private_metadata JSON: %v", err)
+	}
+	if len(rt.ExposedChannels) != 2 || rt.ExposedChannels[0] != testEditHomeChannel || rt.ExposedChannels[1] != testEditExtraChannel {
+		t.Errorf("private_metadata ExposedChannels = %v, want [%s %s]", rt.ExposedChannels, testEditHomeChannel, testEditExtraChannel)
+	}
+}
+
+// TestTunnelEditModal_NoChannelsOmitsInitialConversations fences that the
+// channels field still renders with no pre-fill but omits initial_conversations
+// entirely — Slack rejects an empty initial_conversations array.
+func TestTunnelEditModal_NoChannelsOmitsInitialConversations(t *testing.T) {
+	t.Parallel()
+	meta := &TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditHomeChannel, UserID: testAdminUserID,
+		ResponseURL: testEditModalResponseURL, ResourceID: "r_edit01", Token: testEditToken,
+		// ExposedChannels intentionally nil.
+	}
+	raw, err := TunnelEditModal(meta, "", nil)
+	if err != nil {
+		t.Fatalf("TunnelEditModal: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, blockKitTypeMultiConvSelect) {
+		t.Errorf("channels field should render even with no pre-fill: %s", body)
+	}
+	if strings.Contains(body, "initial_conversations") {
+		t.Errorf("initial_conversations must be omitted when empty (Slack rejects an empty array): %s", body)
 	}
 }
 
