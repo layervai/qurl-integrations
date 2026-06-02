@@ -65,10 +65,9 @@ developer-portal app:
 2. General Information → set the application name to **qURL (sandbox)**, upload
    `assets/discord-app-icon.png`, add the description from
    `discord-metadata.json`, and set the privacy/terms URLs listed there.
-3. Bot → set the bot username to **qURL**. Discord's unique-username system
-   stores this lowercase as `qurl`; the application/profile branding remains
-   **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
-   Intent** under Privileged Gateway Intents.
+3. Bot → set the unique username to `qurl`; the application/profile branding
+   remains **qURL**. Upload `assets/discord-avatar.png`, and enable **Server
+   Members Intent** under Privileged Gateway Intents.
 4. Installation → default install settings should request `bot` and
    `applications.commands` with permissions `2147503104` (View Channels, Send
    Messages, Embed Links, Use Slash Commands).
@@ -104,9 +103,8 @@ pair so Discord's slash-command picker receives the updated command
 descriptions.
 
 Exit codes:
-- `0` — API fields applied, or Discord's unique-username system
-  (`discriminator: "0"`) stores a case-only bot username match lowercase
-  (`qurl`) while the application/profile branding remains **qURL**.
+- `0` — API fields applied, including the lowercase unique username `qurl`;
+  application/profile branding remains **qURL**.
 - `1` — partial API apply. The script prints `retry_after` when Discord
   rate-limits username/avatar/banner updates, flags ignored avatar/banner
   writes, and keeps `1` if a portal action is also needed. Wait for

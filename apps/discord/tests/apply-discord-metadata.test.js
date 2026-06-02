@@ -312,14 +312,15 @@ describe('apply-discord-metadata helpers', () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
       jsonResponse({ username: 'Qurl Bot' }),
-      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ username: metadata.bot.username.toLowerCase() }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(5);
-    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.username}`);
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.username.toLowerCase() });
+    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.username.toLowerCase()}`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 

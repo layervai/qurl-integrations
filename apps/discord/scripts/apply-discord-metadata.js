@@ -255,9 +255,11 @@ async function main({
 
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
+  const brandUsername = doc.bot.username;
+  const apiUsername = brandUsername.toLowerCase();
 
   // Build payloads before the dry-run branch so dry-run validates local assets.
-  const botUsernamePatch = { username: doc.bot.username };
+  const botUsernamePatch = { username: apiUsername };
   const botImagePatch = {
     ...(doc.bot.avatar ? { avatar: dataUri(doc.bot.avatar, 'bot.avatar') } : {}),
     ...(doc.bot.banner ? { banner: dataUri(doc.bot.banner, 'bot.banner') } : {}),
@@ -300,14 +302,14 @@ async function main({
     throw new Error('GET /users/@me did not include username. Refusing to apply bot identity metadata.');
   }
 
-  if (currentUser.username === doc.bot.username) {
-    logger.log(`Bot username already ${doc.bot.username}; skipping username update.`);
-  } else if (currentUser.username.toLowerCase() === doc.bot.username.toLowerCase()) {
+  if (currentUser.username === brandUsername) {
+    logger.log(`Bot username already ${brandUsername}; skipping username update.`);
+  } else if (currentUser.username.toLowerCase() === apiUsername) {
     if (currentUser.discriminator === '0') {
       logger.warn(`Bot username is ${currentUser.username}; Discord unique usernames are lowercase. Treating case-only match as applied; verify the live display outcome in #860.`);
     } else {
       hadPartialFailure = true;
-      logger.warn(`Bot username is ${currentUser.username}; desired ${doc.bot.username}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
+      logger.warn(`Bot username is ${currentUser.username}; desired ${brandUsername}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
     }
   } else {
     try {
