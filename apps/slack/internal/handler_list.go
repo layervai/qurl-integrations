@@ -554,6 +554,10 @@ func aliasNoun(n int) string {
 // [formatTunnelListLine] and the block [formatTunnelListSection] so the two
 // can't drift on which aliases a row advertises.
 func extraAliasTokens(boundAliases []string, token string) []string {
+	// Mutates the slice in place — safe only because aliasesExcluding returns a
+	// freshly make-allocated slice, never a sub-slice of boundAliases. Preserve
+	// that contract if aliasesExcluding ever changes, or the caller's
+	// boundAliases (and the edit-button alias snapshot) would be corrupted.
 	extras := aliasesExcluding(boundAliases, token)
 	for i, a := range extras {
 		extras[i] = "`$" + a + "`"
