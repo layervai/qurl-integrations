@@ -298,6 +298,31 @@ describe('apply-discord-metadata helpers', () => {
     })).rejects.toMatchObject({ retryAfter: '12.5' });
   });
 
+  test('passes an abort signal to Discord requests', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({ username: metadata.bot.unique_username }));
+
+    await expect(request('GET', '/users/@me', undefined, {
+      token: 'test-token',
+      fetchImpl,
+    })).resolves.toEqual({ username: metadata.bot.unique_username });
+
+    expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('converts aborted Discord requests into timeout errors', async () => {
+    const abortErr = new Error('aborted');
+    abortErr.name = 'AbortError';
+
+    await expect(request('GET', '/users/@me', undefined, {
+      token: 'test-token',
+      timeoutMs: 1,
+      fetchImpl: jest.fn().mockRejectedValue(abortErr),
+    })).rejects.toMatchObject({
+      status: 'timeout',
+      message: 'GET /users/@me timed out after 1ms',
+    });
+  });
+
   test('omits the JSON content-type header on GET requests', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({ username: metadata.bot.username }));
 
@@ -322,7 +347,7 @@ describe('apply-discord-metadata helpers', () => {
   test('main returns the portal-action exit code when only the app name drifts', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse('Qurl Bot')),
-      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse('Qurl Bot')),
     );
@@ -392,6 +417,21 @@ describe('apply-discord-metadata helpers', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('main treats a legacy exact-case username match as a partial apply failure', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.username, discriminator: '1234' }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger }))
+      .rejects.toThrow(/completed with skipped fields/);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/desired unique username qurl/));
   });
 
   test('main treats a legacy case-only username mismatch as a partial apply failure', async () => {

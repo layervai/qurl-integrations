@@ -206,16 +206,33 @@ function validateImageRule(relPath, bytes, mime, rule) {
   }
 }
 
-async function request(method, apiPath, body, { token, fetchImpl = fetch } = {}) {
+async function request(method, apiPath, body, { token, fetchImpl = fetch, timeoutMs = 30000 } = {}) {
   const headers = {
     Authorization: `Bot ${token}`,
   };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const res = await fetchImpl(`https://discord.com/api/v10${apiPath}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeout = timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : undefined;
+  let res;
+  try {
+    res = await fetchImpl(`https://discord.com/api/v10${apiPath}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      const timeoutErr = new Error(`${method} ${apiPath} timed out after ${timeoutMs}ms`);
+      timeoutErr.status = 'timeout';
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
   const text = await res.text();
   let parsed = {};
   if (text) {
@@ -343,7 +360,8 @@ async function main({
   if (currentUser.username === brandUsername) {
     // Legacy pre-migration state: avoid a case-only username PATCH until #860
     // verifies the live Discord account's unique-username migration outcome.
-    logger.log(`Bot username already ${brandUsername}; legacy pre-migration casing matches the brand.`);
+    hadPartialFailure = true;
+    logger.warn(`Bot username is ${brandUsername}; desired unique username ${apiUsername}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
     if (currentUser.discriminator === '0' || currentUser.discriminator === undefined) {
       logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
