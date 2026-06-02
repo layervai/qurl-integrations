@@ -24,4 +24,14 @@ describe('discord-metadata.json', () => {
     expect(metadata.application.install_params.scopes).toEqual(['bot', 'applications.commands']);
     expect(metadata.application.install_params.permissions).toBe('2147503104');
   });
+
+  test('keeps documented LayerV app identity in sync with metadata', () => {
+    const root = path.join(__dirname, '..');
+    const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+    const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
+
+    expect(readme).toContain(`Application ID: \`${metadata.application.id}\``);
+    expect(readme).toContain(`Public Key: \`${metadata.application.public_key}\``);
+    expect(envExample).toContain(`DISCORD_CLIENT_ID=${metadata.application.id}`);
+  });
 });
