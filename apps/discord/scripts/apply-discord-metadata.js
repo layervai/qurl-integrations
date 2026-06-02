@@ -358,16 +358,16 @@ async function main({
   }
 
   if (currentUser.username === brandUsername) {
-    // Legacy pre-migration state: avoid a case-only username PATCH until #860
+    // Theoretical mixed-case legacy state: avoid a username PATCH until #860
     // verifies the live Discord account's unique-username migration outcome.
     hadPartialFailure = true;
-    logger.warn(`Bot username is ${brandUsername}; desired unique username ${apiUsername}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
+    logger.warn(`Bot username is ${brandUsername}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
     if (currentUser.discriminator === '0' || currentUser.discriminator === undefined) {
       logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
     } else {
       hadPartialFailure = true;
-      logger.warn(`Bot username is ${currentUser.username}; desired ${brandUsername}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
+      logger.warn(`Bot username is ${currentUser.username} with discriminator ${currentUser.discriminator}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
     }
   } else {
     try {

@@ -431,7 +431,7 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger }))
       .rejects.toThrow(/completed with skipped fields/);
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/desired unique username qurl/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique-username migration completes/));
   });
 
   test('main treats a legacy case-only username mismatch as a partial apply failure', async () => {
@@ -446,7 +446,7 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger }))
       .rejects.toThrow(/completed with skipped fields/);
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Skipping case-only update/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique-username migration completes/));
   });
 
   test('main fails clearly when the current bot user omits username', async () => {
