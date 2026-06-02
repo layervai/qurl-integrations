@@ -92,8 +92,8 @@ npm run apply-discord-metadata -- --dry-run
 ```
 
 Dry-run also verifies that every asset referenced by `discord-metadata.json`
-exists, can be read, stays under 10 MiB, and matches the local dimension rules
-for its Discord surface.
+exists, can be read, stays under the local byte cap for its Discord surface,
+and matches the local dimension rules.
 
 Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands

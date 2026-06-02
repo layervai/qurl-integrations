@@ -8,12 +8,13 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const metadataPath = path.join(root, 'discord-metadata.json');
 const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-const maxDiscordImageBytes = 10 * 1024 * 1024;
+const oneMiB = 1024 * 1024;
+const twoMiB = 2 * oneMiB;
 const imageRules = {
-  'bot.avatar': { maxBytes: maxDiscordImageBytes, minWidth: 128, minHeight: 128, aspect: [1, 1] },
-  'bot.banner': { maxBytes: maxDiscordImageBytes, minWidth: 600, minHeight: 240 },
-  'application.icon': { maxBytes: maxDiscordImageBytes, minWidth: 512, minHeight: 512, aspect: [1, 1] },
-  'application.cover_image': { maxBytes: maxDiscordImageBytes, minWidth: 800, minHeight: 450, aspect: [16, 9] },
+  'bot.avatar': { maxBytes: oneMiB, minWidth: 128, minHeight: 128, aspect: [1, 1] },
+  'bot.banner': { maxBytes: twoMiB, minWidth: 600, minHeight: 240 },
+  'application.icon': { maxBytes: oneMiB, minWidth: 512, minHeight: 512, aspect: [1, 1] },
+  'application.cover_image': { maxBytes: twoMiB, minWidth: 800, minHeight: 450, aspect: [16, 9] },
 };
 
 class PortalActionRequiredError extends Error {
@@ -351,6 +352,7 @@ if (require.main === module) {
 module.exports = {
   assertExpectedApplication,
   dataUri,
+  detectImageDimensions,
   errorDetails,
   main,
   PortalActionRequiredError,

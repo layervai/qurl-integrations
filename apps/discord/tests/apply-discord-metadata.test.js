@@ -5,6 +5,7 @@ const metadata = require('../discord-metadata.json');
 const {
   assertExpectedApplication,
   dataUri,
+  detectImageDimensions,
   errorDetails,
   main,
   PortalActionRequiredError,
@@ -57,6 +58,10 @@ function quietLogger() {
 const tmpMismatchAsset = path.join(__dirname, '.tmp-discord-metadata-mismatch.png');
 
 describe('apply-discord-metadata helpers', () => {
+  afterEach(() => {
+    if (fs.existsSync(tmpMismatchAsset)) fs.unlinkSync(tmpMismatchAsset);
+  });
+
   test('accepts the LayerV-owned Discord application identity', () => {
     expect(() => assertExpectedApplication({
       id: metadata.application.id,
@@ -151,6 +156,18 @@ describe('apply-discord-metadata helpers', () => {
     expect(() => dataUri(metadata.application.icon, 'application.cover_image')).toThrow(/expected approximately 16:9/);
   });
 
+  test('reads JPEG dimensions after standalone markers', () => {
+    const jpeg = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xd0,
+      0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x00, 0xc8,
+      0x03, 0x01, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+      0x00,
+    ]);
+
+    expect(detectImageDimensions(jpeg, 'image/jpeg')).toEqual({ width: 200, height: 100 });
+  });
+
   test('rejects referenced assets over the local byte limit', () => {
     const bytes = fs.readFileSync(path.join(__dirname, '..', metadata.application.icon));
 
@@ -171,12 +188,9 @@ describe('apply-discord-metadata helpers', () => {
 
   test('fails when asset extension does not match image bytes', () => {
     fs.writeFileSync(tmpMismatchAsset, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
-    try {
-      expect(() => dataUri('tests/.tmp-discord-metadata-mismatch.png'))
-        .toThrow(/extension \.png does not match detected image\/jpeg/);
-    } finally {
-      fs.unlinkSync(tmpMismatchAsset);
-    }
+
+    expect(() => dataUri('tests/.tmp-discord-metadata-mismatch.png'))
+      .toThrow(/extension \.png does not match detected image\/jpeg/);
   });
 
   test('redacts image data in dry-run summaries', () => {
