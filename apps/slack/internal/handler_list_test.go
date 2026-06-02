@@ -186,6 +186,45 @@ func TestFormatTunnelListLine(t *testing.T) {
 	}
 }
 
+// TestFormatTunnelListSection pins the richer, multi-line mrkdwn the interactive
+// /qurl list puts in each row's section block: the `$id` bold on its own line,
+// the Display Name beneath, and a faint "alias(es):" line — distinct from the
+// single-line plain-text fallback in [TestFormatTunnelListLine].
+func TestFormatTunnelListSection(t *testing.T) {
+	tunnel := func(slug, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_" + slug,
+			Type:        client.ResourceTypeTunnel,
+			Slug:        slug,
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		want         string
+	}{
+		{name: "slug only, no Display Name", resource: tunnel(testListAliasProdDB, ""), boundAliases: nil, want: "*`$prod-db`*"},
+		{name: "slug + Display Name", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "*`$prod-db`*\nProd database"},
+		{name: "slug + one non-slug alias, no Display Name", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "*`$prod-db`*\n_alias:_ `$grafana`"},
+		{name: "slug + Display Name + two aliases (self-binding slug excluded)", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana, "metrics"}, want: "*`$prod-db`*\nProd database\n_aliases:_ `$grafana`, `$metrics`"},
+		{name: "only the self-binding slug bound — no aliases line", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB}, want: "*`$prod-db`*\nProd database"},
+		{name: "slug-less, alias-less tunnel spells out the missing ID", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "*`r_noslug0001`*\n_No ID set — ask your Slack admin to set one._"},
+		{name: "slug-less tunnel keeps its Display Name above the no-ID note", resource: &client.Resource{ResourceID: "r_noslug0002", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Description: "ops jump host"}, boundAliases: nil, want: "*`r_noslug0002`*\nops jump host\n_No ID set — ask your Slack admin to set one._"},
+		{name: "slug-less tunnel promotes first bound alias to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "*`$grafana`*\n_alias:_ `$metrics`"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := tunnelDisplayToken(tc.resource, tc.boundAliases)
+			if got := formatTunnelListSection(tc.resource, tc.boundAliases, token); got != tc.want {
+				t.Errorf("formatTunnelListSection = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestChannelAliasesByResourceID fences the best-effort posture of the
 // alias-display helper DIRECTLY (TestHandleList_ShowsBoundAliases only
 // reaches it through the full happy path): the two short-circuits and the

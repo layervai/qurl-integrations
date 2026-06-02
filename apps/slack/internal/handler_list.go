@@ -52,6 +52,12 @@ const listTunnelsEmptyMessage = ":mag: No tunnels are available in this channel 
 // as typing `/qurl get $<slug>`. (Brand spelling: lowercase q, uppercase URL.)
 const listCreateButtonLabel = "Create qURL"
 
+// listHeaderBlockText titles the interactive /qurl list. It rides on a `header`
+// block, whose text object is plain_text — so the `:lock:` shortcode renders as
+// an icon but there is no mrkdwn bold. The bold "*Protected Tunnel Resources:*"
+// form still leads the plain-text fallback `body`.
+const listHeaderBlockText = ":lock: Protected Tunnel Resources"
+
 // listCreateButtonMaxRows caps how many tunnel rows /qurl list renders as
 // interactive section+button blocks. Slack rejects a message with more
 // than 50 blocks; the rendered shape is header (1) + N row sections +
@@ -356,7 +362,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			blockCap = len(resources)*2 + 3
 		}
 		blocks = make([]any, 0, blockCap)
-		blocks = append(blocks, sectionBlock("*Protected Tunnel Resources:*"))
+		blocks = append(blocks, headerBlock(listHeaderBlockText))
 	}
 	for i := range resources {
 		line := formatTunnelListLine(&resources[i], aliasMap[resources[i].ResourceID])
@@ -365,27 +371,38 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			continue
 		}
 		// displayTok is "" only for a slug-less, alias-less tunnel — the
-		// "(no slug …)" row, which has no `$<token>` that `/qurl get` (or
-		// the button) could mint against — so that row gets no button.
+		// "(no ID …)" row, which has no `$<token>` that `/qurl get` (or a
+		// button) could mint against — so that row gets no button.
 		tok := displayTok[resources[i].ResourceID]
+		// The block path renders a richer, multi-line section than the
+		// plain-text fallback `line`: the `$id` bold on its own row, the
+		// Display Name beneath it, and a faint aliases line when present. It
+		// takes the precomputed display token so the section can never name a
+		// different token than the row's button mints against.
+		sectionText := formatTunnelListSection(&resources[i], aliasMap[resources[i].ResourceID], tok)
 		if tok == "" {
-			blocks = append(blocks, sectionBlock(line))
+			blocks = append(blocks, sectionBlock(sectionText))
 			continue
 		}
-		// Admin rows get Create qURL + Edit in an actions block; the Edit
-		// button carries the row's edit snapshot so opening the modal needs no
-		// extra read. A snapshot too large for a button value falls back to the
-		// Create-only accessory button.
+		// Create qURL is the row's headline action. It renders as the primary
+		// (filled) button ONLY when an Edit button sits beside it — admin rows,
+		// where primary expresses the Create-over-Edit hierarchy. A create-only
+		// row has nothing to outrank, and a whole column of lone primaries reads
+		// as noise (Slack advises using `primary` sparingly), so it gets a
+		// default-style button. Admin rows pair the two in an actions block; the
+		// Edit button carries the row's edit snapshot so opening the modal needs
+		// no extra read. A snapshot too large for a button value falls through to
+		// the Create-only accessory path below.
 		if showEdit {
 			if editVal, ok := buildTunnelEditButtonValue(resources[i].ResourceID, tok, resources[i].Description, aliasMap[resources[i].ResourceID]); ok {
-				blocks = append(blocks, sectionBlock(line), actionsBlock(
-					buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
+				blocks = append(blocks, sectionBlock(sectionText), actionsBlock(
+					primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
 					buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
 				))
 				continue
 			}
 		}
-		blocks = append(blocks, sectionWithButton(line, listCreateButtonLabel, listCreateQurlActionID, tok))
+		blocks = append(blocks, sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok)))
 	}
 
 	body := "*Protected Tunnel Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
@@ -534,18 +551,8 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	} else {
 		line = "• `$" + token + "`"
 	}
-	extras := make([]string, 0, len(boundAliases))
-	for _, a := range boundAliases {
-		if a != token {
-			extras = append(extras, "`$"+a+"`")
-		}
-	}
-	if len(extras) > 0 {
-		label := "aliases: "
-		if len(extras) == 1 {
-			label = "alias: "
-		}
-		line += " (" + label + strings.Join(extras, ", ") + ")"
+	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+		line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
 	}
 	// Show the tunnel's Display Name next to the id. The description field
 	// doubles as the Display Name (see handleSetDisplayName) and is always
@@ -555,6 +562,66 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 		line += " — " + r.Description
 	}
 	return line
+}
+
+// formatTunnelListSection renders one tunnel as the mrkdwn body of a `section`
+// block for the interactive /qurl list. It lays the row out for buttons rather
+// than a plain line: the `$id` bold on its own row, the Display Name beneath
+// it, and a faint "aliases:" line when extra channel aliases are bound. `token`
+// is the row's precomputed display token (see [tunnelDisplayToken]) — the same
+// value the row's button mints against, so the section can't name a different
+// one. The plain-text fallback (and notifications) still use
+// [formatTunnelListLine]; this richer form is block-only. A slug-less,
+// alias-less tunnel has an empty token, so it renders the bare resource_id,
+// keeps the Display Name (the only human-readable handle such a row has), and
+// spells out that it can't be used until an admin sets an ID — matching the
+// fallback's "(no ID …)" honesty, which also retains the Display Name.
+func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
+	var b strings.Builder
+	if token == "" {
+		b.WriteString("*`" + r.ResourceID + "`*")
+		if r.Description != "" {
+			b.WriteString("\n" + r.Description)
+		}
+		b.WriteString("\n_No ID set — ask your Slack admin to set one._")
+		return b.String()
+	}
+	b.WriteString("*`$" + token + "`*")
+	if r.Description != "" {
+		b.WriteString("\n" + r.Description)
+	}
+	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+		b.WriteString("\n_" + aliasNoun(len(extras)) + ":_ " + strings.Join(extras, ", "))
+	}
+	return b.String()
+}
+
+// aliasNoun returns "alias" or "aliases" to agree with n. Shared by the
+// plain-text and block list formatters so the singular/plural rule lives in one
+// place.
+func aliasNoun(n int) string {
+	if n == 1 {
+		return "alias"
+	}
+	return "aliases"
+}
+
+// extraAliasTokens returns the channel-bound aliases other than the row's
+// primary token, each wrapped as a mrkdwn `$alias` code span and preserving
+// order. It layers display formatting over [aliasesExcluding] so the "exclude
+// the primary token" rule has a single home. Shared by the plain-text
+// [formatTunnelListLine] and the block [formatTunnelListSection] so the two
+// can't drift on which aliases a row advertises.
+func extraAliasTokens(boundAliases []string, token string) []string {
+	// Mutates the slice in place — safe only because aliasesExcluding returns a
+	// freshly make-allocated slice, never a sub-slice of boundAliases. Preserve
+	// that contract if aliasesExcluding ever changes, or the caller's
+	// boundAliases (and the edit-button alias snapshot) would be corrupted.
+	extras := aliasesExcluding(boundAliases, token)
+	for i, a := range extras {
+		extras[i] = "`$" + a + "`"
+	}
+	return extras
 }
 
 // channelAliasesByResourceID builds resource_id → sorted channel-bound
