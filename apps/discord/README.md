@@ -65,9 +65,10 @@ developer-portal app:
 2. General Information → set the application name to **qURL (sandbox)**, upload
    `assets/discord-app-icon.png`, add the description from
    `discord-metadata.json`, and set the privacy/terms URLs listed there.
-3. Bot → set the bot username to **qURL**, upload
-   `assets/discord-avatar.png`, and enable **Server Members Intent** under
-   Privileged Gateway Intents.
+3. Bot → set the bot username to **qURL**. Discord's unique-username system
+   stores this lowercase as `qurl`; the application/profile branding remains
+   **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
+   Intent** under Privileged Gateway Intents.
 4. Installation → default install settings should request `bot` and
    `applications.commands` with permissions `2147503104`.
 5. Copy the bot token.
@@ -106,7 +107,9 @@ username system (`discriminator: "0"`), a lowercase case-only match such as
 live `qurl` vs desired `qURL` is treated as applied with a warning because
 unique usernames are lowercase. A legacy case-only mismatch exits `1` after
 skipping the username PATCH so the operator can verify the live outcome without
-burning Discord's username rate limit. Application name and
+burning Discord's username rate limit; rerun after Discord reports
+`discriminator: "0"` to confirm the lowercase unique username converges.
+Application name and
 legal URLs are Developer Portal-only; if API writes succeed but the app name
 still differs from `discord-metadata.json`, the script exits `2` after printing
 the required portal action. If both happen in one run, the API partial failure
