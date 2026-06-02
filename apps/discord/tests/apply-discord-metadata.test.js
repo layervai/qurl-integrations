@@ -170,6 +170,19 @@ describe('apply-discord-metadata helpers', () => {
     })).rejects.toMatchObject({ retryAfter: '12.5' });
   });
 
+  test('omits the JSON content-type header on GET requests', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({ username: metadata.bot.username }));
+
+    await expect(request('GET', '/users/@me', undefined, {
+      token: 'test-token',
+      fetchImpl,
+    })).resolves.toEqual({ username: metadata.bot.username });
+
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({
+      Authorization: 'Bot test-token',
+    });
+  });
+
   test('marks portal-only drift with a distinct exit code', () => {
     expect(new PortalActionRequiredError('portal step pending').exitCode).toBe(2);
   });
@@ -229,6 +242,17 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/normalize username casing/));
+  });
+
+  test('main fails clearly when the current bot user omits username', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ id: 'bot-user-id' }),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
+      .rejects.toThrow(/did not include username/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   test('main dry-run emits a summary without a token or network calls', async () => {

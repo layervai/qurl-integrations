@@ -79,12 +79,13 @@ function detectImageMime(bytes) {
 }
 
 async function request(method, apiPath, body, { token, fetchImpl = fetch } = {}) {
+  const headers = {
+    Authorization: `Bot ${token}`,
+  };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
   const res = await fetchImpl(`https://discord.com/api/v10${apiPath}`, {
     method,
-    headers: {
-      Authorization: `Bot ${token}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -187,6 +188,9 @@ async function main({
   logger.log(`Verified Discord application: ${currentApp.name} (${currentApp.id})`);
 
   const currentUser = await request('GET', '/users/@me', undefined, requestOptions);
+  if (!currentUser.username) {
+    throw new Error('GET /users/@me did not include username. Refusing to apply bot identity metadata.');
+  }
 
   if (currentUser.username === metadata.bot.username) {
     logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
