@@ -162,6 +162,10 @@ describe('apply-discord-metadata helpers', () => {
     })).toThrow(/install_params\.permissions/);
     expect(() => validateMetadata({
       ...metadata,
+      application: { ...metadata.application, tags: [] },
+    })).toThrow(/application\.tags/);
+    expect(() => validateMetadata({
+      ...metadata,
       application: { ...metadata.application, tags: ['a', 'b', 'c', 'd', 'e', 'f'] },
     })).toThrow(/application\.tags/);
     expect(() => validateMetadata({

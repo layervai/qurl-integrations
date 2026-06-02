@@ -108,11 +108,11 @@ Exit codes:
   application/profile branding remains **qURL**.
 - `1` — partial API apply. The script prints `retry_after` when Discord
   rate-limits username/avatar/banner updates, flags ignored avatar/banner
-  writes, and keeps `1` if a portal action is also needed. Wait for
-  `retry_after` and rerun. For legacy case-only username drift, rerun after
-  Discord reports `discriminator: "0"` to confirm the lowercase unique
-  username converges; app and image fields may have applied while this exit
-  remains non-zero.
+  writes, and keeps `1` if a portal action is also needed. The script does not
+  sleep/retry automatically; wait for `retry_after` and rerun. For legacy
+  case-only username drift, rerun after Discord reports `discriminator: "0"` to
+  confirm the lowercase unique username converges; app and image fields may
+  have applied while this exit remains non-zero.
 - `2` — API writes completed, but the application name still differs from
   `discord-metadata.json`; update the name in Developer Portal.
 - `3` — fatal application metadata PATCH failure. The application fields did

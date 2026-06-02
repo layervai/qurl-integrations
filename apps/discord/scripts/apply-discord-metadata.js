@@ -90,7 +90,7 @@ function validateMetadata(doc = loadMetadata()) {
     throw new Error('discord-metadata.json must set application.install_params.permissions to a numeric string.');
   }
   const tags = doc.application?.tags;
-  if (!Array.isArray(tags) || tags.length > 5 || tags.some((tag) => typeof tag !== 'string' || !tag)) {
+  if (!Array.isArray(tags) || tags.length < 1 || tags.length > 5 || tags.some((tag) => typeof tag !== 'string' || !tag)) {
     throw new Error('discord-metadata.json must set application.tags to 1-5 non-empty strings.');
   }
   validateHttpsUrl(doc.application.terms_of_service_url, 'application.terms_of_service_url');
@@ -278,6 +278,8 @@ async function main({
 
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
+  // bot.username is the cased brand source only. Discord's bot-user API has no
+  // display-name field, so the live PATCH applies bot.unique_username below.
   const brandUsername = doc.bot.username;
   // The API applies Discord's lowercase unique username; app/profile branding
   // carries the cased qURL brand via application metadata and portal fields.
@@ -296,6 +298,7 @@ async function main({
     icon: dataUri(doc.application.icon, 'application.icon'),
     cover_image: dataUri(doc.application.cover_image, 'application.cover_image'),
     tags: doc.application.tags,
+    // Discord v10 Edit Current Application documents install_params as writable.
     install_params: doc.application.install_params,
   };
 
@@ -338,6 +341,8 @@ async function main({
   }
 
   if (currentUser.username === brandUsername) {
+    // Legacy pre-migration state: avoid a case-only username PATCH until #860
+    // verifies the live Discord account's unique-username migration outcome.
     logger.log(`Bot username already ${brandUsername}; legacy pre-migration casing matches the brand.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
     if (currentUser.discriminator === '0' || currentUser.discriminator === undefined) {
