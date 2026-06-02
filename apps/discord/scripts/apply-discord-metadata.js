@@ -46,7 +46,31 @@ function dataUri(relPath) {
   if (!mime) {
     throw new Error(`Discord metadata asset ${relPath} uses unsupported image extension ${ext || '(none)'}. Use PNG or JPEG.`);
   }
-  return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
+  const bytes = fs.readFileSync(filePath);
+  const detectedMime = detectImageMime(bytes);
+  if (!detectedMime) {
+    throw new Error(`Discord metadata asset ${relPath} content is not a PNG or JPEG image.`);
+  }
+  if (detectedMime !== mime) {
+    throw new Error(`Discord metadata asset ${relPath} extension ${ext} does not match detected ${detectedMime}.`);
+  }
+  return `data:${mime};base64,${bytes.toString('base64')}`;
+}
+
+function detectImageMime(bytes) {
+  if (bytes.length >= 8
+    && bytes[0] === 0x89
+    && bytes.toString('ascii', 1, 4) === 'PNG'
+    && bytes[4] === 0x0d
+    && bytes[5] === 0x0a
+    && bytes[6] === 0x1a
+    && bytes[7] === 0x0a) {
+    return 'image/png';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  return undefined;
 }
 
 async function request(method, apiPath, body, { token, fetchImpl = fetch } = {}) {
@@ -158,18 +182,12 @@ async function main({
 
   const currentUser = await request('GET', '/users/@me', undefined, requestOptions);
 
-  const updatedApp = await request('PATCH', '/applications/@me', appPatch, requestOptions);
-  logger.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
-
-  if (metadata.application.name !== updatedApp.name) {
-    hadPortalActionRequired = true;
-    logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
-  }
-
   if (currentUser.username === metadata.bot.username) {
     logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
   } else {
     try {
+      // Keep username separate from bot images so a name conflict/rate limit
+      // does not block avatar/banner updates for the same verified app.
       const updatedUser = await request('PATCH', '/users/@me', botUsernamePatch, requestOptions);
       logger.log(`Updated bot username: ${updatedUser.username}`);
     } catch (err) {
@@ -188,6 +206,14 @@ async function main({
       hadPartialFailure = true;
       logger.warn(`Bot image update skipped: ${errorDetails(err)}`);
     }
+  }
+
+  const updatedApp = await request('PATCH', '/applications/@me', appPatch, requestOptions);
+  logger.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
+
+  if (metadata.application.name !== updatedApp.name) {
+    hadPortalActionRequired = true;
+    logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
   }
 
   logger.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);

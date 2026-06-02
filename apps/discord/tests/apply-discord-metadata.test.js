@@ -1,3 +1,6 @@
+const fs = require('fs');
+const path = require('path');
+
 const metadata = require('../discord-metadata.json');
 const {
   assertExpectedApplication,
@@ -48,6 +51,8 @@ function quietLogger() {
     warn: jest.fn(),
   };
 }
+
+const tmpMismatchAsset = path.join(__dirname, '.tmp-discord-metadata-mismatch.png');
 
 describe('apply-discord-metadata helpers', () => {
   test('accepts the LayerV-owned Discord application identity', () => {
@@ -113,6 +118,16 @@ describe('apply-discord-metadata helpers', () => {
     expect(() => dataUri('discord-metadata.json')).toThrow(/unsupported image extension \.json/);
   });
 
+  test('fails when asset extension does not match image bytes', () => {
+    fs.writeFileSync(tmpMismatchAsset, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    try {
+      expect(() => dataUri('tests/.tmp-discord-metadata-mismatch.png'))
+        .toThrow(/extension \.png does not match detected image\/jpeg/);
+    } finally {
+      fs.unlinkSync(tmpMismatchAsset);
+    }
+  });
+
   test('redacts image data in dry-run summaries', () => {
     expect(summarize({
       avatar: 'data:image/png;base64,abc123',
@@ -141,8 +156,8 @@ describe('apply-discord-metadata helpers', () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse('Qurl Bot')),
       jsonResponse({ username: metadata.bot.username }),
-      jsonResponse(appResponse('Qurl Bot')),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse('Qurl Bot')),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
@@ -155,8 +170,8 @@ describe('apply-discord-metadata helpers', () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
       jsonResponse({ username: metadata.bot.username }),
-      jsonResponse(appResponse()),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
@@ -183,25 +198,27 @@ describe('apply-discord-metadata helpers', () => {
       .rejects.toThrow(/DISCORD_TOKEN is required/);
   });
 
-  test('main treats the application PATCH as fatal before user writes', async () => {
+  test('main treats the application PATCH as fatal after bot identity writes', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
       jsonResponse({ username: 'Qurl Bot' }),
+      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse({ message: 'rate limited', retry_after: '12.5' }, { status: 429 }),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
       .rejects.toThrow(/PATCH \/applications\/@me failed with 429/);
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
   test('main treats a username 429 as a partial apply failure', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
       jsonResponse({ username: 'Qurl Bot' }),
-      jsonResponse(appResponse()),
       jsonResponse({ message: 'rate limited', retry_after: '12.5' }, { status: 429 }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
@@ -213,9 +230,9 @@ describe('apply-discord-metadata helpers', () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse('Qurl Bot')),
       jsonResponse({ username: 'Qurl Bot' }),
-      jsonResponse(appResponse('Qurl Bot')),
       jsonResponse({ message: 'rate limited', retry_after: '12.5' }, { status: 429 }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse('Qurl Bot')),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
