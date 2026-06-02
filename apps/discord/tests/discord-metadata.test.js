@@ -32,6 +32,7 @@ describe('discord-metadata.json', () => {
 
     expect(readme).toContain(`Application ID: \`${metadata.application.id}\``);
     expect(readme).toContain(`Public Key: \`${metadata.application.public_key}\``);
-    expect(envExample).toContain(`DISCORD_CLIENT_ID=${metadata.application.id}`);
+    expect(envExample).toContain(`LayerV sandbox app: ${metadata.application.id}`);
+    expect(envExample).toContain('DISCORD_CLIENT_ID=your_discord_application_client_id');
   });
 });

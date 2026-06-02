@@ -230,6 +230,7 @@ async function main({
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
 
+  // Build payloads before the dry-run branch so dry-run validates local assets.
   const botUsernamePatch = { username: metadata.bot.username };
   const botImagePatch = {
     ...(metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar, 'bot.avatar') } : {}),

@@ -57,10 +57,13 @@ function quietLogger() {
 
 const tmpMismatchAsset = path.join(__dirname, '.tmp-discord-metadata-mismatch.png');
 
+function cleanupTmpMismatchAsset() {
+  if (fs.existsSync(tmpMismatchAsset)) fs.unlinkSync(tmpMismatchAsset);
+}
+
 describe('apply-discord-metadata helpers', () => {
-  afterEach(() => {
-    if (fs.existsSync(tmpMismatchAsset)) fs.unlinkSync(tmpMismatchAsset);
-  });
+  afterEach(cleanupTmpMismatchAsset);
+  afterAll(cleanupTmpMismatchAsset);
 
   test('accepts the LayerV-owned Discord application identity', () => {
     expect(() => assertExpectedApplication({
