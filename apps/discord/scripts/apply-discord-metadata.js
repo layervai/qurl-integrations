@@ -7,9 +7,10 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const metadataPath = path.join(root, 'discord-metadata.json');
-const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+let metadataCache;
 const oneMiB = 1024 * 1024;
 const twoMiB = 2 * oneMiB;
+const aspectRatioTolerance = 0.01; // Keep committed Discord brand assets on exact target ratios.
 const imageRules = {
   'bot.avatar': { maxBytes: oneMiB, minWidth: 128, minHeight: 128, aspect: [1, 1] },
   'bot.banner': { maxBytes: twoMiB, minWidth: 600, minHeight: 240 },
@@ -24,7 +25,27 @@ class PortalActionRequiredError extends Error {
   }
 }
 
-function validateMetadata(doc = metadata) {
+function loadMetadata() {
+  if (metadataCache) return metadataCache;
+  try {
+    metadataCache = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    return metadataCache;
+  } catch (err) {
+    throw new Error(`Failed to read ${metadataPath}. Check discord-metadata.json: ${err.message}`);
+  }
+}
+
+function validateHttpsUrl(value, field) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' && url.hostname) return;
+  } catch {
+    // Fall through to the guided metadata error below.
+  }
+  throw new Error(`discord-metadata.json must set ${field} to an https URL.`);
+}
+
+function validateMetadata(doc = loadMetadata()) {
   if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
   if (!doc.application?.name) throw new Error('discord-metadata.json must set application.name.');
   if (!doc.application?.description) throw new Error('discord-metadata.json must set application.description.');
@@ -49,6 +70,8 @@ function validateMetadata(doc = metadata) {
   if (!/^\d+$/.test(doc.application?.install_params?.permissions || '')) {
     throw new Error('discord-metadata.json must set application.install_params.permissions to a numeric string.');
   }
+  validateHttpsUrl(doc.application.terms_of_service_url, 'application.terms_of_service_url');
+  validateHttpsUrl(doc.application.privacy_policy_url, 'application.privacy_policy_url');
 }
 
 function dataUri(relPath, field) {
@@ -154,7 +177,7 @@ function validateImageRule(relPath, bytes, mime, rule) {
     const [widthRatio, heightRatio] = rule.aspect;
     const expectedRatio = widthRatio / heightRatio;
     const actualRatio = dimensions.width / dimensions.height;
-    if (Math.abs(actualRatio - expectedRatio) > 0.01) {
+    if (Math.abs(actualRatio - expectedRatio) > aspectRatioTolerance) {
       throw new Error(`Discord metadata asset ${relPath} is ${dimensions.width}x${dimensions.height}; expected approximately ${widthRatio}:${heightRatio} aspect ratio.`);
     }
   }
@@ -205,7 +228,7 @@ function errorDetails(err) {
   return `${err.status || 'error'}${retry} ${JSON.stringify(err.body || err.message)}`;
 }
 
-function assertExpectedApplication(app, doc = metadata) {
+function assertExpectedApplication(app, doc = loadMetadata()) {
   if (app.id !== doc.application.id) {
     throw new Error(`DISCORD_TOKEN belongs to application ${app.id}; expected LayerV application ${doc.application.id}. Refusing to update the wrong Discord app.`);
   }
@@ -224,7 +247,8 @@ async function main({
   fetchImpl = fetch,
   logger = console,
 } = {}) {
-  validateMetadata();
+  const doc = loadMetadata();
+  validateMetadata(doc);
   if (!dryRun && !token) {
     throw new Error('DISCORD_TOKEN is required. Export the target bot token before running this script.');
   }
@@ -233,34 +257,34 @@ async function main({
   let hadPortalActionRequired = false;
 
   // Build payloads before the dry-run branch so dry-run validates local assets.
-  const botUsernamePatch = { username: metadata.bot.username };
+  const botUsernamePatch = { username: doc.bot.username };
   const botImagePatch = {
-    ...(metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar, 'bot.avatar') } : {}),
-    ...(metadata.bot.banner ? { banner: dataUri(metadata.bot.banner, 'bot.banner') } : {}),
+    ...(doc.bot.avatar ? { avatar: dataUri(doc.bot.avatar, 'bot.avatar') } : {}),
+    ...(doc.bot.banner ? { banner: dataUri(doc.bot.banner, 'bot.banner') } : {}),
   };
   // Discord returns stored asset hashes, not source-file hashes; keep this
   // authoritative PATCH fatal instead of guessing at image no-op detection.
   const appPatch = {
-    description: metadata.application.description,
-    icon: dataUri(metadata.application.icon, 'application.icon'),
-    cover_image: dataUri(metadata.application.cover_image, 'application.cover_image'),
-    tags: metadata.application.tags,
-    install_params: metadata.application.install_params,
+    description: doc.application.description,
+    icon: dataUri(doc.application.icon, 'application.icon'),
+    cover_image: dataUri(doc.application.cover_image, 'application.cover_image'),
+    tags: doc.application.tags,
+    install_params: doc.application.install_params,
   };
 
   if (dryRun) {
     logger.log(JSON.stringify({
       expected_application: {
-        id: metadata.application.id,
-        public_key: metadata.application.public_key,
+        id: doc.application.id,
+        public_key: doc.application.public_key,
       },
       bot_username: summarize(botUsernamePatch),
       bot_images: Object.keys(botImagePatch).length ? summarize(botImagePatch) : null,
       application: summarize(appPatch),
-      application_name: metadata.application.name,
+      application_name: doc.application.name,
       portal_only: {
-        terms_of_service_url: metadata.application.terms_of_service_url,
-        privacy_policy_url: metadata.application.privacy_policy_url,
+        terms_of_service_url: doc.application.terms_of_service_url,
+        privacy_policy_url: doc.application.privacy_policy_url,
       },
     }, null, 2));
     return;
@@ -268,7 +292,7 @@ async function main({
 
   const requestOptions = { token, fetchImpl };
   const currentApp = await request('GET', '/applications/@me', undefined, requestOptions);
-  assertExpectedApplication(currentApp);
+  assertExpectedApplication(currentApp, doc);
   logger.log(`Verified Discord application: ${currentApp.name} (${currentApp.id})`);
 
   const currentUser = await request('GET', '/users/@me', undefined, requestOptions);
@@ -276,14 +300,14 @@ async function main({
     throw new Error('GET /users/@me did not include username. Refusing to apply bot identity metadata.');
   }
 
-  if (currentUser.username === metadata.bot.username) {
-    logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
-  } else if (currentUser.username.toLowerCase() === metadata.bot.username.toLowerCase()) {
+  if (currentUser.username === doc.bot.username) {
+    logger.log(`Bot username already ${doc.bot.username}; skipping username update.`);
+  } else if (currentUser.username.toLowerCase() === doc.bot.username.toLowerCase()) {
     if (currentUser.discriminator === '0') {
       logger.warn(`Bot username is ${currentUser.username}; Discord unique usernames are lowercase. Treating case-only match as applied; verify the live display outcome in #860.`);
     } else {
       hadPartialFailure = true;
-      logger.warn(`Bot username is ${currentUser.username}; desired ${metadata.bot.username}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
+      logger.warn(`Bot username is ${currentUser.username}; desired ${doc.bot.username}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
     }
   } else {
     try {
@@ -330,12 +354,12 @@ async function main({
   }
   logger.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
-  if (metadata.application.name !== updatedApp.name) {
+  if (doc.application.name !== updatedApp.name) {
     hadPortalActionRequired = true;
-    logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
+    logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(doc.application.name)} in Discord Developer Portal.`);
   }
 
-  logger.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
+  logger.log(`Portal-only URLs: terms=${doc.application.terms_of_service_url}, privacy=${doc.application.privacy_policy_url}`);
   if (hadPartialFailure) {
     const portalSuffix = hadPortalActionRequired ? ' Developer Portal action is also required; see warnings above.' : '';
     throw new Error(`Discord metadata apply completed with skipped fields; see warnings above.${portalSuffix}`);

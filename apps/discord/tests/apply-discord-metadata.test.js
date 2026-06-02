@@ -147,6 +147,14 @@ describe('apply-discord-metadata helpers', () => {
         install_params: { ...metadata.application.install_params, permissions: 'not-a-number' },
       },
     })).toThrow(/install_params\.permissions/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: { ...metadata.application, terms_of_service_url: 'http://layerv.ai/terms' },
+    })).toThrow(/application\.terms_of_service_url/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: { ...metadata.application, privacy_policy_url: 'not-a-url' },
+    })).toThrow(/application\.privacy_policy_url/);
   });
 
   test('renders referenced PNG assets as data URIs', () => {
