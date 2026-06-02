@@ -20,9 +20,9 @@ function validateMetadata(doc = metadata) {
   }
 }
 
-function dataUri(relPath, baseRoot = root) {
+function dataUri(relPath) {
   if (!relPath) return undefined;
-  const filePath = path.join(baseRoot, relPath);
+  const filePath = path.join(root, relPath);
   if (!fs.existsSync(filePath)) {
     throw new Error(`Discord metadata asset ${relPath} does not exist at ${filePath}. Check discord-metadata.json.`);
   }
@@ -68,18 +68,13 @@ function summarize(value) {
   return value;
 }
 
-function botTag(user) {
-  if (user.discriminator && user.discriminator !== '0') return `${user.username}#${user.discriminator}`;
-  return user.username;
-}
-
 function errorDetails(err) {
   const retry = err.retryAfter ? ` retry_after=${err.retryAfter}s` : '';
   return `${err.status || 'error'}${retry} ${JSON.stringify(err.body || err.message)}`;
 }
 
 function assertExpectedApplication(app, doc = metadata) {
-  if (String(app.id) !== doc.application.id) {
+  if (app.id !== doc.application.id) {
     throw new Error(`DISCORD_TOKEN belongs to application ${app.id}; expected LayerV application ${doc.application.id}. Refusing to update the wrong Discord app.`);
   }
   const actualPublicKey = app.verify_key || app.public_key;
@@ -135,7 +130,7 @@ async function main() {
   const updatedApp = await request('PATCH', '/applications/@me', appPatch);
   console.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
-  if (metadata.application.name && metadata.application.name !== updatedApp.name) {
+  if (metadata.application.name !== updatedApp.name) {
     try {
       const renamedApp = await request('PATCH', '/applications/@me', { name: metadata.application.name });
       if (renamedApp.name === metadata.application.name) {
@@ -154,7 +149,7 @@ async function main() {
   } else {
     try {
       const updatedUser = await request('PATCH', '/users/@me', botUsernamePatch);
-      console.log(`Updated bot username: ${botTag(updatedUser)}`);
+      console.log(`Updated bot username: ${updatedUser.username}`);
     } catch (err) {
       hadPartialFailure = true;
       console.warn(`Bot username update skipped: ${errorDetails(err)}`);
@@ -190,6 +185,7 @@ async function main() {
 if (require.main === module) {
   main().catch((err) => {
     console.error(err.message);
+    if (err.retryAfter) console.error(`retry_after=${err.retryAfter}s`);
     if (err.body) console.error(JSON.stringify(err.body));
     process.exit(1);
   });
@@ -197,8 +193,8 @@ if (require.main === module) {
 
 module.exports = {
   assertExpectedApplication,
-  botTag,
   dataUri,
+  errorDetails,
   summarize,
   validateMetadata,
 };

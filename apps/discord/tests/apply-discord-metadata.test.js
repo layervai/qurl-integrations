@@ -1,10 +1,8 @@
-const path = require('path');
-
 const metadata = require('../discord-metadata.json');
 const {
   assertExpectedApplication,
-  botTag,
   dataUri,
+  errorDetails,
   summarize,
   validateMetadata,
 } = require('../scripts/apply-discord-metadata');
@@ -44,12 +42,12 @@ describe('apply-discord-metadata helpers', () => {
   });
 
   test('renders referenced PNG assets as data URIs', () => {
-    const uri = dataUri(metadata.application.icon, path.join(__dirname, '..'));
+    const uri = dataUri(metadata.application.icon);
     expect(uri).toMatch(/^data:image\/png;base64,/);
   });
 
   test('fails with a guided error when an asset is missing', () => {
-    expect(() => dataUri('assets/does-not-exist.png', path.join(__dirname, '..'))).toThrow(/does not exist/);
+    expect(() => dataUri('assets/does-not-exist.png')).toThrow(/does not exist/);
   });
 
   test('redacts image data in dry-run summaries', () => {
@@ -62,8 +60,11 @@ describe('apply-discord-metadata helpers', () => {
     });
   });
 
-  test('formats bot tags for old and new Discord usernames', () => {
-    expect(botTag({ username: 'qURL', discriminator: '0' })).toBe('qURL');
-    expect(botTag({ username: 'qURL', discriminator: '1234' })).toBe('qURL#1234');
+  test('surfaces Discord retry-after values in warnings', () => {
+    expect(errorDetails({
+      status: 429,
+      retryAfter: '12.5',
+      body: { message: 'You are being rate limited.' },
+    })).toContain('retry_after=12.5s');
   });
 });

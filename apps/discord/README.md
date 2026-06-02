@@ -87,6 +87,9 @@ Preview the API payload without making changes:
 npm run apply-discord-metadata -- --dry-run
 ```
 
+Dry-run also verifies that every asset referenced by `discord-metadata.json`
+exists and can be read.
+
 Discord rate-limits bot username/avatar/banner updates. If a sub-field
 returns `429`, the script prints `retry_after` when Discord provides it and
 exits non-zero so automation does not treat a partial apply as complete.
