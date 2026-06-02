@@ -140,8 +140,8 @@ describe('apply-discord-metadata helpers', () => {
   });
 
   test('rejects referenced assets with the wrong local dimensions', () => {
-    expect(() => dataUri(metadata.application.cover_image, 'application.icon')).toThrow(/expected 1:1/);
-    expect(() => dataUri(metadata.application.icon, 'application.cover_image')).toThrow(/expected 16:9/);
+    expect(() => dataUri(metadata.application.cover_image, 'application.icon')).toThrow(/expected approximately 1:1/);
+    expect(() => dataUri(metadata.application.icon, 'application.cover_image')).toThrow(/expected approximately 16:9/);
   });
 
   test('rejects referenced assets over the local byte limit', () => {
@@ -360,6 +360,21 @@ describe('apply-discord-metadata helpers', () => {
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
       .rejects.toThrow(/completed with skipped fields/);
     expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  test('main treats a missing bot banner response hash as a partial apply failure', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ avatar: 'avatar-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger }))
+      .rejects.toThrow(/completed with skipped fields/);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Bot banner update skipped/));
   });
 
   test('main preserves bot partial-failure context when the app PATCH also fails', async () => {

@@ -115,6 +115,7 @@ function detectJpegDimensions(bytes) {
     const marker = bytes[offset];
     offset += 1;
     if (marker === 0xd9 || marker === 0xda) return undefined;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
     if (offset + 2 > bytes.length) return undefined;
     const segmentLength = bytes.readUInt16BE(offset);
     if (segmentLength < 2 || offset + segmentLength > bytes.length) return undefined;
@@ -148,8 +149,10 @@ function validateImageRule(relPath, bytes, mime, rule) {
   }
   if (rule.aspect) {
     const [widthRatio, heightRatio] = rule.aspect;
-    if (dimensions.width * heightRatio !== dimensions.height * widthRatio) {
-      throw new Error(`Discord metadata asset ${relPath} is ${dimensions.width}x${dimensions.height}; expected ${widthRatio}:${heightRatio} aspect ratio.`);
+    const expectedRatio = widthRatio / heightRatio;
+    const actualRatio = dimensions.width / dimensions.height;
+    if (Math.abs(actualRatio - expectedRatio) > 0.01) {
+      throw new Error(`Discord metadata asset ${relPath} is ${dimensions.width}x${dimensions.height}; expected approximately ${widthRatio}:${heightRatio} aspect ratio.`);
     }
   }
 }
@@ -294,6 +297,14 @@ async function main({
       // Discord returns stored asset hashes, not source-file hashes; upload bot
       // images together to limit request count until safe no-op detection exists.
       const imageUser = await request('PATCH', '/users/@me', botImagePatch, requestOptions);
+      if (botImagePatch.avatar && !imageUser.avatar) {
+        hadPartialFailure = true;
+        logger.warn('Bot avatar update skipped: Discord response did not include an avatar hash.');
+      }
+      if (botImagePatch.banner && !imageUser.banner) {
+        hadPartialFailure = true;
+        logger.warn('Bot banner update skipped: Discord response did not include a banner hash.');
+      }
       logger.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
     } catch (err) {
       hadPartialFailure = true;

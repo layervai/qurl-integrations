@@ -114,7 +114,9 @@ Application name and legal URLs are Developer Portal-only; if API writes
 succeed but the app name still differs from `discord-metadata.json`, the script
 exits `2` after printing the required portal action. If both happen in one run,
 the API partial failure keeps exit `1` and the portal action is included in the
-final error message.
+final error message. Discord's current-application API does not return the
+legal URLs, so verify the privacy and terms links directly in Developer Portal
+after editing them.
 The live apply uses Discord v10's documented current-user fields
 (`username`, `avatar`, `banner`) and current-application fields (`description`,
 `icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure
