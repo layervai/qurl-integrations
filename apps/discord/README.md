@@ -98,7 +98,8 @@ avatar and banner together to limit request count, but if a sub-field returns
 automation does not treat a partial apply as complete. Application name and
 legal URLs are Developer Portal-only; if API writes succeed but the app name
 still differs from `discord-metadata.json`, the script exits `2` after printing
-the required portal action.
+the required portal action. If both happen in one run, the API partial failure
+keeps exit `1` and the portal action is included in the final error message.
 
 ### 2. Configure GitHub OAuth
 

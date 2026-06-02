@@ -113,6 +113,8 @@ async function main() {
     ...(metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar) } : {}),
     ...(metadata.bot.banner ? { banner: dataUri(metadata.bot.banner) } : {}),
   };
+  // Discord returns stored asset hashes, not source-file hashes; keep this
+  // authoritative PATCH fatal instead of guessing at image no-op detection.
   const appPatch = {
     description: metadata.application.description,
     icon: dataUri(metadata.application.icon),
@@ -183,7 +185,8 @@ async function main() {
 
   console.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
   if (hadPartialFailure) {
-    throw new Error('Discord metadata apply completed with skipped fields; see warnings above.');
+    const portalSuffix = hadPortalActionRequired ? ' Developer Portal action is also required; see warnings above.' : '';
+    throw new Error(`Discord metadata apply completed with skipped fields; see warnings above.${portalSuffix}`);
   }
   if (hadPortalActionRequired) {
     throw new PortalActionRequiredError('Discord metadata API apply completed, but Developer Portal action is still required; see warnings above.');
