@@ -655,9 +655,6 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
 	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
-	if emailConnection == "" {
-		emailConnection = oauth.DefaultAuth0EmailConnection
-	}
 	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
 	qurlEndpoint := strings.TrimRight(os.Getenv("QURL_ENDPOINT"), "/")

@@ -29,7 +29,7 @@ Customer onboarding is install-first:
 
 ### User commands (`/qurl`)
 
-- `/qurl setup <email>` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; Auth0 starts the email-code login with that address prefilled; first-come-claims — the first user to run it becomes the workspace's qURL admin, and only they can re-run it)
+- `/qurl setup <email>` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; Auth0 starts login with that address prefilled; first-come-claims — the first user to run it becomes the workspace's qURL admin, and only they can re-run it)
 - `/qurl get <$id|$alias>` — Mint a one-time qURL for a tunnel `$id` or a channel `$alias` (raw URLs are not supported)
 - `/qurl list` — List the protected tunnel resources available to you (with their bound channel shortcuts)
 - `/qurl aliases` — List the qURL shortcuts configured in the current channel
@@ -58,12 +58,16 @@ modifiers enabled by the current bot deployment.
 - **Auth:** Per-workspace qURL API key, minted via `/qurl setup <email>` →
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying
   an email address on setup stores it in signed state, sends Auth0
-  `connection` + `login_hint`, and requires the verified Auth0
-  email claim to match before any workspace bind or key mint. Tenants using
-  `/qurl setup <email>` need an Auth0 passwordless email connection; the
-  connection name defaults to `email` and can be overridden with
-  `AUTH0_EMAIL_CONNECTION`. The callback's security gate is the verified email
-  claim, not the connection hint by itself. Keys are
+  `login_hint`, and requires the verified Auth0 email claim to match before any
+  workspace bind or key mint. By default the bot does not force an Auth0
+  `connection`; the Auth0 application and tenant-level Actions own the login
+  method and the cross-connection uniqueness policy. Prefer passwordless on the
+  existing database connection when available, or enforce account-linking /
+  duplicate-deny behavior before enabling a separate passwordless `email`
+  connection for the same audience. `AUTH0_EMAIL_CONNECTION` is an optional
+  recovery override when a deployment must force a specific connection. The
+  callback's security gate is the verified email claim, not the connection hint
+  by itself. Keys are
   field-level encrypted in the `workspace_state` DynamoDB table using
   KMS envelope encryption with `workspace_id` bound as AAD.
 - **Slack app install:** Customer workspaces install qURL through
@@ -158,7 +162,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the bot |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
-| `AUTH0_EMAIL_CONNECTION` | No | Auth0 passwordless email connection name used by `/qurl setup <email>`. Empty defaults to `email`. |
+| `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl-admin tunnel install`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_TUNNEL_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |

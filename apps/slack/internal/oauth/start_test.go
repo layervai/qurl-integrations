@@ -107,7 +107,7 @@ func TestStartHappyPath(t *testing.T) {
 	}
 }
 
-func TestStartEmailSetupUsesPasswordlessConnectionHint(t *testing.T) {
+func TestStartEmailSetupUsesLoginHintWithoutForcingConnection(t *testing.T) {
 	cfg := newStartCfg()
 	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "Admin@Example.COM", cfg.Now())
 	if err != nil {
@@ -127,8 +127,8 @@ func TestStartEmailSetupUsesPasswordlessConnectionHint(t *testing.T) {
 		t.Fatalf("parse Location: %v", err)
 	}
 	q := u.Query()
-	if q.Get("connection") != "email" {
-		t.Errorf("connection: got %q want email", q.Get("connection"))
+	if q.Get("connection") != "" {
+		t.Errorf("connection: got %q want empty so Auth0 app enabled connections choose the login method", q.Get("connection"))
 	}
 	if q.Get("login_hint") != "admin@example.com" {
 		t.Errorf("login_hint: got %q want normalized email", q.Get("login_hint"))
@@ -138,9 +138,9 @@ func TestStartEmailSetupUsesPasswordlessConnectionHint(t *testing.T) {
 	}
 }
 
-func TestStartEmailSetupUsesConfiguredPasswordlessConnection(t *testing.T) {
+func TestStartEmailSetupUsesConfiguredConnection(t *testing.T) {
 	cfg := newStartCfg()
-	cfg.Auth0EmailConnection = "passwordless-email"
+	cfg.Auth0EmailConnection = "Username-Password-Authentication"
 	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", cfg.Now())
 	if err != nil {
 		t.Fatalf("MintStateWithEmail: %v", err)
@@ -158,7 +158,7 @@ func TestStartEmailSetupUsesConfiguredPasswordlessConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := u.Query().Get("connection"); got != "passwordless-email" {
+	if got := u.Query().Get("connection"); got != "Username-Password-Authentication" {
 		t.Errorf("connection: got %q want configured connection", got)
 	}
 }

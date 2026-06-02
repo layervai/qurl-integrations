@@ -146,8 +146,8 @@ func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	if cfg.Auth0Domain != "example.auth0.com" {
 		t.Errorf("Auth0Domain: got %q", cfg.Auth0Domain)
 	}
-	if cfg.Auth0EmailConnection != oauth.DefaultAuth0EmailConnection {
-		t.Errorf("Auth0EmailConnection: got %q want default %q", cfg.Auth0EmailConnection, oauth.DefaultAuth0EmailConnection)
+	if cfg.Auth0EmailConnection != "" {
+		t.Errorf("Auth0EmailConnection: got %q want empty by default", cfg.Auth0EmailConnection)
 	}
 	if string(cfg.OAuthStateSecret) != validStateSecret {
 		t.Errorf("OAuthStateSecret not threaded through")
@@ -160,7 +160,7 @@ func TestBuildOAuthConfigHappyPath(t *testing.T) {
 func TestBuildOAuthConfigEmailConnectionOverride(t *testing.T) {
 	stubJWKSVerifier(t)
 	env := validEnv()
-	env["AUTH0_EMAIL_CONNECTION"] = "passwordless-email"
+	env["AUTH0_EMAIL_CONNECTION"] = "Username-Password-Authentication"
 	applyEnv(t, env)
 	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if err != nil {
@@ -169,7 +169,7 @@ func TestBuildOAuthConfigEmailConnectionOverride(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ok=true with all required env vars set")
 	}
-	if cfg.Auth0EmailConnection != "passwordless-email" {
+	if cfg.Auth0EmailConnection != "Username-Password-Authentication" {
 		t.Errorf("Auth0EmailConnection: got %q want override", cfg.Auth0EmailConnection)
 	}
 }

@@ -1148,7 +1148,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 		return
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
-	respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will email a one-time code after you continue. This link is valid for 5 minutes and only works for you.")
+	respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
 // authenticatedClient resolves an API key for the team and returns a configured client.
