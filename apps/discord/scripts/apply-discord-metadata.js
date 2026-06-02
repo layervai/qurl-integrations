@@ -195,7 +195,8 @@ async function main({
   if (currentUser.username === metadata.bot.username) {
     logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
   } else if (currentUser.username.toLowerCase() === metadata.bot.username.toLowerCase()) {
-    logger.warn(`Bot username is ${currentUser.username}; Discord may normalize username casing. Skipping case-only update to avoid rate-limit churn; verify the live username outcome in #860.`);
+    hadPartialFailure = true;
+    logger.warn(`Bot username is ${currentUser.username}; desired ${metadata.bot.username}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
   } else {
     try {
       // Keep username separate from bot images so a name conflict/rate limit

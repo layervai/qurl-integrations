@@ -230,7 +230,7 @@ describe('apply-discord-metadata helpers', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main skips a case-only username update when Discord normalizes casing', async () => {
+  test('main treats a case-only username mismatch as a partial apply failure', async () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
@@ -239,9 +239,10 @@ describe('apply-discord-metadata helpers', () => {
       jsonResponse(appResponse()),
     );
 
-    await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
+    await expect(main({ token: 'test-token', fetchImpl, logger }))
+      .rejects.toThrow(/completed with skipped fields/);
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/normalize username casing/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Skipping case-only update/));
   });
 
   test('main fails clearly when the current bot user omits username', async () => {
