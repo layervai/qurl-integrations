@@ -91,7 +91,8 @@ npm run apply-discord-metadata -- --dry-run
 ```
 
 Dry-run also verifies that every asset referenced by `discord-metadata.json`
-exists and can be read.
+exists, can be read, stays under 10 MiB, and matches the local dimension rules
+for its Discord surface.
 
 Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands
@@ -109,11 +110,15 @@ unique usernames are lowercase. A legacy case-only mismatch exits `1` after
 skipping the username PATCH so the operator can verify the live outcome without
 burning Discord's username rate limit; rerun after Discord reports
 `discriminator: "0"` to confirm the lowercase unique username converges.
-Application name and
-legal URLs are Developer Portal-only; if API writes succeed but the app name
-still differs from `discord-metadata.json`, the script exits `2` after printing
-the required portal action. If both happen in one run, the API partial failure
-keeps exit `1` and the portal action is included in the final error message.
+Application name and legal URLs are Developer Portal-only; if API writes
+succeed but the app name still differs from `discord-metadata.json`, the script
+exits `2` after printing the required portal action. If both happen in one run,
+the API partial failure keeps exit `1` and the portal action is included in the
+final error message.
+The live apply uses Discord v10's documented current-user fields
+(`username`, `avatar`, `banner`) and current-application fields (`description`,
+`icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure
+is fatal, while bot image failures are reported as partial applies.
 
 ### 2. Configure GitHub OAuth
 

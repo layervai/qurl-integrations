@@ -8,6 +8,13 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const metadataPath = path.join(root, 'discord-metadata.json');
 const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+const maxDiscordImageBytes = 10 * 1024 * 1024;
+const imageRules = {
+  'bot.avatar': { maxBytes: maxDiscordImageBytes, minWidth: 128, minHeight: 128, aspect: [1, 1] },
+  'bot.banner': { maxBytes: maxDiscordImageBytes, minWidth: 600, minHeight: 240 },
+  'application.icon': { maxBytes: maxDiscordImageBytes, minWidth: 512, minHeight: 512, aspect: [1, 1] },
+  'application.cover_image': { maxBytes: maxDiscordImageBytes, minWidth: 800, minHeight: 450, aspect: [16, 9] },
+};
 
 class PortalActionRequiredError extends Error {
   constructor(message) {
@@ -43,7 +50,7 @@ function validateMetadata(doc = metadata) {
   }
 }
 
-function dataUri(relPath) {
+function dataUri(relPath, field) {
   if (!relPath) return undefined;
   const filePath = path.join(root, relPath);
   if (!fs.existsSync(filePath)) {
@@ -67,6 +74,7 @@ function dataUri(relPath) {
   if (detectedMime !== mime) {
     throw new Error(`Discord metadata asset ${relPath} extension ${ext} does not match detected ${detectedMime}.`);
   }
+  if (field) validateImageRule(relPath, bytes, detectedMime, imageRules[field]);
   return `data:${mime};base64,${bytes.toString('base64')}`;
 }
 
@@ -84,6 +92,66 @@ function detectImageMime(bytes) {
     return 'image/jpeg';
   }
   return undefined;
+}
+
+function detectImageDimensions(bytes, mime) {
+  if (mime === 'image/png' && bytes.length >= 24) {
+    return {
+      width: bytes.readUInt32BE(16),
+      height: bytes.readUInt32BE(20),
+    };
+  }
+  if (mime === 'image/jpeg') {
+    return detectJpegDimensions(bytes);
+  }
+  return undefined;
+}
+
+function detectJpegDimensions(bytes) {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) return undefined;
+    while (bytes[offset] === 0xff) offset += 1;
+    const marker = bytes[offset];
+    offset += 1;
+    if (marker === 0xd9 || marker === 0xda) return undefined;
+    if (offset + 2 > bytes.length) return undefined;
+    const segmentLength = bytes.readUInt16BE(offset);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) return undefined;
+    if (
+      (marker >= 0xc0 && marker <= 0xc3)
+      || (marker >= 0xc5 && marker <= 0xc7)
+      || (marker >= 0xc9 && marker <= 0xcb)
+      || (marker >= 0xcd && marker <= 0xcf)
+    ) {
+      return {
+        width: bytes.readUInt16BE(offset + 5),
+        height: bytes.readUInt16BE(offset + 3),
+      };
+    }
+    offset += segmentLength;
+  }
+  return undefined;
+}
+
+function validateImageRule(relPath, bytes, mime, rule) {
+  if (!rule) return;
+  if (bytes.length > rule.maxBytes) {
+    throw new Error(`Discord metadata asset ${relPath} is ${bytes.length} bytes; max is ${rule.maxBytes} bytes.`);
+  }
+  const dimensions = detectImageDimensions(bytes, mime);
+  if (!dimensions) {
+    throw new Error(`Discord metadata asset ${relPath} dimensions could not be read.`);
+  }
+  if (dimensions.width < rule.minWidth || dimensions.height < rule.minHeight) {
+    throw new Error(`Discord metadata asset ${relPath} is ${dimensions.width}x${dimensions.height}; minimum is ${rule.minWidth}x${rule.minHeight}.`);
+  }
+  if (rule.aspect) {
+    const [widthRatio, heightRatio] = rule.aspect;
+    if (dimensions.width * heightRatio !== dimensions.height * widthRatio) {
+      throw new Error(`Discord metadata asset ${relPath} is ${dimensions.width}x${dimensions.height}; expected ${widthRatio}:${heightRatio} aspect ratio.`);
+    }
+  }
 }
 
 async function request(method, apiPath, body, { token, fetchImpl = fetch } = {}) {
@@ -150,20 +218,24 @@ async function main({
   logger = console,
 } = {}) {
   validateMetadata();
+  if (!dryRun && !token) {
+    throw new Error('DISCORD_TOKEN is required. Export the target bot token before running this script.');
+  }
+
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
 
   const botUsernamePatch = { username: metadata.bot.username };
   const botImagePatch = {
-    ...(metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar) } : {}),
-    ...(metadata.bot.banner ? { banner: dataUri(metadata.bot.banner) } : {}),
+    ...(metadata.bot.avatar ? { avatar: dataUri(metadata.bot.avatar, 'bot.avatar') } : {}),
+    ...(metadata.bot.banner ? { banner: dataUri(metadata.bot.banner, 'bot.banner') } : {}),
   };
   // Discord returns stored asset hashes, not source-file hashes; keep this
   // authoritative PATCH fatal instead of guessing at image no-op detection.
   const appPatch = {
     description: metadata.application.description,
-    icon: dataUri(metadata.application.icon),
-    cover_image: dataUri(metadata.application.cover_image),
+    icon: dataUri(metadata.application.icon, 'application.icon'),
+    cover_image: dataUri(metadata.application.cover_image, 'application.cover_image'),
     tags: metadata.application.tags,
     install_params: metadata.application.install_params,
   };
@@ -184,10 +256,6 @@ async function main({
       },
     }, null, 2));
     return;
-  }
-
-  if (!token) {
-    throw new Error('DISCORD_TOKEN is required. Export the target bot token before running this script.');
   }
 
   const requestOptions = { token, fetchImpl };
@@ -277,4 +345,5 @@ module.exports = {
   request,
   summarize,
   validateMetadata,
+  validateImageRule,
 };

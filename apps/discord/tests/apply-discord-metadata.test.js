@@ -11,6 +11,7 @@ const {
   request,
   summarize,
   validateMetadata,
+  validateImageRule,
 } = require('../scripts/apply-discord-metadata');
 
 function jsonResponse(body, { status = 200, headers = {} } = {}) {
@@ -134,8 +135,23 @@ describe('apply-discord-metadata helpers', () => {
   });
 
   test('renders referenced PNG assets as data URIs', () => {
-    const uri = dataUri(metadata.application.icon);
+    const uri = dataUri(metadata.application.icon, 'application.icon');
     expect(uri).toMatch(/^data:image\/png;base64,/);
+  });
+
+  test('rejects referenced assets with the wrong local dimensions', () => {
+    expect(() => dataUri(metadata.application.cover_image, 'application.icon')).toThrow(/expected 1:1/);
+    expect(() => dataUri(metadata.application.icon, 'application.cover_image')).toThrow(/expected 16:9/);
+  });
+
+  test('rejects referenced assets over the local byte limit', () => {
+    const bytes = fs.readFileSync(path.join(__dirname, '..', metadata.application.icon));
+
+    expect(() => validateImageRule(metadata.application.icon, bytes, 'image/png', {
+      maxBytes: 1,
+      minWidth: 1,
+      minHeight: 1,
+    })).toThrow(/max is 1 bytes/);
   });
 
   test('fails with a guided error when an asset is missing', () => {
