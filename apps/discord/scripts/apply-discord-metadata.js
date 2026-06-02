@@ -78,7 +78,10 @@ function assertExpectedApplication(app, doc = metadata) {
     throw new Error(`DISCORD_TOKEN belongs to application ${app.id}; expected LayerV application ${doc.application.id}. Refusing to update the wrong Discord app.`);
   }
   const actualPublicKey = app.verify_key || app.public_key;
-  if (actualPublicKey && actualPublicKey !== doc.application.public_key) {
+  if (!actualPublicKey) {
+    throw new Error(`Discord application ${app.id} did not include a public key. Refusing to update mismatched app metadata.`);
+  }
+  if (actualPublicKey !== doc.application.public_key) {
     throw new Error(`Discord application ${app.id} has public key ${actualPublicKey}; expected ${doc.application.public_key}. Refusing to update mismatched app metadata.`);
   }
 }
@@ -131,17 +134,8 @@ async function main() {
   console.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
   if (metadata.application.name !== updatedApp.name) {
-    try {
-      const renamedApp = await request('PATCH', '/applications/@me', { name: metadata.application.name });
-      if (renamedApp.name === metadata.application.name) {
-        console.log(`Updated application name: ${renamedApp.name}`);
-      } else {
-        console.warn(`Application name remains ${JSON.stringify(renamedApp.name)}; update it in Discord Developer Portal.`);
-      }
-    } catch (err) {
-      hadPartialFailure = true;
-      console.warn(`Application name must be updated in Discord Developer Portal: ${errorDetails(err)}`);
-    }
+    hadPartialFailure = true;
+    console.warn(`Application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
   }
 
   if (currentUser.username === metadata.bot.username) {

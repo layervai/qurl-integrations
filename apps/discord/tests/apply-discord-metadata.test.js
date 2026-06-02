@@ -29,6 +29,12 @@ describe('apply-discord-metadata helpers', () => {
     }, metadata)).toThrow(/has public key/);
   });
 
+  test('rejects a matching app id when Discord omits the public key', () => {
+    expect(() => assertExpectedApplication({
+      id: metadata.application.id,
+    }, metadata)).toThrow(/did not include a public key/);
+  });
+
   test('validates required metadata identity fields', () => {
     expect(() => validateMetadata(metadata)).not.toThrow();
     expect(() => validateMetadata({
