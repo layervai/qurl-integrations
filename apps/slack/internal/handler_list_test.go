@@ -214,7 +214,8 @@ func TestFormatTunnelListSection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatTunnelListSection(tc.resource, tc.boundAliases); got != tc.want {
+			token := tunnelDisplayToken(tc.resource, tc.boundAliases)
+			if got := formatTunnelListSection(tc.resource, tc.boundAliases, token); got != tc.want {
 				t.Errorf("formatTunnelListSection = %q, want %q", got, tc.want)
 			}
 		})

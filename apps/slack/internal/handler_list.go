@@ -326,14 +326,16 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		if !useButtons {
 			continue
 		}
-		// The block path renders a richer, multi-line section than the
-		// plain-text fallback `line`: the `$id` bold on its own row, the
-		// Display Name beneath it, and a faint aliases line when present.
-		sectionText := formatTunnelListSection(&resources[i], aliasMap[resources[i].ResourceID])
 		// displayTok is "" only for a slug-less, alias-less tunnel — the
 		// "(no ID …)" row, which has no `$<token>` that `/qurl get` (or a
 		// button) could mint against — so that row gets no button.
 		tok := displayTok[resources[i].ResourceID]
+		// The block path renders a richer, multi-line section than the
+		// plain-text fallback `line`: the `$id` bold on its own row, the
+		// Display Name beneath it, and a faint aliases line when present. It
+		// takes the precomputed display token so the section can never name a
+		// different token than the row's button mints against.
+		sectionText := formatTunnelListSection(&resources[i], aliasMap[resources[i].ResourceID], tok)
 		if tok == "" {
 			blocks = append(blocks, sectionBlock(sectionText))
 			continue
@@ -487,18 +489,8 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 	} else {
 		line = "• `$" + token + "`"
 	}
-	extras := make([]string, 0, len(boundAliases))
-	for _, a := range boundAliases {
-		if a != token {
-			extras = append(extras, "`$"+a+"`")
-		}
-	}
-	if len(extras) > 0 {
-		label := "aliases: "
-		if len(extras) == 1 {
-			label = "alias: "
-		}
-		line += " (" + label + strings.Join(extras, ", ") + ")"
+	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+		line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
 	}
 	// Show the tunnel's Display Name next to the id. The description field
 	// doubles as the Display Name (see handleSetDisplayName) and is always
@@ -511,16 +503,17 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 }
 
 // formatTunnelListSection renders one tunnel as the mrkdwn body of a `section`
-// block for the interactive /qurl list. It mirrors [formatTunnelListLine]'s
-// token/alias logic but lays the row out for buttons rather than a plain line:
-// the `$id` bold on its own row, the Display Name beneath it, and a faint
-// "aliases:" line when extra channel aliases are bound. The plain-text fallback
-// (and notifications) still use [formatTunnelListLine]; this richer form is
-// block-only. A slug-less, alias-less tunnel has no usable token, so it renders
-// the bare resource_id and spells out that it can't be used until an admin sets
-// one — matching the fallback's "(no ID …)" honesty.
-func formatTunnelListSection(r *client.Resource, boundAliases []string) string {
-	token := tunnelDisplayToken(r, boundAliases)
+// block for the interactive /qurl list. It lays the row out for buttons rather
+// than a plain line: the `$id` bold on its own row, the Display Name beneath
+// it, and a faint "aliases:" line when extra channel aliases are bound. `token`
+// is the row's precomputed display token (see [tunnelDisplayToken]) — the same
+// value the row's button mints against, so the section can't name a different
+// one. The plain-text fallback (and notifications) still use
+// [formatTunnelListLine]; this richer form is block-only. A slug-less,
+// alias-less tunnel has an empty token, so it renders the bare resource_id and
+// spells out that it can't be used until an admin sets one — matching the
+// fallback's "(no ID …)" honesty.
+func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
 	if token == "" {
 		return "*`" + r.ResourceID + "`*\n_No ID set — ask your Slack admin to set one._"
 	}
@@ -529,20 +522,34 @@ func formatTunnelListSection(r *client.Resource, boundAliases []string) string {
 	if r.Description != "" {
 		b.WriteString("\n" + r.Description)
 	}
-	extras := make([]string, 0, len(boundAliases))
-	for _, a := range boundAliases {
-		if a != token {
-			extras = append(extras, "`$"+a+"`")
-		}
-	}
-	if len(extras) > 0 {
-		label := "aliases"
-		if len(extras) == 1 {
-			label = "alias"
-		}
-		b.WriteString("\n_" + label + ":_ " + strings.Join(extras, ", "))
+	if extras := extraAliasTokens(boundAliases, token); len(extras) > 0 {
+		b.WriteString("\n_" + aliasNoun(len(extras)) + ":_ " + strings.Join(extras, ", "))
 	}
 	return b.String()
+}
+
+// aliasNoun returns "alias" or "aliases" to agree with n. Shared by the
+// plain-text and block list formatters so the singular/plural rule lives in one
+// place.
+func aliasNoun(n int) string {
+	if n == 1 {
+		return "alias"
+	}
+	return "aliases"
+}
+
+// extraAliasTokens returns the channel-bound aliases other than the row's
+// primary token, each wrapped as a mrkdwn `$alias` code span and preserving
+// order. It layers display formatting over [aliasesExcluding] so the "exclude
+// the primary token" rule has a single home. Shared by the plain-text
+// [formatTunnelListLine] and the block [formatTunnelListSection] so the two
+// can't drift on which aliases a row advertises.
+func extraAliasTokens(boundAliases []string, token string) []string {
+	extras := aliasesExcluding(boundAliases, token)
+	for i, a := range extras {
+		extras[i] = "`$" + a + "`"
+	}
+	return extras
 }
 
 // channelAliasesByResourceID builds resource_id → sorted channel-bound
