@@ -81,6 +81,9 @@ install params, bot username, avatar, and banner). The script refuses to run if
 the token belongs to any Discord application other than LayerV sandbox app
 `1511450217789128885`.
 
+`bot.username` is the cased **qURL** brand source only; Discord's bot-user API
+receives `bot.unique_username` (`qurl`) as the lowercase unique username.
+
 ```bash
 npm run apply-discord-metadata
 ```

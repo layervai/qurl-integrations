@@ -434,6 +434,21 @@ describe('apply-discord-metadata helpers', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique-username migration completes/));
   });
 
+  test('main treats mixed-case username responses as not fully migrated', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: 'QURL', discriminator: '0' }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger }))
+      .rejects.toThrow(/completed with skipped fields/);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/desired migrated unique username qurl/));
+  });
+
   test('main treats a legacy case-only username mismatch as a partial apply failure', async () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(

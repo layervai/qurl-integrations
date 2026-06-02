@@ -216,6 +216,7 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch, timeou
     ? setTimeout(() => controller.abort(), timeoutMs)
     : undefined;
   let res;
+  let text;
   try {
     res = await fetchImpl(`https://discord.com/api/v10${apiPath}`, {
       method,
@@ -223,6 +224,7 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch, timeou
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
+    text = await res.text();
   } catch (err) {
     if (err.name === 'AbortError') {
       const timeoutErr = new Error(`${method} ${apiPath} timed out after ${timeoutMs}ms`);
@@ -233,7 +235,6 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch, timeou
   } finally {
     if (timeout) clearTimeout(timeout);
   }
-  const text = await res.text();
   let parsed = {};
   if (text) {
     try {
@@ -247,7 +248,7 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch, timeou
     err.status = res.status;
     err.body = parsed;
     const retryAfterHeader = res.headers.get('retry-after');
-    const retryAfter = retryAfterHeader === '' ? parsed.retry_after : retryAfterHeader ?? parsed.retry_after;
+    const retryAfter = retryAfterHeader === '' ? parsed.retry_after : (retryAfterHeader ?? parsed.retry_after);
     if (retryAfter !== undefined && retryAfter !== null) err.retryAfter = String(retryAfter);
     throw err;
   }
@@ -357,18 +358,14 @@ async function main({
     throw new PreflightVerificationError(`Discord bot-user pre-flight verification failed: ${err.message}`, err);
   }
 
-  if (currentUser.username === brandUsername) {
-    // Theoretical mixed-case legacy state: avoid a username PATCH until #860
-    // verifies the live Discord account's unique-username migration outcome.
-    hadPartialFailure = true;
-    logger.warn(`Bot username is ${brandUsername}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
+  if (currentUser.username === apiUsername && (currentUser.discriminator === '0' || currentUser.discriminator === undefined)) {
+    logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
-    if (currentUser.discriminator === '0' || currentUser.discriminator === undefined) {
-      logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
-    } else {
-      hadPartialFailure = true;
-      logger.warn(`Bot username is ${currentUser.username} with discriminator ${currentUser.discriminator}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
-    }
+    // Case-insensitive matches with mixed casing or a legacy discriminator are
+    // not fully migrated to Discord's lowercase unique-username state.
+    hadPartialFailure = true;
+    const discriminator = currentUser.discriminator ?? 'unknown';
+    logger.warn(`Bot username is ${currentUser.username} with discriminator ${discriminator}; desired migrated unique username ${apiUsername}. Skipping username update until Discord unique-username migration completes; verify and resolve the live username outcome in #860.`);
   } else {
     try {
       // Keep username separate from bot images so a name conflict/rate limit
