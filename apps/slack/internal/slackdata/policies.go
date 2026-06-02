@@ -94,18 +94,7 @@ func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channe
 	if len(out.Item) == 0 {
 		return map[string]struct{}{}, nil
 	}
-	allowed := make(map[string]struct{})
-	for _, rid := range readStringSet(out.Item, attrAllowedResourceIDs) {
-		if rid != "" {
-			allowed[rid] = struct{}{}
-		}
-	}
-	for _, rid := range readStringMap(out.Item, attrAliasBindings) {
-		if rid != "" {
-			allowed[rid] = struct{}{}
-		}
-	}
-	return allowed, nil
+	return allowedResourceIDsFromItem(out.Item), nil
 }
 
 // ResolvePolicy returns true iff `resourceID` is in the
@@ -366,20 +355,32 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 	return channels, nil
 }
 
-// channelItemAllowsResource reports whether a channel_policies item makes
-// resourceID available, mirroring [AllowedResourceIDsForChannel]'s union over
-// the same two surfaces: the `allowed_resource_ids` SS and the
-// `alias_bindings` map values.
-func channelItemAllowsResource(item map[string]ddbtypes.AttributeValue, resourceID string) bool {
+// allowedResourceIDsFromItem returns the set of resource IDs a channel_policies
+// item makes available: the union of its `allowed_resource_ids` SS and its
+// `alias_bindings` map values (empty IDs dropped). This is the single
+// definition of "a tunnel is available in a channel" — [Store.AllowedResourceIDsForChannel]
+// returns it after a point GetItem, and [channelItemAllowsResource] membership-
+// tests it inside the [Store.ChannelsForResource] Query loop. Keeping the union
+// in one place stops those two surfaces from drifting if a third grant source
+// is ever added.
+func allowedResourceIDsFromItem(item map[string]ddbtypes.AttributeValue) map[string]struct{} {
+	allowed := make(map[string]struct{})
 	for _, rid := range readStringSet(item, attrAllowedResourceIDs) {
-		if rid == resourceID {
-			return true
+		if rid != "" {
+			allowed[rid] = struct{}{}
 		}
 	}
 	for _, rid := range readStringMap(item, attrAliasBindings) {
-		if rid == resourceID {
-			return true
+		if rid != "" {
+			allowed[rid] = struct{}{}
 		}
 	}
-	return false
+	return allowed
+}
+
+// channelItemAllowsResource reports whether a channel_policies item makes
+// resourceID available, per the shared [allowedResourceIDsFromItem] union.
+func channelItemAllowsResource(item map[string]ddbtypes.AttributeValue, resourceID string) bool {
+	_, ok := allowedResourceIDsFromItem(item)[resourceID]
+	return ok
 }

@@ -139,7 +139,10 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata) []string {
 	seen := make(map[string]struct{})
 	channels := make([]string, 0, listEditMaxChannels)
-	add := func(c string) bool {
+	// addIfRoom appends c unless it's empty, already seen, or the cap is hit.
+	// It returns false ONLY on a cap hit (signaling the caller to stop paging);
+	// a benign empty/duplicate skip still returns true.
+	addIfRoom := func(c string) bool {
 		if c == "" {
 			return true
 		}
@@ -155,7 +158,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 	}
 	// The channel being edited from is always exposed and is never revoked, so
 	// it leads the pre-fill regardless of what enumeration returns.
-	add(meta.ChannelID)
+	addIfRoom(meta.ChannelID)
 	if h.cfg.AdminStore == nil {
 		return channels
 	}
@@ -166,7 +169,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 		return channels
 	}
 	for _, c := range found {
-		if !add(c) {
+		if !addIfRoom(c) {
 			log.Warn("list edit: exposed-channel count exceeds cap; truncating modal pre-fill (un-shown channels keep access)",
 				"cap", listEditMaxChannels, "resource_id", meta.ResourceID)
 			break
