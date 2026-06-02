@@ -48,14 +48,20 @@ linking and auto Contributor-role assignment for community members.
 ### Prerequisites
 
 - **Node.js ≥ 22** (see `package.json` engines)
-- A Discord bot application
+- The LayerV-owned Discord bot application
 - A GitHub OAuth App
 - A hosting target with a public HTTPS URL (ECS, Railway, Fly, etc.)
 - A qURL API key from https://layerv.ai
 
 ### 1. Configure Discord
 
-1. https://discord.com/developers/applications → your bot
+Use the LayerV-owned Discord application, not the previous personal
+developer-portal app:
+
+- Application ID: `1511450217789128885`
+- Public Key: `f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea`
+
+1. https://discord.com/developers/applications → `qURL`
 2. General Information → set the application name to **qURL**, upload
    `assets/discord-app-icon.png`, add the description from
    `discord-metadata.json`, and set the privacy/terms URLs listed there.
@@ -68,7 +74,8 @@ linking and auto Contributor-role assignment for community members.
 
 The repeatable metadata source of truth is `discord-metadata.json`. With a
 target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
-that Discord exposes through API:
+that Discord exposes through API. The script refuses to run if the token
+belongs to any Discord application other than LayerV app `1511450217789128885`.
 
 ```bash
 npm run apply-discord-metadata
