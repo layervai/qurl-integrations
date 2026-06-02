@@ -263,6 +263,16 @@ describe('apply-discord-metadata helpers', () => {
     })).rejects.toMatchObject({ retryAfter: '0' });
   });
 
+  test('falls back to retry-after body values for empty headers', async () => {
+    await expect(request('PATCH', '/users/@me', {}, {
+      token: 'test-token',
+      fetchImpl: jest.fn().mockResolvedValue(jsonResponse({
+        message: 'You are being rate limited.',
+        retry_after: 12.5,
+      }, { status: 429, headers: { 'retry-after': '' } })),
+    })).rejects.toMatchObject({ retryAfter: '12.5' });
+  });
+
   test('omits the JSON content-type header on GET requests', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse({ username: metadata.bot.username }));
 

@@ -207,7 +207,7 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch } = {})
     err.status = res.status;
     err.body = parsed;
     const retryAfterHeader = res.headers.get('retry-after');
-    const retryAfter = retryAfterHeader ?? parsed.retry_after;
+    const retryAfter = retryAfterHeader === '' ? parsed.retry_after : retryAfterHeader ?? parsed.retry_after;
     if (retryAfter !== undefined && retryAfter !== null) err.retryAfter = String(retryAfter);
     throw err;
   }
@@ -304,7 +304,7 @@ async function main({
   }
 
   if (currentUser.username === brandUsername) {
-    logger.log(`Bot username already ${brandUsername}; skipping username update.`);
+    logger.log(`Bot username already ${brandUsername}; legacy pre-migration casing matches the brand.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
     if (currentUser.discriminator === '0') {
       logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
