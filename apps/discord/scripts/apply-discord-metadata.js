@@ -54,6 +54,11 @@ function summarize(value) {
   return value;
 }
 
+function botTag(user) {
+  if (user.discriminator && user.discriminator !== '0') return `${user.username}#${user.discriminator}`;
+  return user.username;
+}
+
 async function main() {
   const botPatch = {
     username: metadata.bot.username,
@@ -86,18 +91,6 @@ async function main() {
     throw new Error('DISCORD_TOKEN is required. Export the target bot token before running this script.');
   }
 
-  const updatedUser = await request('PATCH', '/users/@me', botPatch);
-  console.log(`Updated bot user: ${updatedUser.username}#${updatedUser.discriminator}`);
-
-  if (botBannerPatch) {
-    try {
-      const bannerUser = await request('PATCH', '/users/@me', botBannerPatch);
-      console.log(`Updated bot banner: ${Boolean(bannerUser.banner)}`);
-    } catch (err) {
-      console.warn(`Bot banner update skipped: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
-    }
-  }
-
   const updatedApp = await request('PATCH', '/applications/@me', appPatch);
   console.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
@@ -111,6 +104,22 @@ async function main() {
       }
     } catch (err) {
       console.warn(`Application name must be updated in Discord Developer Portal: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
+    }
+  }
+
+  try {
+    const updatedUser = await request('PATCH', '/users/@me', botPatch);
+    console.log(`Updated bot user: ${botTag(updatedUser)}`);
+  } catch (err) {
+    console.warn(`Bot username/avatar update skipped: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
+  }
+
+  if (botBannerPatch) {
+    try {
+      const bannerUser = await request('PATCH', '/users/@me', botBannerPatch);
+      console.log(`Updated bot banner: ${Boolean(bannerUser.banner)}`);
+    } catch (err) {
+      console.warn(`Bot banner update skipped: ${err.status || 'error'} ${JSON.stringify(err.body || err.message)}`);
     }
   }
 

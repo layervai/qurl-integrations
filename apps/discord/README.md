@@ -74,6 +74,12 @@ that Discord exposes through API:
 npm run apply-discord-metadata
 ```
 
+Preview the API payload without making changes:
+
+```bash
+npm run apply-discord-metadata -- --dry-run
+```
+
 ### 2. Configure GitHub OAuth
 
 1. https://github.com/settings/developers → New OAuth App
