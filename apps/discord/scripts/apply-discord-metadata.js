@@ -95,7 +95,8 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch } = {})
     const err = new Error(`${method} ${apiPath} failed with ${res.status}`);
     err.status = res.status;
     err.body = parsed;
-    err.retryAfter = res.headers.get('retry-after') || parsed.retry_after;
+    const retryAfter = res.headers.get('retry-after') || parsed.retry_after;
+    if (retryAfter !== undefined && retryAfter !== null) err.retryAfter = String(retryAfter);
     throw err;
   }
   return parsed;
@@ -208,7 +209,15 @@ async function main({
     }
   }
 
-  const updatedApp = await request('PATCH', '/applications/@me', appPatch, requestOptions);
+  let updatedApp;
+  try {
+    updatedApp = await request('PATCH', '/applications/@me', appPatch, requestOptions);
+  } catch (err) {
+    if (hadPartialFailure) {
+      err.message = `${err.message}; bot identity fields were also skipped earlier, see warnings above.`;
+    }
+    throw err;
+  }
   logger.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
   if (metadata.application.name !== updatedApp.name) {

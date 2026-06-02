@@ -8,6 +8,7 @@ const {
   errorDetails,
   main,
   PortalActionRequiredError,
+  request,
   summarize,
   validateMetadata,
 } = require('../scripts/apply-discord-metadata');
@@ -148,6 +149,16 @@ describe('apply-discord-metadata helpers', () => {
     })).toContain('retry_after=12.5s');
   });
 
+  test('normalizes Discord retry-after body values', async () => {
+    await expect(request('PATCH', '/users/@me', {}, {
+      token: 'test-token',
+      fetchImpl: jest.fn().mockResolvedValue(jsonResponse({
+        message: 'You are being rate limited.',
+        retry_after: 12.5,
+      }, { status: 429 })),
+    })).rejects.toMatchObject({ retryAfter: '12.5' });
+  });
+
   test('marks portal-only drift with a distinct exit code', () => {
     expect(new PortalActionRequiredError('portal step pending').exitCode).toBe(2);
   });
@@ -223,6 +234,33 @@ describe('apply-discord-metadata helpers', () => {
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
       .rejects.toThrow(/completed with skipped fields/);
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
+  });
+
+  test('main treats a bot image 429 as a partial apply failure', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ message: 'rate limited', retry_after: '12.5' }, { status: 429 }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
+      .rejects.toThrow(/completed with skipped fields/);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  test('main preserves bot partial-failure context when the app PATCH also fails', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: 'Qurl Bot' }),
+      jsonResponse({ message: 'rate limited', retry_after: '12.5' }, { status: 429 }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse({ message: 'rate limited', retry_after: '12.5' }, { status: 429 }),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
+      .rejects.toThrow(/bot identity fields were also skipped earlier/);
     expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
