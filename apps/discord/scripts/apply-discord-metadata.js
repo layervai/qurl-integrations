@@ -127,6 +127,7 @@ function detectJpegDimensions(bytes) {
       || (marker >= 0xc9 && marker <= 0xcb)
       || (marker >= 0xcd && marker <= 0xcf)
     ) {
+      if (segmentLength < 7) return undefined;
       return {
         width: bytes.readUInt16BE(offset + 5),
         height: bytes.readUInt16BE(offset + 3),
@@ -182,7 +183,8 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch } = {})
     const err = new Error(`${method} ${apiPath} failed with ${res.status}`);
     err.status = res.status;
     err.body = parsed;
-    const retryAfter = res.headers.get('retry-after') || parsed.retry_after;
+    const retryAfterHeader = res.headers.get('retry-after');
+    const retryAfter = retryAfterHeader ?? parsed.retry_after;
     if (retryAfter !== undefined && retryAfter !== null) err.retryAfter = String(retryAfter);
     throw err;
   }

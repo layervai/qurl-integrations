@@ -24,7 +24,7 @@ function jsonResponse(body, { status = 200, headers = {} } = {}) {
     status,
     text: jest.fn().mockResolvedValue(JSON.stringify(body)),
     headers: {
-      get: (name) => normalizedHeaders[name.toLowerCase()] || null,
+      get: (name) => normalizedHeaders[name.toLowerCase()] ?? null,
     },
   };
 }
@@ -171,6 +171,16 @@ describe('apply-discord-metadata helpers', () => {
     expect(detectImageDimensions(jpeg, 'image/jpeg')).toEqual({ width: 200, height: 100 });
   });
 
+  test('ignores truncated JPEG SOF segments', () => {
+    const jpeg = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xc0, 0x00, 0x06, 0x08, 0x00, 0x64, 0x00,
+      0xff, 0xd9, 0x00,
+    ]);
+
+    expect(detectImageDimensions(jpeg, 'image/jpeg')).toBeUndefined();
+  });
+
   test('rejects referenced assets over the local byte limit', () => {
     const bytes = fs.readFileSync(path.join(__dirname, '..', metadata.application.icon));
 
@@ -224,6 +234,16 @@ describe('apply-discord-metadata helpers', () => {
         retry_after: 12.5,
       }, { status: 429 })),
     })).rejects.toMatchObject({ retryAfter: '12.5' });
+  });
+
+  test('preserves zero retry-after headers', async () => {
+    await expect(request('PATCH', '/users/@me', {}, {
+      token: 'test-token',
+      fetchImpl: jest.fn().mockResolvedValue(jsonResponse({
+        message: 'You are being rate limited.',
+        retry_after: 12.5,
+      }, { status: 429, headers: { 'retry-after': 0 } })),
+    })).rejects.toMatchObject({ retryAfter: '0' });
   });
 
   test('omits the JSON content-type header on GET requests', async () => {

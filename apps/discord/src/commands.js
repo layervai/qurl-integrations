@@ -2120,7 +2120,7 @@ async function executeSendPipeline(interaction, {
     const audience = mode === RECIPIENT_MODE_VOICE
       ? 'everyone in this voice channel'
       : 'everyone in this server';
-    const notifyMsg = `📩 **${safeName}** shared something with ${audience} via **qURL** — check your DMs from qURL.`;
+    const notifyMsg = `📩 **${safeName}** shared something with ${audience} via **qURL**. Check your DMs.`;
     sendChannelMessage(interaction.channelId, { content: notifyMsg })
       .then((result) => {
         if (!result.ok) {

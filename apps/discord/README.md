@@ -99,6 +99,10 @@ Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands
 in https://github.com/layervai/qurl-integrations/issues/588.
 
+After the live metadata apply, run `npm run register` with the same token/app
+pair so Discord's slash-command picker receives the updated command
+descriptions.
+
 Exit codes:
 - `0` — API fields applied, or Discord's unique-username system
   (`discriminator: "0"`) stores a case-only bot username match lowercase
