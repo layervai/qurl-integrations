@@ -27,8 +27,8 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		`case "$WEB_SERVICE" in`,
 		"WEB_SERVICE may contain only letters, numbers, underscores, and hyphens.",
 		"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
-		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_SLUG}.yaml"`,
-		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_SLUG}.compose.yaml"`,
+		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_ID}.yaml"`,
+		`QURL_COMPOSE_FILE="$PWD/qurl-tunnel-${QURL_TUNNEL_ID}.compose.yaml"`,
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
 		"qurl-tunnel-" + testTunnelSlug + ".compose.yaml",
@@ -39,8 +39,8 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"depends_on:",
 		"condition: service_started",
 		testTunnelAgentDirFragment,
-		"QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}",
-		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
+		"QURL_TUNNEL_ID: ${QURL_TUNNEL_ID}",
+		"QURL_TUNNEL_ID='" + testTunnelSlug + "'",
 		`docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SERVICE"`,
 		"Verify with `docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug + "`",
 		"if you changed `APP_COMPOSE_FILE`, use that file there too",
@@ -65,7 +65,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelResourceID, testTunnelAPIKey} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelResourceID, testTunnelAPIKey, "QURL_TUNNEL_SLUG"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -118,7 +118,7 @@ func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *te
 
 	for _, want := range []string{
 		"WEB_SERVICE='" + testTunnelComposeWeb + "'",
-		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
+		"QURL_TUNNEL_ID='" + testTunnelSlug + "'",
 		`case "$WEB_SERVICE" in`,
 		`*[!A-Za-z0-9_-]*)`,
 		"adding new shell variables here",
@@ -126,7 +126,7 @@ func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *te
 		"<<QURL_COMPOSE_YAML_EOF",
 		`'qurl-tunnel-` + testTunnelSlug + `':`,
 		`network_mode: "service:${WEB_SERVICE}"`,
-		`QURL_TUNNEL_SLUG: ${QURL_TUNNEL_SLUG}`,
+		`QURL_TUNNEL_ID: ${QURL_TUNNEL_ID}`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Docker Compose instructions missing validated-expansion guard %q:\n%s", want, got)

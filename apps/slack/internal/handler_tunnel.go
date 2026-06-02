@@ -737,8 +737,10 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The client calls this route token `id`; the Admin API stores and returns
+	// the same verbatim value as the resource slug.
 	return fmt.Sprintf(`routes:
-  - name: %s
+  - id: %s
     type: http
     local_ip: 127.0.0.1
     local_port: %d`, quotedSlug, args.LocalPort), nil

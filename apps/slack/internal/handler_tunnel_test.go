@@ -33,7 +33,7 @@ const (
 	testTunnelAPIKey       = "lv_live_test_bootstrap"
 	testTunnelAPIKeyID     = "key_tunnel_bootstrap"
 	testSlackResponseURL   = "https://hooks.slack.test/response"
-	testTunnelDockerLine   = `TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_SLUG}"`
+	testTunnelDockerLine   = `TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_ID}"`
 	testTunnelModalKey     = "lv_live_modal_bootstrap"
 	testTunnelPipefailLine = "set -o pipefail"
 	testTunnelComposeWeb   = "web_1"
@@ -47,7 +47,7 @@ const (
 	testForbiddenSlackYAMLFence  = "```yaml"
 	testForbiddenSlackShellFence = "```sh"
 	testForbiddenBootstrapArgv   = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
-	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_SLUG}/agent`
+	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_ID}/agent`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
 	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
 	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
@@ -96,6 +96,19 @@ func mustRenderECSFargateTunnelInstructions(t *testing.T, args *tunnelInstallArg
 		t.Fatalf("renderECSFargateTunnelInstructions: %v", err)
 	}
 	return got
+}
+
+func TestRenderTunnelConfigYAMLUsesRouteID(t *testing.T) {
+	got, err := renderTunnelConfigYAML(&tunnelInstallArgs{Slug: testTunnelSlug, LocalPort: 9090})
+	if err != nil {
+		t.Fatalf("renderTunnelConfigYAML: %v", err)
+	}
+	if !strings.Contains(got, "  - id: '"+testTunnelSlug+"'") {
+		t.Fatalf("config missing route id:\n%s", got)
+	}
+	if strings.Contains(got, "  - name:") {
+		t.Fatalf("config should not emit legacy route name:\n%s", got)
+	}
 }
 
 func TestParseTunnelInstall(t *testing.T) {
@@ -406,7 +419,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"Sidecar image: `" + testTunnelImageRef + "`.",
 		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
-		"QURL_TUNNEL_SLUG='" + testTunnelSlug + "'",
+		"QURL_TUNNEL_ID='" + testTunnelSlug + "'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
@@ -424,7 +437,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", "QURL_TUNNEL_SLUG"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1235,7 +1248,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"claimName: 'qurl-agent-" + testTunnelSlug + "'",
 		"secretName: 'qurl-tunnel-" + testTunnelSlug + "'",
 		"defaultMode: 0440",
-		"QURL_TUNNEL_SLUG",
+		"QURL_TUNNEL_ID",
 		"value: '" + testTunnelSlug + "'",
 		testTunnelModalKey,
 		testTunnelLocalPort9090Line,
@@ -1246,7 +1259,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", "QURL_TUNNEL_SLUG"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}

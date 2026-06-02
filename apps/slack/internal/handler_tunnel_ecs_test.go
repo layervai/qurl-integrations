@@ -34,7 +34,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point",
 		"mounted into the task as the `qurl-config` volume",
 		testTunnelLocalPort9090Line,
-		`"name": "QURL_TUNNEL_SLUG"`,
+		`"name": "QURL_TUNNEL_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
 		testTunnelECSAPIKeyNameLine,
 		`REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_` + testTunnelSlug,
@@ -45,7 +45,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_TUNNEL_SLUG"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
