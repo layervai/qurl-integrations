@@ -1053,6 +1053,15 @@ func TestParseEditChannelSelection(t *testing.T) {
 			t.Errorf("got %v, want [%s]", got, testEditHomeChannel)
 		}
 	})
+	t.Run("drops DM and other non-channel conversation ids", func(t *testing.T) {
+		// A `D…` (DM) id can only arrive via a hand-crafted submission — the
+		// multi-select filters to public/private channels — and must be dropped:
+		// exposing a tunnel into a DM is exactly the leak channel-scoping closes.
+		got := parseEditChannelSelection(withChannels([]string{"D0123456789", testEditExtraChannel}), meta)
+		if len(got) != 2 || got[0] != testEditHomeChannel || got[1] != testEditExtraChannel {
+			t.Errorf("got %v, want [%s %s] (DM dropped)", got, testEditHomeChannel, testEditExtraChannel)
+		}
+	})
 }
 
 // TestHandleTunnelEdit_ExposesNewChannel fences requirement #4: selecting a new
@@ -1146,6 +1155,66 @@ func TestHandleTunnelEdit_RevokesDeselectedChannel(t *testing.T) {
 	}
 	if summary := parseSlackText(t, got); !strings.Contains(summary, "Revoked from:") || !strings.Contains(summary, extraChannel) {
 		t.Errorf("summary missing revoke line for the de-selected channel: %s", summary)
+	}
+}
+
+// TestHandleTunnelEdit_AliasBoundChannelReportedRetainedNotRevoked fences the
+// alias-bound revoke gap: de-selecting a (non-current) channel that exposes the
+// tunnel via an ALIAS binding can't be fully revoked by clearing
+// allowed_resource_ids alone — the alias keeps it in AllowedResourceIDsForChannel's
+// union — so it must be reported as still-available-via-alias rather than
+// "Revoked from", or the admin is told access was removed while the tunnel stays
+// listable/mintable there.
+func TestHandleTunnelEdit_AliasBoundChannelReportedRetainedNotRevoked(t *testing.T) {
+	const aliasChannel = "C0alias0001"
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// Current channel exposed via its slug alias; aliasChannel exposed ONLY via a
+	// separate alias binding (no allowed_resource_ids grant there to clear).
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
+		testEditToken: testEditResourceID,
+	})
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, aliasChannel, map[string]string{
+		"staging": testEditResourceID,
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	var got []byte
+	srv, done := editResultServer(t, &got)
+	meta := TunnelEditModalMetadata{
+		TeamID: testAdminTeamID, ChannelID: testEditChannel, UserID: testAdminUserID,
+		ResponseURL: srv.URL, ResourceID: testEditResourceID, Token: testEditToken, DisplayName: testEditDisplay,
+		ExposedChannels: []string{testEditChannel, aliasChannel}, // modal showed both
+	}
+	// Admin de-selects aliasChannel (keeps only the current channel).
+	body := tunnelEditViewSubmissionBodyWithChannels(t, &meta, testAdminTeamID, testAdminUserID, testEditDisplay, "", []string{testEditChannel})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no result posted to response_url")
+	}
+	// The alias binding survives the revoke, so the resource is STILL in the
+	// channel's union — listable/mintable there.
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, aliasChannel)
+	if err != nil {
+		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
+	}
+	if _, ok := allowed[testEditResourceID]; !ok {
+		t.Errorf("alias binding should keep the resource available in aliasChannel; allow-set = %v", allowed)
+	}
+	summary := parseSlackText(t, got)
+	if !strings.Contains(summary, "Still available via a channel alias") || !strings.Contains(summary, aliasChannel) {
+		t.Errorf("summary should flag aliasChannel as alias-retained, not revoked: %s", summary)
+	}
+	if strings.Contains(summary, "Revoked from:") {
+		t.Errorf("aliasChannel must not be reported as cleanly revoked: %s", summary)
 	}
 }
 

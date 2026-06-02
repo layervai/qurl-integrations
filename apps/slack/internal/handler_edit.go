@@ -366,6 +366,14 @@ func parseEditChannelSelection(values map[string]map[string]interactionStateValu
 		if c == "" || !slackChannelIDPattern.MatchString(c) {
 			return
 		}
+		// Only public/private channels (`C…`/`G…`) are valid exposure targets.
+		// The multi_conversations_select already filters to include:[public,private],
+		// so a DM (`D…`) or other non-channel id reaching here is a hand-crafted
+		// submission — drop it: writing a resource into a DM's channel_policies row
+		// would make it listable/mintable there, the exact leak this scoping closes.
+		if c[0] != 'C' && c[0] != 'G' {
+			return
+		}
 		if _, dup := seen[c]; dup {
 			return
 		}
@@ -507,9 +515,15 @@ func (h *Handler) reconcileChannelAliases(ctx context.Context, log *slog.Logger,
 // channelExposureResult buckets the outcome of reconciling a tunnel's channel
 // exposure for the edit summary.
 type channelExposureResult struct {
-	exposed  []string // channels newly granted access
-	revoked  []string // channels whose access was removed
-	hadError bool     // an expose/revoke write failed
+	exposed []string // channels newly granted access
+	revoked []string // channels whose access was fully removed
+	// aliasRetained holds channels whose allowed_resource_ids grant was cleared
+	// but that STILL expose the resource via a surviving alias binding — so they
+	// remain in AllowedResourceIDsForChannel's union (listable/mintable there).
+	// Reported distinctly so the admin isn't told a channel was revoked when an
+	// alias still grants access; fully revoking means unbinding that alias too.
+	aliasRetained []string
+	hadError      bool // an expose/revoke write failed
 }
 
 // reconcileChannelExposure applies the admin's channel-exposure edit. The
@@ -531,6 +545,10 @@ type channelExposureResult struct {
 // channel exposed by another admin after the modal opened) likewise isn't in
 // the baseline, so it survives. Best-effort per channel: a write failure is
 // flagged, not fatal.
+//
+// A revoked channel that still binds an alias to the resource keeps it in the
+// union (RevokeResourceFromChannel clears only allowed_resource_ids), so it's
+// reported as aliasRetained rather than revoked — see [Handler.channelHasAliasForResource].
 func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, desired []string) channelExposureResult {
 	var res channelExposureResult
 	baseline := make(map[string]struct{}, len(meta.ExposedChannels))
@@ -572,11 +590,46 @@ func (h *Handler) reconcileChannelExposure(ctx context.Context, log *slog.Logger
 			res.hadError = true
 			continue
 		}
+		// RevokeResourceFromChannel only clears the allowed_resource_ids grant. A
+		// channel that ALSO exposes this resource via an alias binding (ChannelsForResource
+		// pre-fills both surfaces) stays in AllowedResourceIDsForChannel's union and
+		// remains listable/mintable here, so reporting it as "revoked" would be false.
+		// The alias_bindings surface is untouched by the delete above, so this re-read
+		// isn't subject to the SS delete's eventual-consistency lag.
+		if h.channelHasAliasForResource(ctx, log, meta.TeamID, c, meta.ResourceID) {
+			res.aliasRetained = append(res.aliasRetained, c)
+			continue
+		}
 		res.revoked = append(res.revoked, c)
 	}
 	sort.Strings(res.exposed)
 	sort.Strings(res.revoked)
+	sort.Strings(res.aliasRetained)
 	return res
+}
+
+// channelHasAliasForResource reports whether channelID still binds an alias to
+// resourceID. It reads the alias_bindings surface (via GetChannelPolicy), which
+// RevokeResourceFromChannel (allowed_resource_ids only) does not touch — so it's
+// safe to call right after a revoke without an eventual-consistency race on the
+// just-deleted set member. Used to tell a clean revoke apart from one where a
+// surviving alias keeps the resource in AllowedResourceIDsForChannel's union.
+// A read error is treated as "no alias" (false): the SS grant was already
+// cleared, so the plain "revoked" summary is the safe, non-alarming default
+// rather than a caveat we could not confirm.
+func (h *Handler) channelHasAliasForResource(ctx context.Context, log *slog.Logger, teamID, channelID, resourceID string) bool {
+	entries, err := h.cfg.AdminStore.GetChannelPolicy(ctx, teamID, channelID)
+	if err != nil {
+		log.Warn("tunnel edit: post-revoke alias re-check failed; reporting channel as revoked",
+			"error", err, "channel_id", channelID, "resource_id", resourceID)
+		return false
+	}
+	for _, e := range entries {
+		if e.ResourceID == resourceID {
+			return true
+		}
+	}
+	return false
 }
 
 // formatTunnelEditSummary renders the admin-facing ephemeral summarizing an
@@ -603,12 +656,15 @@ func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReco
 	if len(chanRes.revoked) > 0 {
 		lines = append(lines, "Revoked from: "+joinChannelMentions(chanRes.revoked))
 	}
+	if len(chanRes.aliasRetained) > 0 {
+		lines = append(lines, ":warning: Still available via a channel alias (remove the alias there to fully revoke): "+joinChannelMentions(chanRes.aliasRetained))
+	}
 	// "No changes." only when nothing happened AND nothing errored — a failed
 	// write leaves all buckets empty but isn't a clean no-op, so the warning
 	// below speaks for it instead.
 	nothingApplied := len(changes) == 0 &&
 		len(aliasRes.added) == 0 && len(aliasRes.removed) == 0 && len(aliasRes.conflicts) == 0 &&
-		len(chanRes.exposed) == 0 && len(chanRes.revoked) == 0
+		len(chanRes.exposed) == 0 && len(chanRes.revoked) == 0 && len(chanRes.aliasRetained) == 0
 	if !aliasRes.hadError && !chanRes.hadError && nothingApplied {
 		lines = append(lines, "No changes.")
 	}

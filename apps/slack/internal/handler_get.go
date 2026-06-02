@@ -128,17 +128,14 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // admin can run setalias.
 //
 // The `/qurl aliases` breadcrumb is channel-scoped (it shows aliases
-// bound here), so it stays accurate even though `/qurl list` is now
-// workspace-wide. If `/qurl aliases` ever widens to workspace-wide too,
-// this breadcrumb deserves the same treatment.
-//
-// TODO(#460): a user can see `$<alias>` rendered by `/qurl list`
-// (workspace-wide post-revert of #234) and still hit this surface
-// when minting from a channel without the binding. Followup tracks
-// either an inline "alias resolves in: #channel-a, …" annotation on
-// the list output or a clearer error here distinguishing
-// "alias does not exist anywhere" from "alias not bound here, but
-// bound in: …".
+// bound here), and so is `/qurl list` now — both surface only what
+// resolves in this channel, so the breadcrumb stays accurate. This also
+// closes the former list/mint asymmetry once tracked by TODO(#460): list,
+// aliases, and mint share one channel-scoped set ([Handler.resourceAllowedInChannel]),
+// so a user sees here exactly what they can mint here. The remaining UX
+// nicety — telling a user which OTHER channels an alias is bound in — is
+// deliberately not surfaced (that cross-channel disclosure is what the
+// scoping closes).
 func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }

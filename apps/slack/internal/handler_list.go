@@ -286,6 +286,13 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// so drop URL/transit resources here), then scopes to the channel allow-set
 	// so only tunnels exposed to THIS channel render — every member sees exactly
 	// the tunnels they could `/qurl get` here, no more.
+	//
+	// Known gap (#590): only the first listResourcesScanLimit (100) upstream
+	// resources are scanned before filtering, so a tunnel exposed to this channel
+	// but sorting past row 100 won't render here. It's fail-safe (under-disclosure,
+	// not a leak) and doesn't affect mintability — `/qurl get` gates on the
+	// allow-set directly, not this scan — so a missing row here is not a bug
+	// elsewhere. Driving the listing by the allow-set IDs is tracked in #590.
 	resources := filterResourcesAllowedInChannel(filterTunnelResources(page.Resources), allowed)
 
 	if len(resources) == 0 {

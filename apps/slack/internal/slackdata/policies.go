@@ -335,6 +335,16 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 				":tid": stringAttr(teamID),
 			},
+			// Project only the membership-test inputs (channelItemAllowsResource
+			// reads the SS + the alias-bindings map; the loop reads the SK) so a
+			// team-wide page doesn't drag every attribute over the wire. Mirrors
+			// LookupChannelAlias's projected read on this table.
+			ProjectionExpression: aws.String("#cid, #ari, #ab"),
+			ExpressionAttributeNames: map[string]string{
+				"#cid": attrSlackChannelID,
+				"#ari": attrAllowedResourceIDs,
+				"#ab":  attrAliasBindings,
+			},
 			ExclusiveStartKey: startKey,
 		})
 		if err != nil {
