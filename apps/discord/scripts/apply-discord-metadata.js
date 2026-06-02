@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Operator note: live applies are not fully idempotent yet. Image/app
+// PATCHes re-upload assets on each run until #588 adds safe no-op detection.
 
 const fs = require('fs');
 const path = require('path');
@@ -22,6 +24,9 @@ function validateMetadata(doc = metadata) {
   }
   if (!doc.application?.public_key || !/^[a-f0-9]{64}$/.test(doc.application.public_key)) {
     throw new Error('discord-metadata.json must set application.public_key to the LayerV Discord public key.');
+  }
+  if (!/^\d+$/.test(doc.application?.install_params?.permissions || '')) {
+    throw new Error('discord-metadata.json must set application.install_params.permissions to a numeric string.');
   }
 }
 
@@ -73,9 +78,9 @@ async function request(method, apiPath, body, { token, fetchImpl = fetch } = {})
 }
 
 function summarize(value) {
-  if (Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.startsWith('data:image/')) return '<image-data>';
+  if (Array.isArray(value)) return value.map(summarize);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => {
-    if (typeof v === 'string' && v.startsWith('data:image/')) return [k, '<image-data>'];
     return [k, summarize(v)];
   }));
   return value;

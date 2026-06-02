@@ -6725,7 +6725,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
     // immediately after re-invite without paying the cooldown window.
     clearCooldown(interaction.user.id);
     return interaction.editReply({
-      content: '❌ qURL bot is no longer in this server. Re-invite the bot and re-run the command.',
+      content: '❌ qURL is no longer in this server. Re-invite it and re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
@@ -8048,7 +8048,7 @@ const commands = [
       );
       builder.addSubcommand(sub =>
         sub.setName('help')
-          .setDescription('Show qURL bot help')
+          .setDescription('Show qURL help')
       );
       builder.addSubcommand(sub =>
         sub.setName('setup')

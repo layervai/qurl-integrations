@@ -91,6 +91,13 @@ describe('apply-discord-metadata helpers', () => {
       ...metadata,
       application: { ...metadata.application, public_key: 'not-a-public-key' },
     })).toThrow(/application\.public_key/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: {
+        ...metadata.application,
+        install_params: { ...metadata.application.install_params, permissions: 'not-a-number' },
+      },
+    })).toThrow(/install_params\.permissions/);
   });
 
   test('renders referenced PNG assets as data URIs', () => {
@@ -110,9 +117,11 @@ describe('apply-discord-metadata helpers', () => {
     expect(summarize({
       avatar: 'data:image/png;base64,abc123',
       nested: { keep: 'qURL' },
+      array: ['data:image/png;base64,def456'],
     })).toEqual({
       avatar: '<image-data>',
       nested: { keep: 'qURL' },
+      array: ['<image-data>'],
     });
   });
 
