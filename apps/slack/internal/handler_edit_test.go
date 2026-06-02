@@ -373,8 +373,8 @@ func TestHandleList_OverCapRowFallsBackToCreateOnly(t *testing.T) {
 	if snap.ResourceID != normalRID {
 		t.Errorf("Edit button is for %q, want the normal row %q", snap.ResourceID, normalRID)
 	}
-	// The over-cap row degrades to a Create-only accessory button (sectionWithButton,
-	// not an actions block), so it's still mintable — just without Edit.
+	// The over-cap row degrades to a Create-only accessory button (a section
+	// accessory, not an actions block), so it's still mintable — just without Edit.
 	createVals := createQurlButtonValues(t, blocks)
 	if len(createVals) != 1 || createVals[0] != bigTok {
 		t.Errorf("over-cap row Create-only accessory = %v, want [%s]", createVals, bigTok)
