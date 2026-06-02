@@ -20,6 +20,14 @@ function validateMetadata(doc = metadata) {
   if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
   if (!doc.application?.name) throw new Error('discord-metadata.json must set application.name.');
   if (!doc.application?.description) throw new Error('discord-metadata.json must set application.description.');
+  for (const [field, value] of [
+    ['bot.avatar', doc.bot?.avatar],
+    ['bot.banner', doc.bot?.banner],
+    ['application.icon', doc.application?.icon],
+    ['application.cover_image', doc.application?.cover_image],
+  ]) {
+    if (!value) throw new Error(`discord-metadata.json must set ${field}.`);
+  }
   if (!doc.application?.id || !/^\d+$/.test(doc.application.id)) {
     throw new Error('discord-metadata.json must set application.id to the LayerV Discord application ID.');
   }
@@ -195,8 +203,12 @@ async function main({
   if (currentUser.username === metadata.bot.username) {
     logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
   } else if (currentUser.username.toLowerCase() === metadata.bot.username.toLowerCase()) {
-    hadPartialFailure = true;
-    logger.warn(`Bot username is ${currentUser.username}; desired ${metadata.bot.username}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
+    if (currentUser.discriminator === '0') {
+      logger.warn(`Bot username is ${currentUser.username}; Discord unique usernames are lowercase. Treating case-only match as applied; verify the live display outcome in #860.`);
+    } else {
+      hadPartialFailure = true;
+      logger.warn(`Bot username is ${currentUser.username}; desired ${metadata.bot.username}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);
+    }
   } else {
     try {
       // Keep username separate from bot images so a name conflict/rate limit

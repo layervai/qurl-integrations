@@ -101,10 +101,12 @@ no-op asset PATCH; wait for `retry_after` and rerun.
 Discord rate-limits bot username/avatar/banner updates. The script sends
 avatar and banner together to limit request count, but if a sub-field returns
 `429`, it prints `retry_after` when Discord provides it and exits `1` so
-automation does not treat a partial apply as complete. A case-only username
-mismatch, such as live `qurl` vs desired `qURL`, also exits `1` after skipping
-the username PATCH so the operator can verify the live outcome without burning
-Discord's username rate limit. Application name and
+automation does not treat a partial apply as complete. For Discord's unique
+username system (`discriminator: "0"`), a lowercase case-only match such as
+live `qurl` vs desired `qURL` is treated as applied with a warning because
+unique usernames are lowercase. A legacy case-only mismatch exits `1` after
+skipping the username PATCH so the operator can verify the live outcome without
+burning Discord's username rate limit. Application name and
 legal URLs are Developer Portal-only; if API writes succeed but the app name
 still differs from `discord-metadata.json`, the script exits `2` after printing
 the required portal action. If both happen in one run, the API partial failure

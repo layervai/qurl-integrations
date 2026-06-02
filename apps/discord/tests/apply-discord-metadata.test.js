@@ -99,6 +99,22 @@ describe('apply-discord-metadata helpers', () => {
     })).toThrow(/application\.description/);
     expect(() => validateMetadata({
       ...metadata,
+      bot: { ...metadata.bot, avatar: '' },
+    })).toThrow(/bot\.avatar/);
+    expect(() => validateMetadata({
+      ...metadata,
+      bot: { ...metadata.bot, banner: '' },
+    })).toThrow(/bot\.banner/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: { ...metadata.application, icon: '' },
+    })).toThrow(/application\.icon/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: { ...metadata.application, cover_image: '' },
+    })).toThrow(/application\.cover_image/);
+    expect(() => validateMetadata({
+      ...metadata,
       application: { ...metadata.application, public_key: 'not-a-public-key' },
     })).toThrow(/application\.public_key/);
     expect(() => validateMetadata({
@@ -230,7 +246,21 @@ describe('apply-discord-metadata helpers', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main treats a case-only username mismatch as a partial apply failure', async () => {
+  test('main treats a migrated case-only username match as applied with a warning', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.username.toLowerCase(), discriminator: '0' }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
+  });
+
+  test('main treats a legacy case-only username mismatch as a partial apply failure', async () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
