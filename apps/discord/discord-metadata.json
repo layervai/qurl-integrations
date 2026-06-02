@@ -1,6 +1,7 @@
 {
   "bot": {
     "username": "qURL",
+    "unique_username": "qurl",
     "avatar": "assets/discord-avatar.png",
     "banner": "assets/discord-profile-banner.png"
   },

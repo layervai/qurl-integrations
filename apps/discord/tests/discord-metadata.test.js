@@ -6,6 +6,8 @@ const metadata = require('../discord-metadata.json');
 describe('discord-metadata.json', () => {
   test('pins the LayerV-owned qURL Discord application identity and brand', () => {
     expect(metadata.bot.username).toBe('qURL');
+    expect(metadata.bot.unique_username).toBe('qurl');
+    expect(metadata.bot.unique_username).toBe(metadata.bot.username.toLowerCase());
     expect(metadata.application.name).toBe('qURL (sandbox)');
     expect(metadata.application.id).toBe('1511450217789128885');
     expect(metadata.application.public_key).toBe('f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea');

@@ -65,9 +65,10 @@ developer-portal app:
 2. General Information → set the application name to **qURL (sandbox)**, upload
    `assets/discord-app-icon.png`, add the description from
    `discord-metadata.json`, and set the privacy/terms URLs listed there.
-3. Bot → set the unique username to `qurl`; the application/profile branding
-   remains **qURL**. Upload `assets/discord-avatar.png`, and enable **Server
-   Members Intent** under Privileged Gateway Intents.
+3. Bot → set the unique username to `qurl` (`bot.unique_username` in
+   `discord-metadata.json`); the application/profile branding remains
+   **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
+   Intent** under Privileged Gateway Intents.
 4. Installation → default install settings should request `bot` and
    `applications.commands` with permissions `2147503104` (View Channels, Send
    Messages, Embed Links, Use Slash Commands).
@@ -117,6 +118,8 @@ Exit codes:
 - `3` — fatal application metadata PATCH failure. The application fields did
   not finish applying; inspect the Discord response, wait for `retry_after` if
   present, and rerun after fixing the API error.
+- `4` — pre-flight token/app verification failed before writes. Fix the token,
+  app ID, or public key mismatch before rerunning.
 
 Application name and legal URLs are Developer Portal-only. Discord's
 Edit Current Application API does not list legal URLs as writable fields, so

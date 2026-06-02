@@ -25,6 +25,18 @@ class PortalActionRequiredError extends Error {
   }
 }
 
+class PreflightVerificationError extends Error {
+  constructor(message, cause) {
+    super(message);
+    this.exitCode = 4;
+    if (cause) {
+      this.status = cause.status;
+      this.body = cause.body;
+      this.retryAfter = cause.retryAfter;
+    }
+  }
+}
+
 function loadMetadata() {
   if (metadataCache) return metadataCache;
   try {
@@ -47,6 +59,13 @@ function validateHttpsUrl(value, field) {
 
 function validateMetadata(doc = loadMetadata()) {
   if (!doc.bot?.username) throw new Error('discord-metadata.json must set bot.username.');
+  if (!doc.bot?.unique_username) throw new Error('discord-metadata.json must set bot.unique_username.');
+  if (doc.bot.unique_username !== doc.bot.unique_username.toLowerCase()) {
+    throw new Error('discord-metadata.json must set bot.unique_username to Discord\'s lowercase unique username.');
+  }
+  if (doc.bot.unique_username !== doc.bot.username.toLowerCase()) {
+    throw new Error('discord-metadata.json must set bot.unique_username to the lowercase form of bot.username.');
+  }
   if (!doc.application?.name) throw new Error('discord-metadata.json must set application.name.');
   if (!doc.application?.description) throw new Error('discord-metadata.json must set application.description.');
   for (const [field, value] of [
@@ -69,6 +88,10 @@ function validateMetadata(doc = loadMetadata()) {
   }
   if (!/^\d+$/.test(doc.application?.install_params?.permissions || '')) {
     throw new Error('discord-metadata.json must set application.install_params.permissions to a numeric string.');
+  }
+  const tags = doc.application?.tags;
+  if (!Array.isArray(tags) || tags.length > 5 || tags.some((tag) => typeof tag !== 'string' || !tag)) {
+    throw new Error('discord-metadata.json must set application.tags to 1-5 non-empty strings.');
   }
   validateHttpsUrl(doc.application.terms_of_service_url, 'application.terms_of_service_url');
   validateHttpsUrl(doc.application.privacy_policy_url, 'application.privacy_policy_url');
@@ -256,8 +279,9 @@ async function main({
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
   const brandUsername = doc.bot.username;
-  // Discord unique usernames are lowercase; app/profile branding carries qURL casing.
-  const apiUsername = brandUsername.toLowerCase();
+  // The API applies Discord's lowercase unique username; app/profile branding
+  // carries the cased qURL brand via application metadata and portal fields.
+  const apiUsername = doc.bot.unique_username;
 
   // Build payloads before the dry-run branch so dry-run validates local assets.
   const botUsernamePatch = { username: apiUsername };
@@ -294,19 +318,29 @@ async function main({
   }
 
   const requestOptions = { token, fetchImpl };
-  const currentApp = await request('GET', '/applications/@me', undefined, requestOptions);
-  assertExpectedApplication(currentApp, doc);
+  let currentApp;
+  try {
+    currentApp = await request('GET', '/applications/@me', undefined, requestOptions);
+    assertExpectedApplication(currentApp, doc);
+  } catch (err) {
+    throw new PreflightVerificationError(`Discord application pre-flight verification failed: ${err.message}`, err);
+  }
   logger.log(`Verified Discord application: ${currentApp.name} (${currentApp.id})`);
 
-  const currentUser = await request('GET', '/users/@me', undefined, requestOptions);
-  if (!currentUser.username) {
-    throw new Error('GET /users/@me did not include username. Refusing to apply bot identity metadata.');
+  let currentUser;
+  try {
+    currentUser = await request('GET', '/users/@me', undefined, requestOptions);
+    if (!currentUser.username) {
+      throw new Error('GET /users/@me did not include username. Refusing to apply bot identity metadata.');
+    }
+  } catch (err) {
+    throw new PreflightVerificationError(`Discord bot-user pre-flight verification failed: ${err.message}`, err);
   }
 
   if (currentUser.username === brandUsername) {
     logger.log(`Bot username already ${brandUsername}; legacy pre-migration casing matches the brand.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
-    if (currentUser.discriminator === '0') {
+    if (currentUser.discriminator === '0' || currentUser.discriminator === undefined) {
       logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
     } else {
       hadPartialFailure = true;
@@ -389,6 +423,7 @@ module.exports = {
   detectImageDimensions,
   errorDetails,
   main,
+  PreflightVerificationError,
   PortalActionRequiredError,
   request,
   summarize,

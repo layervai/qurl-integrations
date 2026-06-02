@@ -8,6 +8,7 @@ const {
   detectImageDimensions,
   errorDetails,
   main,
+  PreflightVerificationError,
   PortalActionRequiredError,
   request,
   summarize,
@@ -103,6 +104,18 @@ describe('apply-discord-metadata helpers', () => {
     expect(() => validateMetadata(metadata)).not.toThrow();
     expect(() => validateMetadata({
       ...metadata,
+      bot: { ...metadata.bot, unique_username: '' },
+    })).toThrow(/bot\.unique_username/);
+    expect(() => validateMetadata({
+      ...metadata,
+      bot: { ...metadata.bot, unique_username: 'qURL' },
+    })).toThrow(/lowercase unique username/);
+    expect(() => validateMetadata({
+      ...metadata,
+      bot: { ...metadata.bot, unique_username: 'different' },
+    })).toThrow(/lowercase form of bot\.username/);
+    expect(() => validateMetadata({
+      ...metadata,
       application: { ...metadata.application, id: '' },
     })).toThrow(/application\.id/);
     expect(() => validateMetadata({
@@ -147,6 +160,14 @@ describe('apply-discord-metadata helpers', () => {
         install_params: { ...metadata.application.install_params, permissions: 'not-a-number' },
       },
     })).toThrow(/install_params\.permissions/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: { ...metadata.application, tags: ['a', 'b', 'c', 'd', 'e', 'f'] },
+    })).toThrow(/application\.tags/);
+    expect(() => validateMetadata({
+      ...metadata,
+      application: { ...metadata.application, tags: ['security', ''] },
+    })).toThrow(/application\.tags/);
     expect(() => validateMetadata({
       ...metadata,
       application: { ...metadata.application, terms_of_service_url: 'http://layerv.ai/terms' },
@@ -290,6 +311,10 @@ describe('apply-discord-metadata helpers', () => {
     expect(new PortalActionRequiredError('portal step pending').exitCode).toBe(2);
   });
 
+  test('marks pre-flight verification failures with a distinct exit code', () => {
+    expect(new PreflightVerificationError('bad token').exitCode).toBe(4);
+  });
+
   test('main returns the portal-action exit code when only the app name drifts', async () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse('Qurl Bot')),
@@ -307,14 +332,14 @@ describe('apply-discord-metadata helpers', () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.username.toLowerCase(), discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.log).toHaveBeenCalledWith(`Bot username already ${metadata.bot.username.toLowerCase()}; Discord unique usernames are lowercase while app/profile branding remains ${metadata.bot.username}.`);
+    expect(logger.log).toHaveBeenCalledWith(`Bot username already ${metadata.bot.unique_username}; Discord unique usernames are lowercase while app/profile branding remains ${metadata.bot.username}.`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -323,15 +348,15 @@ describe('apply-discord-metadata helpers', () => {
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
       jsonResponse({ username: 'Qurl Bot' }),
-      jsonResponse({ username: metadata.bot.username.toLowerCase() }),
+      jsonResponse({ username: metadata.bot.unique_username }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(5);
-    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.username.toLowerCase() });
-    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.username.toLowerCase()}`);
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ username: metadata.bot.unique_username });
+    expect(logger.log).toHaveBeenCalledWith(`Updated bot username: ${metadata.bot.unique_username}`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -339,7 +364,22 @@ describe('apply-discord-metadata helpers', () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.username.toLowerCase(), discriminator: '0' }),
+      jsonResponse({ username: metadata.bot.unique_username, discriminator: '0' }),
+      jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
+      jsonResponse(appResponse()),
+    );
+
+    await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('main treats a lowercase unique username without discriminator as applied', async () => {
+    const logger = quietLogger();
+    const fetchImpl = fetchSequence(
+      jsonResponse(appResponse()),
+      jsonResponse({ username: metadata.bot.unique_username }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
@@ -354,7 +394,7 @@ describe('apply-discord-metadata helpers', () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.username.toLowerCase() }),
+      jsonResponse({ username: metadata.bot.unique_username, discriminator: '1234' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
@@ -372,8 +412,41 @@ describe('apply-discord-metadata helpers', () => {
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
-      .rejects.toThrow(/did not include username/);
+      .rejects.toMatchObject({
+        exitCode: 4,
+        message: expect.stringMatching(/did not include username/),
+      });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  test('main marks failed application identity fetches as pre-flight failures', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse({ message: '401: Unauthorized' }, { status: 401 }),
+    );
+
+    await expect(main({ token: 'bad-token', fetchImpl, logger: quietLogger() }))
+      .rejects.toMatchObject({
+        exitCode: 4,
+        status: 401,
+        message: expect.stringMatching(/application pre-flight verification failed/),
+      });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test('main marks wrong-app identity responses as pre-flight failures before writes', async () => {
+    const fetchImpl = fetchSequence(
+      jsonResponse({
+        ...appResponse(),
+        id: '1495050474414411948',
+      }),
+    );
+
+    await expect(main({ token: 'wrong-app-token', fetchImpl, logger: quietLogger() }))
+      .rejects.toMatchObject({
+        exitCode: 4,
+        message: expect.stringMatching(/application pre-flight verification failed/),
+      });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test('main dry-run emits a summary without a token or network calls', async () => {
