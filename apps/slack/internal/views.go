@@ -410,6 +410,16 @@ func sectionBlock(text string) map[string]any {
 	}
 }
 
+// headerBlock returns a `header` block — Slack's large, bold title text. Its
+// text object must be plain_text, so `:emoji:` shortcodes render but mrkdwn
+// (e.g. `*bold*`) does not.
+func headerBlock(text string) map[string]any {
+	return map[string]any{
+		"type": "header",
+		"text": plainTextObj(text),
+	}
+}
+
 // richTextPreformattedBlock returns a `rich_text` block wrapping a single
 // `rich_text_preformatted` element — Slack's structured code block. Unlike a
 // triple-backtick mrkdwn fence inside a `section`, the preformatted element
@@ -438,26 +448,26 @@ func richTextPreformattedBlock(code string) map[string]any {
 	}
 }
 
-// sectionWithButton returns a `section` block whose accessory is a
-// button. Slack renders an accessory to the RIGHT of the section text —
-// Block Kit has no leading/left accessory slot, so the right-aligned
-// accessory is the idiomatic "one action per row" shape. `value` rides
-// along on the button and is echoed back in the block_actions payload
-// when the button is clicked, so the handler knows which row was tapped.
-func sectionWithButton(text, buttonText, actionID, value string) map[string]any {
+// sectionWithAccessory returns a `section` block with the given element as its
+// accessory. Slack renders an accessory to the RIGHT of the section text —
+// Block Kit has no leading/left accessory slot, so the right-aligned accessory
+// is the idiomatic "one action per row" shape. For a button accessory the
+// `value` rides along and is echoed back in the block_actions payload when the
+// button is clicked, so the handler knows which row was tapped.
+func sectionWithAccessory(text string, accessory map[string]any) map[string]any {
 	return map[string]any{
 		"type": "section",
 		"text": map[string]any{
 			"type": "mrkdwn",
 			"text": text,
 		},
-		"accessory": buttonElement(buttonText, actionID, value),
+		"accessory": accessory,
 	}
 }
 
 // buttonElement returns a `button` block element: an action_id plus an opaque
 // `value` echoed back in the block_actions payload when the button is clicked.
-// Used both as a section accessory (sectionWithButton) and inside an
+// Used both as a section accessory (sectionWithAccessory) and inside an
 // actionsBlock (the multi-button admin `/qurl list` rows).
 func buttonElement(buttonText, actionID, value string) map[string]any {
 	return map[string]any{
@@ -466,6 +476,15 @@ func buttonElement(buttonText, actionID, value string) map[string]any {
 		blockKitFieldActionID: actionID,
 		blockKitFieldValue:    value,
 	}
+}
+
+// primaryButtonElement is a [buttonElement] rendered with Slack's `primary`
+// (filled) style — used for the headline "Create qURL" action so it reads
+// above the secondary Edit button on admin `/qurl list` rows.
+func primaryButtonElement(buttonText, actionID, value string) map[string]any {
+	b := buttonElement(buttonText, actionID, value)
+	b["style"] = "primary"
+	return b
 }
 
 // actionsBlock returns an `actions` block holding the given button elements as

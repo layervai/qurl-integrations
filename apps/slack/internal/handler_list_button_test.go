@@ -295,3 +295,70 @@ func TestHandleBlockActions_UnknownActionIgnored(t *testing.T) {
 		t.Errorf("mint reached for an unrecognized action (hits = %d)", mintHits.Load())
 	}
 }
+
+// primaryCreateButtonPresent reports whether any "Create qURL" button across
+// the list blocks — whether a section accessory or an actions-block element —
+// carries Slack's primary (filled) style.
+func primaryCreateButtonPresent(blocks []any) bool {
+	isPrimaryCreate := func(el map[string]any) bool {
+		return el["action_id"] == listCreateQurlActionID && el["style"] == "primary"
+	}
+	for _, b := range blocks {
+		block, _ := b.(map[string]any)
+		if acc, ok := block["accessory"].(map[string]any); ok && isPrimaryCreate(acc) {
+			return true
+		}
+		if block["type"] == blockKitTypeActions {
+			els, _ := block[blockKitFieldElements].([]any)
+			for _, e := range els {
+				if el, ok := e.(map[string]any); ok && isPrimaryCreate(el) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestHandleList_PolishedDesignMarkers fences the /qurl list visual redesign: a
+// `header` block titles the list, each row's section uses the bold multi-line
+// `*$id*` layout, and the "Create qURL" button renders as the primary style.
+func TestHandleList_PolishedDesignMarkers(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB, testKeyDescription: "Prod database"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status != 200")
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	blocks := parseSlackBlocks(t, body)
+	if len(blocks) == 0 {
+		t.Fatalf("list response carried no blocks: %s", body)
+	}
+
+	// First block is a header titling the list.
+	head, _ := blocks[0].(map[string]any)
+	if head["type"] != "header" {
+		t.Fatalf("first block type = %v, want header; blocks=%v", head["type"], blocks)
+	}
+	if txt, _ := head["text"].(map[string]any); txt["type"] != "plain_text" || !strings.Contains(fmt.Sprint(txt["text"]), "Protected Tunnel Resources") {
+		t.Errorf("header text = %v, want plain_text containing the list title", head["text"])
+	}
+
+	// The row section uses the bold multi-line layout, not the bullet line.
+	if !strings.Contains(string(body), "*`$prod-db`*") {
+		t.Errorf("row section missing bold `*$id*` layout: %s", body)
+	}
+
+	// Create qURL renders as the primary (filled) button.
+	if !primaryCreateButtonPresent(blocks) {
+		t.Errorf("Create qURL button is not styled primary; blocks=%v", blocks)
+	}
+}
