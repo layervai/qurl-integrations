@@ -7,9 +7,6 @@ const root = path.resolve(__dirname, '..');
 const metadataPath = path.join(root, 'discord-metadata.json');
 const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
 
-const dryRun = process.argv.includes('--dry-run');
-const token = process.env.DISCORD_TOKEN;
-
 class PortalActionRequiredError extends Error {
   constructor(message) {
     super(message);
@@ -39,17 +36,16 @@ function dataUri(relPath) {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.png': 'image/png',
-    '.webp': 'image/webp',
   };
   const mime = mimeByExt[ext];
   if (!mime) {
-    throw new Error(`Discord metadata asset ${relPath} uses unsupported image extension ${ext || '(none)'}. Use PNG, JPEG, or WebP.`);
+    throw new Error(`Discord metadata asset ${relPath} uses unsupported image extension ${ext || '(none)'}. Use PNG or JPEG.`);
   }
   return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
 }
 
-async function request(method, apiPath, body) {
-  const res = await fetch(`https://discord.com/api/v10${apiPath}`, {
+async function request(method, apiPath, body, { token, fetchImpl = fetch } = {}) {
+  const res = await fetchImpl(`https://discord.com/api/v10${apiPath}`, {
     method,
     headers: {
       Authorization: `Bot ${token}`,
@@ -103,7 +99,12 @@ function assertExpectedApplication(app, doc = metadata) {
   }
 }
 
-async function main() {
+async function main({
+  dryRun = process.argv.includes('--dry-run'),
+  token = process.env.DISCORD_TOKEN,
+  fetchImpl = fetch,
+  logger = console,
+} = {}) {
   validateMetadata();
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
@@ -124,7 +125,7 @@ async function main() {
   };
 
   if (dryRun) {
-    console.log(JSON.stringify({
+    logger.log(JSON.stringify({
       expected_application: {
         id: metadata.application.id,
         public_key: metadata.application.public_key,
@@ -145,29 +146,30 @@ async function main() {
     throw new Error('DISCORD_TOKEN is required. Export the target bot token before running this script.');
   }
 
-  const currentApp = await request('GET', '/applications/@me');
+  const requestOptions = { token, fetchImpl };
+  const currentApp = await request('GET', '/applications/@me', undefined, requestOptions);
   assertExpectedApplication(currentApp);
-  console.log(`Verified Discord application: ${currentApp.name} (${currentApp.id})`);
+  logger.log(`Verified Discord application: ${currentApp.name} (${currentApp.id})`);
 
-  const currentUser = await request('GET', '/users/@me');
+  const currentUser = await request('GET', '/users/@me', undefined, requestOptions);
 
-  const updatedApp = await request('PATCH', '/applications/@me', appPatch);
-  console.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
+  const updatedApp = await request('PATCH', '/applications/@me', appPatch, requestOptions);
+  logger.log(`Updated application metadata: icon=${Boolean(updatedApp.icon)} cover=${Boolean(updatedApp.cover_image)} description=${Boolean(updatedApp.description)}`);
 
   if (metadata.application.name !== updatedApp.name) {
     hadPortalActionRequired = true;
-    console.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
+    logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(metadata.application.name)} in Discord Developer Portal.`);
   }
 
   if (currentUser.username === metadata.bot.username) {
-    console.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
+    logger.log(`Bot username already ${metadata.bot.username}; skipping username update.`);
   } else {
     try {
-      const updatedUser = await request('PATCH', '/users/@me', botUsernamePatch);
-      console.log(`Updated bot username: ${updatedUser.username}`);
+      const updatedUser = await request('PATCH', '/users/@me', botUsernamePatch, requestOptions);
+      logger.log(`Updated bot username: ${updatedUser.username}`);
     } catch (err) {
       hadPartialFailure = true;
-      console.warn(`Bot username update skipped: ${errorDetails(err)}`);
+      logger.warn(`Bot username update skipped: ${errorDetails(err)}`);
     }
   }
 
@@ -175,15 +177,15 @@ async function main() {
     try {
       // Discord returns stored asset hashes, not source-file hashes; upload bot
       // images together to limit request count until safe no-op detection exists.
-      const imageUser = await request('PATCH', '/users/@me', botImagePatch);
-      console.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
+      const imageUser = await request('PATCH', '/users/@me', botImagePatch, requestOptions);
+      logger.log(`Updated bot images: avatar=${Boolean(imageUser.avatar)} banner=${Boolean(imageUser.banner)}`);
     } catch (err) {
       hadPartialFailure = true;
-      console.warn(`Bot image update skipped: ${errorDetails(err)}`);
+      logger.warn(`Bot image update skipped: ${errorDetails(err)}`);
     }
   }
 
-  console.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
+  logger.log(`Portal-only URLs: terms=${metadata.application.terms_of_service_url}, privacy=${metadata.application.privacy_policy_url}`);
   if (hadPartialFailure) {
     const portalSuffix = hadPortalActionRequired ? ' Developer Portal action is also required; see warnings above.' : '';
     throw new Error(`Discord metadata apply completed with skipped fields; see warnings above.${portalSuffix}`);
@@ -206,7 +208,9 @@ module.exports = {
   assertExpectedApplication,
   dataUri,
   errorDetails,
+  main,
   PortalActionRequiredError,
+  request,
   summarize,
   validateMetadata,
 };
