@@ -259,7 +259,7 @@ describe('apply-discord-metadata helpers', () => {
       fetchImpl: jest.fn().mockResolvedValue(jsonResponse({
         message: 'You are being rate limited.',
         retry_after: 12.5,
-      }, { status: 429, headers: { 'retry-after': 0 } })),
+      }, { status: 429, headers: { 'retry-after': '0' } })),
     })).rejects.toMatchObject({ retryAfter: '0' });
   });
 

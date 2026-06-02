@@ -362,6 +362,8 @@ async function main({
     logger.warn(`Developer Portal action required: application name remains ${JSON.stringify(updatedApp.name)}; update it to ${JSON.stringify(doc.application.name)} in Discord Developer Portal.`);
   }
 
+  // Discord's application object exposes legal URLs, but the v10 Edit Current
+  // Application params do not list them as writable fields; verify in portal.
   logger.log(`Portal-only URLs: terms=${doc.application.terms_of_service_url}, privacy=${doc.application.privacy_policy_url}`);
   if (hadPartialFailure) {
     const portalSuffix = hadPortalActionRequired ? ' Developer Portal action is also required; see warnings above.' : '';

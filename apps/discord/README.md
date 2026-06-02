@@ -119,8 +119,9 @@ Exit codes:
   present, and rerun after fixing the API error.
 
 Application name and legal URLs are Developer Portal-only. Discord's
-current-application API does not return the legal URLs, so verify the privacy
-and terms links directly in Developer Portal after editing them.
+Edit Current Application API does not list legal URLs as writable fields, so
+verify the privacy and terms links directly in Developer Portal after editing
+them.
 
 The live apply uses Discord v10's documented current-user fields
 (`username`, `avatar`, `banner`) and current-application fields (`description`,
