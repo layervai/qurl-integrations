@@ -110,7 +110,7 @@ function detectImageDimensions(bytes, mime) {
 
 function detectJpegDimensions(bytes) {
   let offset = 2;
-  while (offset + 9 < bytes.length) {
+  while (offset < bytes.length) {
     if (bytes[offset] !== 0xff) return undefined;
     while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
     if (offset >= bytes.length) return undefined;
@@ -321,6 +321,8 @@ async function main({
   try {
     updatedApp = await request('PATCH', '/applications/@me', appPatch, requestOptions);
   } catch (err) {
+    err.exitCode = 3;
+    err.message = `Discord application metadata update failed: ${err.message}`;
     if (hadPartialFailure) {
       err.message = `${err.message}; bot identity fields were also skipped earlier, see warnings above.`;
     }

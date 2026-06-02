@@ -115,6 +115,9 @@ Exit codes:
   username converges.
 - `2` — API writes completed, but the application name still differs from
   `discord-metadata.json`; update the name in Developer Portal.
+- `3` — fatal application metadata PATCH failure. The application fields did
+  not finish applying; inspect the Discord response, wait for `retry_after` if
+  present, and rerun after fixing the API error.
 
 Application name and legal URLs are Developer Portal-only. Discord's
 current-application API does not return the legal URLs, so verify the privacy

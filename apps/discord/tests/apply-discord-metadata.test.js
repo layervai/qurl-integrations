@@ -171,6 +171,15 @@ describe('apply-discord-metadata helpers', () => {
     expect(detectImageDimensions(jpeg, 'image/jpeg')).toEqual({ width: 200, height: 100 });
   });
 
+  test('reads JPEG dimensions from a minimal tail SOF segment', () => {
+    const jpeg = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xc0, 0x00, 0x07, 0x08, 0x00, 0x64, 0x00, 0xc8,
+    ]);
+
+    expect(detectImageDimensions(jpeg, 'image/jpeg')).toEqual({ width: 200, height: 100 });
+  });
+
   test('ignores truncated JPEG SOF segments', () => {
     const jpeg = Buffer.from([
       0xff, 0xd8,
@@ -375,7 +384,10 @@ describe('apply-discord-metadata helpers', () => {
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
-      .rejects.toThrow(/PATCH \/applications\/@me failed with 429/);
+      .rejects.toMatchObject({
+        exitCode: 3,
+        message: expect.stringMatching(/Discord application metadata update failed: PATCH \/applications\/@me failed with 429/),
+      });
     expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
@@ -431,7 +443,10 @@ describe('apply-discord-metadata helpers', () => {
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger: quietLogger() }))
-      .rejects.toThrow(/bot identity fields were also skipped earlier/);
+      .rejects.toMatchObject({
+        exitCode: 3,
+        message: expect.stringMatching(/bot identity fields were also skipped earlier/),
+      });
     expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
