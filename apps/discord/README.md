@@ -94,7 +94,9 @@ exists and can be read.
 
 Run the live apply as an operator step after seeding the LayerV-owned token; do
 not wire it as an unconditional CI job until image/app PATCH idempotency lands
-in https://github.com/layervai/qurl-integrations/issues/588.
+in https://github.com/layervai/qurl-integrations/issues/588. Until then, a
+clean re-run can still re-upload images and return `1` if Discord rate-limits a
+no-op asset PATCH; wait for `retry_after` and rerun.
 
 Discord rate-limits bot username/avatar/banner updates. The script sends
 avatar and banner together to limit request count, but if a sub-field returns
