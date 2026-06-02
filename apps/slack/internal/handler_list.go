@@ -510,12 +510,17 @@ func formatTunnelListLine(r *client.Resource, boundAliases []string) string {
 // value the row's button mints against, so the section can't name a different
 // one. The plain-text fallback (and notifications) still use
 // [formatTunnelListLine]; this richer form is block-only. A slug-less,
-// alias-less tunnel has an empty token, so it renders the bare resource_id and
-// spells out that it can't be used until an admin sets one — matching the
-// fallback's "(no ID …)" honesty.
+// alias-less tunnel has an empty token, so it renders the bare resource_id,
+// keeps the Display Name (the only human-readable handle such a row has), and
+// spells out that it can't be used until an admin sets an ID — matching the
+// fallback's "(no ID …)" honesty, which also retains the Display Name.
 func formatTunnelListSection(r *client.Resource, boundAliases []string, token string) string {
 	if token == "" {
-		return "*`" + r.ResourceID + "`*\n_No ID set — ask your Slack admin to set one._"
+		s := "*`" + r.ResourceID + "`*"
+		if r.Description != "" {
+			s += "\n" + r.Description
+		}
+		return s + "\n_No ID set — ask your Slack admin to set one._"
 	}
 	var b strings.Builder
 	b.WriteString("*`$" + token + "`*")

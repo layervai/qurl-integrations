@@ -210,6 +210,7 @@ func TestFormatTunnelListSection(t *testing.T) {
 		{name: "slug + Display Name + two aliases (self-binding slug excluded)", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana, "metrics"}, want: "*`$prod-db`*\nProd database\n_aliases:_ `$grafana`, `$metrics`"},
 		{name: "only the self-binding slug bound — no aliases line", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB}, want: "*`$prod-db`*\nProd database"},
 		{name: "slug-less, alias-less tunnel spells out the missing ID", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "*`r_noslug0001`*\n_No ID set — ask your Slack admin to set one._"},
+		{name: "slug-less tunnel keeps its Display Name above the no-ID note", resource: &client.Resource{ResourceID: "r_noslug0002", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Description: "ops jump host"}, boundAliases: nil, want: "*`r_noslug0002`*\nops jump host\n_No ID set — ask your Slack admin to set one._"},
 		{name: "slug-less tunnel promotes first bound alias to primary", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: []string{testListAliasGrafana, "metrics"}, want: "*`$grafana`*\n_alias:_ `$metrics`"},
 	}
 	for _, tc := range cases {
