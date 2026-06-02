@@ -10,7 +10,7 @@ const metadataPath = path.join(root, 'discord-metadata.json');
 let metadataCache;
 const oneMiB = 1024 * 1024;
 const twoMiB = 2 * oneMiB;
-const aspectRatioTolerance = 0.01; // Keep committed Discord brand assets on exact target ratios.
+const aspectRatioTolerance = 0.01; // Absolute ratio delta; keep committed brand assets on exact target ratios.
 const imageRules = {
   'bot.avatar': { maxBytes: oneMiB, minWidth: 128, minHeight: 128, aspect: [1, 1] },
   'bot.banner': { maxBytes: twoMiB, minWidth: 600, minHeight: 240 },
@@ -256,6 +256,7 @@ async function main({
   let hadPartialFailure = false;
   let hadPortalActionRequired = false;
   const brandUsername = doc.bot.username;
+  // Discord unique usernames are lowercase; app/profile branding carries qURL casing.
   const apiUsername = brandUsername.toLowerCase();
 
   // Build payloads before the dry-run branch so dry-run validates local assets.
@@ -306,7 +307,7 @@ async function main({
     logger.log(`Bot username already ${brandUsername}; skipping username update.`);
   } else if (currentUser.username.toLowerCase() === apiUsername) {
     if (currentUser.discriminator === '0') {
-      logger.warn(`Bot username is ${currentUser.username}; Discord unique usernames are lowercase. Treating case-only match as applied; verify the live display outcome in #860.`);
+      logger.log(`Bot username already ${apiUsername}; Discord unique usernames are lowercase while app/profile branding remains ${brandUsername}.`);
     } else {
       hadPartialFailure = true;
       logger.warn(`Bot username is ${currentUser.username}; desired ${brandUsername}. Skipping case-only update to avoid rate-limit churn; verify and resolve the live username outcome in #860.`);

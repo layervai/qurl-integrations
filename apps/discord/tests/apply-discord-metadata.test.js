@@ -297,13 +297,14 @@ describe('apply-discord-metadata helpers', () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
-      jsonResponse({ username: metadata.bot.username }),
+      jsonResponse({ username: metadata.bot.username.toLowerCase(), discriminator: '0' }),
       jsonResponse({ avatar: 'avatar-hash', banner: 'banner-hash' }),
       jsonResponse(appResponse()),
     );
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(logger.log).toHaveBeenCalledWith(`Bot username already ${metadata.bot.username.toLowerCase()}; Discord unique usernames are lowercase while app/profile branding remains ${metadata.bot.username}.`);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -324,7 +325,7 @@ describe('apply-discord-metadata helpers', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('main treats a migrated case-only username match as applied with a warning', async () => {
+  test('main treats a converged lowercase unique username as applied', async () => {
     const logger = quietLogger();
     const fetchImpl = fetchSequence(
       jsonResponse(appResponse()),
@@ -335,7 +336,8 @@ describe('apply-discord-metadata helpers', () => {
 
     await expect(main({ token: 'test-token', fetchImpl, logger })).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
+    expect(logger.log).toHaveBeenCalledWith(expect.stringMatching(/unique usernames are lowercase/));
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('main treats a legacy case-only username mismatch as a partial apply failure', async () => {
