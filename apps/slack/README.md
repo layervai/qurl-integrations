@@ -30,12 +30,12 @@ Customer onboarding is install-first:
 ### User commands (`/qurl`)
 
 - `/qurl setup <email>` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; Auth0 starts login with that address prefilled; first-come-claims — the first user to run it becomes the workspace's qURL admin, and only they can re-run it)
-- `/qurl get <$id|$alias>` — Mint a one-time qURL for a tunnel `$id` or a channel `$alias` (raw URLs are not supported). Channel-scoped: you can only mint a tunnel from a channel it's been exposed to — including admins, and regardless of knowing the `$id`/`$alias`.
-- `/qurl list` — List the protected tunnel resources available **in this channel** (with their bound channel shortcuts). A tunnel appears only in the channel it was installed in, plus any channels an admin later exposes it to via the **Edit** button.
+- `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a channel `$alias` (raw URLs are not supported). Channel-scoped: you can only create a qURL for a resource from a channel it's been exposed to — including admins, and regardless of knowing the `$id`/`$alias`.
+- `/qurl list` — List the protected resources available **in this channel** (with their bound channel shortcuts). A resource appears only in the channel it was installed in, plus any channels an admin later exposes it to via the **Edit** button.
 - `/qurl aliases` — List the qURL shortcuts configured in the current channel
 - `/qurl help` — Show the user command help
 
-A tunnel's visibility and mintability are the same channel-scoped set: `/qurl list`, `/qurl aliases`, and `/qurl get` all agree on which tunnels are available in a given channel. Admins manage where a tunnel reaches with `/qurl-admin tunnel install` (installs into the current channel) and the **Edit** button on a `/qurl list` row (a "Channels" multi-select that exposes the tunnel to additional channels; the channel it was installed in always keeps access).
+A resource's visibility and availability are the same channel-scoped set: `/qurl list`, `/qurl aliases`, and `/qurl get` all agree on which resources are available in a given channel. Admins manage where a resource reaches with `/qurl-admin tunnel install` (installs into the current channel) and the **Edit** button on a `/qurl list` row (a "Channels" multi-select that exposes the resource to additional channels; the channel it was installed in always keeps access).
 
 ### Admin commands (`/qurl-admin`)
 

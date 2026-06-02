@@ -112,10 +112,10 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 		}
 	}
 
-	// Text fallback still lists every tunnel, including the buttonless
-	// slug-less row, plus the one-time-use guidance.
+	// Text fallback still lists every resource, including the buttonless
+	// slug-less row, plus the qURL creation guidance.
 	fallback := parseSlackText(t, body)
-	for _, want := range []string{"`$prod-db`", "`$stage-db`", "no ID", "/qurl get", "one-time qURL link"} {
+	for _, want := range []string{"`$prod-db`", "`$stage-db`", "no ID", "/qurl get", "create a qURL link"} {
 		if !strings.Contains(fallback, want) {
 			t.Errorf("text fallback missing %q: %q", want, fallback)
 		}
@@ -361,7 +361,7 @@ func TestHandleList_PolishedDesignMarkers(t *testing.T) {
 	if head["type"] != "header" {
 		t.Fatalf("first block type = %v, want header; blocks=%v", head["type"], blocks)
 	}
-	if txt, _ := head["text"].(map[string]any); txt["type"] != "plain_text" || !strings.Contains(fmt.Sprint(txt["text"]), "Protected Tunnel Resources") {
+	if txt, _ := head["text"].(map[string]any); txt["type"] != "plain_text" || !strings.Contains(fmt.Sprint(txt["text"]), "Protected Resources") {
 		t.Errorf("header text = %v, want plain_text containing the list title", head["text"])
 	}
 

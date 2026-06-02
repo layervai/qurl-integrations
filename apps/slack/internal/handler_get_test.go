@@ -113,7 +113,7 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 }
 
 // TestHandleGet_MintTunnelDisabled fences the 403/tunnel_disabled
-// mint error → user-facing "Tunnel resources are not yet enabled"
+// mint error → user-facing "Protected resources are not yet enabled"
 // reply.
 func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -125,7 +125,7 @@ func TestHandleGet_MintTunnelDisabled(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Tunnel resources are not yet enabled") {
+	if !strings.Contains(async, "Protected resources are not yet enabled") {
 		t.Errorf("async reply missing tunnel-disabled message: %q", async)
 	}
 }
@@ -306,7 +306,7 @@ func TestHandleGet_ResourceIDRejected(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(ack, "not a resource ID") {
+	if !strings.Contains(ack, "not an internal `r_...` identifier") {
 		t.Errorf("ack missing resource-id-rejection copy: %q", ack)
 	}
 	if mintHits.Load() != 0 {
@@ -340,7 +340,7 @@ func TestHandleGet_LegacyURLBindingRefused(t *testing.T) {
 	if !strings.Contains(async, "no longer supported") {
 		t.Errorf("async reply missing legacy-binding copy: %q", async)
 	}
-	if !strings.Contains(async, "re-point it at a tunnel") {
+	if !strings.Contains(async, "re-point it at a resource") {
 		t.Errorf("async reply missing re-bind instruction: %q", async)
 	}
 	if mintHits.Load() != 0 {
