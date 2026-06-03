@@ -3,15 +3,12 @@ package internal
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // handleFeedback opens the `/qurl feedback` modal. Unlike the guided tunnel
@@ -54,7 +51,10 @@ func (h *Handler) handleFeedback(w http.ResponseWriter, values url.Values) {
 	log := slog.With("command", "feedback", "team_id", teamID, "user_id", meta.UserID)
 	ctx, cancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 	defer cancel()
-	if err := h.openFeedbackView(ctx, log, teamID, enterpriseID, triggerID, view); err != nil {
+	// openViewWithGridFallback retries with the Enterprise Grid org token when
+	// the workspace itself has none — the same token-owner fallback as the
+	// guided tunnel installer.
+	if err := h.openViewWithGridFallback(ctx, log, teamID, enterpriseID, triggerID, view); err != nil {
 		log.Error("feedback views.open failed", "error", err)
 		respondSlack(w, "Couldn't open the feedback form. Please try again in a moment.")
 		return
@@ -62,24 +62,6 @@ func (h *Handler) handleFeedback(w http.ResponseWriter, values url.Values) {
 	// Modal is open; the slash command needs only a prompt 200 with no body so
 	// Slack doesn't post a redundant ephemeral on top of the modal.
 	respondJSON(w, http.StatusOK, map[string]any{})
-}
-
-// openFeedbackView opens the modal with the workspace bot token, retrying with
-// the Enterprise Grid org token when the workspace itself has none — the same
-// token-owner fallback as the guided tunnel installer (openTunnelInstallView).
-func (h *Handler) openFeedbackView(ctx context.Context, log *slog.Logger, teamID, enterpriseID, triggerID string, view []byte) error {
-	err := h.cfg.OpenView(ctx, teamID, triggerID, view)
-	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		return err
-	}
-	if enterpriseID == "" || enterpriseID == teamID {
-		return err
-	}
-	log.Warn("workspace Slack bot token missing; retrying feedback modal with Enterprise Grid install token",
-		"team_id", teamID,
-		"enterprise_id", enterpriseID,
-	)
-	return h.cfg.OpenView(ctx, enterpriseID, triggerID, view)
 }
 
 type feedbackArgs struct {
