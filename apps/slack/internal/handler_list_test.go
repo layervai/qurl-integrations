@@ -649,12 +649,21 @@ func TestHandleList_TunnelWithDisplayName(t *testing.T) {
 	}
 }
 
-// TestHandleList_HasMoreFooter fences the truncation footer when the
-// master list reports has_more=true.
-func TestHandleList_HasMoreFooter(t *testing.T) {
+// TestHandleList_NoTruncationFooterWhenExposedTunnelsFound fences the #590
+// behavior change: once every tunnel in the channel allow-set has been found,
+// the walk stops and renders a complete listing even when the master list
+// still reports has_more=true (more resources of OTHER types past this page).
+// The old "more resources past the first N-row scan" footer — which keyed on
+// the master-list has_more and so over-claimed — is gone, and a satisfied
+// allow-set fetches a single upstream page (no common-case cost regression).
+func TestHandleList_NoTruncationFooterWhenExposedTunnelsFound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var hits int
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		// has_more=true + a cursor: the workspace has more resources of other
+		// types, but the only tunnel exposed here is already on this page.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_one_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
 		}, "cursor_xyz", true)
@@ -664,8 +673,83 @@ func TestHandleList_HasMoreFooter(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "more resources past") {
-		t.Errorf("async reply missing has_more footer: %q", async)
+	if !strings.Contains(async, "`$one-tun`") {
+		t.Errorf("async reply missing exposed tunnel row: %q", async)
+	}
+	if strings.Contains(async, "more resources past") || strings.Contains(async, "may not be shown") {
+		t.Errorf("truncation footer must be gone now the listing is complete: %q", async)
+	}
+	if hits != 1 {
+		t.Errorf("expected exactly 1 upstream page fetch once the allow-set was satisfied, got %d", hits)
+	}
+}
+
+// TestHandleList_FindsTunnelPastFirstPage is the #590 regression test: a
+// tunnel exposed to the channel that sorts onto the SECOND page of the owner's
+// resources must still render. The old single-page scan dropped it (it sorted
+// past the page window); the paginated walk follows the cursor until the
+// allow-set is satisfied.
+func TestHandleList_FindsTunnelPastFirstPage(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	const exposedID = "r_page2_tun"
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			// Page 1: other resources, none exposed to this channel, more to come.
+			writeResourceListFixture(t, w, []map[string]any{
+				{testKeyResourceID: "r_unexposed_pg1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unexposed-pg1"},
+			}, "cursor_p2", true)
+			return
+		}
+		// Page 2: the tunnel actually exposed to this channel.
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: exposedID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "page2-tun"},
+		}, "", false)
+	})
+	// Only the page-2 tunnel is exposed to C_test.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", exposedID)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$page2-tun`") {
+		t.Errorf("tunnel exposed past the first page must render (#590): %q", async)
+	}
+	if strings.Contains(async, "unexposed-pg1") {
+		t.Errorf("a tunnel not exposed to this channel leaked into the listing: %q", async)
+	}
+}
+
+// TestHandleList_ExhaustsWhenExposedIDMissing fences that the walk terminates
+// (rather than spinning) when an allow-set id is never found upstream — e.g. a
+// stale channel binding to a deleted resource. The live exposed tunnel still
+// renders; the missing id silently doesn't (fail-safe under-disclosure).
+func TestHandleList_ExhaustsWhenExposedIDMissing(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var hits int
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Query().Get("cursor") == "" {
+			writeResourceListFixture(t, w, []map[string]any{
+				{testKeyResourceID: "r_live_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "live-tun"},
+			}, "cursor_p2", true)
+			return
+		}
+		// Final page: nothing more, and the second exposed id never appeared.
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	// Two ids exposed; only r_live_aa exists upstream — r_ghost_bb is a stale binding.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_live_aa", "r_ghost_bb")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$live-tun`") {
+		t.Errorf("the live exposed tunnel must render: %q", async)
+	}
+	if hits != 2 {
+		t.Errorf("expected the walk to page to exhaustion (2 pages) chasing the missing id, got %d", hits)
 	}
 }
 
