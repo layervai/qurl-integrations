@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -750,6 +751,46 @@ func TestHandleList_ExhaustsWhenExposedIDMissing(t *testing.T) {
 	}
 	if hits != 2 {
 		t.Errorf("expected the walk to page to exhaustion (2 pages) chasing the missing id, got %d", hits)
+	}
+}
+
+// TestHandleList_StopsAtPageCap fences the listMaxResourcePages backstop: when
+// an allow-set id is never found AND the listing never exhausts (every page
+// reports has_more=true with a fresh cursor — a pathological upstream the page
+// cap exists to bound), the walk must stop after exactly listMaxResourcePages
+// fetches rather than spin. The live tunnel found on page 1 still renders; the
+// missing id silently doesn't (fail-safe under-disclosure). This is the one
+// path with no natural-termination signal, so the cap — and the loop bound it
+// guards — is what keeps /qurl list from hammering upstream unboundedly.
+func TestHandleList_StopsAtPageCap(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var hits int
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		var rows []map[string]any
+		if hits == 1 {
+			rows = []map[string]any{
+				{testKeyResourceID: "r_live_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "live-tun"},
+			}
+		}
+		// Always a fresh cursor + has_more=true: the natural stop condition
+		// (!HasMore || NextCursor=="") never fires, so only the page cap can
+		// terminate the walk. The cursor value advances so it's never empty.
+		writeResourceListFixture(t, w, rows, "cursor_"+strconv.Itoa(hits), true)
+	})
+	// r_live_aa exists upstream; r_ghost_bb never appears, so pending never
+	// empties and the walk would page forever without the cap.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_live_aa", "r_ghost_bb")
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "`$live-tun`") {
+		t.Errorf("the live exposed tunnel must still render at the page cap: %q", async)
+	}
+	if hits != listMaxResourcePages {
+		t.Errorf("walk must stop at exactly listMaxResourcePages (%d) fetches, got %d", listMaxResourcePages, hits)
 	}
 }
 
