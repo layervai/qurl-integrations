@@ -57,6 +57,18 @@ func (h *Handler) handleRevoke(w http.ResponseWriter, values url.Values) {
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
 	userID := strings.TrimSpace(values.Get(fieldUserID))
+	// Gate AdminStore-nil FIRST, matching handleAdmin. requireAdminSync
+	// dereferences AdminStore (CheckAdmin) with no nil check, and on a
+	// no-DDB deploy (buildAdminStore returns nil when the QURL_*_TABLE env
+	// vars are unset) that's a nil-deref — and it fires SYNC, before the
+	// runAsync hop, so startAsyncWorker's recover doesn't cover it. Routing
+	// `revoke` straight here (rather than through handleAdmin) bypassed the
+	// store guard the membership verbs get, so re-add it: a no-DDB deploy
+	// gets the same friendly "not configured" reply on revoke as on
+	// add/remove/admins instead of a panic + broken response.
+	if !h.requireAdminStoreSync(w) {
+		return
+	}
 	if !h.requireAdminSync(w, teamID, userID, AdminActionRevoke) {
 		return
 	}
@@ -134,4 +146,69 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 	}
 	log.Info("revoke succeeded", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 	return fmt.Sprintf("Revoked `$%s` and all its qURLs.", escapeMrkdwnCode(displayToken))
+}
+
+// handleListRevokeClick handles the admin-only red "Revoke" button on a
+// `/qurl list` row. Slack's confirm dialog has already gated the click, so this
+// fires only after the admin confirmed. It acks within Slack's interaction
+// window and revokes on the async pool, posting the outcome to the
+// interaction's response_url — the list message itself is left intact (revoked
+// tunnels drop on the next `/qurl list`). The resource is identified by the
+// button's value snapshot (the already-resolved resource_id + `$<token>`), so
+// no slug re-resolution is needed.
+//
+// The MUTATION is re-gated against CheckAdmin even though the button only
+// renders for admins — a destructive block_action shouldn't trust the
+// render-time gate alone; mirror handleTunnelEditSubmission's submit-time
+// re-check.
+func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
+	log := slog.With(
+		"command", "list_revoke_tunnel",
+		"team_id", payload.Team.ID,
+		"channel_id", payload.Channel.ID,
+		"user_id", payload.User.ID,
+	)
+	responseURL := payload.ResponseURL
+
+	snapshot, err := parseTunnelRevokeButtonValue(action.Value)
+	if err != nil || snapshot.ResourceID == "" {
+		// Our own button always carries a valid snapshot, so this is
+		// defense-in-depth. h.Go (not the async pool) keeps the ack prompt and
+		// can't deepen pool saturation.
+		log.Warn("list revoke: unparseable button value", "error", err)
+		h.Go(func() { _ = h.postResponse(log, responseURL, ":warning: "+commonRevokeFailedMessage) })
+		respondJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+
+	teamID, userID := payload.Team.ID, payload.User.ID
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		if h.cfg.AdminStore == nil {
+			// Unreachable in practice — the Revoke button only renders when
+			// listCallerCanEdit passes, which needs AdminStore — but fail safe.
+			_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
+			return
+		}
+		// Mutation gate. Bounded off h.baseCtx (not the request ctx) so a
+		// client abort can't cancel the deliberate fail-closed check — same
+		// posture as handleTunnelEditSubmission.
+		adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		isAdmin, _, adminErr := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
+		cancel()
+		if adminErr != nil {
+			log.Error("list revoke: admin check failed", "error", adminErr, "team_id", teamID, "user_id", userID)
+			_ = h.postResponse(log, responseURL, ":warning: failed to verify admin status (upstream error; see logs).")
+			return
+		}
+		if !isAdmin {
+			log.Warn("list revoke: non-admin click denied", "team_id", teamID, "user_id", userID)
+			_ = h.postResponse(log, responseURL, ":warning: this command is admin-only")
+			return
+		}
+		_ = h.postResponse(log, responseURL, h.revokeResource(ctx, log, teamID, userID, snapshot.ResourceID, snapshot.Token))
+	}) {
+		log.Warn("async pool saturated — dropping list Revoke click")
+		h.Go(func() { _ = h.postResponse(log, responseURL, ackBusy) })
+	}
+	respondJSON(w, http.StatusOK, map[string]any{})
 }
