@@ -6,7 +6,7 @@
  *
  * Build-time configurable: scripts/build-release.js rewrites the marked DEFAULT_QURL_API_BASE
  * declaration below (see the marker comment) from the QURL_API_BASE env var (or
- * apps/gmail-extension/.env) when packaging a release — e.g. a sandbox build sets
+ * apps/chrome-extension/.env) when packaging a release — e.g. a sandbox build sets
  * QURL_API_BASE=https://getqurllink.layerv.xyz. Confining the value to this tiny, dedicated
  * file keeps the rewrite low-risk (small surface, one marked line) and removes the duplicate
  * "fallback" constant the old in-place rewrite of the 600-line API client needed.

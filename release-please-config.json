@@ -22,9 +22,9 @@
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true
     },
-    "apps/gmail-extension": {
+    "apps/chrome-extension": {
       "release-type": "node",
-      "component": "gmail-extension",
+      "component": "chrome-extension",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,

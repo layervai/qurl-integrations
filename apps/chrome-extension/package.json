@@ -1,5 +1,5 @@
 {
-  "name": "qurl-gmail-chrome-extension",
+  "name": "qurl-chrome-extension",
   "private": true,
   "version": "1.0.2",
   "description": "Chrome extension for Gmail: upload files to qURL and insert access links into compose drafts.",
