@@ -1485,6 +1485,74 @@ func TestRevokeAPIKeyRejectsEmptyID(t *testing.T) {
 	}
 }
 
+func TestDeleteResource(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if err := c.DeleteResource(context.Background(), "r_abc123test"); err != nil {
+		t.Fatalf("DeleteResource: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/v1/resources/r_abc123test" {
+		t.Fatalf("request = %s %s, want DELETE /v1/resources/r_abc123test", gotMethod, gotPath)
+	}
+}
+
+func TestDeleteResourceReturnsAPIErrorOnFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/resources/r_missing0001" {
+			t.Fatalf("request = %s %s, want DELETE /v1/resources/r_missing0001", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"not found","status":404,"detail":"resource already revoked"}}`))
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	err := c.DeleteResource(context.Background(), "r_missing0001")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("DeleteResource error = %v, want APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Detail != "resource already revoked" {
+		t.Fatalf("APIError = %+v, want 404 resource already revoked", apiErr)
+	}
+}
+
+func TestDeleteResourceRejectsEmptyID(t *testing.T) {
+	c := testClient("https://qurl.invalid", "test-key")
+	if err := c.DeleteResource(context.Background(), " \t "); !errors.Is(err, ErrDeleteResourceEmptyID) {
+		t.Fatalf("DeleteResource empty id error = %v, want ErrDeleteResourceEmptyID", err)
+	}
+}
+
+func TestDeleteResourceEscapesIDPathSegment(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	// A resolved resource_id is always `r_…`, but defend the path segment the
+	// same way RevokeAPIKey/UpdateResource do: a stray slash must not escape
+	// the /v1/resources/ collection.
+	if err := c.DeleteResource(context.Background(), "r_a/b"); err != nil {
+		t.Fatalf("DeleteResource: %v", err)
+	}
+	if gotPath != "/v1/resources/r_a%2Fb" {
+		t.Fatalf("escaped path = %q, want /v1/resources/r_a%%2Fb", gotPath)
+	}
+}
+
 // TestCreateResourceAccessPolicyRoundTrip pins the AccessPolicy decoding
 // path — if the server schema renames a subfield (ip_allowlist →
 // ip_allow, etc.) the round-trip would silently drop it without this
