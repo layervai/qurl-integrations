@@ -13,12 +13,17 @@ if (typeof importScripts === 'function') {
 
 const TAB_MESSAGE_TIMEOUT_MS = 3000;
 // The full relay path from popup to content script is:
-// ping (TAB_MESSAGE_TIMEOUT_MS) -> reinject -> ping (TAB_MESSAGE_TIMEOUT_MS) -> INSERT_LINKS relay.
-// popup/popup.js:RUNTIME_MESSAGE_TIMEOUT_MS must exceed this worst-case budget.
-// Keep these values in sync — see the matching comment in popup.js.
+// ping (TAB_MESSAGE_TIMEOUT_MS) -> reinject (chrome.scripting.executeScript, variable on a
+// cold tab) -> ping (TAB_MESSAGE_TIMEOUT_MS) -> INSERT_LINKS relay (INSERT_LINKS_TAB_MESSAGE_TIMEOUT_MS).
+// popup/popup.js:RUNTIME_MESSAGE_TIMEOUT_MS must exceed this worst-case budget INCLUDING the
+// reinject. Keep these values in sync — see the matching comment in popup.js.
 const INSERT_LINKS_TAB_MESSAGE_TIMEOUT_MS = 9000;
 
 function isGmailTab(tab) {
+  // tab.url is readable here without the "tabs" permission because mail.google.com is in
+  // host_permissions, which grants URL visibility for matching tabs. If that entry ever moves
+  // to optional_host_permissions, tab.url would become undefined and this returns false for
+  // everyone — declare "tabs" (or keep the Gmail host permission required) if that changes.
   return Boolean(tab && tab.id && typeof tab.url === 'string' && tab.url.startsWith('https://mail.google.com/mail/'));
 }
 
@@ -34,7 +39,9 @@ function isTrustedInsertLinksSender(sender) {
     return false;
   }
 
-  // Extension pages such as the popup have no sender.tab; content scripts and web-page contexts do.
+  // Trust contract: a trusted INSERT_LINKS sender is an extension UI page (the popup), which
+  // has sender.id === our extension id AND no sender.tab. Content scripts and web-page contexts
+  // always carry a sender.tab, so requiring its absence rejects them even if the id matches.
   return Boolean(sender && sender.id === chrome.runtime.id && !sender.tab);
 }
 

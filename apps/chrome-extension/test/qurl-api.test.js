@@ -37,6 +37,12 @@ test('normalizeQurlApiBase strips /api/upload and requires https', function () {
     qurlApi.normalizeQurlApiBase('http://example.com');
   }, /https:\/\//i);
 
+  // Embedded credentials are stripped so they aren't persisted or shown back to the user.
+  assert.equal(
+    qurlApi.normalizeQurlApiBase('https://user:hunter2@example.com/api/upload'),
+    'https://example.com'
+  );
+
   assert.equal(qurlApi.normalizeQurlApiBase(null), null);
   assert.equal(qurlApi.normalizeQurlApiBase(undefined), null);
   assert.equal(qurlApi.normalizeQurlApiBase('   '), null);
@@ -103,7 +109,7 @@ test('_buildMultipartBody produces a valid multipart payload', async function ()
   assert.match(text, /--BOUNDARY--/);
 });
 
-test('_buildMultipartBody strips CRLF characters from synthetic content types', async function () {
+test('_buildMultipartBody rejects synthetic content types that try to inject headers', async function () {
   const body = qurlApi._buildMultipartBody(
     'BOUNDARY',
     new Uint8Array([65]),
@@ -113,8 +119,18 @@ test('_buildMultipartBody strips CRLF characters from synthetic content types', 
 
   const text = await body.text();
 
-  assert.match(text, /Content-Type: text\/plainX-Injected: yes/);
-  assert.doesNotMatch(text, /\r\nX-Injected: yes\r\n/);
+  // The line-break is stripped and the result is no longer a valid MIME token, so the
+  // sanitizer falls back to the generic type rather than emitting attacker-controlled text.
+  assert.match(text, /Content-Type: application\/octet-stream/);
+  assert.doesNotMatch(text, /X-Injected: yes/);
+});
+
+test('_sanitizeContentType preserves valid parameterized MIME types', function () {
+  assert.equal(qurlApi._sanitizeContentType('text/plain; charset="utf-8"'), 'text/plain; charset="utf-8"');
+  assert.equal(qurlApi._sanitizeContentType('image/png'), 'image/png');
+  // A stray token (space, not a valid MIME separator) fails the grammar → generic fallback.
+  assert.equal(qurlApi._sanitizeContentType('text/plain evil'), 'application/octet-stream');
+  assert.equal(qurlApi._sanitizeContentType(''), 'application/octet-stream');
 });
 
 test('_buildMultipartBody accepts ArrayBuffer input without changing the payload', async function () {
@@ -141,6 +157,12 @@ test('_extractPayload and _parseExpiry support wrapped and timestamp values', fu
     new Date(1710000000 * 1000).toISOString()
   );
 
+  // Exactly 1e12 is treated as milliseconds (boundary uses >=), not seconds.
+  assert.equal(
+    qurlApi._parseExpiry({ expires_at: 1e12 }),
+    new Date(1e12).toISOString()
+  );
+
   assert.equal(
     qurlApi._parseExpiry({ expires_at: '2026-05-01T12:00:00Z' }),
     '2026-05-01T12:00:00.000Z'
@@ -165,34 +187,33 @@ test('_get returns the first populated candidate key', function () {
   assert.equal(qurlApi._get({ a: Infinity, b: 'ok' }, 'a', 'b'), 'ok');
 });
 
-test('resolveDefaultQurlApiConfig falls back when the bundled default is malformed', function () {
-  const originalConsoleError = console.error;
-  const errors = [];
-  console.error = function (...args) {
-    errors.push(args.join(' '));
-  };
+test('resolveDefaultQurlApiConfig normalizes the centralized default and throws when it is malformed', function () {
+  assert.deepEqual(qurlApi.resolveDefaultQurlApiConfig('https://getqurllink.layerv.ai/'), {
+    normalized: 'https://getqurllink.layerv.ai',
+    origin: 'https://getqurllink.layerv.ai',
+  });
 
-  try {
-    const config = qurlApi.resolveDefaultQurlApiConfig('http://bad.example.com');
-    assert.deepEqual(config, {
-      normalized: 'https://getqurllink.layerv.xyz',
-      origin: 'https://getqurllink.layerv.xyz',
-    });
-  } finally {
-    console.error = originalConsoleError;
-  }
-
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /Invalid bundled qURL API base URL/);
+  // The default is the single source of truth (lib/qurl-config.js); a malformed value is a
+  // build error, so fail loudly rather than silently uploading to an unexpected host.
+  assert.throws(function () {
+    qurlApi.resolveDefaultQurlApiConfig('http://bad.example.com');
+  }, /https:\/\//i);
 });
 
-test('getQurlHostPermissionPattern and isDefaultQurlOrigin use normalized origins', function () {
+test('getQurlHostPermissionPattern drops the port and isDefaultQurlOrigin uses normalized origins', function () {
   assert.equal(
     qurlApi.getQurlHostPermissionPattern('https://example.com/custom/path'),
     'https://example.com/*'
   );
 
-  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.xyz/custom/path'), true);
+  // Chrome match patterns reject ports, so a ported base must yield a port-less pattern.
+  assert.equal(
+    qurlApi.getQurlHostPermissionPattern('https://self.hosted.example:8443/base'),
+    'https://self.hosted.example/*'
+  );
+
+  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.ai/custom/path'), true);
+  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.xyz'), false);
   assert.equal(qurlApi.isDefaultQurlOrigin('https://example.com'), false);
 });
 
@@ -208,7 +229,7 @@ test('ensureQurlHostPermission skips chrome.permissions for the bundled default 
     },
   };
 
-  const granted = await qurlApi.ensureQurlHostPermission('https://getqurllink.layerv.xyz', false);
+  const granted = await qurlApi.ensureQurlHostPermission('https://getqurllink.layerv.ai', false);
 
   assert.equal(granted, true);
   assert.equal(containsCalled, false);
@@ -260,7 +281,7 @@ test('getStoredQurlApiBase ignores malformed stored values', async function () {
 test('uploadFile returns parsed success payload', async function () {
   global.chrome = undefined;
   global.fetch = async function (url, options) {
-    assert.equal(url, 'https://getqurllink.layerv.xyz/api/upload');
+    assert.equal(url, 'https://getqurllink.layerv.ai/api/upload');
     assert.equal(options.method, 'POST');
     assert.match(options.headers['Content-Type'], /^multipart\/form-data; boundary=/);
 
@@ -473,8 +494,13 @@ test('uploadFile localizes invalid JSON and payload errors when messages are ava
 
 test('uploadFile aborts when the request timeout elapses', async function () {
   global.chrome = undefined;
-  global.setTimeout = function (callback) {
-    callback();
+  // Fire only the upload-abort timer; leave the pre-flight timeout pending so the pre-flight
+  // resolves normally (it completes in ms in production). Firing every timer immediately would
+  // trip the pre-flight guard instead of exercising the fetch-abort path under test.
+  global.setTimeout = function (callback, delay) {
+    if (delay === qurlApi.UPLOAD_REQUEST_TIMEOUT_MS) {
+      callback();
+    }
     return 1;
   };
   global.clearTimeout = function () {};
@@ -522,6 +548,9 @@ test('setStoredQurlApiBase surfaces a permission denial before saving', async fu
     runtime: { lastError: null },
     storage: {
       local: {
+        get(_keys, callback) {
+          callback({});
+        },
         set() {
           setCalled = true;
         },
@@ -551,6 +580,9 @@ test('setStoredQurlApiBase skips a second permission prompt when the caller alre
     runtime: { lastError: null },
     storage: {
       local: {
+        get(_keys, callback) {
+          callback({});
+        },
         set(_payload, callback) {
           setCalled = true;
           callback();
@@ -607,6 +639,76 @@ test('setStoredQurlApiBase clears the override without requesting host permissio
   assert.equal(cleared, null);
   assert.equal(removeCalled, true);
   assert.equal(permissionRevoked, true);
+});
+
+test('setStoredQurlApiBase revokes the previous custom origin when switching custom-A -> custom-B', async function () {
+  const revokedOrigins = [];
+  global.chrome = {
+    runtime: { lastError: null },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({ qurlApiBase: 'https://custom-a.example.com' });
+        },
+        set(_payload, callback) {
+          callback();
+        },
+      },
+    },
+    permissions: {
+      contains(_details, callback) {
+        callback(true);
+      },
+      request(_details, callback) {
+        callback(true);
+      },
+      remove(opts, callback) {
+        revokedOrigins.push(opts.origins[0]);
+        callback(true);
+      },
+    },
+  };
+
+  const saved = await qurlApi.setStoredQurlApiBase('https://custom-b.example.com');
+
+  assert.equal(saved, 'https://custom-b.example.com');
+  // The no-longer-reachable custom-A origin is revoked; custom-B is not.
+  assert.deepEqual(revokedOrigins, ['https://custom-a.example.com/*']);
+});
+
+test('setStoredQurlApiBase does not revoke when re-saving the same custom origin', async function () {
+  let revokeCalled = false;
+  global.chrome = {
+    runtime: { lastError: null },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({ qurlApiBase: 'https://custom-a.example.com' });
+        },
+        set(_payload, callback) {
+          callback();
+        },
+      },
+    },
+    permissions: {
+      contains(_details, callback) {
+        callback(true);
+      },
+      request(_details, callback) {
+        callback(true);
+      },
+      remove(_opts, callback) {
+        revokeCalled = true;
+        callback(true);
+      },
+    },
+  };
+
+  // Same host, only a path change — the host permission is still needed, so no revoke.
+  const saved = await qurlApi.setStoredQurlApiBase('https://custom-a.example.com/team');
+
+  assert.equal(saved, 'https://custom-a.example.com/team');
+  assert.equal(revokeCalled, false);
 });
 
 test('uploadFile reports network failures', async function () {

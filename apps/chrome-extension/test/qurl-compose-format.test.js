@@ -123,7 +123,9 @@ test('buildLinkHtml uses the localized expiry suffix when chrome.i18n is availab
       expiry: '2026-05-01T12:00:00Z',
     }]);
 
-    assert.match(html, new RegExp(`\\[Ends ${formattedExpiry}\\]`));
+    // Literal contains-check (not a RegExp): the formatted expiry includes a UTC offset like
+    // "+0000", and "+" is a regex metacharacter that would otherwise break the match.
+    assert.ok(html.includes(`[Ends ${formattedExpiry}]`), `expected localized suffix in: ${html}`);
   } finally {
     global.chrome = originalChrome;
   }

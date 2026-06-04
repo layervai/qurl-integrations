@@ -8,7 +8,9 @@ The manifest declares:
 "optional_host_permissions": ["https://*/*"]
 ```
 
-This broad declaration exists only because the extension allows a user to save an arbitrary HTTPS QURL server at runtime. It is intentionally broader than the extension's actual runtime access pattern and should be called out explicitly in any reviewer note or store-listing justification.
+This broad declaration exists only because the extension allows a user to save an arbitrary HTTPS qURL server at runtime. It is intentionally broader than the extension's actual runtime access pattern and should be called out explicitly in any reviewer note or store-listing justification.
+
+It cannot be narrowed without removing the custom-server feature: MV3's `chrome.permissions.request()` can only request origins already covered by a pattern in `optional_host_permissions`. Because the user may type any HTTPS origin, this wildcard is the only declaration that lets the extension request that exact origin at runtime. The wildcard *declares what may be requested* — it is not a grant. No origin is accessible until the user enters it and approves Chrome's own per-origin prompt.
 
 Chrome Web Store reviewers commonly scrutinize `https://*/*`, so the reviewer note should explicitly tie this wildcard to the user-driven custom-server feature and the exact-origin prompt flow below.
 
@@ -20,4 +22,4 @@ The extension does not auto-grant access to all HTTPS origins:
 - The popup then calls `chrome.permissions.request(...)` for that exact origin from the confirmation click handler, preserving the user gesture for Chrome's own prompt.
 - Uploads fail closed if host permission is unavailable for a non-default origin.
 
-The extension does not crawl arbitrary browsing origins. Additional access is used only for the single QURL upload origin that the user explicitly chooses and approves.
+The extension does not crawl arbitrary browsing origins. Additional access is used only for the single qURL upload origin that the user explicitly chooses and approves.

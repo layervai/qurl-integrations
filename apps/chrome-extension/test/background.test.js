@@ -278,6 +278,33 @@ test('isTrustedInsertLinksSender fails closed when runtime id is unavailable', f
   assert.equal(background.isTrustedInsertLinksSender({ id: 'trusted-extension-id' }), false);
 });
 
+test('isTrustedInsertLinksSender rejects a content-script sender even with a matching id', function () {
+  const chrome = {
+    i18n: {
+      getMessage() {
+        return '';
+      },
+    },
+    runtime: {
+      id: 'trusted-extension-id',
+      lastError: null,
+      onMessage: {
+        addListener() {},
+      },
+    },
+  };
+
+  const background = loadBackground(chrome);
+
+  // Popup (extension page): id matches and there is no sender.tab -> trusted.
+  assert.equal(background.isTrustedInsertLinksSender({ id: 'trusted-extension-id' }), true);
+  // Content script / web page: carries a sender.tab -> rejected despite the matching id.
+  assert.equal(
+    background.isTrustedInsertLinksSender({ id: 'trusted-extension-id', tab: { id: 1 } }),
+    false
+  );
+});
+
 test('INSERT_LINKS relay timeout is longer than the ping timeout budget', function () {
   const chrome = {
     i18n: {

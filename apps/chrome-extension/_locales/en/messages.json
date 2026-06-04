@@ -73,6 +73,20 @@
     "message": "Server returned success but no download link was provided.",
     "description": "Shown when the qURL server returns a success response without a qurl_link field"
   },
+  "file_too_large_error": {
+    "message": "$FILENAME$ is too large to upload from the popup (max $MAX$).",
+    "description": "Shown when a selected file exceeds the popup's per-file size cap",
+    "placeholders": {
+      "filename": {
+        "content": "$1",
+        "example": "video.mp4"
+      },
+      "max": {
+        "content": "$2",
+        "example": "100.0 MB"
+      }
+    }
+  },
   "config_reset_error": {
     "message": "Failed to reset qURL server URL.",
     "description": "Fallback error shown when resetting the server URL fails"
@@ -124,7 +138,7 @@
     "description": "Button label while uploading"
   },
   "uploading_hint": {
-    "message": "Uploading, please wait...",
+    "message": "Uploading — keep this popup open until it finishes…",
     "description": "Footer hint while uploading"
   },
   "inserting_hint": {
@@ -188,7 +202,7 @@
     "description": "Shown when the user declines the permission prompt for a custom qURL server"
   },
   "permission_request_confirm": {
-    "message": "Allow the extension to access $1 for qURL uploads? Chrome will show a permission prompt next.",
+    "message": "Allow the extension to access $origin$ for qURL uploads? Chrome will show a permission prompt next.",
     "description": "Confirmation shown before requesting host permission for a custom qURL server",
     "placeholders": {
       "origin": {
@@ -254,7 +268,7 @@
     "description": "Shown when a pending insertion request is evicted; the insertion may have succeeded"
   },
   "expiry_suffix": {
-    "message": " (Expires: $1)",
+    "message": " (Expires: $EXPIRY$)",
     "description": "Suffix shown after a link when the server returns an expiry timestamp",
     "placeholders": {
       "expiry": {

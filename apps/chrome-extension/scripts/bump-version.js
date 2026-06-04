@@ -1,3 +1,8 @@
+// Released versions are owned by Release Please (see release-please-config.json:
+// apps/chrome-extension), which bumps package.json and manifest.json from conventional commits
+// on main. This script is a convenience for ad-hoc LOCAL Chrome Web Store packaging
+// (e.g. `npm run publish:patch`) when cutting a one-off ZIP outside the release flow; it keeps
+// package.json, package-lock.json, and manifest.json in lockstep the same way Release Please does.
 const fs = require('fs');
 const path = require('path');
 
@@ -73,6 +78,9 @@ function bumpVersion(version, level) {
 }
 
 function validateVersion(version) {
+  // Pre-release suffixes (e.g. 1.0.0-rc.1) are intentionally rejected: the Chrome manifest
+  // version field is dot-separated integers only, and Release Please owns released versions
+  // anyway. Don't relax this to accept semver pre-release tags.
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     throw new Error(`Invalid version: ${version}. Expected x.y.z`);
   }

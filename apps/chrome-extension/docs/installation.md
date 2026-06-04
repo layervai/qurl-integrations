@@ -2,7 +2,7 @@
 
 ## Local Unpacked Install
 
-1. From `qurl-gmail-chrome-extension/`, build the unpacked extension:
+1. From `apps/chrome-extension/`, build the unpacked extension:
 
 ```bash
 npm run release
@@ -17,7 +17,7 @@ For a full validation flow with screenshots, see [local-unpacked-testing.md](./l
 
 ## Build-Time Default Server Override
 
-The extension supports two QURL server configuration paths:
+The extension supports two qURL server configuration paths:
 
 - Runtime override in the popup settings, stored in `chrome.storage.local`
 - Build-time default override for `release/` and `dist/`
@@ -32,6 +32,6 @@ To change the build-time default:
 
 ## Runtime Custom Server Permissions
 
-When you save a custom QURL server in the popup settings, the extension first asks for confirmation naming the exact origin, then Chrome shows its per-origin host-permission prompt.
+When you save a custom qURL server in the popup settings, the extension first asks for confirmation naming the exact origin, then Chrome shows its per-origin host-permission prompt.
 
-`optional_host_permissions` remains `https://*/*` only to enable this one-origin-at-a-time flow for user-specified HTTPS QURL servers.
+`optional_host_permissions` remains `https://*/*` only to enable this one-origin-at-a-time flow for user-specified HTTPS qURL servers.

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "92",
+  "minimum_chrome_version": "99",
   "name": "__MSG_ext_name__",
   "default_locale": "en",
   "version": "1.0.2",
@@ -33,13 +33,12 @@
     "extension_pages": "script-src 'self'; object-src 'self';"
   },
   "permissions": [
-    "activeTab",
     "scripting",
     "storage"
   ],
   "host_permissions": [
     "https://mail.google.com/*",
-    "https://getqurllink.layerv.xyz/*"
+    "https://getqurllink.layerv.ai/*"
   ],
   "optional_host_permissions": [
     "https://*/*"

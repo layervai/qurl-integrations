@@ -11,18 +11,20 @@ const QURLI18n = typeof globalThis !== 'undefined' && globalThis.QURLI18n
   ? globalThis.QURLI18n
   : (typeof module !== 'undefined' && module.exports ? require('./qurl-i18n.js') : null);
 
+// Centralized config is the single source of truth for the default server base URL.
+// Loaded before this script in popup.html and required directly in Node tests.
+const QURLConfig = typeof globalThis !== 'undefined' && globalThis.QURLConfig
+  ? globalThis.QURLConfig
+  : (typeof module !== 'undefined' && module.exports ? require('./qurl-config.js') : null);
+
 // ===================== Configuration =====================
-// Default qURL server base URL used when no override is configured.
-// Release builds may rewrite this constant from QURL_API_BASE in .env or the shell environment.
-// Keep this declaration simple so scripts/build-release.js can rewrite it reliably.
-// Note: The build rewriter adds a trailing slash, but normalizeQurlApiBase (called via
-// resolveDefaultQurlApiConfig) strips it. This "add slash then strip slash" round-trip
-// is intentional — the rewriter outputs a canonical form and normalization ensures
-// consistent runtime behavior regardless of input formatting.
-const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';
-// Do not deduplicate this with DEFAULT_QURL_API_BASE. The build-time rewriter intentionally
-// only patches the primary constant so this fallback remains a known-good bundled default.
-const DEFAULT_QURL_API_BASE_FALLBACK = 'https://getqurllink.layerv.xyz/';
+// Default qURL server base URL used when no override is configured. The value lives in
+// lib/qurl-config.js (build-time configurable via QURL_API_BASE); see that file. The
+// trailing slash it carries is stripped by normalizeQurlApiBase via resolveDefaultQurlApiConfig.
+const DEFAULT_QURL_API_BASE = QURLConfig ? QURLConfig.DEFAULT_QURL_API_BASE : null;
+// Pre-flight (storage + permission lookups) must finish within this budget so a torn-down
+// MV3 service worker that drops a Chrome callback can't hang the upload forever.
+const UPLOAD_PREFLIGHT_TIMEOUT_MS = 10 * 1000;
 const QURL_API_BASE_STORAGE_KEY = 'qurlApiBase';
 const UPLOAD_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_QURL_API_CONFIG = resolveDefaultQurlApiConfig(DEFAULT_QURL_API_BASE);
@@ -41,8 +43,35 @@ const DEFAULT_QURL_API_ORIGIN = DEFAULT_QURL_API_CONFIG.origin;
  *                    resource_url: string|null, expires_at: string|null, error: string|null}>}
  */
 async function uploadFile(fileBuffer, filename, contentType) {
-  const baseUrl = await getQurlApiBase();
-  const hasPermission = await ensureQurlHostPermission(baseUrl, false);
+  let baseUrl;
+  let hasPermission;
+  try {
+    // Bound the pre-flight: storage.local.get and permissions.contains are Promise-wrapped
+    // Chrome callbacks with no native timeout. If the service worker is torn down mid-call
+    // the callback can be dropped, which would otherwise hang the popup on "Uploading…"
+    // forever (the fetch AbortController below is not armed until after this resolves).
+    const preflight = (async function () {
+      const resolvedBase = await getQurlApiBase();
+      const granted = await ensureQurlHostPermission(resolvedBase, false);
+      return { resolvedBase, granted };
+    })();
+    const result = await withTimeout(
+      preflight,
+      UPLOAD_PREFLIGHT_TIMEOUT_MS,
+      getMessage('upload_preflight_timeout_error', 'Timed out preparing the upload. Please try again.')
+    );
+    baseUrl = result.resolvedBase;
+    hasPermission = result.granted;
+  } catch (err) {
+    return {
+      success: false,
+      resource_id: null,
+      qurl_link: null,
+      resource_url: null,
+      expires_at: null,
+      error: err && err.message ? err.message : String(err),
+    };
+  }
   if (!hasPermission) {
     return {
       success: false,
@@ -137,6 +166,9 @@ async function uploadFile(fileBuffer, filename, contentType) {
     }
 
     const resourceId = _get(payloadObject, 'resource_id', 'resourceId', 'id');
+    // _get also coerces finite numbers to strings (useful for numeric resource_id). For the URL
+    // fields that's harmless: a backend emitting a number would yield e.g. "123", which
+    // normalizeAllowedLink rejects, so it surfaces as "no download link" rather than a bad link.
     const qurlLink = _get(payloadObject, 'qurl_link', 'qurlLink');
     const resourceUrl = _get(payloadObject, 'resource_url', 'resourceUrl');
 
@@ -241,6 +273,12 @@ async function setStoredQurlApiBase(value, options) {
   const normalized = normalizeQurlApiBase(value);
   const resolvedOptions = options || {};
 
+  // Capture the previous override up front so its host permission can be revoked once we've
+  // switched away from it — whether the user clears the override (custom → default) OR moves to
+  // a different custom server (custom-A → custom-B). Least privilege: don't leave a granted
+  // origin that the UI can no longer reach.
+  const previousBase = await getStoredQurlApiBase();
+
   if (normalized) {
     const granted = await ensureQurlHostPermission(normalized, !resolvedOptions.skipPermissionRequest);
     if (!granted) {
@@ -251,26 +289,7 @@ async function setStoredQurlApiBase(value, options) {
     }
   }
 
-  // When clearing the override, revoke any previously-granted custom origin permission.
-  // This honors the principle of least privilege — the user no longer needs access to
-  // the custom server once they've switched back to the bundled default.
-  if (!normalized) {
-    const previousBase = await getStoredQurlApiBase();
-    if (previousBase && !isDefaultQurlOrigin(previousBase)) {
-      const pattern = getQurlHostPermissionPattern(previousBase);
-      if (typeof chrome !== 'undefined' && chrome.permissions && chrome.permissions.remove) {
-        try {
-          await new Promise(function (res) {
-            chrome.permissions.remove({ origins: [pattern] }, res);
-          });
-        } catch (_err) {
-          // Best-effort revocation; failure is non-fatal.
-        }
-      }
-    }
-  }
-
-  return new Promise(function (resolve, reject) {
+  const stored = await new Promise(function (resolve, reject) {
     if (!normalized) {
       chrome.storage.local.remove(QURL_API_BASE_STORAGE_KEY, function () {
         if (chrome.runtime && chrome.runtime.lastError) {
@@ -291,6 +310,47 @@ async function setStoredQurlApiBase(value, options) {
       }
       resolve(normalized);
     });
+  });
+
+  // Only after the new value is persisted (so a failed grant/store leaves the old permission in
+  // place) do we drop the previous custom origin if it is no longer the active base.
+  await revokeStaleCustomOrigin(previousBase, normalized);
+  return stored;
+}
+
+/**
+ * Best-effort revocation of a previous custom origin's host permission once it is no longer the
+ * active base URL. No-op for the bundled default and when the host is unchanged (custom-A →
+ * custom-A, or a path-only change on the same host). Revocation failure is non-fatal.
+ *
+ * @param {string|null} previousBase
+ * @param {string|null} normalizedBase
+ * @returns {Promise<void>}
+ */
+function revokeStaleCustomOrigin(previousBase, normalizedBase) {
+  if (!previousBase || isDefaultQurlOrigin(previousBase)) {
+    return Promise.resolve();
+  }
+
+  const previousPattern = getQurlHostPermissionPattern(previousBase);
+  if (normalizedBase && getQurlHostPermissionPattern(normalizedBase) === previousPattern) {
+    // Same host still in use — keep the permission.
+    return Promise.resolve();
+  }
+
+  if (typeof chrome === 'undefined' || !chrome.permissions || !chrome.permissions.remove) {
+    return Promise.resolve();
+  }
+
+  return new Promise(function (res) {
+    try {
+      chrome.permissions.remove({ origins: [previousPattern] }, function () {
+        void (chrome.runtime && chrome.runtime.lastError);
+        res();
+      });
+    } catch (_err) {
+      res();
+    }
   });
 }
 
@@ -361,6 +421,9 @@ function requestQurlHostPermission(baseUrl) {
  * @param {string} contentType
  * @returns {Blob}
  */
+// Builds the multipart body with an explicit boundary rather than via FormData (which would
+// let fetch set the boundary). The explicit form keeps the header sanitization above under our
+// control and yields deterministic bytes the unit tests assert against.
 function _buildMultipartBody(boundary, fileBuffer, filename, contentType) {
   const safeFilename = _sanitizeFilename(filename);
   const safeContentType = _sanitizeContentType(contentType);
@@ -383,10 +446,48 @@ function _buildMultipartBody(boundary, fileBuffer, filename, contentType) {
 }
 
 function _sanitizeContentType(contentType) {
-  // Strip control characters (NUL, CR, LF, etc.) to prevent header injection.
-  // Mirrors the control-character stripping in _sanitizeFilename for consistency.
-  const normalized = String(contentType || 'application/octet-stream').replace(/[\x00-\x1f]+/g, '');
-  return normalized || 'application/octet-stream';
+  // Strip the same control + line-separator classes as _sanitizeFilename so the two
+  // multipart header fields have matching injection resistance (CR/LF/NUL plus the
+  // Unicode line separators \u0085\u2028\u2029). Note: ';' and '"' are deliberately
+  // NOT stripped — they are legitimate in MIME types (e.g. text/plain; charset="utf-8").
+  const stripped = String(contentType || 'application/octet-stream')
+    // eslint-disable-next-line no-control-regex -- intentionally strips control chars to block header injection
+    .replace(/[\x00-\x1f\u0085\u2028\u2029]+/g, '')
+    .trim();
+  // Accept only a well-formed MIME type (type/subtype with optional parameters);
+  // anything else falls back to the generic octet-stream rather than being emitted raw.
+  if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+(\s*;.*)?$/.test(stripped)) {
+    return 'application/octet-stream';
+  }
+  return stripped;
+}
+
+/**
+ * Rejects a pending promise if it does not settle within the given budget.
+ * Used to bound Chrome callback-backed promises that have no native timeout.
+ *
+ * @param {Promise<T>} promise
+ * @param {number} timeoutMs
+ * @param {string} timeoutMessage
+ * @returns {Promise<T>}
+ * @template T
+ */
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  return new Promise(function (resolve, reject) {
+    const timerId = setTimeout(function () {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    Promise.resolve(promise).then(
+      function (value) {
+        clearTimeout(timerId);
+        resolve(value);
+      },
+      function (err) {
+        clearTimeout(timerId);
+        reject(err);
+      }
+    );
+  });
 }
 
 /**
@@ -449,7 +550,8 @@ function _parseExpiry(payload) {
     }
 
     // Current Unix timestamps in seconds are ~1e9, while millisecond timestamps are ~1e12.
-    const ms = raw > 1e12 ? raw : raw * 1000;
+    // Treat exactly 1e12 as milliseconds (year 2001 in ms vs year ~33658 in seconds).
+    const ms = raw >= 1e12 ? raw : raw * 1000;
     return new Date(ms).toISOString();
   }
 
@@ -478,6 +580,7 @@ function _parseExpiry(payload) {
  */
 function _sanitizeFilename(name) {
   if (!name) return 'unnamed';
+  // eslint-disable-next-line no-control-regex -- intentionally strips control chars from the Content-Disposition filename
   const sanitized = String(name).replace(/[\x00-\x1f\u0085\u2028\u2029"\\]/g, '_');
   const encoder = new TextEncoder();
   let totalBytes = 0;
@@ -496,15 +599,13 @@ function _sanitizeFilename(name) {
 }
 
 function createMultipartBoundary() {
-  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
-    const bytes = new Uint8Array(16);
-    globalThis.crypto.getRandomValues(bytes);
-    return '----QurlBoundary' + Array.from(bytes, function (byte) {
-      return byte.toString(16).padStart(2, '0');
-    }).join('');
-  }
-
-  return '----QurlBoundary' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  // crypto.getRandomValues is present in every Chrome at/after minimum_chrome_version, so there
+  // is no non-crypto fallback to maintain (Node test runs provide it via the global crypto too).
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return '----QurlBoundary' + Array.from(bytes, function (byte) {
+    return byte.toString(16).padStart(2, '0');
+  }).join('');
 }
 
 /**
@@ -540,36 +641,41 @@ function normalizeQurlApiBase(value) {
   parsed.pathname = pathname || '/';
   parsed.search = '';
   parsed.hash = '';
+  // Drop any embedded credentials so they don't get persisted to chrome.storage.local or shown
+  // back to the user; the upload sends no auth via the URL.
+  parsed.username = '';
+  parsed.password = '';
 
   return parsed.toString().replace(/\/$/, '');
 }
 
 function resolveDefaultQurlApiConfig(baseUrl) {
-  try {
-    const normalized = normalizeQurlApiBase(baseUrl);
-    return {
-      normalized,
-      origin: new URL(normalized).origin,
-    };
-  } catch (err) {
-    const normalized = normalizeQurlApiBase(DEFAULT_QURL_API_BASE_FALLBACK);
-    console.error('[qURL] Invalid bundled qURL API base URL, falling back to built-in default:', err.message);
-    return {
-      normalized,
-      origin: new URL(normalized).origin,
-    };
+  // baseUrl comes from lib/qurl-config.js (the single source of truth). If it is
+  // missing or malformed the extension cannot function, so fail loudly rather than
+  // silently uploading somewhere unexpected.
+  const normalized = normalizeQurlApiBase(baseUrl);
+  if (!normalized) {
+    throw new Error('Missing default qURL API base — lib/qurl-config.js did not load.');
   }
+  return {
+    normalized,
+    origin: new URL(normalized).origin,
+  };
 }
 
 /**
  * Builds the host permission pattern for the given qURL base URL.
+ *
+ * Chrome match patterns do not permit a port in the host, so a base URL with an
+ * explicit port (e.g. https://host:8443) must yield a port-less pattern. Host match
+ * patterns authorize any port on the host, which is the intended behavior here.
  *
  * @param {string} baseUrl
  * @returns {string}
  */
 function getQurlHostPermissionPattern(baseUrl) {
   const parsed = new URL(baseUrl);
-  return `${parsed.origin}/*`;
+  return `${parsed.protocol}//${parsed.hostname}/*`;
 }
 
 /**
@@ -598,6 +704,8 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     DEFAULT_QURL_API_BASE,
     UPLOAD_REQUEST_TIMEOUT_MS,
+    UPLOAD_PREFLIGHT_TIMEOUT_MS,
+    withTimeout,
     _buildMultipartBody,
     _extractPayload,
     _get,

@@ -29,9 +29,9 @@ Upload local files to qURL directly from Gmail's compose window. After upload, s
 Open the extension popup and set the **qURL server** field.
 
 - If you save a custom URL, uploads use that URL
-- If you leave it empty, uploads fall back to the built-in default: `https://getqurllink.layerv.xyz/`
+- If you leave it empty, uploads use the built-in default: `https://getqurllink.layerv.ai/` (the qURL production upload connector)
 - You can paste either the server base URL or a full `/api/upload` URL; the client normalizes it automatically
-- If you want packaged `release/` or `dist/` builds to default to a different server, set `QURL_API_BASE` in `.env` before running the build scripts
+- The built-in default lives in one place — `lib/qurl-config.js`. To point packaged `release/` or `dist/` builds at a non-production server (e.g. a sandbox such as `https://getqurllink.layerv.xyz`), set `QURL_API_BASE` in `.env` before running the build scripts; the build regenerates `lib/qurl-config.js` and the manifest host permission together
 
 ### Step 2 — Load the Extension in Chrome
 
@@ -50,6 +50,18 @@ If you plan to publish to the Chrome Web Store, see [docs/chrome-web-store-revie
 5. Click **Upload to qURL**
 6. Wait for the upload to complete — the qURL links will be automatically inserted at the bottom of your email draft
 7. Continue composing your email and send as normal
+
+> **Keep the popup open while uploading.** The popup is a regular extension page, so dismissing
+> it (clicking elsewhere, switching windows) destroys its context and cancels any in-flight
+> upload. The popup shows an "keep this popup open" hint while a batch is uploading. Links are
+> always appended at the **end** of the active draft, regardless of where your cursor is.
+>
+> **Gmail must be the active tab in the focused window** when you open the popup — the extension
+> targets the active tab, so a Gmail tab in a *different* window won't be found. Large files are
+> capped at **100 MB per file** (the popup reads each file into memory); oversized files are
+> reported per-file instead of crashing the popup. This ceiling is a popup-safety limit only —
+> the qURL server may enforce its own (lower) limit, in which case a within-cap file can still be
+> rejected by the server after upload.
 
 ---
 
@@ -111,6 +123,14 @@ npm run icons
 ## Packaging for Release
 
 The project includes scripts for bumping the extension version, building a clean release directory, and creating a Chrome Web Store upload ZIP.
+
+> **Versioning.** Released versions are owned by Release Please monorepo mode (this app is
+> registered in `release-please-config.json` with a `node` release-type; an `extra-files` entry
+> keeps `manifest.json`'s `$.version` in lockstep with `package.json`). The Release Please seed
+> in `.release-please-manifest.json` is **`1.0.2`** — intentionally not the `0.1.0` the other
+> apps use — because the extension already carried `1.0.2` (its pre-monorepo Chrome Web Store
+> version); seeding lower would make automated bumps appear to regress. The `bump-version.js`
+> scripts below remain a convenience for ad-hoc local Web Store ZIPs outside the release flow.
 
 ### Recommended One-Command Packaging
 

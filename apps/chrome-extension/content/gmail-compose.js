@@ -10,13 +10,31 @@
 
   // Prevent double injection. This guard is safe because MV3 content scripts run in an
   // isolated world — page scripts cannot observe or tamper with this property.
+  //
+  // The guard flag and the onMessage listener share this isolated-world context's lifetime: if
+  // Chrome tears the context down (the case a reinject is meant to recover), the flag is gone too,
+  // so the reinjected run falls through and re-registers the listener. The only gap is the rare
+  // case where the message port is severed but the JS context survives — then a reinject early-
+  // returns here without re-registering, and the popup may still see "no response from content
+  // script". We do NOT move addListener above this guard: that would register a duplicate listener
+  // on every legitimate double-injection (manifest auto-inject + reinject), double-replying to
+  // each message. A full reload of the Gmail tab recovers the severed-port case.
   if (window.__QURL_COMPOSE_INJECTED__) return;
   window.__QURL_COMPOSE_INJECTED__ = true;
   const INSERT_REQUEST_CACHE_TTL_MS = 30000;
-  const INSERT_REQUEST_CACHE_MAX_ENTRIES = 32;
-  const INSERT_REQUEST_PENDING_MAX_ENTRIES = 64;
+  // Single hard cap on tracked INSERT_LINKS requests. Completed entries are otherwise removed
+  // only by their per-entry TTL timer, so a same-requestId retry (SDK-level
+  // sendRuntimeMessageWithRetry, which may fire only after the popup's message timeout) within
+  // the TTL window replays the cached response instead of triggering a SECOND insertion.
+  // Eviction only happens on a flood past the cap — implausible given the INSERT_LINKS trust
+  // boundary (popup-only sender).
+  const INSERT_REQUEST_MAX_ENTRIES = 64;
   const INSERT_REQUEST_PENDING_TIMEOUT_MS = 8000;
   const COMPOSE_BODY_DISCOVERY_TIMEOUT_MS = 4000;
+  // TODO(gmail-frontend-classes): the first selector relies on Gmail's obfuscated CSS classes
+  // (.Am.Al.editable), which Google can rename without notice. The role/contenteditable
+  // selectors below are the stable fallbacks. If "Gmail insertion stopped working" is reported,
+  // start here.
   const COMPOSE_BODY_SELECTORS = [
     '.Am.Al.editable:not([contenteditable="false"])',
     '[role="dialog"] [role="textbox"][contenteditable="true"][aria-label]',
@@ -47,7 +65,8 @@
 
     const requestId = typeof message.requestId === 'string' ? message.requestId : '';
     if (!requestId) {
-      // Backward-compatible path for callers that do not participate in request deduplication.
+      // Legacy fallback for a caller that sends no requestId; never produced by popup.js today
+      // (it always sets a crypto.randomUUID requestId), kept as a defensive no-dedup path.
       insertLinksIntoGmailDraft(results, function (ok) {
         sendResponse({ success: ok });
       });
@@ -89,10 +108,12 @@
   }
 
   function pruneInsertRequestState() {
-    while (insertRequestState.size > INSERT_REQUEST_CACHE_MAX_ENTRIES) {
+    while (insertRequestState.size > INSERT_REQUEST_MAX_ENTRIES) {
       let evictedRequestId = null;
       let evictedEntry = null;
 
+      // Prefer evicting the oldest completed entry. Completed entries are otherwise reaped by
+      // their TTL timer, so this only fires under a flood past the cap.
       for (const [requestId, entry] of insertRequestState.entries()) {
         if (entry.status === 'done') {
           evictedRequestId = requestId;
@@ -101,26 +122,16 @@
         }
       }
 
-      // Keep pending requests alive until they settle so callers are not left waiting forever.
-      // This means the cache can temporarily grow beyond INSERT_REQUEST_CACHE_MAX_ENTRIES if
-      // all entries are still pending. The overflow is bounded by INSERT_REQUEST_PENDING_TIMEOUT_MS
-      // (currently 8s), after which pending requests are forcibly marked done. In practice the
-      // trust boundary (only extension UI can send INSERT_LINKS) limits misbehavior risk.
-      //
-      // However, enforce a hard cap (INSERT_REQUEST_PENDING_MAX_ENTRIES) to prevent unbounded
-      // memory growth from a misbehaving caller flooding requests during the timeout window.
+      // No completed entry to drop — evict the oldest entry overall (a pending one) so the map
+      // stays bounded, notifying its callers below rather than leaving them hanging. "Oldest"
+      // here means first-inserted (Map iteration order), not oldest-by-status.
       if (!evictedRequestId) {
-        if (insertRequestState.size > INSERT_REQUEST_PENDING_MAX_ENTRIES) {
-          // Evict the oldest pending entry (first in insertion order).
-          const oldestPending = insertRequestState.entries().next().value;
-          if (oldestPending) {
-            evictedRequestId = oldestPending[0];
-            evictedEntry = oldestPending[1];
-          }
-        }
-        if (!evictedRequestId) {
+        const oldest = insertRequestState.entries().next().value;
+        if (!oldest) {
           break;
         }
+        evictedRequestId = oldest[0];
+        evictedEntry = oldest[1];
       }
 
       if (evictedEntry && evictedEntry.cleanupTimerId !== null) {
@@ -132,6 +143,11 @@
       // Notify pending callbacks before eviction so callers receive immediate feedback
       // instead of hanging until their own timeout fires.
       if (evictedEntry && evictedEntry.status === 'pending' && evictedEntry.callbacks.length > 0) {
+        // Like the late-completion race in finishTrackedInsertRequest, the insertion this entry
+        // started is still scheduled: it may complete and update the draft after we've already
+        // reported an error here. Warn so that "draft updated despite an error" is observable.
+        console.warn('[qURL] Evicted a pending INSERT_LINKS under cache pressure; '
+          + 'its insertion may still complete and update the draft after this error.');
         const evictionError = {
           success: false,
           error: getMessage(
@@ -155,6 +171,15 @@
     const entry = insertRequestState.get(requestId);
     if (!entry) {
       return;
+    }
+
+    // Surface the documented race: the pending timeout already settled this entry with a
+    // timeout error, and now the real insertion is completing late and overwriting it. The
+    // user saw "timed out" but the draft did receive the links. Warn so this is observable
+    // in the wild (a future hook for a metric).
+    if (entry.status === 'done') {
+      console.warn('[qURL] INSERT_LINKS completed after its pending timeout already reported failure; '
+        + 'the draft was updated despite the earlier timeout message.');
     }
 
     entry.status = 'done';
@@ -301,7 +326,9 @@
     const seen = new Set();
 
     for (const selector of COMPOSE_BODY_SELECTORS) {
-      const query = focusedOnly ? `${selector}:focus` : selector;
+      // Wrap in :is(...) so the :focus qualifier applies to the whole selector even if an entry
+      // is ever a comma-separated list (a bare `a, b:focus` would only constrain the last item).
+      const query = focusedOnly ? `:is(${selector}):focus` : selector;
       const selectorMatches = root.querySelectorAll(query);
       for (const match of selectorMatches) {
         if (seen.has(match)) {
@@ -407,7 +434,7 @@
   // ==================== Draft Insertion ====================
 
   /**
-   * Inserts QURL link HTML into the active Gmail compose draft.
+   * Inserts qURL link HTML into the active Gmail compose draft.
    *
    * @param {Array<{filename: string, link: string, expiry: string|null}>} results
    * @param {function} callback - called with (boolean) success

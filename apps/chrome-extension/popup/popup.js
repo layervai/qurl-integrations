@@ -29,11 +29,19 @@ const configHint = document.getElementById('configHint');
 const copyArea = document.getElementById('copyArea');
 const copyBtn = document.getElementById('copyBtn');
 const footer = document.querySelector('.footer');
-// Keep the popup budget above the full relay path:
-// ping (3s) -> reinject -> ping (3s) -> INSERT_LINKS relay (9s).
-const RUNTIME_MESSAGE_TIMEOUT_MS = 16000;
+// Keep the popup budget above the background relay's worst-case path:
+//   ping (3s) -> content-script reinject (chrome.scripting.executeScript) -> ping (3s)
+//   -> INSERT_LINKS relay (9s).
+// On a cold Gmail tab the reinject (loading three scripts) can take several seconds. The
+// fixed legs sum to 15s; budgeting 25s leaves ~10s of reinject headroom so a slow reinject
+// does not surface a (non-retryable) timeout while the insertion still completes — which
+// would push the user to retry manually and duplicate links. Keep in sync with background.js.
+const RUNTIME_MESSAGE_TIMEOUT_MS = 25000;
 const RUNTIME_MESSAGE_RETRY_DELAY_MS = 250;
-const SETTINGS_PANEL_AUTO_CLOSE_MS = 1200;
+// The popup reads each file fully into memory before upload, so cap per-file size to keep the
+// renderer from OOM-ing. This is a popup-safety ceiling, not the server's limit.
+const MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024;
+const SETTINGS_PANEL_AUTO_CLOSE_MS = 2000;
 const COPY_BUTTON_REVERT_MS = 1500;
 const FOCUS_DEFER_MS = 0;
 
@@ -322,7 +330,7 @@ uploadBtn.addEventListener('click', async () => {
   // Reset UI
   clearResults();
   setLoading(true);
-  footer.textContent = getMessage('uploading_hint', 'Uploading, please wait...');
+  footer.textContent = getMessage('uploading_hint', 'Uploading — keep this popup open until it finishes…');
 
   const results = [];
   const errors = [];
@@ -331,6 +339,20 @@ uploadBtn.addEventListener('click', async () => {
   for (const file of selectedFiles) {
     // Add progress item
     const progressItem = addProgressItem(file.name, 'uploading');
+
+    // The popup reads each file fully into memory (file.arrayBuffer) before upload, so guard
+    // against an oversized file OOM-ing the popup. Reject it with a clear message BEFORE the
+    // read rather than crashing the renderer.
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      const tooLarge = getMessage(
+        'file_too_large_error',
+        '$1 is too large to upload from the popup (max $2).',
+        [file.name, formatFileSize(MAX_UPLOAD_FILE_BYTES)]
+      );
+      errors.push({ filename: file.name, error: tooLarge });
+      updateProgressItem(progressItem, 'error', `${file.name}: ${tooLarge}`);
+      continue;
+    }
 
     try {
       const buf = await file.arrayBuffer();
@@ -359,6 +381,8 @@ uploadBtn.addEventListener('click', async () => {
     insertionError = await insertIntoGmailDraft(results);
   }
 
+  // Reflects the most recent batch only (the Copy button re-copies this batch); it
+  // intentionally does not accumulate across uploads.
   lastSuccessfulResults = results.slice();
 
   // Show results
@@ -387,29 +411,40 @@ copyBtn.addEventListener('click', async () => {
 
 // ==================== Progress UI ====================
 
+// Static, user-input-free icon markup keyed by state. Set via innerHTML of a dedicated icon
+// node only (never interpolated with dynamic data) — the filename/status text is set with
+// textContent below, so there is no escape-into-innerHTML surface to drift into XSS.
+const PROGRESS_ICON_HTML = {
+  uploading: '<div class="spinner"></div>',
+  success: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7L5.5 10.5L12 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  error: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3L11 11M11 3L3 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+};
+
+function renderProgressItem(item, state, text) {
+  item.className = `progress-item ${state}`;
+  item.textContent = '';
+
+  const iconNode = document.createElement('div');
+  iconNode.className = 'progress-icon';
+  iconNode.innerHTML = PROGRESS_ICON_HTML[state] || PROGRESS_ICON_HTML.uploading;
+
+  const textNode = document.createElement('span');
+  textNode.className = 'progress-text';
+  textNode.textContent = text;
+
+  item.append(iconNode, textNode);
+}
+
 function addProgressItem(filename, state) {
   progressArea.classList.remove('hidden');
   const item = document.createElement('div');
-  item.className = `progress-item ${state}`;
-  item.innerHTML = `
-    <div class="progress-icon">${state === 'uploading' ? '<div class="spinner"></div>' : ''}</div>
-    <span class="progress-text">${escapeHtml(filename)}</span>
-  `;
+  renderProgressItem(item, state, filename);
   progressArea.appendChild(item);
   return item;
 }
 
 function updateProgressItem(item, state, text) {
-  item.className = `progress-item ${state}`;
-  const icon = state === 'success'
-    ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7L5.5 10.5L12 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-    : state === 'error'
-    ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3L11 11M11 3L3 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
-    : '';
-  item.innerHTML = `
-    <div class="progress-icon">${icon || '<div class="spinner"></div>'}</div>
-    <span class="progress-text">${escapeHtml(text)}</span>
-  `;
+  renderProgressItem(item, state, text);
 }
 
 function formatExpiry(isoString) {
@@ -492,10 +527,13 @@ function showResults(results, errors, insertionError) {
     errorArea.classList.remove('hidden');
     const title = document.createElement('div');
     title.className = 'error-title';
-    title.textContent = errors.length === 1 && !insertionError
-      ? getMessage('result_one_error', '1 file failed to upload')
-      : insertionError && errors.length === 0
+    // Pick the title by upload-error count; the insertion failure (if any) is always listed
+    // as its own bullet below. The singular case must not depend on insertionError, or one
+    // failed upload alongside an insertion failure renders the ungrammatical "1 files…".
+    title.textContent = insertionError && errors.length === 0
       ? getMessage('result_insertion_only_failed', 'Uploaded successfully, but Gmail draft insertion failed')
+      : errors.length === 1
+      ? getMessage('result_one_error', '1 file failed to upload')
       : getMessage('result_n_errors', '$1 files failed to upload', [String(errors.length)]);
     errorArea.appendChild(title);
 
@@ -690,27 +728,25 @@ function createInsertLinksMessage(results) {
 }
 
 function createRequestId() {
-  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-    return window.crypto.randomUUID();
-  }
-  return `qurl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  // crypto.randomUUID is guaranteed at minimum_chrome_version 99 (and in the Node test runtime),
+  // so no non-crypto fallback is needed.
+  return window.crypto.randomUUID();
 }
 
 function isRetryableRuntimeMessageError(err) {
   return Boolean(err && err.qurlRetryable);
 }
 
-function escapeHtml(str) {
-  if (window.QURLComposeFormatter && typeof window.QURLComposeFormatter.escapeHtml === 'function') {
-    return window.QURLComposeFormatter.escapeHtml(str);
+// buildCopyHtml/buildCopyText/normalizeAllowedLink delegate to the single implementation in
+// lib/qurl-compose-format.js (loaded before this script in popup.html). Keeping one copy
+// prevents the security-sensitive https-only URL logic from drifting between two places. The
+// formatter is a hard dependency, so fail loudly if it is missing rather than silently
+// falling back to a second, potentially weaker, implementation.
+function getComposeFormatter() {
+  if (!window.QURLComposeFormatter) {
+    throw new Error('QURLComposeFormatter is not loaded — check the script order in popup.html.');
   }
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return window.QURLComposeFormatter;
 }
 
 function formatFileSize(bytes) {
@@ -721,34 +757,15 @@ function formatFileSize(bytes) {
 }
 
 function buildCopyHtml(results) {
-  if (window.QURLComposeFormatter) {
-    return window.QURLComposeFormatter.buildLinkHtml(results);
-  }
-  return '';
+  return getComposeFormatter().buildLinkHtml(results);
 }
 
 function buildCopyText(results) {
-  if (window.QURLComposeFormatter) {
-    return window.QURLComposeFormatter.buildLinkPlainText(results);
-  }
-  return '';
+  return getComposeFormatter().buildLinkPlainText(results);
 }
 
 function normalizeAllowedLink(link) {
-  if (window.QURLComposeFormatter && typeof window.QURLComposeFormatter.normalizeAllowedLink === 'function') {
-    return window.QURLComposeFormatter.normalizeAllowedLink(link);
-  }
-
-  if (!link) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(String(link));
-    return parsed.protocol === 'https:' ? parsed.toString() : null;
-  } catch (_err) {
-    return null;
-  }
+  return getComposeFormatter().normalizeAllowedLink(link);
 }
 
 async function writeRichClipboard(html, text) {
@@ -780,11 +797,10 @@ function copyViaExecCommand(html, text) {
   try {
     copied = document.execCommand('copy');
   } finally {
-    // Ensure listener is removed even if execCommand throws before dispatching
-    // the copy event (in which case { once: true } would not have fired).
-    if (!copied) {
-      document.removeEventListener('copy', listener);
-    }
+    // Always remove the listener (no-op if { once: true } already fired). Covers the rare
+    // case where execCommand returns true without dispatching a copy event, which would
+    // otherwise leak the listener for the popup's lifetime.
+    document.removeEventListener('copy', listener);
   }
   if (!copied) {
     throw new Error('Copy command was rejected.');

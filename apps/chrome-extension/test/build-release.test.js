@@ -10,116 +10,127 @@ function makeTempReleaseRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'qurl-release-test-'));
 }
 
-test('rewriteDefaultApiBase tolerates minor formatting differences in qurl-api.js', function () {
+// Mirrors lib/qurl-config.js: a tiny CommonJS-compatible module exporting DEFAULT_QURL_API_BASE.
+// The marked declaration line is what writeDefaultApiBaseConfig rewrites.
+function writeConfigFixture(releaseRoot, base) {
+  fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
+  fs.writeFileSync(
+    path.join(releaseRoot, 'lib', 'qurl-config.js'),
+    [
+      '(function (global) {',
+      `  const DEFAULT_QURL_API_BASE = ${JSON.stringify(base)};`,
+      '  const QURLConfig = { DEFAULT_QURL_API_BASE };',
+      '  if (global) { global.QURLConfig = QURLConfig; }',
+      '  if (typeof module !== "undefined" && module.exports) { module.exports = QURLConfig; }',
+      "}(typeof globalThis !== 'undefined' ? globalThis : this));",
+      '',
+    ].join('\n')
+  );
+}
+
+function readConfigBase(releaseRoot) {
+  return buildRelease.readDefaultQurlApiBase(buildRelease.qurlConfigPath(releaseRoot));
+}
+
+test('writeDefaultApiBaseConfig regenerates the marked declaration regardless of source formatting', function () {
   const releaseRoot = makeTempReleaseRoot();
 
   try {
+    // Odd spacing + single quotes — the rewrite is anchored to the declaration, not its formatting.
     fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
     fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
+      path.join(releaseRoot, 'lib', 'qurl-config.js'),
       [
-        '/** test fixture */',
-        'const DEFAULT_QURL_API_BASE  =  "https://getqurllink.layerv.xyz/" ;',
-        'const OTHER_VALUE = true;',
+        '(function (global) {',
+        "  const DEFAULT_QURL_API_BASE  =  'https://getqurllink.layerv.ai/' ;",
+        '  const QURLConfig = { DEFAULT_QURL_API_BASE };',
+        '  if (typeof module !== "undefined" && module.exports) { module.exports = QURLConfig; }',
+        "}(typeof globalThis !== 'undefined' ? globalThis : this));",
         '',
       ].join('\n')
     );
 
-    buildRelease.rewriteDefaultApiBase('https://custom.example.com/base', releaseRoot);
+    buildRelease.writeDefaultApiBaseConfig('https://custom.example.com/base', releaseRoot);
 
-    const updated = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-api.js'), 'utf8');
-    assert.match(updated, /const DEFAULT_QURL_API_BASE = "https:\/\/custom\.example\.com\/base\/";/);
+    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/base/');
   } finally {
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
 });
 
-test('rewriteDefaultApiBase preserves literal dollar signs in the replacement URL', function () {
+test('writeDefaultApiBaseConfig rewrites the declaration, not a matching comment/string', function () {
   const releaseRoot = makeTempReleaseRoot();
 
   try {
+    // The real lib/qurl-config.js carries a marker comment that itself contains the literal
+    // `const DEFAULT_QURL_API_BASE = '...';`. The rewrite must target the actual declaration
+    // line, not the first textual match (which is the comment).
     fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
     fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
+      path.join(releaseRoot, 'lib', 'qurl-config.js'),
       [
-        "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';",
-        "const DEFAULT_QURL_API_BASE_FALLBACK = 'https://getqurllink.layerv.xyz/';",
+        '(function (global) {',
+        "  // build-release.js rewrites the `const DEFAULT_QURL_API_BASE = '...';` declaration below.",
+        "  const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.ai/';",
+        '  const QURLConfig = { DEFAULT_QURL_API_BASE };',
+        '  if (typeof module !== "undefined" && module.exports) { module.exports = QURLConfig; }',
+        "}(typeof globalThis !== 'undefined' ? globalThis : this));",
         '',
       ].join('\n')
     );
 
-    buildRelease.rewriteDefaultApiBase('https://custom.example.com/path/$1', releaseRoot);
+    buildRelease.writeDefaultApiBaseConfig('https://custom.example.com', releaseRoot);
 
-    const updated = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-api.js'), 'utf8');
-    assert.match(updated, /const DEFAULT_QURL_API_BASE = "https:\/\/custom\.example\.com\/path\/\$1\/";/);
+    const written = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-config.js'), 'utf8');
+    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/');
+    // The decoy comment is untouched.
+    assert.ok(written.includes("// build-release.js rewrites the `const DEFAULT_QURL_API_BASE = '...';` declaration below."));
   } finally {
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
 });
 
-test('rewriteDefaultApiBase safely quotes replacement URLs that contain apostrophes', function () {
+test('writeDefaultApiBaseConfig preserves $ and apostrophes in the replacement URL', function () {
   const releaseRoot = makeTempReleaseRoot();
 
   try {
-    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
-    fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
-      [
-        "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';",
-        "const DEFAULT_QURL_API_BASE_FALLBACK = 'https://getqurllink.layerv.xyz/';",
-        '',
-      ].join('\n')
-    );
-
-    buildRelease.rewriteDefaultApiBase("https://custom.example.com/o'connor", releaseRoot);
-
-    const updated = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-api.js'), 'utf8');
-    assert.match(updated, /const DEFAULT_QURL_API_BASE = "https:\/\/custom\.example\.com\/o'connor\/";/);
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+    buildRelease.writeDefaultApiBaseConfig("https://custom.example.com/path/$1/o'connor", releaseRoot);
+    assert.equal(readConfigBase(releaseRoot), "https://custom.example.com/path/$1/o'connor/");
   } finally {
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
 });
 
-test('rewriteDefaultApiBase is a no-op when the override matches the bundled default', function () {
+test('writeDefaultApiBaseConfig leaves the base value unchanged when the override matches', function () {
   const releaseRoot = makeTempReleaseRoot();
 
   try {
-    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
-    const fixture = "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';\n";
-    fs.writeFileSync(path.join(releaseRoot, 'lib', 'qurl-api.js'), fixture);
-
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
     assert.doesNotThrow(function () {
-      buildRelease.rewriteDefaultApiBase('https://getqurllink.layerv.xyz', releaseRoot);
+      buildRelease.writeDefaultApiBaseConfig('https://getqurllink.layerv.ai', releaseRoot);
     });
-
-    const updated = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-api.js'), 'utf8');
-    assert.equal(updated, fixture);
+    assert.equal(readConfigBase(releaseRoot), 'https://getqurllink.layerv.ai/');
   } finally {
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
 });
 
-test('applyBuildOverrides rewrites both the default API base and release host permission', function () {
+test('applyBuildOverrides rewrites both the config default and the manifest host permission', function () {
   const releaseRoot = makeTempReleaseRoot();
   const originalLog = console.log;
   console.log = function () {};
 
   try {
-    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
-    fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
-      [
-        "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';",
-        "const DEFAULT_QURL_API_BASE_FALLBACK = 'https://getqurllink.layerv.xyz/';",
-        '',
-      ].join('\n')
-    );
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+    // rewriteManifestHostPermission derives the entry to replace from the PROJECT config
+    // (the real production default), so the manifest must carry that production pattern.
     fs.writeFileSync(
       path.join(releaseRoot, 'manifest.json'),
       JSON.stringify({
         host_permissions: [
           'https://mail.google.com/*',
-          'https://getqurllink.layerv.xyz/*',
+          'https://getqurllink.layerv.ai/*',
         ],
       }, null, 2)
     );
@@ -128,14 +139,49 @@ test('applyBuildOverrides rewrites both the default API base and release host pe
       qurlApiBase: 'https://custom.example.com/api/upload',
     }, releaseRoot);
 
-    const apiClient = fs.readFileSync(path.join(releaseRoot, 'lib', 'qurl-api.js'), 'utf8');
     const manifest = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'manifest.json'), 'utf8'));
 
-    assert.match(apiClient, /const DEFAULT_QURL_API_BASE = "https:\/\/custom\.example\.com\/";/);
+    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/');
     assert.deepEqual(manifest.host_permissions, [
       'https://mail.google.com/*',
       'https://custom.example.com/*',
     ]);
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(releaseRoot, { recursive: true, force: true });
+  }
+});
+
+test('applyBuildOverrides drops a port from the manifest pattern but keeps it in the config base', function () {
+  const releaseRoot = makeTempReleaseRoot();
+  const originalLog = console.log;
+  console.log = function () {};
+
+  try {
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+    fs.writeFileSync(
+      path.join(releaseRoot, 'manifest.json'),
+      JSON.stringify({
+        host_permissions: [
+          'https://mail.google.com/*',
+          'https://getqurllink.layerv.ai/*',
+        ],
+      }, null, 2)
+    );
+
+    buildRelease.applyBuildOverrides({
+      qurlApiBase: 'https://self.hosted.example:8443',
+    }, releaseRoot);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'manifest.json'), 'utf8'));
+
+    // Chrome match patterns reject ports, so the manifest pattern must be port-less...
+    assert.deepEqual(manifest.host_permissions, [
+      'https://mail.google.com/*',
+      'https://self.hosted.example/*',
+    ]);
+    // ...while the upload base URL retains the port so requests reach the right endpoint.
+    assert.equal(readConfigBase(releaseRoot), 'https://self.hosted.example:8443/');
   } finally {
     console.log = originalLog;
     fs.rmSync(releaseRoot, { recursive: true, force: true });
@@ -148,23 +194,11 @@ test('applyBuildOverrides keeps the release bundle self-consistent end to end', 
   console.log = function () {};
 
   try {
-    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
     fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
     fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
     fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
     fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
-    fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-i18n.js'),
-      'module.exports = { getMessage: function (_key, fallback) { return fallback || ""; } };\n'
-    );
-    fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
-      [
-        "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';",
-        "const DEFAULT_QURL_API_BASE_FALLBACK = 'https://getqurllink.layerv.xyz/';",
-        '',
-      ].join('\n')
-    );
     fs.writeFileSync(
       path.join(releaseRoot, 'manifest.json'),
       JSON.stringify({
@@ -172,7 +206,7 @@ test('applyBuildOverrides keeps the release bundle self-consistent end to end', 
         action: { default_popup: 'popup/popup.html' },
         host_permissions: [
           'https://mail.google.com/*',
-          'https://getqurllink.layerv.xyz/*',
+          'https://getqurllink.layerv.ai/*',
         ],
       }, null, 2)
     );
@@ -185,29 +219,26 @@ test('applyBuildOverrides keeps the release bundle self-consistent end to end', 
       buildRelease.validateReleaseManifest(releaseRoot);
     });
 
-    delete require.cache[require.resolve(path.join(releaseRoot, 'lib', 'qurl-api.js'))];
-    assert.doesNotThrow(function () {
-      require(path.join(releaseRoot, 'lib', 'qurl-api.js'));
-    });
+    // The regenerated config module still loads and exposes the override base.
+    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/base/');
   } finally {
     console.log = originalLog;
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
 });
 
-test('rewriteManifestHostPermission rewrites the existing bundled host entry from the manifest itself', function () {
+test('rewriteManifestHostPermission rewrites the bundled host entry derived from the config default', function () {
   const releaseRoot = makeTempReleaseRoot();
 
   try {
-    // The function now reads the bundled default from the project source to determine
-    // which host_permission entry to replace. Use the actual bundled default pattern.
-    const bundledDefaultPattern = 'https://getqurllink.layerv.xyz/*';
+    // The function reads the bundled default from the project config to decide which entry to
+    // replace, so the manifest must carry the real production pattern.
     fs.writeFileSync(
       path.join(releaseRoot, 'manifest.json'),
       JSON.stringify({
         host_permissions: [
           'https://mail.google.com/*',
-          bundledDefaultPattern,
+          'https://getqurllink.layerv.ai/*',
         ],
       }, null, 2)
     );
@@ -244,13 +275,15 @@ test('validateReleaseManifest fails when localized messages are missing', functi
   }
 });
 
-test('validateReleaseManifest fails when the bundled host permission drifts from DEFAULT_QURL_API_BASE', function () {
+test('validateReleaseManifest fails when the bundled host permission drifts from the config default', function () {
   const releaseRoot = makeTempReleaseRoot();
 
   try {
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
     fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
-    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
     fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
+    fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
+    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
     fs.writeFileSync(
       path.join(releaseRoot, 'manifest.json'),
       JSON.stringify({
@@ -262,57 +295,10 @@ test('validateReleaseManifest fails when the bundled host permission drifts from
         ],
       }, null, 2)
     );
-    fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
-    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
-    fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
-      [
-        "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';",
-        "const DEFAULT_QURL_API_BASE_FALLBACK = 'https://getqurllink.layerv.xyz/';",
-        '',
-      ].join('\n')
-    );
 
     assert.throws(function () {
       buildRelease.validateReleaseManifest(releaseRoot);
     }, /host permission mismatch/);
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
-});
-
-test('validateReleaseManifest fails when DEFAULT_QURL_API_BASE_FALLBACK is malformed', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
-    fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
-    fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
-    fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
-    fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
-    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
-    fs.writeFileSync(
-      path.join(releaseRoot, 'manifest.json'),
-      JSON.stringify({
-        manifest_version: 3,
-        action: { default_popup: 'popup/popup.html' },
-        host_permissions: [
-          'https://mail.google.com/*',
-          'https://getqurllink.layerv.xyz/*',
-        ],
-      }, null, 2)
-    );
-    fs.writeFileSync(
-      path.join(releaseRoot, 'lib', 'qurl-api.js'),
-      [
-        "const DEFAULT_QURL_API_BASE = 'https://getqurllink.layerv.xyz/';",
-        "const DEFAULT_QURL_API_BASE_FALLBACK = 'http://bad.example.com/';",
-        '',
-      ].join('\n')
-    );
-
-    assert.throws(function () {
-      buildRelease.validateReleaseManifest(releaseRoot);
-    }, /Bundled fallback QURL API base is invalid/);
   } finally {
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
