@@ -39,10 +39,10 @@ func TestParse_HappyPaths(t *testing.T) {
 		// resource-id shapes aren't mistaken for wired forms.
 		{name: "unsetalias", text: "unsetalias $prod-db", wantSub: SubcmdUnsetAlias, wantAlias: "prod-db", wantFlags: map[string]string{}},
 		{name: "aliases", text: "aliases", wantSub: SubcmdAliases, wantFlags: map[string]string{}},
-		{name: "admin revoke qurl_id", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB", wantSub: SubcmdAdmin, wantAdmin: AdminRevoke, wantTarget: "q_01HXYZ8ABCDEF0123456789AB", wantFlags: map[string]string{}},
-		{name: "admin add mention", text: "admin add <@U12345678>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
-		{name: "admin add mention with display name", text: "admin add <@U12345678|kevin>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
-		{name: "admin remove mention", text: "admin remove <@U67890123>", wantSub: SubcmdAdmin, wantAdmin: AdminRemove, wantUserID: "U67890123", wantFlags: map[string]string{}},
+		{name: "revoke resource by id", text: "revoke $prod-db", wantSub: SubcmdRevoke, wantAlias: "prod-db", wantFlags: map[string]string{}},
+		{name: "add mention", text: "add <@U12345678>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
+		{name: "add mention with display name", text: "add <@U12345678|kevin>", wantSub: SubcmdAdmin, wantAdmin: AdminAdd, wantUserID: "U12345678", wantFlags: map[string]string{}},
+		{name: "remove mention", text: "remove <@U67890123>", wantSub: SubcmdAdmin, wantAdmin: AdminRemove, wantUserID: "U67890123", wantFlags: map[string]string{}},
 		{name: testAdminListCmd, text: testAdminListCmd, wantSub: SubcmdAdmin, wantAdmin: AdminList, wantFlags: map[string]string{}},
 		{name: "list", text: "list", wantSub: SubcmdList, wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
@@ -62,10 +62,10 @@ func TestParse_HappyPaths(t *testing.T) {
 		// "unknown flag" error.
 		{name: "dm:false accepted", text: "get $prod-db dm:false", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "false"}},
 		{name: "dm:FALSE case-folded", text: "get $prod-db dm:FALSE", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "FALSE"}},
-		// Admin verb is lowercased before the AdminAction switch. Pinned
-		// so a future refactor that drops `strings.ToLower(verb)` can't
-		// silently regress mobile-client / auto-capitalize inputs.
-		{name: "mixed-case admin verb normalized", text: "admin List", wantSub: SubcmdAdmin, wantAdmin: AdminList, wantFlags: map[string]string{}},
+		// The leading verb is lowercased before the subcommand switch (Parse's
+		// `strings.ToLower(tokens[0])`). Pinned so a future refactor that drops
+		// it can't silently regress mobile-client / auto-capitalize inputs.
+		{name: "mixed-case verb normalized", text: "Admins", wantSub: SubcmdAdmin, wantAdmin: AdminList, wantFlags: map[string]string{}},
 		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
 		{name: "single-digit alias accepted", text: "get $1", wantSub: SubcmdGet, wantAlias: "1", wantFlags: map[string]string{}},
 		// Internal `--` runs are intentionally accepted — qurl-service
@@ -171,36 +171,29 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "setalias without target", text: "setalias $prod-db", wantErr: ErrMissingTarget},
 		{name: "unsetalias without alias", text: "unsetalias", wantErr: ErrEmptyResource},
 		{name: "unsetalias without sigil", text: "unsetalias prod-db", wantErr: ErrMissingSigil},
-		{name: "admin no verb", text: "admin", wantErr: ErrMissingAdminAction},
-		{name: "admin unknown verb", text: "admin frobnicate", wantErr: ErrUnknownAdminAction},
-		{name: "admin revoke missing qurl_id", text: "admin revoke", wantErr: ErrMissingTarget},
-		{name: "admin revoke with $alias rejected", text: "admin revoke $prod-db", wantErr: ErrUnexpectedArgument},
-		{name: "admin revoke with malformed id rejected", text: "admin revoke ;rm-rf", wantErr: ErrInvalidQURLID},
-		{name: "admin revoke with non-q-prefix id rejected", text: "admin revoke r_resource_id", wantErr: ErrInvalidQURLID},
-		{name: "admin revoke with oversize id rejected", text: "admin revoke q_" + strings.Repeat("A", 100), wantErr: ErrInvalidQURLID},
-		// A fat-paste with embedded whitespace splits into two
-		// positional args at tokenize time; the first half passes
-		// the {16,64} length floor on its own (16 'A's), so the
-		// second half lands as an unexpected trailing arg. Either
-		// failure mode is a friendlier surface than shipping a
-		// space-containing path to qurl-service.
-		{name: "admin revoke with embedded whitespace rejected", text: "admin revoke q_" + strings.Repeat("A", 16) + " " + strings.Repeat("B", 16), wantErr: ErrUnexpectedArgument},
-		{name: "admin add without mention", text: "admin add", wantErr: ErrMissingUserMention},
-		{name: "admin add with bare @user", text: "admin add @alice", wantErr: ErrInvalidUserMention},
-		{name: "admin add with non-mention positional", text: "admin add alice", wantErr: ErrInvalidUserMention},
-		{name: "admin add with lowercase user-id", text: "admin add <@u12345678>", wantErr: ErrInvalidUserMention},
-		{name: "admin add with non-U/W prefix rejected", text: "admin add <@A12345678>", wantErr: ErrInvalidUserMention},
-		{name: "admin add with too-short id rejected", text: "admin add <@U1234>", wantErr: ErrInvalidUserMention},
-		{name: "admin add with extra arg rejected", text: "admin add <@U12345678> extra", wantErr: ErrUnexpectedArgument},
-		{name: "admin remove without mention", text: "admin remove", wantErr: ErrMissingUserMention},
-		{name: "admin remove with non-mention positional", text: "admin remove alice", wantErr: ErrInvalidUserMention},
-		{name: "admin remove with extra arg rejected", text: "admin remove <@U12345678> extra", wantErr: ErrUnexpectedArgument},
-		{name: "admin list with extra arg rejected", text: "admin list extra", wantErr: ErrUnexpectedArgument},
+		// `admin` is no longer a parser verb — the dispatcher redirects the
+		// deprecated `admin <verb>` prefix before Parse sees it, so at the
+		// parser level a leading `admin` is just an unknown subcommand.
+		{name: "admin prefix is unknown at parser level", text: "admin frobnicate", wantErr: ErrUnknownSubcommand},
+		{name: "revoke missing id", text: "revoke", wantErr: ErrEmptyResource},
+		{name: "revoke without sigil rejected", text: "revoke prod-db", wantErr: ErrMissingSigil},
+		{name: "revoke with bad alias charset rejected", text: "revoke $Bad_ID", wantErr: ErrInvalidAlias},
+		{name: "revoke with extra arg rejected", text: "revoke $prod-db extra", wantErr: ErrUnexpectedArgument},
+		{name: "add without mention", text: "add", wantErr: ErrMissingUserMention},
+		{name: "add with bare @user", text: "add @alice", wantErr: ErrInvalidUserMention},
+		{name: "add with non-mention positional", text: "add alice", wantErr: ErrInvalidUserMention},
+		{name: "add with lowercase user-id", text: "add <@u12345678>", wantErr: ErrInvalidUserMention},
+		{name: "add with non-U/W prefix rejected", text: "add <@A12345678>", wantErr: ErrInvalidUserMention},
+		{name: "add with too-short id rejected", text: "add <@U1234>", wantErr: ErrInvalidUserMention},
+		{name: "add with extra arg rejected", text: "add <@U12345678> extra", wantErr: ErrUnexpectedArgument},
+		{name: "remove without mention", text: "remove", wantErr: ErrMissingUserMention},
+		{name: "remove with non-mention positional", text: "remove alice", wantErr: ErrInvalidUserMention},
+		{name: "remove with extra arg rejected", text: "remove <@U12345678> extra", wantErr: ErrUnexpectedArgument},
+		{name: "admins with extra arg rejected", text: "admins extra", wantErr: ErrUnexpectedArgument},
 		{name: "alias with uppercase rejected", text: "get $ProdDB", wantErr: ErrInvalidAlias},
 		{name: "alias with leading hyphen rejected", text: "get $-foo", wantErr: ErrInvalidAlias},
 		{name: "alias with space (quoted) rejected", text: `get "$prod db"`, wantErr: ErrInvalidAlias},
 		{name: "alias with equals rejected", text: "setalias $a=b https://x.example", wantErr: ErrInvalidAlias},
-		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke q_01HXYZ8ABCDEF0123456789AB extra", wantErr: ErrUnexpectedArgument},
 		{name: "alias with trailing hyphen rejected", text: "get $prod-", wantErr: ErrInvalidAlias},
 		{name: "alias single hyphen rejected", text: "get $-", wantErr: ErrInvalidAlias},
 		{name: "alias with double trailing hyphens rejected", text: "get $foo--", wantErr: ErrInvalidAlias},
@@ -336,48 +329,11 @@ func TestParse_GetFlagErrors(t *testing.T) {
 	}
 }
 
-// TestParse_QURLIDLengthBoundary pins the {16,64} boundary on
-// qurlIDPattern. 16 and 64 accept; 15 and 65 reject with
-// ErrInvalidQURLID. The floor is the realistic shortest qurl-service
-// emits (ULID suffixes are 26 chars; 16 leaves a margin) — a 15-char
-// `q_abc` token is almost always a truncation paste, so failing at
-// parse time gives the user a hint instead of an opaque 404.
-func TestParse_QURLIDLengthBoundary(t *testing.T) {
-	t.Parallel()
-	at16 := strings.Repeat("A", 16)
-	at15 := strings.Repeat("A", 15)
-	at64 := strings.Repeat("A", 64)
-	at65 := strings.Repeat("A", 65)
-
-	for _, ok := range []string{at16, at64} {
-		cmd, err := Parse("admin revoke q_" + ok)
-		if err != nil {
-			t.Errorf("Parse(admin revoke q_<%d chars>): unexpected error %v", len(ok), err)
-			continue
-		}
-		if cmd.Target != "q_"+ok {
-			t.Errorf("Target = %q, want %q", cmd.Target, "q_"+ok)
-		}
-	}
-
-	for _, bad := range []string{at15, at65} {
-		_, err := Parse("admin revoke q_" + bad)
-		if err == nil {
-			t.Errorf("Parse(admin revoke q_<%d chars>) returned nil error, want ErrInvalidQURLID", len(bad))
-			continue
-		}
-		if !errors.Is(err, ErrInvalidQURLID) {
-			t.Errorf("Parse(admin revoke q_<%d chars>) error = %v, want errors.Is(_, ErrInvalidQURLID)", len(bad), err)
-		}
-	}
-}
-
 // TestParse_UserMentionLengthBoundary pins the {8,63}-suffix boundary
 // on userMentionPattern. 8 and 63 accept (real Slack IDs sit in
 // 8-11 char territory, with margin for future grammar shifts); 7 and
-// 64 reject. The ceiling mirrors qurlIDPattern's pathological-paste
-// posture — a 1000-char `<@U…>` paste surfaces as a parser error
-// rather than reaching DDB.
+// 64 reject. The ceiling caps a pathological paste — a 1000-char
+// `<@U…>` paste surfaces as a parser error rather than reaching DDB.
 func TestParse_UserMentionLengthBoundary(t *testing.T) {
 	t.Parallel()
 	at7 := strings.Repeat("A", 7)
@@ -386,9 +342,9 @@ func TestParse_UserMentionLengthBoundary(t *testing.T) {
 	at64 := strings.Repeat("A", 64)
 
 	for _, ok := range []string{at8, at63} {
-		cmd, err := Parse("admin add <@U" + ok + ">")
+		cmd, err := Parse("add <@U" + ok + ">")
 		if err != nil {
-			t.Errorf("Parse(admin add <@U<%d chars>>): unexpected error %v", len(ok), err)
+			t.Errorf("Parse(add <@U<%d chars>>): unexpected error %v", len(ok), err)
 			continue
 		}
 		if cmd.UserID != "U"+ok {
@@ -397,13 +353,13 @@ func TestParse_UserMentionLengthBoundary(t *testing.T) {
 	}
 
 	for _, bad := range []string{at7, at64} {
-		_, err := Parse("admin add <@U" + bad + ">")
+		_, err := Parse("add <@U" + bad + ">")
 		if err == nil {
-			t.Errorf("Parse(admin add <@U<%d chars>>) returned nil error, want ErrInvalidUserMention", len(bad))
+			t.Errorf("Parse(add <@U<%d chars>>) returned nil error, want ErrInvalidUserMention", len(bad))
 			continue
 		}
 		if !errors.Is(err, ErrInvalidUserMention) {
-			t.Errorf("Parse(admin add <@U<%d chars>>) error = %v, want errors.Is(_, ErrInvalidUserMention)", len(bad), err)
+			t.Errorf("Parse(add <@U<%d chars>>) error = %v, want errors.Is(_, ErrInvalidUserMention)", len(bad), err)
 		}
 	}
 }
@@ -424,11 +380,10 @@ func TestParse_AdminErrorsNeutralizeMrkdwn(t *testing.T) {
 		name string
 		text string
 	}{
-		{"revoke + mrkdwn paste", "admin revoke <!channel>"},
-		{"add + mrkdwn paste", "admin add <!channel>"},
-		{"remove + mrkdwn paste", "admin remove <!channel>"},
-		{"list + mrkdwn trailing", "admin list <!channel>"},
-		{"unknown verb + mrkdwn", "admin <!channel>"},
+		{"revoke + mrkdwn paste", "revoke <!channel>"},
+		{"add + mrkdwn paste", "add <!channel>"},
+		{"remove + mrkdwn paste", "remove <!channel>"},
+		{"admins + mrkdwn trailing", "admins <!channel>"},
 	} {
 		_, err := Parse(tc.text)
 		if err == nil {
@@ -445,15 +400,17 @@ func TestParse_AdminErrorsNeutralizeMrkdwn(t *testing.T) {
 
 	// Separate case: a backtick in the user input must be neutralized
 	// (replaced with U+02CA), otherwise it could close the code span
-	// and let subsequent mrkdwn render.
-	_, err := Parse("admin revoke q_AAAA`AAAA")
+	// and let subsequent mrkdwn render. `revoke $aaa`+"`"+`bbb` carries a
+	// literal backtick in the alias token, which parseAliasToken rejects
+	// (ErrInvalidAlias) and echoes through truncateForError.
+	_, err := Parse("revoke $aaa`bbb")
 	if err == nil {
 		t.Fatal("Parse with backtick payload returned nil error")
 	}
 	msg := err.Error()
-	// User's backtick must NOT survive — only the code-span delimiters
-	// (one pair around the echoed token) should appear.
-	if strings.Count(msg, "`q_AAAA`AAAA`") > 0 {
+	// The user's raw backtick must NOT survive in the echoed token — it's
+	// replaced with U+02CA, so the breakout sequence never appears.
+	if strings.Contains(msg, "aaa`bbb") {
 		t.Errorf("error allows backtick code-span breakout: %q", msg)
 	}
 }
@@ -600,9 +557,9 @@ func FuzzParse(f *testing.F) {
 		"setalias $alias \"https://x.example with space\"",
 		"setalias $alias \"unbalanced",
 		"unsetalias $alias",
-		"admin revoke q_01HXYZ8ABCDEF0123456789AB",
-		"admin add <@U12345678>",
-		"admin remove <@U12345678|kevin>",
+		"revoke $prod-db",
+		"add <@U12345678>",
+		"remove <@U12345678|kevin>",
 		testAdminListCmd,
 		"get https://example.com",
 		"list",
@@ -619,13 +576,10 @@ func FuzzParse(f *testing.F) {
 		ErrEmptyResource,
 		ErrMissingSigil,
 		ErrUnknownSubcommand,
-		ErrUnknownAdminAction,
-		ErrMissingAdminAction,
 		ErrMissingTarget,
 		ErrMissingUserMention,
 		ErrInvalidUserMention,
 		ErrInvalidAlias,
-		ErrInvalidQURLID,
 		ErrUnexpectedArgument,
 		ErrInvalidFlag,
 		ErrURLNotSupportedGet,
