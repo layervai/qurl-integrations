@@ -7,6 +7,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "register": "node src/register-commands.js",
+    "apply-discord-metadata": "node scripts/apply-discord-metadata.js",
     "lint": "eslint src tests scripts --max-warnings 0",
     "test": "jest --coverage"
   },

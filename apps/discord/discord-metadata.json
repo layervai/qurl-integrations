@@ -1,0 +1,30 @@
+{
+  "bot": {
+    "username": "qURL",
+    "unique_username": "qurl",
+    "avatar": "assets/discord-avatar.png",
+    "banner": "assets/discord-profile-banner.png"
+  },
+  "application": {
+    "id": "1511450217789128885",
+    "public_key": "f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea",
+    "name": "qURL (sandbox)",
+    "description": "Securely share files, maps, and links as one-time qURLs that expire on first access.",
+    "icon": "assets/discord-app-icon.png",
+    "cover_image": "assets/discord-cover.png",
+    "tags": [
+      "security",
+      "productivity",
+      "utilities"
+    ],
+    "install_params": {
+      "scopes": [
+        "bot",
+        "applications.commands"
+      ],
+      "permissions": "2147503104"
+    },
+    "terms_of_service_url": "https://layerv.ai/terms",
+    "privacy_policy_url": "https://layerv.ai/privacy"
+  }
+}

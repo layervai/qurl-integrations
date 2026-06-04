@@ -4129,13 +4129,13 @@ describe('handleConfirmSendClick', () => {
     // and the user sees "recipients left the server" — misleading.
     // Pin the dedicated copy + deleteFlow so the flow row doesn't
     // linger. Cooldown clears so the user can re-run immediately
-    // after the admin re-invites the bot.
+    // after the admin re-invites qURL.
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     int.guild = null;
     sendCooldowns.set(SENDER_ID, Date.now());
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/bot is no longer in this server/i),
+      content: expect.stringMatching(/qURL is no longer in this server/i),
       components: [],
     }));
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({

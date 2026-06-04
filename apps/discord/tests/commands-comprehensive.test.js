@@ -1330,14 +1330,14 @@ describe('/qurl help subcommand', () => {
 
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('qURL Bot'),
+        content: expect.stringContaining('qURL — Help'),
         ephemeral: true,
       }),
     );
   });
 
   // Positive assertions for the help-text copy. Without these, the only
-  // other help-text assertion is `stringContaining('qURL Bot')`, which
+  // other help-text assertion is `stringContaining('qURL — Help')`, which
   // would stay green if every fix below were reverted. Pinning them here
   // catches accidental regressions on the next edit to this block.
   it('includes the four help-text copy fixes', async () => {
@@ -2411,7 +2411,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     // map, not absence of help). Catches a regression where the
     // entire help branch goes silent.
     expect(replyArg.content).toContain('/qurl send');
-    expect(replyArg.content).toContain('qURL Bot — Help');
+    expect(replyArg.content).toContain('qURL — Help');
     // Pin the flag-off `sectionVerb` swap — a regression that drops
     // the conditional verb would render "Share resources" against a
     // map-disabled deploy. Catches the swap in isolation from the

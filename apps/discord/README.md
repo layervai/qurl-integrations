@@ -48,16 +48,95 @@ linking and auto Contributor-role assignment for community members.
 ### Prerequisites
 
 - **Node.js ≥ 22** (see `package.json` engines)
-- A Discord bot application
+- The LayerV-owned Discord bot application
 - A GitHub OAuth App
 - A hosting target with a public HTTPS URL (ECS, Railway, Fly, etc.)
 - A qURL API key from https://layerv.ai
 
 ### 1. Configure Discord
 
-1. https://discord.com/developers/applications → your bot
-2. Enable **Server Members Intent** under Bot → Privileged Gateway Intents.
-3. Copy the bot token.
+Use the LayerV-owned sandbox Discord application, not the previous personal
+developer-portal app:
+
+- Application ID: `1511450217789128885`
+- Public Key: `f951fb4d407da2ac37ebb862f074e311d530b6e95940984695a320a1ac9f00ea`
+
+1. https://discord.com/developers/applications → `qURL (sandbox)`
+2. General Information → set the application name to **qURL (sandbox)**, upload
+   `assets/discord-app-icon.png`, add the description from
+   `discord-metadata.json`, and set the privacy/terms URLs listed there.
+3. Bot → set the unique username to `qurl` (`bot.unique_username` in
+   `discord-metadata.json`); the application/profile branding remains
+   **qURL**. Upload `assets/discord-avatar.png`, and enable **Server Members
+   Intent** under Privileged Gateway Intents.
+4. Installation → default install settings should request `bot` and
+   `applications.commands` with permissions `2147503104` (View Channels, Send
+   Messages, Embed Links, Use Slash Commands).
+5. Copy the bot token.
+
+The repeatable metadata source of truth is `discord-metadata.json`. With a
+target bot token in `DISCORD_TOKEN`, operators can apply the bot/app fields
+that Discord exposes through API (`description`, `icon`, `cover_image`, tags,
+install params, bot username, avatar, and banner). The script refuses to run if
+the token belongs to any Discord application other than LayerV sandbox app
+`1511450217789128885`.
+
+`bot.username` is the cased **qURL** brand source only; Discord's bot-user API
+receives `bot.unique_username` (`qurl`) as the lowercase unique username.
+
+```bash
+npm run apply-discord-metadata
+```
+
+Preview the API payload without making changes:
+
+```bash
+npm run apply-discord-metadata -- --dry-run
+```
+
+Dry-run also verifies that every asset referenced by `discord-metadata.json`
+exists, can be read, stays under the local byte cap for its Discord surface,
+and matches the local dimension rules.
+
+Run the live apply as an operator step after seeding the LayerV-owned token; do
+not wire it as an unconditional CI job until image/app PATCH idempotency lands
+in https://github.com/layervai/qurl-integrations/issues/588. Username and
+image updates are separate Discord `/users/@me` PATCHes, so respect
+`retry_after` and rerun instead of looping if either edit is rate-limited.
+
+After the live metadata apply, run `npm run register` with the same token/app
+pair so Discord's slash-command picker receives the updated command
+descriptions. Keep `DISCORD_CLIENT_ID` aligned with the metadata application
+ID; the script verifies the token's app, while command registration and invite
+links read the client ID from environment/SSM/infra wiring.
+
+Exit codes:
+- `0` — API fields applied, including the lowercase unique username `qurl`;
+  application/profile branding remains **qURL**.
+- `1` — partial API apply. The script prints `retry_after` when Discord
+  rate-limits username/avatar/banner updates, flags ignored avatar/banner
+  writes, and keeps `1` if a portal action is also needed. The script does not
+  sleep/retry automatically; wait for `retry_after` and rerun. For legacy
+  case-only username drift, rerun after Discord reports `discriminator: "0"` to
+  confirm the lowercase unique username converges; app and image fields may
+  have applied while this exit remains non-zero.
+- `2` — API writes completed, but the application name still differs from
+  `discord-metadata.json`; update the name in Developer Portal.
+- `3` — fatal application metadata PATCH failure. The application fields did
+  not finish applying; inspect the Discord response, wait for `retry_after` if
+  present, and rerun after fixing the API error.
+- `4` — pre-flight token/app verification failed before writes. Fix the token,
+  app ID, or public key mismatch before rerunning.
+
+Application name and legal URLs are Developer Portal-only. Discord's
+Edit Current Application API does not list legal URLs as writable fields, so
+verify the privacy and terms links directly in Developer Portal after editing
+them.
+
+The live apply uses Discord v10's documented current-user fields
+(`username`, `avatar`, `banner`) and current-application fields (`description`,
+`icon`, `cover_image`, `tags`, `install_params`); an application PATCH failure
+is fatal, while bot image failures are reported as partial applies.
 
 ### 2. Configure GitHub OAuth
 
