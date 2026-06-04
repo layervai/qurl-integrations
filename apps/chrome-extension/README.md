@@ -206,7 +206,7 @@ On Windows, `scripts/package-release.js` uses PowerShell's `Compress-Archive`; o
 Example output:
 
 ```text
-dist/qurl-gmail-chrome-extension-v1.0.0.zip
+dist/qurl-chrome-extension-v1.0.0.zip
 ```
 
 ### One-Command Publish Packaging
