@@ -383,6 +383,15 @@ func escapeMrkdwnCode(s string) string {
 	return mrkdwnCodeEscaper.Replace(s)
 }
 
+// escapeMrkdwnText escapes user-controlled text that is interpolated directly
+// into Slack mrkdwn (not inside an inline code span). Slack requires escaping
+// &, <, and >; backticks, hard line breaks, and cosmetic formatting markers are
+// neutralized too so a displayed value cannot open a code span, split a row, or
+// apply bold/italic/strike formatting to the surrounding message.
+func escapeMrkdwnText(s string) string {
+	return mrkdwnTextEscaper.Replace(s)
+}
+
 // mrkdwnCodeEscaper is the single-pass substitution table used by
 // `escapeMrkdwnCode`. Defined at package scope so the replacer is
 // constructed once at init rather than per-call. Order matters in
@@ -391,6 +400,19 @@ func escapeMrkdwnCode(s string) string {
 // two. (`\n` and `\r` standalone are handled by their own entries.)
 var mrkdwnCodeEscaper = strings.NewReplacer(
 	"`", "ˊ",
+	"\r\n", " ",
+	"\n", " ",
+	"\r", " ",
+)
+
+var mrkdwnTextEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"`", "ˊ",
+	"*", "∗",
+	"_", "＿",
+	"~", "～",
 	"\r\n", " ",
 	"\n", " ",
 	"\r", " ",

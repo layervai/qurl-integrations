@@ -135,11 +135,11 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 }
 
 // processButtonGet is the async-worker body for the `/qurl list`
-// "Create qURL" button. It mints a one-time qURL for the row's tunnel via
-// the same [Handler.getWork] pipeline as `/qurl get $<slug>` (resolve the
-// token → channel-authorize → rate-limit → mint) and posts the outcome to
-// the interaction's response_url. The cmd carries no dm/reason flags —
-// the button is the plain one-time-use mint.
+// "Create qURL" button. It mints a one-time qURL for the row's resource via
+// the same [Handler.getWork] pipeline as `/qurl get $<token>` (delivery guard
+// → rate-limit → resolve token → channel-authorize → mint) and posts the
+// outcome to the interaction's response_url. The cmd carries no dm/reason
+// flags — the button is the plain one-time-use mint.
 func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID, userID, triggerID string, cmd *Command) {
 	if channelID == "" {
 		// Channel-scope guard mirrors processGet: the resolve path is

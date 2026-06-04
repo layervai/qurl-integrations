@@ -677,6 +677,11 @@ func slashSubcommand(text, command string) bool {
 }
 
 // adminVerbs are the leading verb words that belong to `/qurl-admin`.
+const (
+	adminVerbTunnel   = "tunnel"
+	adminVerbResource = "resource"
+)
+
 // Used to redirect a user who typed an admin verb on `/qurl` and to
 // classify the wrong-surface case. `set-alias`/`unset-alias` carry both
 // spellings because slashVerb accepts the dash-free historical form too.
@@ -689,7 +694,7 @@ func slashSubcommand(text, command string) bool {
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-alias", "unsetalias", "set-display-name", "unset-display-name"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbTunnel, adminVerbResource, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -956,8 +961,10 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// reply rather than a stale modal opener. Bare `admin` lands
 		// here so the parser emits the `missing admin action` error.
 		h.handleAdmin(w, values)
-	case slashSubcommand(text, "tunnel"):
+	case slashSubcommand(text, adminVerbTunnel):
 		h.handleTunnel(w, values)
+	case slashSubcommand(text, adminVerbResource):
+		h.handleResource(w, values)
 	case setAliasSubcommand(text):
 		// Bare `set-alias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
@@ -1290,11 +1297,15 @@ func (h *Handler) adminHelpMessage(command string) string {
 				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
 				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
 				"• `/qurl-admin tunnel install <id> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin resource expose $<alias> [as:$channel-alias]` — Expose an existing URL resource in this channel",
+				"• `/qurl-admin resource expose url:<target-url> as:$channel-alias` — Expose an existing no-alias URL resource in this channel",
 				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
 				"• `/qurl-admin tunnel install <id>` — Create a Docker sidecar bootstrap key and bind `$<id>` in this channel (admin only)",
+				"• `/qurl-admin resource expose $<alias> [as:$channel-alias]` — Expose an existing URL resource in this channel",
+				"• `/qurl-admin resource expose url:<target-url> as:$channel-alias` — Expose an existing no-alias URL resource in this channel",
 				"  Guided setup is not enabled in this deployment; use the typed installer form.",
 			)
 		}

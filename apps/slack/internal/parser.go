@@ -73,6 +73,7 @@ const (
 	AdminActionSetAlias         AdminAction = "set_alias"
 	AdminActionUnsetAlias       AdminAction = "unset_alias"
 	AdminActionTunnelInstall    AdminAction = "tunnel_install"
+	AdminActionResourceExpose   AdminAction = "resource_expose"
 	AdminActionSetDisplayName   AdminAction = "set_display_name"
 	AdminActionUnsetDisplayName AdminAction = "unset_display_name"
 )

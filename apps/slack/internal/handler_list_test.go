@@ -21,15 +21,21 @@ import (
 // resource-row builder lines visually aligned. Assertion sites read
 // these names too, so a rename surfaces every site at once.
 //
-// `/qurl list` is tunnel-only and renders the slug as the `$<token>`,
-// so the fixtures below are tunnel resources (testKeyType:
-// client.ResourceTypeTunnel) carrying a slug.
+// Most `/qurl list` fixtures below are tunnel resources carrying a slug; URL
+// resource tests add explicit URL rows where that behavior matters.
 const (
-	testListAliasProdDB  = "prod-db"
-	testListAliasSecret  = "secret"
-	testListAliasAlpha   = "alpha"
-	testListAliasGrafana = "grafana"
-	testListResIDProdDB  = "r_prod_db_aa"
+	testListAliasProdDB   = "prod-db"
+	testListAliasSecret   = "secret"
+	testListAliasAlpha    = "alpha"
+	testListAliasGrafana  = "grafana"
+	testListAliasDocs     = "docs"
+	testListSlugOpsTunnel = "ops-tunnel"
+	testListResIDProdDB   = "r_prod_db_aa"
+	testListResIDURLDocs  = "r_url_docs01"
+	testListURLDocs       = "https://docs.example.com"
+	testListURLFirst      = "https://first.example.com"
+	testListURLSecond     = "https://second.example.com"
+	testListGetCommand    = "/qurl get"
 )
 
 // writeResourceListFixture writes a /v1/resources success envelope
@@ -80,7 +86,7 @@ func TestHandleList_RendersAllTunnels(t *testing.T) {
 	if !strings.Contains(async, "`$stage-db`") {
 		t.Errorf("async reply missing stage-db row: %q", async)
 	}
-	if !strings.Contains(async, "/qurl get") {
+	if !strings.Contains(async, testListGetCommand) {
 		t.Errorf("async reply missing copy-paste hint: %q", async)
 	}
 }
@@ -186,6 +192,48 @@ func TestFormatTunnelListLine(t *testing.T) {
 	}
 }
 
+func TestFormatURLListLine(t *testing.T) {
+	urlResource := func(alias, desc string) *client.Resource {
+		return &client.Resource{
+			ResourceID:  "r_url_" + alias,
+			Type:        client.ResourceTypeURL,
+			Alias:       alias,
+			TargetURL:   "https://" + alias + ".example.com",
+			Status:      client.StatusActive,
+			Description: desc,
+		}
+	}
+	cases := []struct {
+		name         string
+		resource     *client.Resource
+		boundAliases []string
+		token        string
+		blockedAlias string
+		want         string
+	}{
+		{name: "resource alias token", resource: urlResource(testListAliasDocs, ""), boundAliases: nil, want: "• `$docs` → https://docs.example.com"},
+		{name: "resource alias plus description", resource: urlResource("billing", "Billing portal"), boundAliases: nil, want: "• `$billing` → https://billing.example.com — Billing portal"},
+		{name: "description is mrkdwn escaped", resource: urlResource("alerts", "Use <!channel> *now*"), boundAliases: nil, want: "• `$alerts` → https://alerts.example.com — Use &lt;!channel&gt; ∗now∗"},
+		{name: "channel alias fallback when resource alias missing", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: []string{testListAliasDocs}, want: "• `$docs` → https://docs.example.com"},
+		{name: "resource alias excludes matching channel alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{testListAliasDocs, "kb"}, want: "• `$docs` (alias: `$kb`) → https://docs.example.com"},
+		{name: "resource alias token is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: nil, want: "• `$doˊcs` → https://docs.example.com"},
+		{name: "substituted channel alias names shadowed resource alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{"kb"}, token: "kb", blockedAlias: testListAliasDocs, want: "• `$kb` (resource alias `$docs` is shadowed here) → https://docs.example.com"},
+		{name: "no alias renders visible but unmintable row", resource: &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com", Status: client.StatusActive}, boundAliases: nil, want: "• `r_url_noalias` (no alias — ask your Slack admin to set one) → https://plain.example.com"},
+		{name: "target URL is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>", Status: client.StatusActive}, boundAliases: nil, want: "• `$docs` → https://docs.example.com/a?x=&lt;bad&gt;&amp;q=ˊtickˊ &lt;!channel&gt;"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := urlDisplayToken(tc.resource, tc.boundAliases)
+			if tc.token != "" {
+				token = tc.token
+			}
+			if got := formatURLListLineWithToken(tc.resource, tc.boundAliases, token, tc.blockedAlias); got != tc.want {
+				t.Errorf("formatURLListLineWithToken = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFormatTunnelListSection pins the richer, multi-line mrkdwn the interactive
 // /qurl list puts in each row's section block: the `$id` bold on its own line,
 // the Display Name beneath, and a faint "alias(es):" line — distinct from the
@@ -222,6 +270,45 @@ func TestFormatTunnelListSection(t *testing.T) {
 				t.Errorf("formatTunnelListSection = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatURLListSection(t *testing.T) {
+	r := &client.Resource{
+		ResourceID:  testListResIDURLDocs,
+		Type:        client.ResourceTypeURL,
+		Alias:       testListAliasDocs,
+		TargetURL:   testListURLDocs,
+		Description: "Docs portal",
+		Status:      client.StatusActive,
+	}
+	boundAliases := []string{testListAliasDocs, "kb"}
+	if got, want := formatURLListSectionWithToken(r, boundAliases, urlDisplayToken(r, boundAliases), ""), "*`$docs`*\nhttps://docs.example.com\nDocs portal\n_alias:_ `$kb`"; got != want {
+		t.Errorf("formatURLListSectionWithToken = %q, want %q", got, want)
+	}
+
+	unsafeDescription := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: testListURLDocs, Description: "Use <!channel> *now*"}
+	if got, want := formatURLListSectionWithToken(unsafeDescription, nil, "docs", ""), "*`$docs`*\nhttps://docs.example.com\nUse &lt;!channel&gt; ∗now∗"; got != want {
+		t.Errorf("formatURLListSectionWithToken(unsafe description) = %q, want %q", got, want)
+	}
+
+	if got, want := formatURLListSectionWithToken(r, []string{"kb"}, "kb", testListAliasDocs), "*`$kb`*\n_Resource alias `$docs` is shadowed here._\nhttps://docs.example.com\nDocs portal"; got != want {
+		t.Errorf("formatURLListSectionWithToken(shadowed alias) = %q, want %q", got, want)
+	}
+
+	unsafeTarget := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>"}
+	if got, want := formatURLListSectionWithToken(unsafeTarget, nil, "docs", ""), "*`$docs`*\nhttps://docs.example.com/a?x=&lt;bad&gt;&amp;q=ˊtickˊ &lt;!channel&gt;"; got != want {
+		t.Errorf("formatURLListSectionWithToken(unsafe target) = %q, want %q", got, want)
+	}
+
+	unsafeAlias := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs}
+	if got, want := formatURLListSectionWithToken(unsafeAlias, nil, "do`cs", ""), "*`$doˊcs`*\nhttps://docs.example.com"; got != want {
+		t.Errorf("formatURLListSectionWithToken(unsafe alias) = %q, want %q", got, want)
+	}
+
+	noAlias := &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com"}
+	if got, want := formatURLListSectionWithToken(noAlias, nil, "", ""), "*`r_url_noalias`*\n_No alias set — ask your Slack admin to set one._\nhttps://plain.example.com"; got != want {
+		t.Errorf("formatURLListSectionWithToken(no alias) = %q, want %q", got, want)
 	}
 }
 
@@ -495,22 +582,24 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 	}
 }
 
-// TestHandleList_URLResourcesFiltered fences the tunnel-only scope:
-// URL/transit resources MUST NOT appear in `/qurl list` at all — only
-// type=tunnel rows survive. A stray `slug` on a URL row doesn't rescue
-// it either; the filter keys on Type, not the slug field.
-func TestHandleList_URLResourcesFiltered(t *testing.T) {
+// TestHandleList_URLResourcesListed fences the restored URL-resource scope:
+// URL resources exposed to this channel appear alongside tunnels, using their
+// resource alias as the copy-paste token. A stray slug on a URL row must NOT
+// become the token — slugs are tunnel-only. URL rows with no alias stay visible
+// but render as "no alias" rows, so the list does not advertise an unmintable
+// `$r_...` token.
+func TestHandleList_URLResourcesListed(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_tun_aaaaaa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "alpha-tunnel"},
-			{testKeyResourceID: "r_url_btarg1", fAttrAlias: "burl", testKeyTargetURL: "https://b.example.com"},
+			{testKeyResourceID: "r_url_btarg1", testKeyType: client.ResourceTypeURL, fAttrAlias: "burl", testKeyTargetURL: "https://b.example.com", testKeyDescription: "Billing portal"},
 			{testKeyResourceID: "r_url_stray1", testKeyTargetURL: "https://c.example.com", testKeySlug: "stray-slug"},
 		}, "", false)
 	})
-	// Expose all three to C_test so the TYPE filter (not the channel scope) is
-	// what drops the URL resources.
+	// Expose all three to C_test so the type handling (not channel scope) is
+	// what decides how the URL rows render.
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_aaaaaa", "r_url_btarg1", "r_url_stray1")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -519,11 +608,14 @@ func TestHandleList_URLResourcesFiltered(t *testing.T) {
 	if !strings.Contains(async, "`$alpha-tunnel`") {
 		t.Errorf("async reply missing the tunnel row: %q", async)
 	}
-	if strings.Contains(async, "burl") || strings.Contains(async, "b.example.com") {
-		t.Errorf("URL resource leaked into tunnel-only list: %q", async)
+	if !strings.Contains(async, "`$burl` → https://b.example.com — Billing portal") {
+		t.Errorf("async reply missing URL resource alias row: %q", async)
 	}
-	if strings.Contains(async, "c.example.com") || strings.Contains(async, "stray-slug") {
-		t.Errorf("URL resource with stray slug leaked into tunnel-only list: %q", async)
+	if !strings.Contains(async, "`r_url_stray1` (no alias — ask your Slack admin to set one) → https://c.example.com") {
+		t.Errorf("async reply missing no-alias URL row: %q", async)
+	}
+	if strings.Contains(async, "`$stray-slug`") {
+		t.Errorf("URL resource with stray slug rendered a tunnel slug token: %q", async)
 	}
 }
 
