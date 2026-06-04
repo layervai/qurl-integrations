@@ -707,7 +707,7 @@ func respondTunnelEditModalError(w http.ResponseWriter, message string) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		respFieldResponseAction: "update",
+		respFieldResponseAction: respActionUpdate,
 		respFieldView:           json.RawMessage(view),
 	})
 }
