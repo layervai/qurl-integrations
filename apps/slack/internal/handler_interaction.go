@@ -468,6 +468,9 @@ type interactionPayload struct {
 	Team struct {
 		ID string `json:"id"`
 	} `json:"team"`
+	Enterprise struct {
+		ID string `json:"id"`
+	} `json:"enterprise"`
 	User struct {
 		ID string `json:"id"`
 	} `json:"user"`

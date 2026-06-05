@@ -12,10 +12,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const testExposeChannel = "C_test"
+
+func exposeBlockActionsBodyWithEnterprise(t *testing.T, teamID, enterpriseID, userID, channelID, responseURL, actionID, value string) string {
+	t.Helper()
+	payload := map[string]any{
+		"type":         "block_actions",
+		payloadKeyTeam: map[string]any{"id": teamID},
+		payloadKeyUser: map[string]any{"id": userID},
+		"channel":      map[string]any{"id": channelID},
+		"trigger_id":   "trigger_test",
+		"response_url": responseURL,
+		"actions": []map[string]any{
+			{"action_id": actionID, "block_id": "row_block", "value": value},
+		},
+	}
+	if enterpriseID != "" {
+		payload["enterprise"] = map[string]any{"id": enterpriseID}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal block_actions payload: %v", err)
+	}
+	return url.Values{"payload": {string(raw)}}.Encode()
+}
 
 // --- chooser (slash) ------------------------------------------------------
 
@@ -287,6 +311,54 @@ func TestHandleExposeURLClick_NoResourcesOpensEmptyModal(t *testing.T) {
 	}
 	if strings.Contains(js, exposeURLActionResource) {
 		t.Errorf("empty modal should not render URL-resource select: %s", js)
+	}
+}
+
+func TestHandleExposeURLClick_NoResourcesFallsBackToEnterpriseOpen(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, nil, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	type openCall struct {
+		tokenOwnerID string
+		view         []byte
+	}
+	opens := make(chan openCall, 2)
+	h.cfg.OpenView = func(_ context.Context, tokenOwnerID, _ string, view []byte) error {
+		opens <- openCall{tokenOwnerID: tokenOwnerID, view: view}
+		if tokenOwnerID == testAdminTeamID {
+			return auth.ErrSlackBotTokenNotConfigured
+		}
+		return nil
+	}
+
+	body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, testEnterpriseID, testAdminUserID, testExposeChannel, "https://hooks.slack.com/expose", exposeURLActionID, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("url click ack = %d, want 200", w.Code)
+	}
+
+	var first, second openCall
+	select {
+	case first = <-opens:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace OpenView was not called")
+	}
+	select {
+	case second = <-opens:
+	case <-time.After(2 * time.Second):
+		t.Fatal("enterprise OpenView fallback was not called")
+	}
+	if first.tokenOwnerID != testAdminTeamID || second.tokenOwnerID != testEnterpriseID {
+		t.Fatalf("OpenView token owner order = %q, %q; want workspace then enterprise", first.tokenOwnerID, second.tokenOwnerID)
+	}
+	if !strings.Contains(string(second.view), "No URL resources yet") {
+		t.Fatalf("enterprise fallback opened unexpected view: %s", second.view)
 	}
 }
 

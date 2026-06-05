@@ -54,6 +54,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	log := slog.With(
 		"command", "expose_connector_click",
 		"team_id", payload.Team.ID,
+		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
 		"user_id", payload.User.ID,
 	)
@@ -72,7 +73,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 		ResponseURL:   responseURL,
 		CreatedAtUnix: h.now().Unix(),
 	}
-	teamID, triggerID := payload.Team.ID, payload.TriggerID
+	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
 		view, err := TunnelInstallModal(meta)
 		if err != nil {
@@ -82,7 +83,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
-		if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 			log.Warn("expose connector: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
@@ -96,7 +97,9 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 // the admin picks one rather than typing an alias. With no URL resources to
 // expose it posts a short ephemeral via response_url instead of opening an empty
 // picker. Same open posture as handleExposeConnectorClick (ack fast, open on the
-// async goroutine inside the trigger window, fail open via response_url).
+// async goroutine inside the trigger window, retry with the Enterprise Grid
+// install token when Slack includes enterprise context, fail open via
+// response_url).
 //
 // No admin re-check before the resource list fetch here, unlike the bare-verb
 // path (openExposeURLWizard re-checks because `/qurl-admin expose-url` has no
@@ -109,6 +112,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 	log := slog.With(
 		"command", "expose_url_click",
 		"team_id", payload.Team.ID,
+		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
 		"user_id", payload.User.ID,
 	)
@@ -125,7 +129,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		UserID:      payload.User.ID,
 		ResponseURL: responseURL,
 	}
-	teamID, triggerID := payload.Team.ID, payload.TriggerID
+	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
 		// Bound the resource fetch on its own short budget so a slow upstream
 		// can't eat into the views.open trigger window; the open then gets the
@@ -148,7 +152,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 			}
 			openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 			defer openCancel()
-			if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+			if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 				log.Warn("expose url: empty modal views.open failed", "error", err)
 				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 			}
@@ -162,7 +166,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
-		if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 			log.Warn("expose url: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
