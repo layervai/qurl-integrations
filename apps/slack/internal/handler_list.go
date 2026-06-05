@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -15,19 +14,21 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-// listResourcesScanLimit is the page size for the single `/v1/resources` fetch
-// backing `/qurl list`, `/qurl aliases`, and the URL resource-alias fallback
-// in `/qurl get`. We over-fetch (the server's max) rather than page to a small
-// display target: a 10-row page could surface zero channel-allowed resources
-// after client-side filtering even when mintable rows exist. One generous page
-// keeps the command single-request while making the client-side filtering
-// reliable for normal workspaces. Bumping this affects all three surfaces.
+// listResourcesScanLimit is the per-page size for the `/v1/resources` fetches
+// backing `/qurl list`, `/qurl aliases`, the URL resource-alias fallback in
+// `/qurl get`, and the `/qurl-admin expose-url` picker.
 //
-// A server-side "mintable from Slack" filter (or allow-set-driven listing)
-// would let this drop to a normal page size and make `page.HasMore` mean "more
-// channel-listable resources" rather than "more resources of any type" — see
-// the footer caveat in [Handler.processListResources] and the same caveat on
-// the `/qurl aliases` triage warning in [Handler.processAliases].
+//   - `/qurl list` pages through resources until every resource in the channel
+//     allow-set has been seen (see [Handler.fetchAllowedResources]) — tunnels
+//     and URL resources alike — so the listing is complete regardless of how the
+//     owner's full resource set sorts (#590). The page size only affects how many
+//     requests that walk takes, not which resources render.
+//   - `/qurl aliases`, the `/qurl get` URL resource-alias fallback, and the
+//     `/qurl-admin expose-url` picker each scan a SINGLE page. A bound/aliased
+//     resource_id past this page surfaces the triage warning in
+//     [Handler.processAliases] (aliases) or is missed by the get fallback /
+//     duplicate-alias ambiguity check (#590). A server-side type filter (tracked
+//     in #531) would let those single-page surfaces drop to a normal size.
 const listResourcesScanLimit = 100
 
 const (
@@ -332,25 +333,19 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 		return
 	}
 
-	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	// `/qurl list` shows the channel's mintable resources — tunnels AND URL
+	// resources — scoped to the channel allow-set, so every member sees exactly
+	// the resources they could `/qurl get` here, no more. The listing is driven by
+	// paging the owner's resources until every allow-set member has been seen
+	// (#590): a resource exposed to this channel can no longer be missed for
+	// sorting past a fixed scan window, because the walk doesn't stop at one. The
+	// common case — every exposed resource on the first page — still costs a
+	// single request.
+	resources, err := h.fetchAllowedResources(ctx, log, c, allowed)
 	if err != nil {
 		_ = h.postResponse(log, responseURL, ":warning: "+mapListResourcesError(log, teamID, err))
 		return
 	}
-
-	// `/qurl list` shows only Slack-mintable resource types, then scopes to the
-	// channel allow-set so only resources exposed to THIS channel render — every
-	// member sees exactly the resources they could `/qurl get` here, no more.
-	//
-	// Known gap (#590): only the first listResourcesScanLimit (100) upstream
-	// resources are scanned before filtering, so a resource exposed to this
-	// channel but sorting past row 100 won't render here. For display this is
-	// fail-safe under-disclosure, not a leak. For URL resource-alias minting,
-	// however, the get fallback and duplicate-alias ambiguity detection share
-	// the same scan; a duplicate alias outside the first page can be missed.
-	// Channel aliases already bound in DDB are unaffected. Driving listing and
-	// alias resolution by the allow-set IDs is tracked in #590.
-	resources := filterResourcesAllowedInChannel(filterListableResources(page.Resources), allowed)
 
 	if len(resources) == 0 {
 		_ = h.postResponse(log, responseURL, h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID))
@@ -452,18 +447,6 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	if useButtons {
 		blocks = append(blocks, contextBlock(listFooterButtons))
 	}
-	if page.HasMore {
-		// page.HasMore is a master-list signal — more resources of ANY
-		// type, not necessarily more tunnels — so this footer can fire
-		// even when every tunnel is already shown. See the #531 caveat
-		// on listResourcesScanLimit; until then we warn rather than
-		// risk implying the listing is exhaustive.
-		hasMore := fmt.Sprintf("…more resources past the first %d-row scan — some resources may not be shown.", listResourcesScanLimit)
-		body += "\n_" + hasMore + "_"
-		if useButtons {
-			blocks = append(blocks, contextBlock(hasMore))
-		}
-	}
 
 	if !useButtons {
 		_ = h.postResponse(log, responseURL, body)
@@ -562,19 +545,67 @@ func isURLResource(r *client.Resource) bool {
 	return r.Type == client.ResourceTypeURL || (r.Type == "" && r.TargetURL != "")
 }
 
-// filterResourcesAllowedInChannel keeps only the resources whose ResourceID is
-// in `allowed` (the channel's AllowedResourceIDsForChannel set). This is the
-// disclosure half of the channel-scoping invariant: a member sees exactly the
-// resources they could mint here. The caller has already dropped non-mintable
-// and revoked rows; this drops resources not exposed to the current channel.
-func filterResourcesAllowedInChannel(resources []client.Resource, allowed map[string]struct{}) []client.Resource {
-	out := make([]client.Resource, 0, len(resources))
-	for i := range resources {
-		if _, ok := allowed[resources[i].ResourceID]; ok {
-			out = append(out, resources[i])
-		}
+// listMaxResourcePages bounds how many `/v1/resources` pages
+// [Handler.fetchAllowedResources] will walk. It is a safety backstop, not an
+// expected limit: the walk normally stops as soon as every allow-set member is
+// found (the common case is the first page). The cap only bites when an
+// allow-set id is never found — e.g. a stale channel binding to a resource the
+// owner has since deleted — which would otherwise scan to the end of the
+// owner's resource list on every call. At listResourcesScanLimit (100) rows
+// per page this covers far more resources than any real workspace holds, so a
+// capped walk can only ever drop an id the owner's list no longer contains
+// (fail-safe under-disclosure, never a live listed resource).
+const listMaxResourcePages = 50
+
+// fetchAllowedResources returns the live resources — tunnels AND URL resources —
+// exposed to the current channel, by paging `/v1/resources` until every
+// resource_id in the channel allow-set has been seen (or the listing is
+// exhausted / the page cap is hit). This is the channel-scoped disclosure half
+// of `/qurl list`: a member sees exactly the resources they could `/qurl get`
+// here.
+//
+// Paging until the allow-set is satisfied — rather than scanning a single fixed
+// page and filtering it — is the #590 fix: a resource exposed to this channel
+// can no longer be omitted for sorting past the page window. Allow-set ids are
+// matched as resources stream past and the walk stops as soon as the last one is
+// found, so a workspace whose exposed resources all land on the first page still
+// costs a single request (no regression to the common case).
+//
+// Allow-set membership is matched here; non-mintable / revoked rows are dropped
+// by filterListableResources (tunnels + URL resources). (#596 introduced this as
+// fetchAllowedTunnels; it was generalized to all listable resource types when
+// #599's URL-resource support merged, so the channel-scoped #590 paging fix now
+// covers URL resources too.)
+func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	pending := make(map[string]struct{}, len(allowed))
+	for id := range allowed {
+		pending[id] = struct{}{}
 	}
-	return out
+	matched := make([]client.Resource, 0, len(allowed))
+	cursor := ""
+	for page := 0; page < listMaxResourcePages; page++ {
+		out, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit, Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		for i := range out.Resources {
+			if _, ok := pending[out.Resources[i].ResourceID]; ok {
+				delete(pending, out.Resources[i].ResourceID)
+				matched = append(matched, out.Resources[i])
+			}
+		}
+		// Stop once every exposed id is found, or the listing is exhausted.
+		if len(pending) == 0 || !out.HasMore || out.NextCursor == "" {
+			return filterListableResources(matched), nil
+		}
+		cursor = out.NextCursor
+	}
+	// Page cap reached with allow-set ids still unresolved — the backstop in
+	// listMaxResourcePages. Not an expected path; surface it for operators. The
+	// unresolved ids simply don't render (fail-safe, never a leak).
+	log.Warn("list: resource-page cap reached before resolving every allow-set member",
+		"pages", listMaxResourcePages, "unresolved", len(pending))
+	return filterListableResources(matched), nil
 }
 
 // tunnelToken returns the resource-intrinsic `$<token>` for a tunnel.
