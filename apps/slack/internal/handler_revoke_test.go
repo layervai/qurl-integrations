@@ -274,8 +274,15 @@ func TestHandleList_RendersRevokeButton(t *testing.T) {
 		t.Fatalf("Revoke button missing confirm dialog: %v", btn)
 	}
 	confirmText, _ := confirm["text"].(map[string]any)
-	if txt, _ := confirmText["text"].(string); !strings.Contains(txt, "every qURL") || !strings.Contains(txt, "can't be undone") {
+	txt, _ := confirmText["text"].(string)
+	if !strings.Contains(txt, "every qURL") || !strings.Contains(txt, "can't be undone") {
 		t.Errorf("confirm dialog copy missing irreversible/all-qURLs warning: %v", confirm)
+	}
+	// Slack's confirm dialog doesn't render bold, so a `*…*` span would show its
+	// raw asterisks (the popup looked unformatted). Pin that the copy stays free
+	// of bold markers — a regression re-introducing them fails here.
+	if strings.Contains(txt, "*") {
+		t.Errorf("confirm dialog copy carries mrkdwn bold markers; they render as raw asterisks in Slack's confirm dialog: %q", txt)
 	}
 	// The button value must carry the resolved resource_id so the click
 	// handler revokes without a slug re-resolve.

@@ -28,7 +28,13 @@ const commonRevokeFailedMessage = "Failed to revoke the resource. Please try aga
 // it's exposed to — not an un-expose of the current channel (that's what the
 // Edit modal's channel multi-select does). Edit and Revoke sit side by side, so
 // the copy makes the difference explicit.
-const revokeConfirmText = "This revokes the resource *and every qURL on it*, in every channel it's exposed to. It can't be undone."
+//
+// NO bold here: Slack's confirm dialog doesn't render `*bold*`, even though
+// withConfirmDialog types this text as mrkdwn — a bold span just shows its raw
+// asterisks, which is what made the popup look unformatted. Newlines ARE honored
+// (an mrkdwn paragraph break), so the irreversibility warning sits on its own
+// line for weight.
+const revokeConfirmText = "This revokes the resource and every qURL on it, in every channel it's exposed to.\n\nIt can't be undone."
 
 // handleRevoke implements `/qurl-admin revoke $<id|alias>`. Rather than
 // revoking immediately, it resolves + channel-authorizes the token and posts

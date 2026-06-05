@@ -666,6 +666,48 @@ func TestHandleAdmin_AdminStoreUnconfigured(t *testing.T) {
 // revoke is resource-scoped via `$<id>`; and id references carry the `$`
 // sigil. newAliasTestHandler wires both aliasStore and AdminStore, so every
 // gated help line renders.
+// TestAdminHelpGroupsVerbsUnderSections fences the categorized layout: the
+// admin help renders its verbs under the four bold section headers instead of
+// one flat bullet list. newAliasTestHandler wires aliasStore + AdminStore, so
+// every section's gate passes and all four headers render. A regression that
+// dropped a header (or flattened the grouping) fails here.
+func TestAdminHelpGroupsVerbsUnderSections(t *testing.T) {
+	h, _ := newAliasTestHandler(t)
+	help := h.adminHelpMessage(commandAdmin)
+
+	for _, want := range []string{
+		"*Expose resources*",
+		"*Aliases*",
+		"*Manage resources*",
+		"*Bot admins*",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("admin help missing section header %q:\n%s", want, help)
+		}
+	}
+}
+
+// TestAdminHelpOmitsSectionHeadersWhenUnwired fences the "never render an empty
+// header" invariant the adminHelpMessage section comments lean on: with neither
+// aliasStore nor AdminStore wired, none of the four section headers appear — a
+// no-store deploy renders only the title and the always-present help anchor.
+// newTestHandler wires neither store, so it exercises that path directly.
+func TestAdminHelpOmitsSectionHeadersWhenUnwired(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	help := h.adminHelpMessage(commandAdmin)
+
+	for _, absent := range []string{
+		"*Expose resources*",
+		"*Aliases*",
+		"*Manage resources*",
+		"*Bot admins*",
+	} {
+		if strings.Contains(help, absent) {
+			t.Errorf("unwired admin help leaked section header %q:\n%s", absent, help)
+		}
+	}
+}
+
 func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
 	h, _ := newAliasTestHandler(t)
 	help := h.adminHelpMessage(commandAdmin)
