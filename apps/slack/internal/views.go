@@ -25,6 +25,7 @@ const (
 	callbackIDSetAliasRebind = "setalias_rebind_confirm"
 	callbackIDTunnelInstall  = "tunnel_install"
 	callbackIDTunnelEdit     = "tunnel_edit"
+	callbackIDFeedback       = "feedback"
 )
 
 // listCreateQurlActionID is the action_id on the "Create qURL" button
@@ -662,4 +663,191 @@ func optionObj(text, value string) map[string]any {
 		"text":             plainTextObj(text),
 		blockKitFieldValue: value,
 	}
+}
+
+// plainTextSectionBlock returns a `section` block whose text is a plain_text
+// object. Slack does NO mrkdwn parsing on plain_text, so embedded `<…>` mention
+// syntax (`<!channel>`, `<@U…>`) and `*`/`_` render literally — that is the
+// reason free-form feedback (summary/details) is rendered through here rather
+// than sectionBlock: it neutralizes mention/link injection from user text into
+// the operator-visible feedback channel.
+func plainTextSectionBlock(text string) map[string]any {
+	return map[string]any{
+		"type": "section",
+		"text": plainTextObj(text),
+	}
+}
+
+// Feedback modal block/action IDs and input bounds. The bounds are enforced
+// client-side via the inputs' max_length AND re-checked in
+// parseFeedbackModalArgs so a crafted submission cannot exceed them.
+const (
+	feedbackBlockType     = "feedback_type"
+	feedbackActionType    = "feedback_type_select"
+	feedbackBlockSummary  = "feedback_summary"
+	feedbackActionSummary = "feedback_summary_input"
+	feedbackBlockDetails  = "feedback_details"
+	feedbackActionDetails = "feedback_details_input"
+
+	// Character (rune) caps, both well under Slack's 3000-char text-object
+	// limit so the summary/details render in single section blocks.
+	feedbackSummaryMaxLen = 150
+	feedbackDetailsMaxLen = 2800
+)
+
+// Feedback type option values. Stable lowercase tokens chosen to map cleanly
+// onto the GitHub labels the triage routine applies (e.g. type:bug), so the
+// value travels unchanged from modal selection to issue label.
+const (
+	feedbackTypeBug     = "bug"
+	feedbackTypeFeature = "feature"
+	feedbackTypeOther   = "other"
+)
+
+// FeedbackModalMetadata is carried through Slack private_metadata from the
+// `/qurl feedback` slash command that opened the modal to the later
+// view_submission. It captures the submitter attribution at open time — the
+// view_submission payload only carries team/user IDs, not the human-readable
+// handle/workspace — plus the slash command's response_url so the async post
+// can confirm receipt (or report a delivery failure) back in the channel the
+// command was run from. No freshness TTL: feedback mints no secret and is
+// idempotent, so a late submission just posts the same note (the response_url
+// confirmation may simply have expired, which is harmless).
+type FeedbackModalMetadata struct {
+	TeamID       string `json:"team_id"`
+	TeamDomain   string `json:"team_domain,omitempty"`
+	UserID       string `json:"user_id"`
+	UserName     string `json:"user_name,omitempty"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	ChannelName  string `json:"channel_name,omitempty"`
+	EnterpriseID string `json:"enterprise_id,omitempty"`
+	ResponseURL  string `json:"response_url"`
+}
+
+// FeedbackModal renders the `/qurl feedback` modal: a type select, a short
+// required summary, and optional free-form details. The context line warns
+// against pasting secrets because submissions land in an operator-visible
+// internal channel (see Handler.processFeedback).
+func FeedbackModal(meta *FeedbackModalMetadata) ([]byte, error) {
+	privateMeta, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private_metadata: %w", err)
+	}
+	if len(privateMeta) > slackPrivateMetadataMaxBytes {
+		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
+	}
+	summaryInput := plainTextInput(feedbackActionSummary, "Short summary of the bug or idea", "")
+	summaryInput["max_length"] = feedbackSummaryMaxLen
+	detailsInput := multilinePlainTextInput(feedbackActionDetails, "Steps to reproduce, what you expected, or extra context", "")
+	detailsInput["max_length"] = feedbackDetailsMaxLen
+	payload := map[string]any{
+		blockKitFieldType:            blockKitTypeModal,
+		blockKitFieldCallbackID:      callbackIDFeedback,
+		blockKitFieldTitle:           plainTextObj("Send feedback"),
+		blockKitFieldSubmit:          plainTextObj("Send"),
+		blockKitFieldClose:           plainTextObj("Cancel"),
+		blockKitFieldPrivateMetadata: string(privateMeta),
+		blockKitFieldBlocks: []any{
+			contextBlock("Goes straight to the qURL team. Please don't include qURL keys, tokens, or other secrets."),
+			inputBlock(feedbackBlockType, "Type", "", false,
+				staticSelect(feedbackActionType, []map[string]any{
+					optionObj("Bug report", feedbackTypeBug),
+					optionObj("Feature request", feedbackTypeFeature),
+					optionObj("Something else", feedbackTypeOther),
+				}, optionObj("Bug report", feedbackTypeBug))),
+			inputBlock(feedbackBlockSummary, "Summary", "", false, summaryInput),
+			inputBlock(feedbackBlockDetails, "Details", "Optional", true, detailsInput),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// FeedbackErrorModal replaces a submitted feedback modal with a form-level
+// error for the rare structural failures (forged/stale metadata, missing
+// wiring) that aren't tied to a specific input field. Per-field validation
+// problems use response_action:errors via respondViewErrors instead.
+func FeedbackErrorModal(message string) ([]byte, error) {
+	payload := map[string]any{
+		blockKitFieldType:  blockKitTypeModal,
+		blockKitFieldTitle: plainTextObj("Send feedback"),
+		blockKitFieldClose: plainTextObj("Close"),
+		blockKitFieldBlocks: []any{
+			sectionBlock(":warning: " + message),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// FeedbackMessage builds the Block Kit payload posted to the internal feedback
+// channel via the Slack incoming webhook. The user-provided summary and details
+// render as plain_text blocks (see plainTextSectionBlock) so Slack performs no
+// mrkdwn parsing on them; the fixed labels and the attribution line render as
+// mrkdwn, with the Slack-supplied attribution values escaped because user_name /
+// team_domain — while Slack-issued — sit outside this code's trust boundary. The
+// `text` fallback is kept free of user content so the channel's push
+// notification can't be used to smuggle a mention out of feedback text.
+func FeedbackMessage(meta *FeedbackModalMetadata, typeValue, summary, details string) ([]byte, error) {
+	emoji, label, ok := feedbackTypeDisplay(typeValue)
+	if !ok {
+		return nil, fmt.Errorf("unknown feedback type %q", typeValue)
+	}
+	blocks := []any{
+		headerBlock(emoji + " " + label),
+		plainTextSectionBlock(summary),
+	}
+	if details != "" {
+		blocks = append(blocks,
+			contextBlock("*Details*"),
+			plainTextSectionBlock(details),
+		)
+	}
+	blocks = append(blocks, contextBlock(feedbackAttribution(meta)))
+	payload := map[string]any{
+		blockKitFieldBlocks: blocks,
+		respFieldText:       "New qURL feedback — " + label,
+	}
+	return json.Marshal(payload)
+}
+
+// feedbackTypeDisplay maps a stored feedback type value to its header emoji and
+// label. ok is false for an unrecognized value, which parseFeedbackModalArgs
+// treats as a field error and FeedbackMessage as a render error.
+func feedbackTypeDisplay(typeValue string) (emoji, label string, ok bool) {
+	switch typeValue {
+	case feedbackTypeBug:
+		return ":beetle:", "Bug report", true
+	case feedbackTypeFeature:
+		return ":bulb:", "Feature request", true
+	case feedbackTypeOther:
+		return ":speech_balloon:", "Feedback", true
+	default:
+		return "", "", false
+	}
+}
+
+// feedbackAttribution renders the submitter context line. It pairs the
+// human-readable Slack handle / workspace domain (for the team triaging in
+// Slack) with the stable team/user IDs (the triage routine's join keys and the
+// GitHub-issue attribution). Every dynamic value is escaped for the mrkdwn code
+// span it sits in.
+func feedbackAttribution(meta *FeedbackModalMetadata) string {
+	userLabel := strings.TrimSpace(meta.UserName)
+	if userLabel == "" {
+		userLabel = meta.UserID
+	}
+	workspaceLabel := strings.TrimSpace(meta.TeamDomain)
+	if workspaceLabel == "" {
+		workspaceLabel = meta.TeamID
+	}
+	var b strings.Builder
+	b.WriteString("From `")
+	b.WriteString(escapeMrkdwnCode(userLabel))
+	b.WriteString("` in workspace `")
+	b.WriteString(escapeMrkdwnCode(workspaceLabel))
+	b.WriteString("` · user_id `")
+	b.WriteString(escapeMrkdwnCode(meta.UserID))
+	b.WriteString("` · team_id `")
+	b.WriteString(escapeMrkdwnCode(meta.TeamID))
+	b.WriteString("`")
+	return b.String()
 }

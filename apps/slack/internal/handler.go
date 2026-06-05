@@ -70,6 +70,12 @@ func NewSlackRateLimitError(retryAfter string) error {
 // OpenViewFunc posts a Slack modal through `views.open`.
 type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
 
+// PostFeedbackFunc delivers a `/qurl feedback` submission to the internal
+// feedback Slack channel by POSTing a Block Kit payload to a Slack incoming
+// webhook. The bytes are the full webhook request body (built by
+// [FeedbackMessage]); the implementation owns only the HTTP delivery.
+type PostFeedbackFunc func(ctx context.Context, payload []byte) error
+
 // SlackRateLimitRetryAfter returns Slack's Retry-After hint from err when the
 // OpenView implementation preserved one with [NewSlackRateLimitError].
 func SlackRateLimitRetryAfter(err error) string {
@@ -295,6 +301,12 @@ type Config struct {
 	// dev/sandbox installs; production deploys should set an immutable tag or
 	// digest so Slack never instructs customers to run a floating image.
 	TunnelImage string
+
+	// PostFeedback delivers a `/qurl feedback` submission to the internal
+	// feedback Slack channel. Nil disables `/qurl feedback`: the command
+	// replies that feedback isn't enabled and userHelpMessage omits the line.
+	// Production wires it in cmd/main.go from FEEDBACK_SLACK_WEBHOOK_URL.
+	PostFeedback PostFeedbackFunc
 }
 
 // Handler processes Slack events and commands.
@@ -698,7 +710,7 @@ var adminVerbs = []string{"admin", "tunnel", "set-alias", "setalias", "unset-ali
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup"}
+var userVerbs = []string{"get", "list", "aliases", "create", "setup", "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -863,7 +875,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 }
 
 // dispatchUserCommand routes the user-facing `/qurl` verbs: setup, get,
-// list, aliases, help. Admin verbs typed on `/qurl` get a redirect to
+// list, aliases, feedback, help. Admin verbs typed on `/qurl` get a redirect to
 // `/qurl-admin` instead of the generic unknown-subcommand reply, so an
 // admin who fat-fingers the command gets a direct correction.
 func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values, setupEmail string, setupMatched bool, setupErr error) {
@@ -905,6 +917,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		h.handleGet(w, values)
 	case text == "aliases":
 		h.handleAliases(w, values)
+	case slashSubcommand(text, "feedback"):
+		// feedback is a user verb available to any workspace member — no
+		// admin gate, no qURL setup required (it never calls qurl-service).
+		// slashSubcommand (not exact match) so `feedback <stray text>` still
+		// opens the form rather than falling through to "unknown subcommand".
+		h.handleFeedback(w, values)
 	case isAdminVerb(text):
 		// An admin verb typed on `/qurl` — redirect to `/qurl-admin` rather
 		// than the generic unknown reply. firstWord(text) is the classified
@@ -1254,6 +1272,13 @@ func (h *Handler) userHelpMessage(command string) string {
 			"• `/qurl aliases` — List this channel's aliases and the resource each one points to",
 		)
 	}
+	if h.cfg.PostFeedback != nil {
+		// feedback needs no AdminStore/setup — only the PostFeedback seam —
+		// so it gates on that alone and shows even on no-DDB deploys.
+		lines = append(lines,
+			"• `/qurl feedback` — Send a bug report or feature request to the qURL team",
+		)
+	}
 	lines = append(lines,
 		"• `/qurl help` — Show this help message",
 		"",
@@ -1411,6 +1436,9 @@ const (
 	// keys (response_action: "errors"|"update" + the replacement view).
 	respFieldResponseAction = "response_action"
 	respFieldView           = "view"
+	// respActionUpdate is the response_action value that swaps the current
+	// modal for a replacement view (the modal error responders use it).
+	respActionUpdate = "update"
 )
 
 func respondSlack(w http.ResponseWriter, text string) {

@@ -50,6 +50,8 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 			h.handleTunnelInstallSubmission(w, payload)
 		case callbackIDTunnelEdit:
 			h.handleTunnelEditSubmission(w, payload)
+		case callbackIDFeedback:
+			h.handleFeedbackSubmission(w, payload)
 		default:
 			// Unknown callback_id — ack 200 (Slack hangs the modal
 			// otherwise) and log so a future view drift is visible.
@@ -395,7 +397,7 @@ func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		respFieldResponseAction: "update",
+		respFieldResponseAction: respActionUpdate,
 		respFieldView:           json.RawMessage(view),
 	})
 }
