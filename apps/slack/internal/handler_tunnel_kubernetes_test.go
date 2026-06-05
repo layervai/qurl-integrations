@@ -23,7 +23,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 
 	for _, want := range []string{
-		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
+		"QURL_BOOTSTRAP_SECRET='qurl-connector-" + testTunnelSlug + "'",
 		testTunnelKeyPromptLine,
 		`head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`,
 		"unset QURL_BOOTSTRAP_KEY",
@@ -89,8 +89,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	if err := yaml.Unmarshal([]byte(got[patchCodeStart:patchCodeStart+patchCodeEnd]), &podSpecFragment); err != nil {
 		t.Fatalf("PodSpec fragment YAML did not parse: %v", err)
 	}
-	if podSpecFragment.SecurityContext["fsGroup"] == nil || len(podSpecFragment.Containers) != 1 || podSpecFragment.Containers[0].Name != "qurl-tunnel" {
-		t.Fatalf("PodSpec fragment = %+v, want fsGroup and qurl-tunnel container", podSpecFragment)
+	if podSpecFragment.SecurityContext["fsGroup"] == nil || len(podSpecFragment.Containers) != 1 || podSpecFragment.Containers[0].Name != "qurl-connector" {
+		t.Fatalf("PodSpec fragment = %+v, want fsGroup and qurl-connector container", podSpecFragment)
 	}
 	for _, want := range []string{
 		"sidecar/securityContext/volumes block",
@@ -99,7 +99,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"fsGroupChangePolicy: OnRootMismatch",
 		"WARNING: pod-level fsGroup applies to every volume in this pod",
 		"securityContext:",
-		"name: qurl-tunnel",
+		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
@@ -149,7 +149,7 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		Environment: tunnelEnvKubernetes,
 	}, testTunnelImageRef)
 	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
-	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-tunnel-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
+	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-connector-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
 	const kubectlDryRunTimeout = 20 * time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), kubectlDryRunTimeout)
 	defer cancel()
@@ -209,7 +209,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"qurl-tunnel-" + slug,
+		"qurl-connector-" + slug,
 		"qurl-proxy-" + slug,
 		"qurl-agent-" + slug,
 	} {
@@ -242,7 +242,7 @@ func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {
 	t.Parallel()
 	// Production tunnel slugs cannot be all hyphens; this protects the helper
 	// for future callers with different validated prefixes or names.
-	got := kubernetesNameWithSlug("qurl-tunnel-", strings.Repeat("-", 80))
+	got := kubernetesNameWithSlug("qurl-connector-", strings.Repeat("-", 80))
 	if strings.Contains(got, "--") {
 		t.Fatalf("name = %q, want no doubled hyphen when trimmed base is empty", got)
 	}

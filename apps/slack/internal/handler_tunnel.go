@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	// Production deploys should set QURL_TUNNEL_IMAGE to an immutable
+	// Production deploys should set QURL_CONNECTOR_IMAGE to an immutable
 	// release tag or digest. The floating fallback is for dev/sandbox
 	// onboarding where the latest sidecar build is intentional.
-	defaultTunnelImage            = "ghcr.io/layervai/qurl-reverse-tunnel-client:latest"
+	defaultTunnelImage            = "ghcr.io/layervai/qurl-connector:latest"
 	defaultTunnelLocalPort        = 8080
 	tunnelBootstrapTTL            = "1h"
 	tunnelBootstrapSkew           = 2 * time.Minute
@@ -456,7 +456,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 
 	// The description doubles as the tunnel's user-facing Display Name
 	// (see handleSetDisplayName — there's no separate field). Install
-	// seeds it with a sensible default so every tunnel has a Display Name
+	// seeds it with a sensible default so every qURL Connector has a Display Name
 	// from the moment it exists; admins refine it with
 	// `/qurl-admin set-display-name` and revert to this default with
 	// `/qurl-admin unset-display-name`. find_or_create only applies the
@@ -716,7 +716,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 	if !usingDefaultImage {
 		return ""
 	}
-	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_TUNNEL_IMAGE` to an immutable release tag or digest before production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`."
+	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_CONNECTOR_IMAGE` to an immutable release tag or digest before production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`."
 }
 
 func tunnelInstallRateLimitMessage(err error) string {

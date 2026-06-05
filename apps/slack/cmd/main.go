@@ -131,9 +131,9 @@ func run() error {
 
 	maxConcurrentAsync := readMaxConcurrentAsync()
 	adminStore := buildAdminStore(signalCtx)
-	tunnelImage := strings.TrimSpace(os.Getenv("QURL_TUNNEL_IMAGE"))
+	tunnelImage := strings.TrimSpace(os.Getenv("QURL_CONNECTOR_IMAGE"))
 	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
-		return fmt.Errorf("QURL_TUNNEL_IMAGE: %w", err)
+		return fmt.Errorf("QURL_CONNECTOR_IMAGE: %w", err)
 	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
