@@ -1,5 +1,5 @@
 // Released versions are owned by Release Please (see release-please-config.json:
-// apps/gmail-extension), which bumps package.json and manifest.json from conventional commits
+// apps/chrome-extension), which bumps package.json and manifest.json from conventional commits
 // on main. This script is a convenience for ad-hoc LOCAL Chrome Web Store packaging
 // (e.g. `npm run publish:patch`) when cutting a one-off ZIP outside the release flow; it keeps
 // package.json, package-lock.json, and manifest.json in lockstep the same way Release Please does.

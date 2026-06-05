@@ -461,9 +461,8 @@ func TestSetAlias_HappyTunnelSlug(t *testing.T) {
 // admin-only reply BEFORE any tunnel-slug resolution, so no upstream
 // resource lookup and no alias bind happen. Before this gate, set-alias
 // relied only on the (cosmetic) Slack-manifest restriction — see
-// handleSetAlias. Mirrors TestHandleAdminRevoke_NonAdmin for the
-// membership verbs; the upstream-hit assertion pins the gate-before-resolve
-// ordering.
+// handleSetAlias. Mirrors the requireAdminSync gate the membership verbs
+// share; the upstream-hit assertion pins the gate-before-resolve ordering.
 func TestSetAlias_NonAdminDenied(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	var resolveHits atomic.Int32

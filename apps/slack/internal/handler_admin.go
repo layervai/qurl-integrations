@@ -11,69 +11,40 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-// adminUsageMessage is the arg hint shown when `/qurl-admin admin` is
-// invoked with no action (bare `admin`, which parses to
-// [ErrMissingAdminAction]). Lists the membership + revoke actions so the
-// user learns the grammar rather than seeing the terse sentinel. "qURL bot
-// admin" (not "workspace admin") is deliberate: membership is the bot's own
-// admin set, not Slack's workspace-admin role.
+// handleAdmin parses a flat bot-admin membership verb (`add`/`remove`/
+// `admins`) via the shared parser and dispatches to the action-specific
+// handler. Each is sync — one DDB GetItem/UpdateItem — so the full gate +
+// body + reply chain fits inside Slack's 3s slash-command ack window without
+// the async runAsync hop. (Resource `revoke` is multi-hop and lives in its
+// own async handleRevoke; it does not route here.)
 //
-// Keep the action SET (add/remove/list/revoke) in sync with the `/qurl-admin
-// help` listing in handler.go — only the verb roster must match, not the prose
-// (help capitalizes and appends "(admin only)"). The two are maintained
-// independently and would otherwise drift when an action is added or renamed.
-const adminUsageMessage = "Usage:\n• `/qurl-admin admin add @user` — promote a Slack user to qURL bot admin\n• `/qurl-admin admin remove @user` — demote a qURL bot admin\n• `/qurl-admin admin list` — show who connected qURL (the owner) and current bot admins\n• `/qurl-admin admin revoke <qurl_id>` — revoke a single qURL"
-
-// handleAdmin parses the `admin <verb> ...` form via the shared parser
-// and dispatches to the action-specific handler. Every recognized verb
-// is sync — one DDB GetItem/UpdateItem or one qURL API DELETE — so the
-// full gate + body + reply chain fits inside Slack's 3s slash-command
-// ack window without the async runAsync hop. Async verbs were retired
-// with the v1 admin-surface scope cut.
-//
-// Parse runs first, then requireAdminStoreSync gates the rest. So on
-// a sandbox deploy without the QURL_*_TABLE env vars:
-// malformed/unknown admin text surfaces as a parser error
-// (`:warning: unknown admin action`, `:warning: missing @user
-// mention`, etc.); parser-valid verbs reply with "Admin features are
-// not configured". The distinction is intentional — parser errors
-// are useful feedback regardless of DDB wiring, and reordering the
-// checks would mask shape errors behind the not-configured surface.
-//
-// The retired `admin claim` verb is rejected at the parser layer
-// (ErrUnknownAdminAction) since /qurl setup now seeds the workspace
-// admin in the OAuth callback. There is no in-bot path that hands a
-// bootstrap code to the user anymore.
+// Parse runs first, then requireAdminStoreSync gates the rest. So on a
+// sandbox deploy without the QURL_*_TABLE env vars: malformed verb text
+// surfaces as a parser error (`:warning: missing @user mention`, etc.);
+// parser-valid verbs reply with "Admin features are not configured". The
+// distinction is intentional — parser errors are useful feedback regardless
+// of DDB wiring, and reordering the checks would mask shape errors behind the
+// not-configured surface.
 func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
 	if err != nil {
-		// Bare `admin` (no action) parses to ErrMissingAdminAction. List the
-		// available actions instead of the terse sentinel so the user learns
-		// the grammar. This parser-level discovery hint is ungated (the admin
-		// gate is on execution, not discovery — matching set-alias /
-		// set-display-name). It stays shown even on a no-DDB deploy, where
-		// `/qurl-admin help` instead gates its admin lines behind AdminStore;
-		// the divergence is deliberate — parser feedback is useful regardless
-		// of wiring (see the handleAdmin doc comment).
-		if errors.Is(err, ErrMissingAdminAction) {
-			respondSlack(w, ":warning: "+adminUsageMessage)
-			return
-		}
+		// Surface the terse parser sentinel verbatim — bare `add`/`remove`
+		// yield "missing @user mention", a malformed mention yields the
+		// invalid-mention hint. This is ungated (discovery, not execution —
+		// the admin gate is on the verb body), matching set-alias /
+		// set-display-name.
 		respondSlack(w, ":warning: "+err.Error())
 		return
 	}
-	// No `cmd.Subcommand != SubcmdAdmin` guard: this entry point is
-	// only reached from the `text == "admin"` / `HasPrefix("admin ")`
-	// branches in handleSlashCommand, and the parser's parseAdmin
-	// dispatch produces SubcmdAdmin for that input class. If the
-	// parser ever drifts and emits a different subcommand here,
-	// cmd.AdminAction will land empty and the switch's `default:`
-	// arm renders the same "unknown" copy a guard would have.
-	// TrimSpace mirrors handleSlashCommand's other entry points — a
+	// No `cmd.Subcommand != SubcmdAdmin` guard: this entry point is only
+	// reached from the add/remove/admins dispatch arm in dispatchAdminCommand,
+	// and Parse maps those to SubcmdAdmin + an AdminAction. If the parser ever
+	// drifts and emits a different subcommand here, cmd.AdminAction lands empty
+	// and the switch's `default:` arm renders the same "unknown" copy a guard
+	// would have. TrimSpace mirrors handleSlashCommand's other entry points — a
 	// whitespace-only team_id or user_id otherwise sneaks past
 	// requireAdminSync's `== ""` check.
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -83,9 +54,7 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
 	}
-	switch cmd.AdminAction { //nolint:exhaustive // dispatch handles only parser-producible actions; gate-audit labels never reach here, default covers the rest
-	case AdminRevoke:
-		h.handleAdminRevoke(w, teamID, userID, cmd)
+	switch cmd.AdminAction { //nolint:exhaustive // dispatch handles only the membership actions Parse produces here; gate-audit labels never reach here, default covers the rest
 	case AdminAdd:
 		h.handleAdminAdd(w, teamID, userID, cmd)
 	case AdminRemove:
@@ -93,15 +62,13 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 	case AdminList:
 		h.handleAdminList(w, teamID, userID)
 	default:
-		// Unreachable in practice — the parser returns
-		// ErrUnknownAdminAction before reaching this dispatcher. Kept
-		// for refactor safety. The reply intentionally OMITS
-		// cmd.AdminAction; even though it's parser-enumerated today,
-		// a future parser drift could land an arbitrary string here,
-		// and echoing it back risks confusing copy on already-confused
-		// input. The user already knows what they typed.
+		// Unreachable in practice — Parse only produces AdminAdd/AdminRemove/
+		// AdminList on the verbs routed here. Kept for refactor safety. The
+		// reply intentionally OMITS cmd.AdminAction; a future parser drift
+		// could land an arbitrary string here, and echoing it back risks
+		// confusing copy on already-confused input.
 		slog.Warn("admin dispatcher: unknown action reached default arm — parser drift?", "team_id", teamID, "user_id", userID, "action", string(cmd.AdminAction))
-		respondSlack(w, "Unknown admin action. Try `/qurl help`.")
+		respondSlack(w, "Unknown admin command. Try `/qurl-admin help`.")
 	}
 }
 
@@ -140,19 +107,19 @@ const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup <email
 // missing the ack.
 const adminGateBudget = 800 * time.Millisecond
 
-// adminSyncVerbBudget bounds the verb-body work for sync admin
-// verbs (revoke / add / remove / list) so the full gate + body +
+// adminSyncVerbBudget bounds the verb-body work for the sync admin
+// membership verbs (add / remove / admins) so the full gate + body +
 // encode chain fits inside Slack's 3s slash-command ack window.
 // Without this, asyncWorkTimeout (25s) would silently let the verb
 // body wedge past 3s and the user would see no reply at all (Slack
-// drops slash-command responses that miss the ack).
+// drops slash-command responses that miss the ack). (Resource `revoke`
+// is multi-hop and runs async via runAsync, so it isn't bounded here.)
 //
 // 1.2s + adminGateBudget=800ms = 2s of upstream work — leaves ~1s of
 // the 3s window for response_encode + write + the Slack-side network
-// hop. Generous compared to typical timings (verb is one DDB
-// UpdateItem or one qurl-service DELETE, both well under 100ms warm)
-// but the headroom is the point: missing Slack's ack costs the user
-// any visible reply at all.
+// hop. Generous compared to typical timings (each verb is one DDB
+// UpdateItem, well under 100ms warm) but the headroom is the point:
+// missing Slack's ack costs the user any visible reply at all.
 const adminSyncVerbBudget = 1200 * time.Millisecond
 
 // requireAdminSync centralizes the admin-only gate for sync handlers.
@@ -188,54 +155,6 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 		return false
 	}
 	return true
-}
-
-// handleAdminRevoke deletes a single qURL by its `qurl_id`. Reuses the
-// customer-facing DELETE so quota/audit logs reflect the action. 404
-// surfaces as a friendly "already revoked or typo'd?" message; other
-// failures surface a generic upstream-error.
-func (h *Handler) handleAdminRevoke(w http.ResponseWriter, teamID, userID string, cmd *Command) {
-	if !h.requireAdminSync(w, teamID, userID, AdminRevoke) {
-		return
-	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
-	defer cancel()
-	c, err := h.authenticatedClient(ctx, teamID)
-	if err != nil {
-		slog.Error("failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
-		respondSlack(w, authErrorMessage(err))
-		return
-	}
-	if err := c.Delete(ctx, cmd.Target); err != nil {
-		var apiErr *client.APIError
-		if errors.As(err, &apiErr) {
-			switch apiErr.StatusCode {
-			case http.StatusNotFound:
-				// cmd.Target echoes are SAFE inside backtick code
-				// spans because qurlIDPattern (`^q_[A-Z0-9]{16,64}$`)
-				// restricts the charset to ASCII-uppercase + digits
-				// — no backtick break-out, no mrkdwn token. If
-				// TODO(upstream-rebrand) ever widens the charset,
-				// route the echo through truncateForError-equivalent
-				// neutralization before interpolating.
-				slog.Info("admin revoke: qURL not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-				respondSlack(w, fmt.Sprintf("`%s` not found — already revoked, or check the qurl_id.", cmd.Target))
-				return
-			case http.StatusUnauthorized, http.StatusForbidden:
-				// API key rotated or invalidated — generic upstream-error
-				// would leave the admin guessing. Point at /qurl setup <email> so
-				// they have a concrete next step.
-				slog.Warn("admin revoke: upstream auth rejected (API key rotated?)", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-				respondSlack(w, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to rotate.")
-				return
-			}
-		}
-		slog.Error("revoke qURL failed", "error", err, "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-		respondSlack(w, fmt.Sprintf(":warning: failed to revoke `%s` (upstream error; see logs).", cmd.Target))
-		return
-	}
-	slog.Info("admin revoke succeeded", "team_id", teamID, "user_id", userID, "qurl_id", cmd.Target)
-	respondSlack(w, fmt.Sprintf("Revoked `%s`.", cmd.Target))
 }
 
 // handleAdminAdd promotes the target Slack user to bot admin on the

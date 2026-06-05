@@ -12,7 +12,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
-- `apps/gmail-extension/` — Chrome MV3 extension (JavaScript)
+- `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
 - `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
@@ -24,7 +24,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 <type>(<scope>): <description>
 
 type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
-scope: slack | teams | discord | cli | zapier | gmail-extension | shared | ci
+scope: slack | teams | discord | cli | zapier | chrome-extension | shared | ci
 ```
 
 > Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml`. `.github/workflows/pr-title.yml`'s `scopes:` block is the CI-enforced superset:

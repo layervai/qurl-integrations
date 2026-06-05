@@ -52,7 +52,7 @@ The extension consists of four cooperating runtime pieces:
 ## File Structure
 
 ```
-qurl-gmail-chrome-extension/
+apps/chrome-extension/
 ├── manifest.json              # MV3 extension manifest
 ├── background.js              # Service worker (relay + content script bootstrap)
 ├── popup/

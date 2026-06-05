@@ -206,7 +206,7 @@ On Windows, `scripts/package-release.js` uses PowerShell's `Compress-Archive`; o
 Example output:
 
 ```text
-dist/qurl-gmail-chrome-extension-v1.0.0.zip
+dist/qurl-chrome-extension-v1.0.0.zip
 ```
 
 ### One-Command Publish Packaging
@@ -273,7 +273,7 @@ The client also accepts a flat response (no `data` wrapper).
 ## File Structure
 
 ```
-apps/gmail-extension/
+apps/chrome-extension/
 ├── manifest.json              # MV3 extension manifest
 ├── background.js             # Service worker
 ├── popup/

@@ -6,10 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,210 +20,13 @@ import (
 // literals that would otherwise repeat across cases. Slack user IDs
 // are uppercase alphanumeric (no underscore), so the fixtures here
 // use that shape — the parser's userMentionPattern rejects the
-// `U_admin`-style IDs the older test fixtures used. qurl_id fixtures
-// are ULID-style 26-char suffixes so the parser's {16,64} length
-// gate accepts them.
+// `U_admin`-style IDs the older test fixtures used.
 const (
 	testTargetUserID  = "UTARGET01"
 	testTargetMention = "<@UTARGET01>"
 	testOtherAdminID  = "UOTHER001"
-	testAdminListCmd  = "admin list"
-	testRevokeQURLID  = "q_01HXYZ8ABCDEF0123456789AB"
-	testMissingQURLID = "q_01HXYZ8MISS123456789ABCDE"
+	testAdminListCmd  = "admins"
 )
-
-// --- Revoke (single qurl_id, sync) ---
-
-// TestHandleAdminRevoke_HappyPath fences single-qURL revocation.
-func TestHandleAdminRevoke_HappyPath(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	var deleteHits atomic.Int32
-	ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
-		deleteHits.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "Revoked `"+testRevokeQURLID+"`") {
-		t.Errorf("reply missing success line: %q", reply)
-	}
-	if deleteHits.Load() != 1 {
-		t.Errorf("DELETE called %d times, want 1", deleteHits.Load())
-	}
-}
-
-// TestHandleAdminRevoke_404IsGraceful fences the 404-friendly
-// surface: an already-revoked or typo'd qurl_id renders a hint rather
-// than a stack trace.
-func TestHandleAdminRevoke_404IsGraceful(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer("DELETE", "/v1/qurls/"+testMissingQURLID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","status":404}}`))
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testMissingQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "already revoked") {
-		t.Errorf("reply missing graceful 404 surface: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_InvalidQURLID fences the format check: a
-// pasted token that doesn't match `q_<alphanum>` gets a parser-error
-// hint, not an opaque DELETE 404.
-func TestHandleAdminRevoke_InvalidQURLID(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke not-a-real-id", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "q_<id>") {
-		t.Errorf("reply missing format hint: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_AuthRejected fences the 401/403 surface: a
-// rotated workspace API key surfaces a "re-run /qurl setup <email>" hint
-// instead of the generic upstream-error copy, so the admin has a
-// concrete next step.
-//
-// addCustomer uses map-assignment for routes, so the per-iteration
-// re-register replaces the previous handler — the second iteration
-// genuinely exercises the 403 status, not a stale 401.
-func TestHandleAdminRevoke_AuthRejected(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(`{"error":{"title":"auth rejected","status":` + strconv.Itoa(status) + `}}`))
-		})
-
-		h := newAdminTestHandler(t, ts)
-		inv := newAdminSlashInvoker(t, h)
-
-		_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(reply, "re-run `/qurl setup <email>`") {
-			t.Errorf("status %d: reply missing rotate-hint: %q", status, reply)
-		}
-	}
-}
-
-// TestHandleAdminRevoke_Upstream5xx fences the generic upstream-error
-// surface: a 5xx from qurl-service surfaces the generic
-// "failed to revoke" copy + the detailed slog.Error for triage. The
-// 5xx path is distinct from the 401/403 auth-rejected path (which
-// renders the "re-run /qurl setup <email>" hint) and the 404 path (which
-// renders the "already revoked or typo'd" hint).
-func TestHandleAdminRevoke_Upstream5xx(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer("DELETE", "/v1/qurls/"+testRevokeQURLID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"title":"Internal Server Error","status":500}}`))
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "failed to revoke") {
-		t.Errorf("reply missing generic-error surface: %q", reply)
-	}
-	// Should NOT misclassify as auth-rejected or not-found.
-	if strings.Contains(reply, "re-run `/qurl setup <email>`") {
-		t.Errorf("5xx misclassified as auth-rejected: %q", reply)
-	}
-	if strings.Contains(reply, "already revoked") {
-		t.Errorf("5xx misclassified as not-found: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_CheckAdminError fences the 5xx surface on
-// the admin-gate path: a DDB transient failure during CheckAdmin
-// (the GetItem against workspace_mappings) renders the generic
-// "failed to verify admin status" reply rather than misclassifying
-// the user as non-admin. The slog.Error audit attribution is
-// implicitly fenced (test exercises the code path; CloudWatch
-// readers see the captured "error" attr).
-func TestHandleAdminRevoke_CheckAdminError(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "failed to verify admin status") {
-		t.Errorf("reply missing CheckAdmin-error surface: %q", reply)
-	}
-}
-
-// errString is a tiny test-only error type for injecting transient
-// DDB failures. Production code wraps these through ddbToError into
-// the *slackdata.Error shape, so the underlying type doesn't need to
-// be a DDB exception.
-type errString string
-
-func (e errString) Error() string { return string(e) }
-
-// TestHandleAdminRevoke_MissingTeamOrUserID fences the early-return
-// in requireAdminSync when team_id / user_id are empty. The
-// handleAdmin entry-point TrimSpaces both fields, so a whitespace-
-// only payload reaches the gate as "" and renders the explicit
-// "missing team_id or user_id" warning. No mutation is attempted.
-func TestHandleAdminRevoke_MissingTeamOrUserID(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.failOnAdminMutation(t, "missing identity should bail before CheckAdmin")
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	// Empty team_id, valid user_id.
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, "   ", testAdminUserID)
-	if !strings.Contains(reply, "missing team_id or user_id") {
-		t.Errorf("empty-team reply missing surface: %q", reply)
-	}
-	// Valid team_id, empty user_id.
-	_, reply = inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, "   ")
-	if !strings.Contains(reply, "missing team_id or user_id") {
-		t.Errorf("empty-user reply missing surface: %q", reply)
-	}
-}
-
-// TestHandleAdminRevoke_NonAdmin fences the admin-only gate on revoke.
-func TestHandleAdminRevoke_NonAdmin(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t)
-	var deleteHits atomic.Int32
-	ts.addCustomerPrefix("DELETE", "/v1/qurls/", func(w http.ResponseWriter, _ *http.Request) {
-		deleteHits.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke "+testRevokeQURLID, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "admin-only") {
-		t.Errorf("reply missing admin-only fence: %q", reply)
-	}
-	if deleteHits.Load() != 0 {
-		t.Errorf("DELETE fired despite non-admin gate (hits = %d)", deleteHits.Load())
-	}
-}
 
 // --- Add ---
 
@@ -240,7 +40,7 @@ func TestHandleAdminAdd_HappyPath(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "Added <@"+testTargetUserID+">") {
 		t.Errorf("reply missing success line: %q", reply)
 	}
@@ -266,7 +66,7 @@ func TestHandleAdminAdd_AlreadyAdmin(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "already an admin") {
 		t.Errorf("reply missing idempotent surface: %q", reply)
 	}
@@ -354,7 +154,7 @@ func TestHandleAdminAdd_Unverified(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "couldn't confirm admin add") {
 		t.Errorf("reply missing unverified-retry surface: %q", reply)
 	}
@@ -370,7 +170,7 @@ func TestHandleAdminAdd_NonAdminCaller(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Errorf("reply missing admin-only fence: %q", reply)
 	}
@@ -388,7 +188,7 @@ func TestHandleAdminAdd_SelfAdd(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin add <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("add <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "You're already an admin") {
 		t.Errorf("reply missing self-add surface: %q", reply)
 	}
@@ -405,7 +205,7 @@ func TestHandleAdminAdd_InvalidMention(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	for _, text := range []string{"admin add", "admin add someone", "admin add @someone"} {
+	for _, text := range []string{"add", "add someone", "add @someone"} {
 		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
 		if !strings.Contains(reply, ":warning:") {
 			t.Errorf("%q: reply missing parser-error surface: %q", text, reply)
@@ -432,7 +232,7 @@ func TestHandleAdminRemove_HappyPath(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove <@"+testOtherAdminID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove <@"+testOtherAdminID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "Removed <@"+testOtherAdminID+">") {
 		t.Errorf("reply missing success line: %q", reply)
 	}
@@ -452,7 +252,7 @@ func TestHandleAdminRemove_NotAdmin(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "isn't an admin") {
 		t.Errorf("reply missing idempotent surface: %q", reply)
 	}
@@ -469,7 +269,7 @@ func TestHandleAdminRemove_SelfRemoveRefused(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove <@"+testAdminUserID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "can't remove yourself") {
 		t.Errorf("reply missing self-remove guard: %q", reply)
 	}
@@ -491,7 +291,7 @@ func TestHandleAdminRemove_OwnerRemoveRefused(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove <@"+testAdminOwnerID+">", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove <@"+testAdminOwnerID+">", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "connected qURL to this workspace") {
 		t.Errorf("reply missing owner-remove guard: %q", reply)
 	}
@@ -507,7 +307,7 @@ func TestHandleAdminRemove_NonAdminCaller(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin remove "+testTargetMention, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("remove "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Errorf("reply missing admin-only fence: %q", reply)
 	}
@@ -819,68 +619,27 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 
 // --- Dispatch-shell tests ---
 
-// TestHandleAdmin_BareAdminVerb fences the bare `admin` form — a
-// parser error surfaced as the action-roster usage hint, not a panic
-// in the verb-dispatch switch or the terse "missing admin action"
-// sentinel.
-func TestHandleAdmin_BareAdminVerb(t *testing.T) {
+// TestHandleAdmin_LegacyAdminPrefixRedirects fences the deprecated `admin
+// <verb>` prefix: bare `admin` and `admin <verb> ...` both get a one-line
+// redirect pointing at the flat verbs (the `admin` word is redundant on an
+// already-admin command), not a panic in the verb-dispatch switch.
+func TestHandleAdmin_LegacyAdminPrefixRedirects(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("admin", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, ":warning:") {
-		t.Errorf("reply missing parser-error surface: %q", reply)
-	}
-	// The bare-admin hint lists the available actions rather than echoing
-	// the terse sentinel, so the user learns the grammar.
-	for _, want := range []string{"admin add", "admin remove", "admin list", "admin revoke"} {
-		if !strings.Contains(reply, want) {
-			t.Errorf("bare-admin hint missing %q: %q", want, reply)
+	for _, text := range []string{"admin", "admin add <@U12345678>"} {
+		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(reply, "isn't needed") {
+			t.Errorf("%q: reply missing the prefix-deprecation redirect: %q", text, reply)
 		}
-	}
-}
-
-// TestAdminRosters_InSync is the drift guard for the two independently
-// maintained admin-action rosters: adminUsageMessage (the bare-`admin` arg
-// hint, handler_admin.go) and the `/qurl-admin help` listing (adminHelpMessage,
-// handler.go). A cross-reference comment can't enforce parity, so this fails
-// CI if a future admin action is added to (or dropped from) one roster but not
-// the other.
-func TestAdminRosters_InSync(t *testing.T) {
-	h := newTestHandler(t, noopQURLServer(t))
-	// adminHelpMessage gates the admin add/remove/list/revoke lines on
-	// AdminStore (the same condition the verbs use at runtime), so seed it.
-	seedAliasAdminGate(t, h, testAliasTeamID)
-	help := h.adminHelpMessage(commandAdmin)
-
-	// Both rosters render each action as `<cmd> admin <verb>`, and <cmd> itself
-	// ends in `-admin`, so the verb is the token right after `admin admin`.
-	// That anchor skips the trailing `(admin only)` and the set-display-name
-	// lines, which contain a single `admin` only.
-	re := regexp.MustCompile(`admin admin (\w+)`)
-	extract := func(s string) map[string]bool {
-		set := map[string]bool{}
-		for _, m := range re.FindAllStringSubmatch(s, -1) {
-			set[m[1]] = true
-		}
-		return set
-	}
-	hint, listing := extract(adminUsageMessage), extract(help)
-
-	if len(hint) == 0 || len(listing) == 0 {
-		t.Fatalf("extracted empty action set (hint=%v listing=%v) — a roster's `<cmd> admin <verb>` shape drifted", hint, listing)
-	}
-	for v := range hint {
-		if !listing[v] {
-			t.Errorf("bare-`admin` hint lists action %q that `/qurl-admin help` omits — rosters out of sync", v)
-		}
-	}
-	for v := range listing {
-		if !hint[v] {
-			t.Errorf("`/qurl-admin help` lists action %q that the bare-`admin` hint omits — rosters out of sync", v)
+		// The redirect names the flat verbs so the user learns the new grammar.
+		for _, want := range []string{"add @user", "remove @user", "admins", "revoke $<id>"} {
+			if !strings.Contains(reply, want) {
+				t.Errorf("%q: redirect missing flat verb %q: %q", text, want, reply)
+			}
 		}
 	}
 }
@@ -901,20 +660,45 @@ func TestHandleAdmin_AdminStoreUnconfigured(t *testing.T) {
 	}
 }
 
-// TestHandleAdminRevoke_RejectsAliasShape fences the parser
-// distinction: `admin revoke $alias` is wrong-grammar and the reply
-// must surface a parser hint rather than silently trying to resolve
-// the alias.
-func TestHandleAdminRevoke_RejectsAliasShape(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
+// TestAdminHelpReflectsFlatVerbs pins the command-cleanup contract on the
+// `/qurl-admin help` text: no redundant "(admin only)" labels; the membership
+// + revoke verbs are flat (no `admin` sub-word); listing admins is `admins`;
+// revoke is resource-scoped via `$<id>`; and id references carry the `$`
+// sigil. newAliasTestHandler wires both aliasStore and AdminStore, so every
+// gated help line renders.
+func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
+	h, _ := newAliasTestHandler(t)
+	help := h.adminHelpMessage(commandAdmin)
 
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
-
-	_, reply := inv.invokeAdmin("admin revoke $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "q_<id>") && !strings.Contains(reply, "qurl_id") {
-		t.Errorf("reply must guide user toward the qurl_id form: %q", reply)
+	if strings.Contains(help, "(admin only)") {
+		t.Errorf("admin help still carries the redundant (admin only) label:\n%s", help)
+	}
+	for _, want := range []string{
+		"/qurl-admin add @user",
+		"/qurl-admin remove @user",
+		"/qurl-admin admins",
+		"/qurl-admin revoke $<id>",
+		"/qurl-admin set-display-name $<id>",
+		"/qurl-admin unset-display-name $<id>",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("admin help missing %q:\n%s", want, help)
+		}
+	}
+	// The old `<cmd> admin <verb>` membership grammar and the per-link
+	// `qurl_id` revoke must be gone. Match the precise old forms — a bare
+	// "admin add" substring would false-positive on "/qurl-admin add" (and
+	// "admin admin" on "/qurl-admin admins").
+	for _, gone := range []string{
+		"/qurl-admin admin add",
+		"/qurl-admin admin remove",
+		"/qurl-admin admin list",
+		"/qurl-admin admin revoke",
+		"qurl_id",
+	} {
+		if strings.Contains(help, gone) {
+			t.Errorf("admin help still references removed grammar %q:\n%s", gone, help)
+		}
 	}
 }
 
@@ -1209,10 +993,10 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		// Workspace is bound, but the owner-gate's CheckAdmin read
 		// fails (transient DDB). The gate is security-relevant, so it
 		// must fail CLOSED: surface the upstream-error reply and do NOT
-		// fall through to mint a setup URL. Mirrors
-		// TestHandleAdminRevoke_CheckAdminError for the admin verbs.
+		// fall through to mint a setup URL. Mirrors the requireAdminSync
+		// fail-closed posture the membership verbs share.
 		ts.seedAdmin(t)
-		ts.ddb.SetGetItemErr(ts.tableNames.workspace, errString("injected DDB transient"))
+		ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected DDB transient"))
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)
 
