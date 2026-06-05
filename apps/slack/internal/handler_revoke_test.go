@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,29 +32,38 @@ func seedRevokeFixture(t *testing.T, ts *adminTestServers) *adminSlashInvoker {
 	return newAdminSlashInvoker(t, newAdminTestHandler(t, ts))
 }
 
-// TestHandleRevoke_HappyPath fences the resource-revoke flow: an admin
-// revokes `$<alias>`, which resolves to its resource_id and issues
-// DELETE /v1/resources/{id}; the async reply confirms the revoke.
-func TestHandleRevoke_HappyPath(t *testing.T) {
+// TestHandleRevoke_PostsConfirmButton fences the slash flow: `/qurl-admin
+// revoke $<id>` resolves + authorizes the token and posts the SAME red Revoke
+// button (danger + confirm dialog) the /qurl list row carries — it does NOT
+// delete. The delete happens only on click (handleListRevokeClick), so both
+// surfaces share one confirmation. The posted button must carry the resolved
+// resource_id so the click needs no re-resolve.
+func TestHandleRevoke_PostsConfirmButton(t *testing.T) {
 	ts := newAdminTestServers(t)
-	var gotPath string
 	var hits atomic.Int32
-	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, r *http.Request) {
+	ts.addCustomerPrefix(http.MethodDelete, "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	})
 	inv := seedRevokeFixture(t, ts)
 
-	_, _, asyncReply := inv.invokeAdminAsync("revoke $"+testRevokeAlias, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(asyncReply, "Revoked") || !strings.Contains(asyncReply, testRevokeAlias) {
-		t.Errorf("reply missing revoke confirmation: %q", asyncReply)
+	inv.invokeAdmin("revoke $"+testRevokeAlias, testAdminTeamID, testAdminUserID)
+	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+	btn := findActionButton(blocks, listRevokeTunnelActionID)
+	if btn == nil {
+		t.Fatalf("slash revoke didn't post a Revoke button: %v", blocks)
 	}
-	if hits.Load() != 1 {
-		t.Errorf("DELETE fired %d times, want exactly 1", hits.Load())
+	if btn["style"] != "danger" {
+		t.Errorf("Revoke button style = %v, want danger", btn["style"])
 	}
-	if gotPath != "/v1/resources/"+testRevokeResourceID {
-		t.Errorf("DELETE path = %q, want /v1/resources/%s (slug must resolve to resource_id)", gotPath, testRevokeResourceID)
+	if _, ok := btn["confirm"].(map[string]any); !ok {
+		t.Errorf("Revoke button missing confirm dialog: %v", btn)
+	}
+	if v, _ := btn["value"].(string); !strings.Contains(v, testRevokeResourceID) {
+		t.Errorf("Revoke button value missing resolved resource_id: %q", v)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("slash revoke must NOT delete (delete is on click); DELETE hit %d times", hits.Load())
 	}
 }
 
@@ -81,59 +91,64 @@ func TestHandleRevoke_NonAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleRevoke_NotFoundIsGraceful fences the 404/410 surface: revoking an
-// already-revoked or stale id reads as a friendly "already revoked" hint, not
-// a raw upstream error.
-func TestHandleRevoke_NotFoundIsGraceful(t *testing.T) {
+// revokeResource is the shared delete+map helper behind BOTH the /qurl list
+// Revoke click and the slash confirm button — both route a confirmed click
+// into it. These exercise its error mapping directly.
+
+// newRevokeHandlerWithDeleteStatus wires a handler whose DELETE
+// /v1/resources/{id} replies with the given status + body.
+func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Handler {
+	t.Helper()
 	ts := newAdminTestServers(t)
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
+		w.WriteHeader(status)
+		if body != "" {
+			_, _ = w.Write([]byte(body))
+		}
 	})
-	inv := seedRevokeFixture(t, ts)
+	return newAdminTestHandler(t, ts)
+}
 
-	_, _, asyncReply := inv.invokeAdminAsync("revoke $"+testRevokeAlias, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(asyncReply, "not found") || !strings.Contains(asyncReply, "already revoked") {
-		t.Errorf("reply missing graceful not-found surface: %q", asyncReply)
+func TestRevokeResource_Success(t *testing.T) {
+	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNoContent, "")
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Revoked") || !strings.Contains(msg, testRevokeAlias) {
+		t.Errorf("success message = %q, want revoke confirmation", msg)
 	}
 }
 
-// TestHandleRevoke_AuthRejected fences the 401/403 surface: a rotated API key
-// points the admin at /qurl setup rather than a generic error.
-func TestHandleRevoke_AuthRejected(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		ts := newAdminTestServers(t)
-		ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(`{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`))
-		})
-		inv := seedRevokeFixture(t, ts)
+// TestRevokeResource_NotFound fences the 404/410 surface: an already-revoked or
+// stale id reads as a friendly "already revoked" hint, not a raw upstream error.
+func TestRevokeResource_NotFound(t *testing.T) {
+	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNotFound, `{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`)
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "not found") || !strings.Contains(msg, "already revoked") {
+		t.Errorf("404 message = %q, want graceful already-revoked surface", msg)
+	}
+}
 
-		_, _, asyncReply := inv.invokeAdminAsync("revoke $"+testRevokeAlias, testAdminTeamID, testAdminUserID)
-		if !strings.Contains(asyncReply, "API key was rejected") || !strings.Contains(asyncReply, "setup") {
-			t.Errorf("status %d: reply missing key-rotation guidance: %q", status, asyncReply)
+// TestRevokeResource_AuthRejected fences the 401/403 surface: a rotated API key
+// points the admin at /qurl setup rather than a generic error.
+func TestRevokeResource_AuthRejected(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		h := newRevokeHandlerWithDeleteStatus(t, status, `{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`)
+		msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+		if !strings.Contains(msg, "API key was rejected") || !strings.Contains(msg, "setup") {
+			t.Errorf("status %d message = %q, want key-rotation guidance", status, msg)
 		}
 	}
 }
 
-// TestHandleRevoke_Upstream5xx fences the generic upstream-error surface: a
-// 5xx maps to a sanitized failure (with the support Reference handle), not a
-// leaked upstream body.
-func TestHandleRevoke_Upstream5xx(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"title":"Internal","detail":"boom","code":"internal","status":500}}`))
-	})
-	inv := seedRevokeFixture(t, ts)
-
-	_, _, asyncReply := inv.invokeAdminAsync("revoke $"+testRevokeAlias, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(asyncReply, "Failed to revoke") {
-		t.Errorf("reply missing generic upstream-error surface: %q", asyncReply)
+// TestRevokeResource_Upstream5xx fences the generic upstream-error surface: a
+// 5xx maps to a sanitized failure, not a leaked upstream body.
+func TestRevokeResource_Upstream5xx(t *testing.T) {
+	h := newRevokeHandlerWithDeleteStatus(t, http.StatusInternalServerError, `{"error":{"title":"Internal","detail":"boom","code":"internal","status":500}}`)
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Failed to revoke") {
+		t.Errorf("5xx message = %q, want generic failure", msg)
 	}
-	// The upstream detail ("boom") must NOT leak to the wire.
-	if strings.Contains(asyncReply, "boom") {
-		t.Errorf("reply leaked upstream detail: %q", asyncReply)
+	if strings.Contains(msg, "boom") {
+		t.Errorf("5xx message leaked upstream detail: %q", msg)
 	}
 }
 
@@ -266,6 +281,39 @@ func TestHandleList_RendersRevokeButton(t *testing.T) {
 	// handler revokes without a slug re-resolve.
 	if v, _ := btn["value"].(string); !strings.Contains(v, testRevokeResourceID) {
 		t.Errorf("Revoke button value missing resource_id: %q", v)
+	}
+}
+
+// TestHandleList_NoRevokeButtonForNonAdmin fences the render gate: even with
+// the full edit/revoke wiring present, a NON-admin's /qurl list shows neither
+// the Revoke nor the Edit button — both gate on listCallerCanEdit → the bot's
+// CheckAdmin (owner or admin_slack_user_ids), not the Slack workspace-admin
+// role. The Create qURL button still renders; the list itself works for all.
+func TestHandleList_NoRevokeButtonForNonAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t) // workspace bound, but testAdminUserID is NOT on the bot admin set
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testRevokeResourceID, testKeyType: client.ResourceTypeTunnel, testKeySlug: testRevokeAlias},
+		}, "", false)
+	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testRevokeResourceID)
+	h := newAdminTestHandler(t, ts)
+	withListEditWiring(h) // wiring is present — the gate is the caller's bot-admin status, not the wiring
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+	if btn := findActionButton(blocks, listRevokeTunnelActionID); btn != nil {
+		t.Errorf("non-admin /qurl list rendered a Revoke button: %v", btn)
+	}
+	if btn := findActionButton(blocks, listEditTunnelActionID); btn != nil {
+		t.Errorf("non-admin /qurl list rendered an Edit button: %v", btn)
+	}
+	if len(createQurlButtonValues(t, blocks)) == 0 {
+		t.Errorf("non-admin /qurl list rendered no Create qURL button (list should still work): %v", blocks)
 	}
 }
 

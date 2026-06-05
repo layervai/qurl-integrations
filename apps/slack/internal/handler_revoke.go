@@ -22,17 +22,21 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
-// handleRevoke implements `/qurl-admin revoke $<id|alias>`: revoke a protected
-// resource AND all its qURLs (DELETE /v1/resources/{id}). Unlike the sync
-// membership verbs, revoke is multi-hop — resolve the `$token` to a
-// resource_id, then delete — so it acks via [Handler.runAsync] and posts the
-// outcome to response_url, the same shape as `/qurl get`.
+// handleRevoke implements `/qurl-admin revoke $<id|alias>`. Rather than
+// revoking immediately, it resolves + channel-authorizes the token and posts
+// the SAME red Revoke button the `/qurl list` row carries (with its native
+// confirm dialog); the delete happens only when the admin clicks + confirms
+// (handleListRevokeClick). So the typed and button surfaces share one
+// confirmation and one delete path — a destructive verb shouldn't fire on a
+// bare keystroke. Resolving is multi-hop (channel alias → slug fallback), so it
+// acks via [Handler.runAsync] and posts the prompt to response_url, like
+// `/qurl get`.
 //
 // The admin gate runs SYNC before the ack so a non-admin gets an immediate
-// "admin-only" reply rather than "Working on it…" followed by a denial.
-// requireAdminSync writes the denial and returns false; on success it writes
-// nothing, leaving runAsync to own the ack — so `w` is written exactly once on
-// either path.
+// "admin-only" reply (and never sees a Revoke button) rather than "Working on
+// it…" followed by a denial. requireAdminSync writes the denial and returns
+// false; on success it writes nothing, leaving runAsync to own the ack — so
+// `w` is written exactly once on either path.
 func (h *Handler) handleRevoke(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	cmd, err := Parse(text)
@@ -77,10 +81,13 @@ func (h *Handler) handleRevoke(w http.ResponseWriter, values url.Values) {
 	})
 }
 
-// processRevoke is the async-worker body for `/qurl-admin revoke`: resolve the
-// `$<id|alias>` to a resource_id (channel-scoped authorization, the same
-// resolver `/qurl get` uses) then revoke it, POSTing the outcome to
-// response_url.
+// processRevoke is the async-worker body for `/qurl-admin revoke`: it resolves
+// the `$<id|alias>` to a resource_id (channel-scoped authorization, the same
+// resolver `/qurl get` uses) and then — instead of deleting — posts the SAME
+// red Revoke button + confirm dialog the `/qurl list` row carries. The delete
+// runs only on click + confirm (handleListRevokeClick), so both surfaces share
+// one confirmation and one delete path. Resolving up front means a typo'd or
+// unauthorized `$<id>` fails fast here, before any confirm prompt is shown.
 func (h *Handler) processRevoke(ctx context.Context, log *slog.Logger, values url.Values, cmd *Command) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
@@ -107,7 +114,28 @@ func (h *Handler) processRevoke(ctx context.Context, log *slog.Logger, values ur
 		return
 	}
 
-	_ = h.postResponse(log, responseURL, h.revokeResource(ctx, log, teamID, userID, resourceID, cmd.Alias))
+	// Post the confirm button (the same danger button + native confirm dialog
+	// the /qurl list row renders) rather than deleting now. The click →
+	// handleListRevokeClick re-gates admin and performs the delete, so the
+	// typed and button surfaces converge on one confirmation + one delete path.
+	revokeVal, ok := buildTunnelRevokeButtonValue(resourceID, cmd.Alias)
+	if !ok {
+		// Unreachable: the value is two short fields, well under the cap. Bail
+		// loudly rather than posting a button that can't carry the resource_id.
+		log.Error("revoke: revoke-button value exceeded Slack's cap", "team_id", teamID, "resource_id", resourceID)
+		_ = h.postResponse(log, responseURL, ":warning: "+commonRevokeFailedMessage)
+		return
+	}
+	blocks := []any{
+		sectionBlock(fmt.Sprintf("Revoke `$%s`? This revokes the resource *and every qURL on it* — click *Revoke* to confirm.", escapeMrkdwnCode(cmd.Alias))),
+		actionsBlock(withConfirmDialog(
+			dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
+			"Revoke $"+cmd.Alias+"?",
+			"This revokes the resource *and every qURL on it*. It can't be undone.",
+			"Revoke",
+		)),
+	}
+	_ = h.postResponseBlocks(log, responseURL, fmt.Sprintf("Confirm revoke of `$%s`", escapeMrkdwnCode(cmd.Alias)), blocks)
 }
 
 // revokeResource calls DELETE /v1/resources/{resourceID} and returns the
