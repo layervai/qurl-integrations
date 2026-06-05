@@ -680,6 +680,7 @@ func slashSubcommand(text, command string) bool {
 const (
 	adminVerbTunnel   = "tunnel"
 	adminVerbResource = "resource"
+	adminVerbExpose   = "expose"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
@@ -694,7 +695,7 @@ const (
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbTunnel, adminVerbResource, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbTunnel, adminVerbResource, adminVerbExpose, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -965,6 +966,8 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleTunnel(w, values)
 	case slashSubcommand(text, adminVerbResource):
 		h.handleResource(w, values)
+	case slashSubcommand(text, adminVerbExpose):
+		h.handleExpose(w, values)
 	case setAliasSubcommand(text):
 		// Bare `set-alias` falls through too — parseAliasArgs renders
 		// the usage hint, so the user gets the right grammar without
@@ -1294,6 +1297,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
+				"• `/qurl-admin expose` — Guided picker: choose *qURL Connector* or *URL*, then fill in a short form (recommended)",
 				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes (admin only)",
 				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
 				"• `/qurl-admin tunnel install <id> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<id>` in this channel",

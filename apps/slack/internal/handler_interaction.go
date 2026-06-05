@@ -50,6 +50,8 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 			h.handleTunnelInstallSubmission(w, payload)
 		case callbackIDTunnelEdit:
 			h.handleTunnelEditSubmission(w, payload)
+		case callbackIDExposeURL:
+			h.handleExposeURLSubmission(w, payload)
 		default:
 			// Unknown callback_id — ack 200 (Slack hangs the modal
 			// otherwise) and log so a future view drift is visible.
@@ -75,6 +77,16 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
+	// `/qurl-admin expose` chooser buttons open a guided modal; checked first
+	// (distinct action_ids) so a click routes to the opener, not a list mint.
+	if _, ok := findActionByID(payload.Actions, exposeConnectorActionID); ok {
+		h.handleExposeConnectorClick(w, payload)
+		return
+	}
+	if _, ok := findActionByID(payload.Actions, exposeURLActionID); ok {
+		h.handleExposeURLClick(w, payload)
+		return
+	}
 	// Edit is checked first so a row carrying both buttons routes to the modal
 	// opener rather than the mint when Edit is the clicked element.
 	if editAction, ok := findActionByID(payload.Actions, listEditTunnelActionID); ok {

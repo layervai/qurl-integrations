@@ -17,6 +17,10 @@ const (
 	resourceExposeUsage       = "Usage:\n• `/qurl-admin resource expose $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin resource expose url:<target-url> as:$channel-alias`"
 	resourceExposeSchemeHTTP  = "http"
 	resourceExposeSchemeHTTPS = "https"
+	// exposeURLResourceFailedMsg is the generic failure reply shared by the
+	// typed `resource expose` path and the expose-URL modal, kept as one const
+	// so the copy stays in lockstep across both surfaces.
+	exposeURLResourceFailedMsg = "Failed to expose URL resource. Please try again."
 )
 
 type resourceExposeArgs struct {
@@ -115,7 +119,7 @@ func (h *Handler) exposeURLResourceInChannel(ctx context.Context, log *slog.Logg
 			return userErr.msg
 		}
 		log.Error("resource expose: unexpected resource lookup error", "error", err, "team_id", teamID)
-		return "Failed to expose URL resource. Please try again."
+		return exposeURLResourceFailedMsg
 	}
 
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.ChannelAlias, resource.ResourceID)
@@ -124,7 +128,7 @@ func (h *Handler) exposeURLResourceInChannel(ctx context.Context, log *slog.Logg
 	}
 	if err != nil {
 		log.Error("resource expose: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.ChannelAlias, "resource_id", resource.ResourceID)
-		return "Failed to expose URL resource. Please try again."
+		return exposeURLResourceFailedMsg
 	}
 
 	log.Info("URL resource exposed to Slack channel", "team_id", teamID, "channel_id", channelID, "channel_alias", args.ChannelAlias, "resource_alias", resource.Alias, "resource_id", resource.ResourceID)

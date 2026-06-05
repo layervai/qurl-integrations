@@ -608,12 +608,19 @@ func multilinePlainTextInput(actionID, placeholder, initialValue string) map[str
 }
 
 func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
-	return map[string]any{
+	element := map[string]any{
 		"type":                "static_select",
 		blockKitFieldActionID: actionID,
 		"options":             options,
-		"initial_option":      initial,
 	}
+	// Omit initial_option when nil — Slack rejects `"initial_option": null`. A
+	// nil initial means "no pre-selection" (the URL-expose picker forces a
+	// deliberate choice); a non-nil one pre-selects (e.g. the connector
+	// installer's environment default). Mirrors multiConversationsSelect's guard.
+	if initial != nil {
+		element["initial_option"] = initial
+	}
+	return element
 }
 
 // multiConversationsSelect returns a multi_conversations_select element — used

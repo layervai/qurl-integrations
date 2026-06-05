@@ -70,10 +70,15 @@ const (
 // lines; naming them keeps a typo from becoming a silent mislabel in the
 // audit trail.
 const (
-	AdminActionSetAlias         AdminAction = "set_alias"
-	AdminActionUnsetAlias       AdminAction = "unset_alias"
-	AdminActionTunnelInstall    AdminAction = "tunnel_install"
-	AdminActionResourceExpose   AdminAction = "resource_expose"
+	AdminActionSetAlias       AdminAction = "set_alias"
+	AdminActionUnsetAlias     AdminAction = "unset_alias"
+	AdminActionTunnelInstall  AdminAction = "tunnel_install"
+	AdminActionResourceExpose AdminAction = "resource_expose"
+	// AdminActionExpose is the gate-audit label for the `/qurl-admin expose`
+	// chooser (the two-button connector/URL picker). Distinct from
+	// AdminActionResourceExpose (the typed URL-expose path) so the audit trail
+	// tells the guided entry apart from the typed one.
+	AdminActionExpose           AdminAction = "expose"
 	AdminActionSetDisplayName   AdminAction = "set_display_name"
 	AdminActionUnsetDisplayName AdminAction = "unset_display_name"
 )
