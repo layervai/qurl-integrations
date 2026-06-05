@@ -81,7 +81,7 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
-	// `/qurl-admin expose` chooser buttons open a guided modal; checked first
+	// `/qurl-admin protect` chooser buttons open a guided modal; checked first
 	// (distinct action_ids) so a click routes to the opener, not a list mint.
 	if _, ok := findActionByID(payload.Actions, exposeConnectorActionID); ok {
 		h.handleExposeConnectorClick(w, payload)
@@ -215,12 +215,12 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
 		slog.Warn("tunnel install modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin expose-connector again.")
+		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
 		slog.Warn("tunnel install modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin expose-connector again.")
+		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
 	// The Slack request signature covers the full form body, including the
@@ -234,7 +234,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
-		respondTunnelInstallModalError(w, "This modal expired. Run /qurl-admin expose-connector again.")
+		respondTunnelInstallModalError(w, "This modal expired. Run /qurl-admin protect-connector again.")
 		return
 	}
 	// Slack signs the request envelope, not our private_metadata value by
@@ -242,12 +242,12 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// across workspaces or users.
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
 		slog.Warn("tunnel install modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin expose-connector again.")
+		respondTunnelInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect-connector again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin expose-connector again to start a new setup.")
+		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
 		return
 	}
 	if h.cfg.AdminStore == nil {

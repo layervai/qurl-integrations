@@ -247,7 +247,7 @@ func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
 
 // TestTunnelEditModal_RendersChannelsSelect fences the new "expose to channels"
 // field: a multi_conversations_select pre-filled (initial_conversations) with
-// the tunnel's currently-exposed channels, filtered to public+private, and the
+// the tunnel's currently-protected channels, filtered to public+private, and the
 // same channel set carried in private_metadata as the reconcile baseline.
 func TestTunnelEditModal_RendersChannelsSelect(t *testing.T) {
 	t.Parallel()
@@ -278,7 +278,7 @@ func TestTunnelEditModal_RendersChannelsSelect(t *testing.T) {
 			t.Errorf("edit modal missing %q: %s", want, body)
 		}
 	}
-	// private_metadata carries the exposed-channels baseline for the submit
+	// private_metadata carries the protected-channels baseline for the submit
 	// reconcile.
 	var got map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil {

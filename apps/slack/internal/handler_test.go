@@ -192,9 +192,9 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	}
 	// User help must NOT advertise admin verbs as runnable commands —
 	// they live on /qurl-admin. Check for the command-line forms (the
-	// `/qurl-admin expose-connector` advert and the `/qurl set-alias`
+	// `/qurl-admin protect-connector` advert and the `/qurl set-alias`
 	// bullet), not bare words.
-	for _, leaked := range []string{"/qurl-admin expose-connector", "/qurl set-alias", "/qurl-admin admin", "/qurl-admin set-alias"} {
+	for _, leaked := range []string{"/qurl-admin protect-connector", "/qurl set-alias", "/qurl-admin admin", "/qurl-admin set-alias"} {
 		if strings.Contains(userHelp, leaked) {
 			t.Errorf("/qurl help leaked admin command %q: %q", leaked, userHelp)
 		}
@@ -234,7 +234,7 @@ func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 
 	// Admin verbs on /qurl → redirect to /qurl-admin. (setup is NOT here:
 	// it's a user verb now, so `/qurl setup` is handled, not redirected.)
-	for _, text := range []string{"expose-connector foo", "set-alias $a $b", "unset-alias $a", "admin list"} {
+	for _, text := range []string{"protect", "protect-connector foo", "set-alias $a $b", "unset-alias $a", "admin list"} {
 		reply := slashReply(t, h, commandUser, text)
 		if !strings.Contains(reply, "admin command") || !strings.Contains(reply, "/qurl-admin") {
 			t.Errorf("/qurl %q: want admin-command redirect, got %q", text, reply)
@@ -371,8 +371,8 @@ func TestDispatchSplit_NonProdCommandNamesRouteBySuffix(t *testing.T) {
 
 	// Admin verb on the sandbox user command → redirect names the sandbox
 	// admin command.
-	reply = slashReply(t, h, "/qurl-sandbox", "expose-connector foo")
-	if !strings.Contains(reply, "/qurl-sandbox-admin expose-connector") {
+	reply = slashReply(t, h, "/qurl-sandbox", "protect-connector foo")
+	if !strings.Contains(reply, "/qurl-sandbox-admin protect-connector") {
 		t.Errorf("admin-verb redirect should name /qurl-sandbox-admin, got %q", reply)
 	}
 

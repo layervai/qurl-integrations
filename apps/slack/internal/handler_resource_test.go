@@ -111,7 +111,7 @@ func TestHandleResourceExpose_BindsURLResourceAlias(t *testing.T) {
 		}}, "", false)
 	})
 
-	status, ack, async := inv.invokeAdminAsync("expose-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
+	status, ack, async := inv.invokeAdminAsync("protect-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
 	if status != http.StatusOK || !strings.Contains(ack, "Working on it") {
 		t.Fatalf("sync = (%d, %q), want async ack", status, ack)
 	}
@@ -144,7 +144,7 @@ func TestHandleResourceExpose_BindsNoAliasURLResourceByTargetURL(t *testing.T) {
 		}}, "", false)
 	})
 
-	_, _, async := inv.invokeAdminAsync("expose-url url:"+testResourceExposeURL+" as:$"+testResourceExposeChannelAlias, testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("protect-url url:"+testResourceExposeURL+" as:$"+testResourceExposeChannelAlias, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "URL resource is now available as `$handbook`") {
 		t.Fatalf("async reply = %q", async)
 	}
@@ -163,14 +163,14 @@ func TestHandleResourceExpose_NonAdminDoesNotLookupOrBind(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
-	ts.failOnAdminMutation(t, "non-admin expose-url should not bind")
+	ts.failOnAdminMutation(t, "non-admin protect-url should not bind")
 	var resourceLookups atomic.Int32
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		resourceLookups.Add(1)
 		writeResourceListFixture(t, w, nil, "", false)
 	})
 
-	_, reply := inv.invokeAdmin("expose-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("protect-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Fatalf("reply = %q, want admin denial", reply)
 	}
@@ -197,7 +197,7 @@ func TestHandleResourceExpose_DuplicateChannelAliasRefusesOverwrite(t *testing.T
 		}}, "", false)
 	})
 
-	_, _, async := inv.invokeAdminAsync("expose-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("protect-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "Alias `$docs` is already bound in this channel") {
 		t.Fatalf("async reply = %q", async)
 	}
@@ -227,7 +227,7 @@ func TestHandleResourceExpose_IgnoresTunnelAlias(t *testing.T) {
 		}}, "", false)
 	})
 
-	_, _, async := inv.invokeAdminAsync("expose-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("protect-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "No active URL resource `$docs` was found") {
 		t.Fatalf("async reply = %q", async)
 	}
@@ -254,7 +254,7 @@ func TestHandleResourceExpose_TargetURLNotFoundMentionsExactMatch(t *testing.T) 
 		}}, "", false)
 	})
 
-	_, _, async := inv.invokeAdminAsync("expose-url url:"+testResourceExposeURL+" as:$"+testResourceExposeChannelAlias, testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("protect-url url:"+testResourceExposeURL+" as:$"+testResourceExposeChannelAlias, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "exact target URL") || !strings.Contains(async, "match the dashboard URL exactly") {
 		t.Fatalf("async reply = %q", async)
 	}

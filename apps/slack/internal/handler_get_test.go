@@ -491,7 +491,7 @@ func TestHandleGet_ResourceAliasDuplicateAllowedRefusesAmbiguousMint(t *testing.
 
 // TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured fences the
 // non-enumerating failure shape for resource-alias fallback: finding a listed
-// alias that is not exposed to this channel collapses to the same user copy as
+// alias that is not protected in this channel collapses to the same user copy as
 // a missing token and never attempts a mint.
 func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -1124,13 +1124,13 @@ func TestHandleGet_DollarTokenBindingWinsOverSlug(t *testing.T) {
 
 // TestHandleGet_DollarSlugAdminAlsoChannelScoped is the security regression
 // fence for "even an admin can't /qurl get a tunnel from a channel it isn't
-// exposed to". The former admin bypass (admins could mint any slug from any
+// protected in". The former admin bypass (admins could mint any slug from any
 // channel, because /qurl list was workspace-wide) is gone: list, alias, and
 // mint now share one channel-scoped definition. An admin minting `$<slug>` in a
 // channel where the resource has no alias binding and no allow-set entry is
 // refused with the same anti-enumeration "not configured for this channel" copy
 // a non-admin gets, and the mint never runs — but the admin DOES mint once the
-// tunnel is exposed to the channel.
+// tunnel is protected in the channel.
 func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 	t.Run("blocked when not exposed in this channel", func(t *testing.T) {
 		ts := newAdminTestServers(t)
