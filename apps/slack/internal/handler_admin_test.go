@@ -619,11 +619,12 @@ func TestRemoveAdmin_Concurrent(t *testing.T) {
 
 // --- Dispatch-shell tests ---
 
-// TestHandleAdmin_LegacyAdminPrefixRedirects fences the deprecated `admin
+// TestDispatchAdmin_LegacyAdminPrefixRedirects fences the deprecated `admin
 // <verb>` prefix: bare `admin` and `admin <verb> ...` both get a one-line
 // redirect pointing at the flat verbs (the `admin` word is redundant on an
-// already-admin command), not a panic in the verb-dispatch switch.
-func TestHandleAdmin_LegacyAdminPrefixRedirects(t *testing.T) {
+// already-admin command), not a panic. The redirect lives in
+// dispatchAdminCommand's `admin` case, which matches before handleAdmin runs.
+func TestDispatchAdmin_LegacyAdminPrefixRedirects(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 

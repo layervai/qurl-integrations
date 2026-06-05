@@ -22,6 +22,12 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
+// staleRevokeButtonMessage is shown when a `/qurl list` Revoke button carries
+// an unparseable value (a corrupt/stale snapshot). "Try again" would just
+// re-send the same bad value on the next click, so point the admin at a fresh
+// list instead — something they can actually act on.
+const staleRevokeButtonMessage = "This Revoke button is out of date — run `/qurl list` again and use the fresh button."
+
 // revokeConfirmText is the confirm-dialog body shared by the `/qurl list`
 // Revoke button and the `/qurl-admin revoke` prompt. It spells out the blast
 // radius: revoke destroys the resource (and every qURL on it) in EVERY channel
@@ -212,7 +218,7 @@ func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interact
 		// defense-in-depth. h.Go (not the async pool) keeps the ack prompt and
 		// can't deepen pool saturation.
 		log.Warn("list revoke: unparseable button value", "error", err)
-		h.Go(func() { _ = h.postResponse(log, responseURL, ":warning: "+commonRevokeFailedMessage) })
+		h.Go(func() { _ = h.postResponse(log, responseURL, ":warning: "+staleRevokeButtonMessage) })
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}

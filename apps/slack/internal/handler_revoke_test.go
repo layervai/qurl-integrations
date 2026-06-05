@@ -403,8 +403,8 @@ func TestHandleListRevokeClick_UnparseableValue(t *testing.T) {
 	}
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, commonRevokeFailedMessage) {
-		t.Errorf("unparseable revoke value should post the failure notice: %q", async)
+	if !strings.Contains(async, staleRevokeButtonMessage) {
+		t.Errorf("unparseable revoke value should post the stale-button notice: %q", async)
 	}
 	if hits.Load() != 0 {
 		t.Errorf("DELETE fired for an unparseable value (hits = %d)", hits.Load())
