@@ -1336,12 +1336,25 @@ func (h *Handler) userHelpMessage(command string) string {
 func (h *Handler) adminHelpMessage(command string) string {
 	// command is non-empty here (normalized in handleSlashCommand); see
 	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
+	// The verbs are grouped under bold section headers (Expose resources,
+	// Aliases, Manage resources, Bot admins) rather than one flat bullet list —
+	// the admin surface grew long enough that a flat list was hard to scan. Each
+	// section is gated on the same wiring its verbs need at runtime, so an
+	// unwired deploy never renders an empty header; in practice aliasStore and
+	// AdminStore are wired in lockstep (both from the QURL_*_TABLE env vars; see
+	// cmd/main.go), so the sections appear and disappear together.
 	lines := []string{
 		"*/qurl-admin* — Admin commands for qURL in Slack",
-		"",
-		"*Admin commands:*",
 	}
+	appendSectionHeader := func(title string) {
+		lines = append(lines, "", title)
+	}
+	// Expose resources: stand up new access in this channel (a connector tunnel
+	// or an existing URL resource). Gates on aliasStore + AdminStore, the same
+	// pair the install/expose verbs need; the guided-vs-typed split nests under
+	// OpenView, the condition the guided modals themselves require.
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
+		appendSectionHeader("*Expose resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
 				"• `/qurl-admin expose` — Guided picker: choose *qURL Connector* or *URL*, then fill in a short form (recommended)",
@@ -1362,22 +1375,21 @@ func (h *Handler) adminHelpMessage(command string) string {
 		}
 	}
 	if h.aliasStore != nil {
-		// set-alias/unset-alias reply ":warning: not configured" on a
-		// sandbox deploy without an aliasStore; mirror the PostDM gate
-		// above so help doesn't advertise verbs whose reply tells the
-		// user they can't be used. User-facing copy calls these
-		// "aliases" (not "shortcuts") even though the admin verbs retain
-		// their historical set-alias/unset-alias names.
+		// Aliases: alternate names that resolve to a tunnel within a channel.
+		// set-alias/unset-alias reply ":warning: not configured" on a sandbox
+		// deploy without an aliasStore, so gate on it — help shouldn't advertise
+		// verbs whose only reply tells the user they can't be used. User-facing
+		// copy calls these "aliases" (not "shortcuts") even though the admin
+		// verbs retain their historical set-alias/unset-alias names.
 		//
-		// Gates on aliasStore (the store set-alias/unset-alias WRITE
-		// through). At runtime these verbs ALSO need AdminStore for the
-		// in-code requireAdminSync gate (see handleSetAlias), so aliasStore
-		// isn't the verb's only dependency — but aliasStore and AdminStore
-		// are wired in lockstep (both come from the same QURL_*_TABLE env
-		// vars; see cmd/main.go), so an aliasStore-wired-but-AdminStore-nil
-		// deploy doesn't arise and gating here on aliasStore is equivalent
-		// to gating on both. `/qurl aliases` above gates on AdminStore
-		// because it READS channel_policies through it.
+		// Gates on aliasStore (the store set-alias/unset-alias WRITE through).
+		// At runtime these verbs ALSO need AdminStore for the in-code
+		// requireAdminSync gate (see handleSetAlias), but aliasStore and
+		// AdminStore are wired in lockstep (both from the same QURL_*_TABLE env
+		// vars; see cmd/main.go), so gating here on aliasStore is equivalent to
+		// gating on both. `/qurl aliases` gates on AdminStore because it READS
+		// channel_policies through it.
+		appendSectionHeader("*Aliases*")
 		lines = append(lines,
 			"• `/qurl-admin set-alias $<alias> $<id>` — Point an alias at a qURL Connector ID in this channel",
 			"• `/qurl-admin unset-alias $<alias>` — Remove an alias from this channel",
@@ -1385,32 +1397,37 @@ func (h *Handler) adminHelpMessage(command string) string {
 	}
 	if h.cfg.AdminStore != nil {
 		// Every verb below gates on the in-code requireAdminSync (CheckAdmin
-		// against AdminStore), so they're listed only when AdminStore is
-		// wired — the same condition the verbs use at runtime. On sandbox
-		// deploys without the three QURL_*_TABLE env vars (see cmd/main.go),
-		// AdminStore is nil and these verbs render "Admin features are not
-		// configured", so gating the help lines on the same condition keeps
-		// the listing consistent with what the verbs actually do.
+		// against AdminStore), so they're listed only when AdminStore is wired —
+		// the same condition the verbs use at runtime. On sandbox deploys without
+		// the three QURL_*_TABLE env vars (see cmd/main.go), AdminStore is nil and
+		// these verbs render "Admin features are not configured", so gating the
+		// help lines on the same condition keeps the listing consistent with what
+		// the verbs actually do.
 		//
-		// set-display-name / unset-display-name set a friendly Display Name
-		// on a tunnel id (the `$<slug>` shown by `/qurl list`).
+		// Two sections under the one AdminStore gate:
+		//   Manage resources — name a resource (set-/unset-display-name set the
+		//     friendly Display Name shown in `/qurl list`) or retire it (revoke
+		//     is resource-scoped via `$<id>`).
+		//   Bot admins — who's allowed to run these commands. Flat membership
+		//     verbs (no `admin` sub-word); `admins` is the plural-noun roster,
+		//     so it doesn't collide with `/qurl list`.
+		appendSectionHeader("*Manage resources*")
 		lines = append(lines,
 			"• `/qurl-admin set-display-name $<id> <display name>` — Set a qURL Connector's friendly Display Name shown in `/qurl list`",
 			"• `/qurl-admin unset-display-name $<id>` — Reset a qURL Connector's Display Name to the default",
-			// Flat membership + revoke verbs (no `admin` sub-word). `admins`
-			// lists the roster (plural noun, so it doesn't collide with
-			// `/qurl list`); `revoke` is resource-scoped via `$<id>`.
+			"• `/qurl-admin revoke $<id>` — Revoke a protected resource and all its qURLs",
+		)
+		appendSectionHeader("*Bot admins*")
+		lines = append(lines,
 			"• `/qurl-admin add @user` — Promote a Slack user to bot admin",
 			"• `/qurl-admin remove @user` — Demote a Slack user from bot admin",
 			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current bot admins",
-			"• `/qurl-admin revoke $<id>` — Revoke a protected resource and all its qURLs",
 		)
 	}
-	// Always-present anchor: the optional blocks above are all gated on
-	// sandbox wiring, so without this line a no-store deploy would render
-	// just the header with no verbs. Mirrors the `/qurl help` line on the
-	// user surface.
-	lines = append(lines, "• `/qurl-admin help` — Show this help message")
+	// Always-present anchor: the sections above are all gated on sandbox wiring,
+	// so without this line a no-store deploy would render just the header with no
+	// verbs. Mirrors the `/qurl help` line on the user surface.
+	lines = append(lines, "", "• `/qurl-admin help` — Show this help message")
 	// Authored with the prod admin command name; rewrite to the invoked
 	// admin command so a non-prod env renders its own (`/qurl-sandbox-admin`
 	// …). Every admin literal here is the full `/qurl-admin`, so a single
