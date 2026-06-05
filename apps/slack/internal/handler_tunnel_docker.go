@@ -23,13 +23,13 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 WEB_CONTAINER=%s
 %s
 
-QURL_TUNNEL_ID=%s
-TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_ID}"
-SECRET_DIR="/run/secrets/qurl-tunnel/${QURL_TUNNEL_ID}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_ID}/agent"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_TUNNEL_ID}.yaml"
+QURL_CONNECTOR_ID=%s
+CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"
+SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
+CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
 
-# This intentionally overwrites the per-tunnel config so rerunning the install
+# This intentionally overwrites the per-connector config so rerunning the install
 # refreshes the deterministic ID and port values in place.
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
@@ -40,19 +40,19 @@ $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
 %s
 %s
 
-if docker ps -a --format '{{.Names}}' | grep -Fxq "$TUNNEL_CONTAINER"; then
-  docker rm -f "$TUNNEL_CONTAINER" >/dev/null
+if docker ps -a --format '{{.Names}}' | grep -Fxq "$CONNECTOR_CONTAINER"; then
+  docker rm -f "$CONNECTOR_CONTAINER" >/dev/null
 fi
 
 docker run -d \
-  --name "$TUNNEL_CONTAINER" \
+  --name "$CONNECTOR_CONTAINER" \
   --network "container:${WEB_CONTAINER}" \
   --restart=on-failure:5 \
   -v "$AGENT_STATE_DIR:/var/lib/layerv/agent" \
   -v "$SECRET_DIR:$SECRET_DIR:ro" \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
-  -e QURL_TUNNEL_ID="$QURL_TUNNEL_ID" \
+  -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
   %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
@@ -64,5 +64,5 @@ docker run -d \
 		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
 	intro += " It writes or overwrites the qURL Connector's qurl-proxy config in the current directory. Re-running this install briefly restarts the qURL Connector container if it already exists. Because the qURL Connector shares the web container's network namespace, restart the qURL Connector after replacing or recreating the web container."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file.", nil
 }

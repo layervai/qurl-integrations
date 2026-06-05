@@ -28,11 +28,11 @@ const (
 	testTunnelWizardCmd    = "expose-connector"                         // bare verb → guided modal
 	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug // typed: `expose-connector prod-dashboard`
 	testTunnelChannelID    = "C_test"
-	testTunnelImageRef     = "ghcr.io/layervai/qurl-reverse-tunnel-client:v-test"
+	testTunnelImageRef     = "ghcr.io/layervai/qurl-connector:v-test"
 	testTunnelAPIKey       = "lv_live_test_bootstrap"
 	testTunnelAPIKeyID     = "key_tunnel_bootstrap"
 	testSlackResponseURL   = "https://hooks.slack.test/response"
-	testTunnelDockerLine   = `TUNNEL_CONTAINER="qurl-tunnel-${QURL_TUNNEL_ID}"`
+	testTunnelDockerLine   = `CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"`
 	testTunnelModalKey     = "lv_live_modal_bootstrap"
 	testTunnelPipefailLine = "set -o pipefail"
 	testTunnelComposeWeb   = "web_1"
@@ -46,7 +46,7 @@ const (
 	testForbiddenSlackYAMLFence  = "```yaml"
 	testForbiddenSlackShellFence = "```sh"
 	testForbiddenBootstrapArgv   = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
-	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-tunnel/${QURL_TUNNEL_ID}/agent`
+	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
 	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
 	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
@@ -418,12 +418,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"Sidecar image: `" + testTunnelImageRef + "`.",
 		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
-		"QURL_TUNNEL_ID='" + testTunnelSlug + "'",
+		"QURL_CONNECTOR_ID='" + testTunnelSlug + "'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
-		`docker rm -f "$TUNNEL_CONTAINER"`,
+		`docker rm -f "$CONNECTOR_CONTAINER"`,
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelAgentDirFragment,
 		testTunnelImageRef,
@@ -436,7 +436,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", "QURL_TUNNEL_SLUG"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", "QURL_CONNECTOR_SLUG"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1227,7 +1227,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"qURL alias `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
 		"The shell block below prompts for it",
-		"QURL_BOOTSTRAP_SECRET='qurl-tunnel-" + testTunnelSlug + "'",
+		"QURL_BOOTSTRAP_SECRET='qurl-connector-" + testTunnelSlug + "'",
 		testTunnelPipefailLine,
 		testTunnelKeyPromptLine,
 		`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin`,
@@ -1236,7 +1236,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"name: 'qurl-proxy-" + testTunnelSlug + "'",
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
-		"Append the `qurl-tunnel` container under your existing `containers:` list",
+		"Append the `qurl-connector` container under your existing `containers:` list",
 		"fsGroup: 65532",
 		"fsGroupChangePolicy: OnRootMismatch",
 		"securityContext:",
@@ -1245,9 +1245,9 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"drop: [\"ALL\"]",
 		"type: RuntimeDefault",
 		"claimName: 'qurl-agent-" + testTunnelSlug + "'",
-		"secretName: 'qurl-tunnel-" + testTunnelSlug + "'",
+		"secretName: 'qurl-connector-" + testTunnelSlug + "'",
 		"defaultMode: 0440",
-		"QURL_TUNNEL_ID",
+		"QURL_CONNECTOR_ID",
 		"value: '" + testTunnelSlug + "'",
 		testTunnelModalKey,
 		testTunnelLocalPort9090Line,
@@ -1258,7 +1258,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", "QURL_TUNNEL_SLUG"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", "QURL_CONNECTOR_SLUG"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1288,7 +1288,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				"Target environment: Docker sidecar.",
 				"WEB_CONTAINER='web.1'",
 				testTunnelDockerLine,
-				"docker logs -f qurl-tunnel-" + testTunnelSlug,
+				"docker logs -f qurl-connector-" + testTunnelSlug,
 			},
 		},
 		{
@@ -1298,9 +1298,9 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			want: []string{
 				"Target environment: Docker Compose.",
 				"WEB_SERVICE='" + testTunnelComposeWeb + "'",
-				"TUNNEL_SERVICE='qurl-tunnel-" + testTunnelSlug + "'",
-				"'qurl-tunnel-" + testTunnelSlug + "':",
-				"docker compose -f compose.yaml -f qurl-tunnel-" + testTunnelSlug + ".compose.yaml logs -f qurl-tunnel-" + testTunnelSlug,
+				"CONNECTOR_SERVICE='qurl-connector-" + testTunnelSlug + "'",
+				"'qurl-connector-" + testTunnelSlug + "':",
+				"docker compose -f compose.yaml -f qurl-connector-" + testTunnelSlug + ".compose.yaml logs -f qurl-connector-" + testTunnelSlug,
 			},
 		},
 		{
@@ -1311,7 +1311,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				ecsFargateChecklistText,
 				ecsFargateRegionPlaceholderNote,
 				testTunnelECSAPIKeyNameLine,
-				`REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_` + testTunnelSlug,
+				`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
 			},
 		},
 	}
@@ -2008,7 +2008,7 @@ func TestValidateTunnelImageRefRejectsBackticks(t *testing.T) {
 
 func TestValidateTunnelImageRefRejectsShellSyntaxBytes(t *testing.T) {
 	t.Parallel()
-	badTag := "ghcr.io/layervai/qurl-reverse-tunnel-client:bad"
+	badTag := "ghcr.io/layervai/qurl-connector:bad"
 	for i, image := range []string{
 		badTag + " tag",
 		badTag + "$tag",

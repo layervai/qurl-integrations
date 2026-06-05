@@ -19,7 +19,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		ecsFargateChecklistText,
 		"non-essential sidecar container",
 		"Fargate's awsvpc network mode",
-		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_" + testTunnelSlug + "`",
+		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + testTunnelSlug + "`",
 		ecsFargateRegionPlaceholderNote,
 		"AWS appends a random suffix",
 		"127.0.0.1:9090",
@@ -28,16 +28,16 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"ECS injects this bootstrap secret as `QURL_API_KEY`, which is an environment variable",
 		"file-mounted secret runtimes should use `QURL_API_KEY_FILE` instead",
 		"prefer a file-mounted secret runtime",
-		"secret as `qurl-tunnel-" + testTunnelSlug + "`",
+		"secret as `qurl-connector-" + testTunnelSlug + "`",
 		"treat this Slack message as secret until the sidecar connects",
 		testTunnelImageRef,
 		"Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point",
 		"mounted into the task as the `qurl-config` volume",
 		testTunnelLocalPort9090Line,
-		`"name": "QURL_TUNNEL_ID"`,
+		`"name": "QURL_CONNECTOR_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
 		testTunnelECSAPIKeyNameLine,
-		`REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_` + testTunnelSlug,
+		`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
 	} {
@@ -45,7 +45,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_TUNNEL_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -76,7 +76,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
 		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
 	}
-	if container.Secrets[0].ValueFrom != "REPLACE_WITH_SECRET_ARN_FOR_QURL_TUNNEL_"+testTunnelSlug {
+	if container.Secrets[0].ValueFrom != "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_"+testTunnelSlug {
 		t.Fatalf("ECS secret ValueFrom = %q, want unmistakable replacement placeholder", container.Secrets[0].ValueFrom)
 	}
 }

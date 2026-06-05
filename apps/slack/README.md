@@ -39,10 +39,10 @@ A resource's visibility and availability are the same channel-scoped set: `/qurl
 
 ### Admin commands (`/qurl-admin`)
 
-- `/qurl-admin set-alias $<alias> $<id>` — Point a channel shortcut at a tunnel ID (admin-only)
+- `/qurl-admin set-alias $<alias> $<id>` — Point a channel shortcut at a qURL Connector ID (admin-only)
 - `/qurl-admin unset-alias $<alias>` — Remove a channel shortcut binding (admin-only)
-- `/qurl-admin expose-connector` — Guided tunnel sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install)
-- `/qurl-admin expose-connector <id|$id> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a tunnel from a typed command (admin-only; default local port is 8080)
+- `/qurl-admin expose-connector` — Guided qURL Connector sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install)
+- `/qurl-admin expose-connector <id|$id> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a qURL Connector from a typed command (admin-only; default local port is 8080)
 - `/qurl-admin admin add @user` / `remove @user` / `list` — Manage the workspace's bot admins (admin-only)
 - `/qurl-admin admin revoke <qurl_id>` — Revoke a single qURL (admin-only)
 - `/qurl-admin help` — Show the admin command help
@@ -83,14 +83,14 @@ modifiers enabled by the current bot deployment.
   enterprise-scoped bot token is stored under the Slack `enterprise_id`, while
   qURL API keys and admin state remain scoped to each invoking workspace's
   `team_id`.
-- **Tunnel onboarding:** `/qurl-admin expose-connector` opens a Slack modal with the
-  bot token for the invoking workspace, letting an admin choose the tunnel
+- **Connector onboarding:** `/qurl-admin expose-connector` opens a Slack modal with the
+  bot token for the invoking workspace, letting an admin choose the qURL Connector
   ID, optional channel shortcut, local port, and target environment
   (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl-admin expose-connector <id>` (or
   `$id`) remains available for CLI-style admins. Both paths use the
-  workspace API key to find-or-create a tunnel resource scoped to the
+  workspace API key to find-or-create a qURL Connector resource scoped to the
   connected qURL account, bind `$<id>` or the `alias:` shortcut override in
-  the current Slack channel, and mint a 1-hour `tunnel_bootstrap` API
+  the current Slack channel, and mint a one-hour bootstrap API
   key. When `alias:` is omitted, the ID doubles as the channel shortcut.
   Retrying the install within the modal's 25-minute validity window reuses
   the same bootstrap-key idempotency bucket. Retrying after that window can
@@ -99,13 +99,13 @@ modifiers enabled by the current bot deployment.
   The Slack response hides the internal resource id and renders output
   tailored to the selected environment. Docker and Docker Compose receive
   guarded pasteable shell blocks that write `qurl-proxy.yaml`, create a
-  bootstrap-key file, create/chown per-tunnel durable agent state, pass
-  `QURL_API_KEY_FILE`, and pass `QURL_TUNNEL_ID=<id>` to the client.
+  bootstrap-key file, create/chown per-connector durable agent state, pass
+  `QURL_API_KEY_FILE`, and pass `QURL_CONNECTOR_ID=<id>` to the client.
   ECS/Fargate and Kubernetes receive the same contract as deployment
   snippets: co-locate the sidecar with the target container, mount durable
   per-instance state at `/var/lib/layerv/agent`, mount or inject the
   bootstrap key through the runtime's secret mechanism, and remove the key
-  after the logs show a successful tunnel connection. ECS/Fargate uses the
+  after the logs show a successful connection. ECS/Fargate uses the
   client's supported `QURL_API_KEY` fallback because AWS injects task secrets
   as environment variables; Docker, Docker Compose, and Kubernetes prefer
   `QURL_API_KEY_FILE`. Do not share one agent state volume across
@@ -167,7 +167,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
-| `QURL_TUNNEL_IMAGE` | No | Docker image reference rendered by `/qurl-admin expose-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-reverse-tunnel-client@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_TUNNEL_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-reverse-tunnel-client:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
+| `QURL_CONNECTOR_IMAGE` | No | Docker image reference rendered by `/qurl-admin expose-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-connector:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
@@ -201,5 +201,5 @@ With per-workspace token storage in place, existing customer workspaces must
 reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
 token. New installs through `/oauth/slack/install` store that token
 automatically, and guided `/qurl-admin expose-connector` uses it for `views.open`
-(which requires no scope). If Slack tells a customer guided tunnel setup needs
+(which requires no scope). If Slack tells a customer guided connector setup needs
 the latest qURL Slack app install, send them through this reinstall link.

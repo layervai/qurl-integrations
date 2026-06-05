@@ -22,7 +22,7 @@ import (
 // resource-row builder lines visually aligned. Assertion sites read
 // these names too, so a rename surfaces every site at once.
 //
-// Most `/qurl list` fixtures below are tunnel resources carrying a slug; URL
+// Most `/qurl list` fixtures below are qURL Connector resources carrying a slug; URL
 // resource tests add explicit URL rows where that behavior matters.
 const (
 	testListAliasProdDB   = "prod-db"
@@ -636,7 +636,7 @@ func TestHandleList_URLResourcesListed(t *testing.T) {
 // label or `[slug:...]` fragment (both redundant now that the whole
 // list is tunnels and the token IS the slug). The customer's
 // onboarding flow reads this slug to match what the sidecar
-// provisioned (via QURL_TUNNEL_ID) and pastes it into `/qurl get`.
+// provisioned (via QURL_CONNECTOR_ID) and pastes it into `/qurl get`.
 func TestHandleList_TunnelSlugIsToken(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)

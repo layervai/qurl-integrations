@@ -66,7 +66,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
   fsGroup: 65532
   fsGroupChangePolicy: OnRootMismatch
 containers:
-  - name: qurl-tunnel
+  - name: qurl-connector
     image: %s
     securityContext:
       runAsUser: 65532
@@ -79,14 +79,14 @@ containers:
         type: RuntimeDefault
     env:
       - name: QURL_API_KEY_FILE
-        value: /run/secrets/qurl-tunnel/api_key
-      - name: QURL_TUNNEL_ID
+        value: /run/secrets/qurl-connector/api_key
+      - name: QURL_CONNECTOR_ID
         value: %s
     volumeMounts:
       - name: qurl-agent-state
         mountPath: /var/lib/layerv/agent
       - name: qurl-bootstrap
-        mountPath: /run/secrets/qurl-tunnel
+        mountPath: /run/secrets/qurl-connector
         readOnly: true
       - name: qurl-proxy
         mountPath: /work/qurl-proxy.yaml
@@ -121,7 +121,7 @@ volumes:
 		"- The bootstrap key is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session. The apply pipeline briefly carries a generated Secret manifest between `kubectl` processes.",
 		"- Delete the bootstrap Secret after the pod logs show the qURL Connector connected.",
 	}, "\n")
-	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend the `qurl-tunnel` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
+	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend the `qurl-connector` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }
 
 type kubernetesTunnelNames struct {
@@ -132,7 +132,7 @@ type kubernetesTunnelNames struct {
 
 func kubernetesTunnelObjectNames(slug string) kubernetesTunnelNames {
 	return kubernetesTunnelNames{
-		secret:    kubernetesNameWithSlug("qurl-tunnel-", slug),
+		secret:    kubernetesNameWithSlug("qurl-connector-", slug),
 		configMap: kubernetesNameWithSlug("qurl-proxy-", slug),
 		agentPVC:  kubernetesNameWithSlug("qurl-agent-", slug),
 	}
