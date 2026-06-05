@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -65,6 +66,54 @@ func TestHandleExpose_AdminRendersChooser(t *testing.T) {
 	}
 	if !strings.Contains(reply, "expose") {
 		t.Fatalf("reply = %q, want the chooser fallback text", reply)
+	}
+}
+
+// TestHandleExpose_UserSurfaceRendersChooser fences the product-facing entry:
+// admins can run `/qurl expose` and get the same two-button chooser directly,
+// instead of a wrong-surface redirect to `/qurl-admin expose`.
+func TestHandleExpose_UserSurfaceRendersChooser(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	body := url.Values{
+		fieldCommand:     {commandUser},
+		fieldText:        {"expose"},
+		fieldTeamID:      {testAdminTeamID},
+		fieldUserID:      {testAdminUserID},
+		fieldChannelID:   {testExposeChannel},
+		fieldResponseURL: {"https://hooks.slack.com/expose"},
+		fieldTriggerID:   {"trigger_test"},
+	}
+	encoded := body.Encode()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, pathSlackCommands, strings.NewReader(encoded))
+	sig, tsHeader := signSlackBody(t, encoded)
+	r.Header.Set(headerSlackSignature, sig)
+	r.Header.Set(headerSlackTimestamp, tsHeader)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, w.Body.String())
+	}
+	if text, _ := got[respFieldText].(string); strings.Contains(text, "admin command") {
+		t.Fatalf("reply = %q, want chooser rather than wrong-surface redirect", text)
+	}
+	js, err := json.Marshal(got[blockKitFieldBlocks])
+	if err != nil {
+		t.Fatalf("marshal blocks: %v", err)
+	}
+	for _, want := range []string{exposeConnectorActionID, exposeURLActionID, "Expose qURL Connector", "Expose URL"} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("/qurl expose chooser missing %q: %s", want, js)
+		}
 	}
 }
 
@@ -200,10 +249,10 @@ func TestHandleExposeURLClick_OpensModalWithResourceOptions(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLClick_NoResourcesPostsEphemeral fences that with no URL
-// resources the button posts a guidance ephemeral and never opens an empty
-// picker.
-func TestHandleExposeURLClick_NoResourcesPostsEphemeral(t *testing.T) {
+// TestHandleExposeURLClick_NoResourcesOpensEmptyModal fences that with no URL
+// resources the button still opens a helpful first-run modal instead of posting
+// a terse response_url warning or rendering an empty picker.
+func TestHandleExposeURLClick_NoResourcesOpensEmptyModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -211,30 +260,33 @@ func TestHandleExposeURLClick_NoResourcesPostsEphemeral(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
-	var opened atomic.Int32
-	h.cfg.OpenView = func(context.Context, string, string, []byte) error { opened.Add(1); return nil }
+	views := make(chan []byte, 1)
+	h.cfg.OpenView = func(_ context.Context, _, _ string, view []byte) error {
+		views <- view
+		return nil
+	}
 
-	captured := &capturedResponseURL{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		captured.record(b)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testExposeChannel, srv.URL, exposeURLActionID, "")
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testExposeChannel, "https://hooks.slack.com/expose", exposeURLActionID, "")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("url click ack = %d, want 200", w.Code)
 	}
 
-	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(got, "No URL resources found") {
-		t.Errorf("ephemeral = %q, want the no-resources guidance", got)
+	var view []byte
+	select {
+	case view = <-views:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView was not called for the empty URL-resource state")
 	}
-	if opened.Load() != 0 {
-		t.Errorf("OpenView called %d times with no resources, want 0", opened.Load())
+	js := string(view)
+	for _, want := range []string{"No URL resources yet", "qURL dashboard", "/qurl expose"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("empty modal missing %q: %s", want, js)
+		}
+	}
+	if strings.Contains(js, exposeURLActionResource) {
+		t.Errorf("empty modal should not render URL-resource select: %s", js)
 	}
 }
 
@@ -306,9 +358,9 @@ func TestHandleExposeURLBareNonAdminDenied(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLBareNoResources fences that with no URL resources the bare
-// path posts the guidance ephemeral and never opens an empty picker.
-func TestHandleExposeURLBareNoResources(t *testing.T) {
+// TestHandleExposeURLBareNoResourcesOpensEmptyModal fences that with no URL
+// resources the bare path opens the same helpful first-run modal.
+func TestHandleExposeURLBareNoResourcesOpensEmptyModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -316,16 +368,34 @@ func TestHandleExposeURLBareNoResources(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
-	var opened atomic.Int32
-	h.cfg.OpenView = func(context.Context, string, string, []byte) error { opened.Add(1); return nil }
+	views := make(chan []byte, 1)
+	h.cfg.OpenView = func(_ context.Context, _, _ string, view []byte) error {
+		views <- view
+		return nil
+	}
 	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("expose-url", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No URL resources found") {
-		t.Fatalf("async = %q, want the no-resources guidance", async)
+	status, ack := inv.invokeAdmin("expose-url", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("ack status = %d, want 200", status)
 	}
-	if opened.Load() != 0 {
-		t.Errorf("OpenView called %d times with no resources, want 0", opened.Load())
+	if !strings.Contains(ack, "Working") {
+		t.Fatalf("ack = %q, want working response", ack)
+	}
+	var view []byte
+	select {
+	case view = <-views:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView was not called for bare expose-url empty state")
+	}
+	js := string(view)
+	for _, want := range []string{"No URL resources yet", "qURL dashboard", "/qurl expose"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("empty modal missing %q: %s", want, js)
+		}
+	}
+	if strings.Contains(js, exposeURLActionResource) {
+		t.Errorf("empty modal should not render URL-resource select: %s", js)
 	}
 }
 

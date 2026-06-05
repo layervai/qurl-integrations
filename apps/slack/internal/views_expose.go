@@ -100,6 +100,24 @@ func ExposeURLModal(meta ExposeURLModalMetadata, options []map[string]any) ([]by
 	return json.Marshal(payload)
 }
 
+// ExposeURLEmptyModal renders the first-run state for the guided URL picker.
+// Slack rejects a static_select with zero options, so the handler opens this
+// informational modal instead of posting a terse response_url warning.
+func ExposeURLEmptyModal(channelID string) ([]byte, error) {
+	payload := map[string]any{
+		blockKitFieldType:       blockKitTypeModal,
+		blockKitFieldCallbackID: callbackIDExposeURL,
+		blockKitFieldTitle:      plainTextObj("Expose URL"),
+		blockKitFieldClose:      plainTextObj("Close"),
+		blockKitFieldBlocks: []any{
+			contextBlock("Target channel: " + slackChannelMention(channelID)),
+			sectionBlock("*No URL resources yet*\nCreate a URL resource in the qURL dashboard, then run `/qurl expose` and choose *Expose URL* again."),
+			contextBlock("To create a new qURL Connector instead, run `/qurl expose` and choose qURL Connector."),
+		},
+	}
+	return json.Marshal(payload)
+}
+
 // ExposeURLErrorModal replaces a submitted URL-expose modal with a form-level
 // error notice, for the structural failures (stale/forged metadata, admin
 // re-check denial, missing wiring) that aren't tied to a specific input field.

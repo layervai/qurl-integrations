@@ -934,6 +934,11 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// slashSubcommand (not exact match) so `feedback <stray text>` still
 		// opens the form rather than falling through to "unknown subcommand".
 		h.handleFeedback(w, values)
+	case slashSubcommand(text, adminVerbExpose):
+		// `/qurl expose` is the low-friction guided entry point. It reuses the
+		// admin-gated chooser instead of redirecting to `/qurl-admin expose`, so
+		// admins get the two buttons directly on the command people naturally try.
+		h.handleExpose(w, values)
 	case isAdminVerb(text):
 		// An admin verb typed on `/qurl` — redirect to `/qurl-admin` rather
 		// than the generic unknown reply. firstWord(text) is the classified
@@ -1291,6 +1296,11 @@ func (h *Handler) userHelpMessage(command string) string {
 		// it replies ":warning: not configured".
 		lines = append(lines,
 			"• `/qurl aliases` — List this channel's aliases and the resource each one points to",
+		)
+	}
+	if h.aliasStore != nil && h.cfg.AdminStore != nil && h.cfg.OpenView != nil {
+		lines = append(lines,
+			"• `/qurl expose` — Admin-only guided picker for exposing a qURL Connector or URL in this channel",
 		)
 	}
 	if h.cfg.PostFeedback != nil {

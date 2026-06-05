@@ -140,7 +140,18 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 			return
 		}
 		if len(options) == 0 {
-			_ = h.postResponse(log, responseURL, "No URL resources found to expose. Create one in the qURL dashboard, then run `/qurl-admin expose` again.")
+			view, err := ExposeURLEmptyModal(payload.Channel.ID)
+			if err != nil {
+				log.Error("expose url: empty modal render failed", "error", err)
+				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
+				return
+			}
+			openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+			defer openCancel()
+			if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+				log.Warn("expose url: empty modal views.open failed", "error", err)
+				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
+			}
 			return
 		}
 		view, err := ExposeURLModal(meta, options)
