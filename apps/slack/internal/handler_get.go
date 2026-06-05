@@ -435,14 +435,21 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //     minting; if more than one channel-allowed resource shares that alias,
 //     fail closed as ambiguous rather than minting an arbitrary row.
 //
-// Cost note: after the per-user rate-limit gate, a binding miss incurs upstream
-// resource lookups (slug, then alias when needed), including for plain typos.
-// That's the deliberate price of the round-trip honesty above — don't
-// "optimize" it away by short-circuiting the fallbacks on a binding miss.
+// Cost note: this runs BEFORE the per-user rate-limit gate in getWork — the gate
+// only fires once a token resolves, so a typo never burns the user's quota (see
+// getWork). A binding miss therefore incurs its upstream resource lookups (slug,
+// then the first-page alias scan when needed) un-throttled by that gate,
+// including for plain typos. That's the deliberate "spend a read rather than burn
+// the user's quota on a fat-fingered alias" tradeoff — don't "optimize" it away
+// by short-circuiting the fallbacks on a binding miss. Each scan is bounded by
+// listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
+// the request rate; if the in-bot limiter (CheckRateLimit, a stub today) ever
+// needs to shed this resolution cost too, add a cheap token-shape pre-filter
+// before the alias scan rather than moving the gate back ahead of resolution.
 //
-// Caller must have already checked AdminStore (getWork does this before the
-// rate-limit gate). Returns a [*userError] on lookup failure,
-// not-a-known-token, or not-allowed-here.
+// Caller must have already checked AdminStore (getWork does this before
+// resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
+// not-allowed-here.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {

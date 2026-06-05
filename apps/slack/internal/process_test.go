@@ -587,10 +587,10 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
-	// Seed the alias so the worker passes the rate-limit gate, resolves
-	// the token, and reaches authenticatedClient, where panickingProvider.APIKey
+	// Seed the alias so the worker resolves the token, passes the rate-limit
+	// gate, and reaches authenticatedClient, where panickingProvider.APIKey
 	// panics. Without the seed the worker would fail closed at LookupChannelAlias
-	// and never exercise the recover defer.
+	// (before the rate-limit gate) and never exercise the recover defer.
 	seedGetAliasBinding(t, h, "T123")
 
 	body := getTokenCommandBody("T123", "trig-panic", rec.URL)

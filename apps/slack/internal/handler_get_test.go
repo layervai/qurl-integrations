@@ -54,7 +54,7 @@ func writeAPIError(t *testing.T, w http.ResponseWriter, status int, code, title 
 }
 
 // TestHandleGet_HappyPath fences the canonical /qurl get flow:
-// rate-limit OK → channel-scoped alias lookup → mint → channel
+// channel-scoped alias resolution → rate-limit OK → mint → channel
 // ephemeral reply carrying the qURL link.
 func TestHandleGet_HappyPath(t *testing.T) {
 	ts := newAdminTestServers(t)
