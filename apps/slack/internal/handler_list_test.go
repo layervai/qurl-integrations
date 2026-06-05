@@ -136,7 +136,7 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 		"ops":             resID,
 	})
 	// Description doubles as the Display Name and is always set; here it
-	// carries the install default ("Slack tunnel install for <slug>"). The
+	// carries the install default ("Slack qURL Connector install for <slug>"). The
 	// row shows the bound aliases AND the Display Name after the em-dash.
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{

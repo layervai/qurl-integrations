@@ -56,7 +56,7 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		{name: "missing everything", input: "", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
 		{name: "lone dollar id rejected", input: "$ Prod API", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
 		// Bare `$` with no name: the empty-id check fires before the missing-name
-		// check, so this is "Missing tunnel id" (not "Missing Display Name").
+		// check, so this is "Missing qURL Connector id" (not "Missing Display Name").
 		{name: "lone dollar no name rejected", input: "$", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
 		{name: "dollar then invalid id rejected", input: "$Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		// TrimPrefix strips exactly one `$`, so `$$prod-dashboard` becomes
