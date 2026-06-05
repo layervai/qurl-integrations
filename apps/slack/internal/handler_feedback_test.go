@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ const (
 	testFeedbackUserName   = "dana"
 	testPlainTextType      = "plain_text"
 	testHooksURL           = "https://hooks.slack.com/x"
+	testFeedbackSummary    = "summary"
 )
 
 func TestParseFeedbackModalArgs(t *testing.T) {
@@ -306,7 +308,7 @@ func TestHandleFeedbackSubmissionTeamMismatch(t *testing.T) {
 	h, _, posted := feedbackTestHandler(t)
 	meta := &FeedbackModalMetadata{TeamID: testAdminTeamID, UserID: testAdminUserID, ResponseURL: testHooksURL}
 	// Payload team differs from the metadata team — a cross-workspace replay.
-	body := feedbackSubmissionBody(t, meta, "T_OTHER", testAdminUserID, feedbackTypeBug, "summary", "")
+	body := feedbackSubmissionBody(t, meta, "T_OTHER", testAdminUserID, feedbackTypeBug, testFeedbackSummary, "")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/interactions", body, body))
 	if w.Code != http.StatusOK {
@@ -324,6 +326,85 @@ func TestHandleFeedbackSubmissionTeamMismatch(t *testing.T) {
 	select {
 	case <-posted:
 		t.Fatal("PostFeedback must not run on a team mismatch")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleFeedbackSubmissionDeliveryFailure(t *testing.T) {
+	t.Parallel()
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+	h.cfg.PostFeedback = func(context.Context, []byte) error { return errors.New("webhook 503") }
+
+	notified := make(chan string, 1)
+	rs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		notified <- string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(rs.Close)
+
+	meta := &FeedbackModalMetadata{TeamID: testAdminTeamID, UserID: testAdminUserID, ResponseURL: rs.URL}
+	body := feedbackSubmissionBody(t, meta, testAdminTeamID, testAdminUserID, feedbackTypeBug, testFeedbackSummary, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/interactions", body, body))
+
+	// A delivery failure must surface a retry ephemeral — never silently drop.
+	select {
+	case got := <-notified:
+		if strings.Contains(got, "Thanks") || !strings.Contains(got, "Couldn't send") {
+			t.Errorf("delivery-failure ephemeral = %q, want retry copy", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no failure ephemeral posted to response_url")
+	}
+}
+
+func TestHandleFeedbackSubmissionUserMismatch(t *testing.T) {
+	t.Parallel()
+	h, _, posted := feedbackTestHandler(t)
+	// Team matches but the submitting user differs — symmetric modal-replay guard.
+	meta := &FeedbackModalMetadata{TeamID: testAdminTeamID, UserID: testAdminUserID, ResponseURL: testHooksURL}
+	body := feedbackSubmissionBody(t, meta, testAdminTeamID, "U_OTHER", feedbackTypeBug, testFeedbackSummary, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/interactions", body, body))
+	var result struct {
+		ResponseAction string `json:"response_action"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.ResponseAction != respActionUpdate {
+		t.Errorf("response_action = %q, want %q (error modal)", result.ResponseAction, respActionUpdate)
+	}
+	select {
+	case <-posted:
+		t.Fatal("PostFeedback must not run on a user mismatch")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleFeedbackSubmissionMissingResponseURL(t *testing.T) {
+	t.Parallel()
+	h, _, posted := feedbackTestHandler(t)
+	// Empty response_url → the async worker can't confirm receipt, so the submit
+	// is refused (error modal) rather than posted into the void.
+	meta := &FeedbackModalMetadata{TeamID: testAdminTeamID, UserID: testAdminUserID, ResponseURL: ""}
+	body := feedbackSubmissionBody(t, meta, testAdminTeamID, testAdminUserID, feedbackTypeBug, testFeedbackSummary, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/interactions", body, body))
+	var result struct {
+		ResponseAction string `json:"response_action"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.ResponseAction != respActionUpdate {
+		t.Errorf("response_action = %q, want %q (error modal)", result.ResponseAction, respActionUpdate)
+	}
+	select {
+	case <-posted:
+		t.Fatal("PostFeedback must not run with a missing response_url")
 	case <-time.After(100 * time.Millisecond):
 	}
 }
