@@ -1002,7 +1002,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	// readability — all three expose entries sit together. Each connector/URL
 	// verb opens its guided modal when bare and runs the typed power-user form
 	// when given arguments (handleExposeConnector / handleExposeURL).
-	case slashSubcommand(text, adminVerbExposeConnector):
+	case slashSubcommand(text, "expose-connector"):
 		h.handleExposeConnector(w, values)
 	case slashSubcommand(text, adminVerbExposeURL):
 		h.handleExposeURL(w, values)
