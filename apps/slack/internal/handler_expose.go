@@ -426,8 +426,8 @@ type exposeURLCreateArgs struct {
 	ChannelAlias string
 }
 
-func parseExposeURLCreateModalArgs(values map[string]map[string]interactionStateValue) (*exposeURLCreateArgs, map[string]string) {
-	fieldErrors := map[string]string{}
+func parseExposeURLCreateModalArgs(values map[string]map[string]interactionStateValue) (args *exposeURLCreateArgs, fieldErrors map[string]string) {
+	fieldErrors = map[string]string{}
 
 	targetURL := strings.TrimSpace(interactionStateText(values, exposeURLBlockTarget, exposeURLActionTarget))
 	parsed, err := url.Parse(targetURL)
