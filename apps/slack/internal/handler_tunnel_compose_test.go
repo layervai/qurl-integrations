@@ -35,7 +35,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"'qurl-tunnel-" + testTunnelSlug + "':",
 		`network_mode: "service:${WEB_SERVICE}"`,
 		"do not hand-edit the generated fragment",
-		"bring the tunnel service up again too",
+		"bring the qURL Connector service up again too",
 		"depends_on:",
 		"condition: service_started",
 		testTunnelAgentDirFragment,

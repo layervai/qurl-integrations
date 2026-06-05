@@ -17,7 +17,7 @@ import (
 const (
 	testDisplayNameProdAPI      = "Prod API"
 	testDisplayNameMissingMsg   = "Missing Display Name"
-	testDisplayNameInvalidIDMsg = "valid tunnel id"
+	testDisplayNameInvalidIDMsg = "valid qURL Connector id"
 )
 
 // --- install-default constructor -----------------------------------------
@@ -26,7 +26,7 @@ func TestDefaultTunnelDisplayName(t *testing.T) {
 	// Install seeds this and unset-display-name reverts to it. The string
 	// must match install's auto-fill exactly, so a fresh install and a
 	// post-unset tunnel read identically.
-	if got, want := defaultTunnelDisplayName("prod-dashboard"), "Slack tunnel install for prod-dashboard"; got != want {
+	if got, want := defaultTunnelDisplayName("prod-dashboard"), "Slack qURL Connector install for prod-dashboard"; got != want {
 		t.Errorf("defaultTunnelDisplayName = %q, want %q", got, want)
 	}
 }
@@ -53,11 +53,11 @@ func TestParseSetDisplayNameArgs(t *testing.T) {
 		{name: "lone quote kept as part of name", input: id + ` it's fine`, wantID: id, wantName: "it's fine"},
 		{name: "dollar-prefixed id accepted", input: "$" + id + ` "Prod API"`, wantID: id, wantName: testDisplayNameProdAPI},
 
-		{name: "missing everything", input: "", wantErr: true, wantMsgSub: "Missing tunnel id"},
-		{name: "lone dollar id rejected", input: "$ Prod API", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "missing everything", input: "", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
+		{name: "lone dollar id rejected", input: "$ Prod API", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
 		// Bare `$` with no name: the empty-id check fires before the missing-name
 		// check, so this is "Missing tunnel id" (not "Missing Display Name").
-		{name: "lone dollar no name rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
+		{name: "lone dollar no name rejected", input: "$", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
 		{name: "dollar then invalid id rejected", input: "$Prod foo", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 		// TrimPrefix strips exactly one `$`, so `$$prod-dashboard` becomes
 		// `$prod-dashboard`, which still fails the slug check (matching
@@ -115,9 +115,9 @@ func TestParseUnsetDisplayNameArgs(t *testing.T) {
 	}{
 		{name: "happy", input: id, wantID: id},
 		{name: "dollar-prefixed id accepted", input: "$" + id, wantID: id},
-		{name: "missing id", input: "", wantErr: true, wantMsgSub: "Provide exactly one tunnel id"},
-		{name: "lone dollar rejected", input: "$", wantErr: true, wantMsgSub: "Missing tunnel id"},
-		{name: "trailing args rejected", input: id + " extra", wantErr: true, wantMsgSub: "Provide exactly one tunnel id"},
+		{name: "missing id", input: "", wantErr: true, wantMsgSub: "Provide exactly one qURL Connector id"},
+		{name: "lone dollar rejected", input: "$", wantErr: true, wantMsgSub: "Missing qURL Connector id"},
+		{name: "trailing args rejected", input: id + " extra", wantErr: true, wantMsgSub: "Provide exactly one qURL Connector id"},
 		{name: "invalid id rejected", input: "Prod", wantErr: true, wantMsgSub: testDisplayNameInvalidIDMsg},
 	}
 	for _, tc := range cases {
@@ -331,7 +331,7 @@ func TestSetDisplayName_TunnelNotFound(t *testing.T) {
 	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("set-display-name "+testTunnelSlug+" Prod", testAliasTeamID, "U_alias_admin")
 
-	if !strings.Contains(async, "No tunnel with id") || !strings.Contains(async, "/qurl list") {
+	if !strings.Contains(async, "No qURL Connector with id") || !strings.Contains(async, "/qurl list") {
 		t.Errorf("async reply = %q, want friendly not-found copy pointing at /qurl list", async)
 	}
 	if capPatch.calls.Load() != 0 {

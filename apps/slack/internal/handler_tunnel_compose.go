@@ -98,9 +98,9 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$TUNNEL_SER
 	}
 	introParts = append(introParts,
 		"If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it.",
-		"Re-run this install to regenerate the same tunnel's Compose fragment when the port or service changes; do not hand-edit the generated fragment because the next install replaces it.",
-		"If Compose recreates the web service container, bring the tunnel service up again too.",
+		"Re-run this install to regenerate the same qURL Connector's Compose fragment when the port or service changes; do not hand-edit the generated fragment because the next install replaces it.",
+		"If Compose recreates the web service container, bring the qURL Connector service up again too.",
 	)
 	intro := strings.Join(introParts, " ")
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the tunnel connects, delete the bootstrap key file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-tunnel-" + args.Slug + ".compose.yaml logs -f qurl-tunnel-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the qURL Connector connects, delete the bootstrap key file.", nil
 }

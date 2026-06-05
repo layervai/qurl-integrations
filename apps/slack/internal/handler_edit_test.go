@@ -595,7 +595,7 @@ func TestHandleTunnelEdit_HappyPath(t *testing.T) {
 		t.Errorf("PATCHed description = %q, want %q", patched, "Renamed Prod")
 	}
 	summary := parseSlackText(t, got)
-	for _, want := range []string{"Updated tunnel `$" + testEditToken + "`", "new-alias", testEditOldAlias} {
+	for _, want := range []string{"Updated qURL Connector `$" + testEditToken + "`", "new-alias", testEditOldAlias} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary missing %q: %s", want, summary)
 		}
@@ -810,7 +810,7 @@ func TestHandleTunnelEdit_AliasConflictReported(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no result posted to response_url")
 	}
-	if summary := parseSlackText(t, got); !strings.Contains(summary, "Skipped (already used by another tunnel") || !strings.Contains(summary, "taken") {
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Skipped (already used by another qURL Connector") || !strings.Contains(summary, "taken") {
 		t.Errorf("summary missing conflict line: %s", summary)
 	}
 	if rid, found, _ := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testEditChannel, "taken"); !found || rid != otherRID {
