@@ -687,6 +687,27 @@ func TestAdminHelpGroupsVerbsUnderSections(t *testing.T) {
 	}
 }
 
+// TestAdminHelpOmitsSectionHeadersWhenUnwired fences the "never render an empty
+// header" invariant the adminHelpMessage section comments lean on: with neither
+// aliasStore nor AdminStore wired, none of the four section headers appear — a
+// no-store deploy renders only the title and the always-present help anchor.
+// newTestHandler wires neither store, so it exercises that path directly.
+func TestAdminHelpOmitsSectionHeadersWhenUnwired(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	help := h.adminHelpMessage(commandAdmin)
+
+	for _, absent := range []string{
+		"*Expose resources*",
+		"*Aliases*",
+		"*Manage resources*",
+		"*Bot admins*",
+	} {
+		if strings.Contains(help, absent) {
+			t.Errorf("unwired admin help leaked section header %q:\n%s", absent, help)
+		}
+	}
+}
+
 func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
 	h, _ := newAliasTestHandler(t)
 	help := h.adminHelpMessage(commandAdmin)
