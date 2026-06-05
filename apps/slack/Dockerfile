@@ -6,13 +6,8 @@
 
 # Bumped 1.26.3 → 1.26.4 for the net/textproto fix (GO-2026-5039 / GO-2026-5037);
 # go.mod requires go 1.26.4. SHA-pinned to the multi-arch index digest, same as
-# the rest of the repo's base images (GOTOOLCHAIN stays the image default
-# `local` — no unpinned build-time toolchain fetch).
-#
-# This image is younger than check-docker-age's 14-day floor (eligible
-# 2026-06-16), so PR #602 carries the `age-check-bypass` label — a verified-CVE
-# emergency, which is exactly what that label is for. Once the image ages past
-# the floor the label is no longer needed; no Dockerfile change required then.
+# the rest of the repo's base images — GOTOOLCHAIN stays the image default
+# `local`, so there's no unpinned build-time toolchain fetch.
 FROM golang:1.26.4-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS build
 
 WORKDIR /src

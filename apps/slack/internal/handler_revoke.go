@@ -138,7 +138,7 @@ func (h *Handler) processRevoke(ctx context.Context, log *slog.Logger, values ur
 		sectionBlock(fmt.Sprintf("Revoke `$%s`?", escapeMrkdwnCode(cmd.Alias))),
 		actionsBlock(withConfirmDialog(
 			dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
-			"Revoke $"+cmd.Alias+"?",
+			"Revoke $"+escapeMrkdwnCode(cmd.Alias)+"?",
 			revokeConfirmText,
 			"Revoke",
 		)),

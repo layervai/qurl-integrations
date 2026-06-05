@@ -206,7 +206,7 @@ func listRowBlocks(r *client.Resource, sectionText, tok string, showEdit bool, b
 			if revokeVal, ok := buildTunnelRevokeButtonValue(r.ResourceID, tok); ok {
 				row = append(row, withConfirmDialog(
 					dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
-					"Revoke $"+tok+"?",
+					"Revoke $"+escapeMrkdwnCode(tok)+"?",
 					revokeConfirmText,
 					"Revoke",
 				))
