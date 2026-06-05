@@ -143,6 +143,8 @@ func run() error {
 	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
 	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
 
+	postFeedback := buildPostFeedback(userAgent)
+
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
 	// main goroutine (to detect SIGTERM and trigger srv.Shutdown) and
@@ -160,6 +162,7 @@ func run() error {
 		AdminStore:         adminStore,
 		OpenView:           openView,
 		TunnelImage:        tunnelImage,
+		PostFeedback:       postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;
@@ -944,4 +947,31 @@ func buildAdminStore(ctx context.Context) *slackdata.Store {
 		"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
 		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable))
 	return s
+}
+
+// buildPostFeedback wires the /qurl feedback delivery seam from
+// FEEDBACK_SLACK_WEBHOOK_URL. Feedback posts submissions to an internal Slack
+// channel via an incoming webhook. This is an OPTIONAL feature secret whose SSM
+// parameter ships as "PLACEHOLDER" until an operator seeds it, so an unset OR
+// invalid value returns nil (feedback disabled, logged as a warn) rather than
+// failing startup — otherwise a not-yet-seeded deploy would crash-loop. While
+// disabled, /qurl feedback replies "not enabled" and help omits it.
+// validateFeedbackWebhookURL("") returns an error, but the empty case is
+// matched first so it logs the calmer "not set" line.
+func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
+	feedbackWebhookURL := strings.TrimSpace(os.Getenv("FEEDBACK_SLACK_WEBHOOK_URL"))
+	switch host, err := validateFeedbackWebhookURL(feedbackWebhookURL); {
+	case feedbackWebhookURL == "":
+		slog.Info("feedback disabled — FEEDBACK_SLACK_WEBHOOK_URL not set; /qurl feedback will reply 'not enabled'")
+		return nil
+	case err != nil:
+		slog.Warn("feedback disabled — FEEDBACK_SLACK_WEBHOOK_URL is set but not a usable URL", "error", err)
+		return nil
+	default:
+		if !strings.EqualFold(host, slackIncomingWebhookHost) {
+			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost) // #nosec G706 -- host is operator-set; slog's JSON handler escapes control bytes in attribute values.
+		}
+		slog.Info("feedback delivery wired via Slack incoming webhook")
+		return newFeedbackWebhookPoster(feedbackWebhookURL, userAgent, nil)
+	}
 }
