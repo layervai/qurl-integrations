@@ -4,16 +4,13 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-FROM golang:1.26.3-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS build
-
-# go.mod requires go 1.26.4 (GO-2026-5039 / GO-2026-5037 net/textproto fix),
-# but this base image is SHA-pinned at 1.26.3 and ships GOTOOLCHAIN=local, so a
-# `go` command would fail "requires go >= 1.26.4". GOTOOLCHAIN=auto lets the
-# build fetch the matching toolchain (verified against the Go checksum DB) at
-# build time. We don't bump the base image to golang:1.26.4-alpine because the
-# repo's check-docker-age gate requires base images ≥14 days old, and the patch
-# is too fresh; swap to a pinned 1.26.4 base once it ages past that gate.
-ENV GOTOOLCHAIN=auto
+# Bumped 1.26.3 → 1.26.4 for the net/textproto fix (GO-2026-5039 / GO-2026-5037);
+# go.mod requires go 1.26.4. SHA-pinned to the multi-arch index digest, same as
+# the rest of the repo's base images (GOTOOLCHAIN stays the image default
+# `local` — no unpinned build-time toolchain fetch). If check-docker-age flags
+# this as younger than its 14-day floor, the `age-check-bypass` label
+# (verified-CVE emergency only) is the sanctioned override.
+FROM golang:1.26.4-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS build
 
 WORKDIR /src
 
