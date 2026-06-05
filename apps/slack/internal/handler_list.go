@@ -207,7 +207,7 @@ func listRowBlocks(r *client.Resource, sectionText, tok string, showEdit bool, b
 				row = append(row, withConfirmDialog(
 					dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
 					"Revoke $"+tok+"?",
-					"This revokes the resource *and every qURL on it*. It can't be undone.",
+					revokeConfirmText,
 					"Revoke",
 				))
 			}

@@ -107,19 +107,19 @@ const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup <email
 // missing the ack.
 const adminGateBudget = 800 * time.Millisecond
 
-// adminSyncVerbBudget bounds the verb-body work for sync admin
-// verbs (revoke / add / remove / list) so the full gate + body +
+// adminSyncVerbBudget bounds the verb-body work for the sync admin
+// membership verbs (add / remove / admins) so the full gate + body +
 // encode chain fits inside Slack's 3s slash-command ack window.
 // Without this, asyncWorkTimeout (25s) would silently let the verb
 // body wedge past 3s and the user would see no reply at all (Slack
-// drops slash-command responses that miss the ack).
+// drops slash-command responses that miss the ack). (Resource `revoke`
+// is multi-hop and runs async via runAsync, so it isn't bounded here.)
 //
 // 1.2s + adminGateBudget=800ms = 2s of upstream work — leaves ~1s of
 // the 3s window for response_encode + write + the Slack-side network
-// hop. Generous compared to typical timings (verb is one DDB
-// UpdateItem or one qurl-service DELETE, both well under 100ms warm)
-// but the headroom is the point: missing Slack's ack costs the user
-// any visible reply at all.
+// hop. Generous compared to typical timings (each verb is one DDB
+// UpdateItem, well under 100ms warm) but the headroom is the point:
+// missing Slack's ack costs the user any visible reply at all.
 const adminSyncVerbBudget = 1200 * time.Millisecond
 
 // requireAdminSync centralizes the admin-only gate for sync handlers.

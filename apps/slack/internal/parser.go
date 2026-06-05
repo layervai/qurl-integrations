@@ -96,8 +96,9 @@ type Command struct {
 	// alias name.
 	Alias string
 	// Target is the trailing positional arg used by `setalias` (parser
-	// accepts a URL, raw resource_id, or `$slug` shape — the handler
-	// then enforces tunnels-only) and `admin revoke` (a `q_<id>`).
+	// accepts a URL, raw resource_id, or `$slug` shape — the handler then
+	// enforces tunnels-only). `revoke` carries its `$<id|alias>` in Alias
+	// (via parseAliasToken), not here.
 	Target string
 	// UserID is the parsed Slack user ID from a `<@U12345>` mention
 	// argument used by `admin add` / `admin remove`. Distinct from the
@@ -429,9 +430,8 @@ func tokenize(text string) []string {
 // name via [parseAliasToken]. Get mints from a tunnel slug or a channel
 // alias only — a `$r_<id>` resource ID fails the alias charset (the `_`)
 // and is rejected, same as a raw URL. The alias-mutating verbs
-// (`setalias`, `unsetalias`) share the same token shape; `admin revoke`
-// takes a raw `q_<id>` (no sigil) so it doesn't go through here. Surplus
-// positional args after the first are an error.
+// (`setalias`, `unsetalias`) and `revoke` (via parseRevoke) share this same
+// `$`-sigil token shape. Surplus positional args after the first are an error.
 func parseGet(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrEmptyResource

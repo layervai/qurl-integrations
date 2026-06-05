@@ -22,6 +22,14 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
+// revokeConfirmText is the confirm-dialog body shared by the `/qurl list`
+// Revoke button and the `/qurl-admin revoke` prompt. It spells out the blast
+// radius: revoke destroys the resource (and every qURL on it) in EVERY channel
+// it's exposed to — not an un-expose of the current channel (that's what the
+// Edit modal's channel multi-select does). Edit and Revoke sit side by side, so
+// the copy makes the difference explicit.
+const revokeConfirmText = "This revokes the resource *and every qURL on it*, in every channel it's exposed to. It can't be undone."
+
 // handleRevoke implements `/qurl-admin revoke $<id|alias>`. Rather than
 // revoking immediately, it resolves + channel-authorizes the token and posts
 // the SAME red Revoke button the `/qurl list` row carries (with its native
@@ -127,11 +135,11 @@ func (h *Handler) processRevoke(ctx context.Context, log *slog.Logger, values ur
 		return
 	}
 	blocks := []any{
-		sectionBlock(fmt.Sprintf("Revoke `$%s`? This revokes the resource *and every qURL on it* — click *Revoke* to confirm.", escapeMrkdwnCode(cmd.Alias))),
+		sectionBlock(fmt.Sprintf("Revoke `$%s`?", escapeMrkdwnCode(cmd.Alias))),
 		actionsBlock(withConfirmDialog(
 			dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
 			"Revoke $"+cmd.Alias+"?",
-			"This revokes the resource *and every qURL on it*. It can't be undone.",
+			revokeConfirmText,
 			"Revoke",
 		)),
 	}
