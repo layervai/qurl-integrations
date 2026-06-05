@@ -312,7 +312,7 @@ type getWorkArgs struct {
 	triggerID string
 }
 
-// getWork runs the inner rate-limit→resolve→mint pipeline for the token form
+// getWork runs the inner resolve→rate-limit→mint pipeline for the token form
 // (`/qurl get $id` or `/qurl get $alias`). Raw URLs and `$r_<id>` resource IDs
 // are rejected at parse time. Returns the rendered reply text (without leading
 // `:warning:`) on success, or a [*userError] whose msg routes to the user.
@@ -340,15 +340,27 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: unexpectedGetShapeMessage}
 	}
 
-	// Rate-limit before token resolution so typoed or unknown resource aliases
-	// cannot amplify upstream ListResources calls. This intentionally makes the
-	// limiter command-level rather than mint-only: failed alias resolutions are
-	// bounded too. The dm:true delivery guard above stays earlier because an
-	// undeliverable privacy request should not consume a mint attempt.
+	// AdminStore is required both for token resolution (the channel-alias lookup
+	// in resolveTokenForGet) and for the rate-limit gate further down.
 	if h.cfg.AdminStore == nil {
 		log.Warn("get: AdminStore is nil; token-form lookup unavailable", "team_id", args.teamID)
 		return "", errAdminStoreNotConfigured
 	}
+
+	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
+	if err != nil {
+		// Resolution failures (typoed / unknown / not-channel-authorized aliases)
+		// return BEFORE the rate-limit gate below, so a fat-fingered
+		// `/qurl get $typo` never burns the user's quota.
+		return "", err
+	}
+
+	// Rate-limit AFTER a successful resolution: only a request that resolved to a
+	// real, channel-authorized resource — i.e. an actual mint attempt — counts
+	// against the user's quota. The dm:true delivery guard above stays earliest
+	// so an undeliverable privacy request consumes nothing either. (Resolution
+	// work for unknown aliases is instead bounded by Slack's own per-user
+	// slash-command throttle, not by spending the user's mint quota on typos.)
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
@@ -368,13 +380,8 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		SessionDuration: resourceSessionDuration,
 		MaxSessions:     resourceMaxSessions,
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
+		ResourceID:      boundResourceID,
 	}
-
-	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
-	if err != nil {
-		return "", err
-	}
-	input.ResourceID = boundResourceID
 
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
