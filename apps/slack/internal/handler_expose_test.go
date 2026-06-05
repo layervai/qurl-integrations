@@ -6,15 +6,40 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const testExposeChannel = "C_test"
+
+func exposeBlockActionsBodyWithEnterprise(t *testing.T, teamID, enterpriseID, userID, channelID, responseURL, actionID, value string) string {
+	t.Helper()
+	payload := map[string]any{
+		"type":         "block_actions",
+		payloadKeyTeam: map[string]any{"id": teamID},
+		payloadKeyUser: map[string]any{"id": userID},
+		"channel":      map[string]any{"id": channelID},
+		"trigger_id":   "trigger_test",
+		"response_url": responseURL,
+		"actions": []map[string]any{
+			{"action_id": actionID, "block_id": "row_block", "value": value},
+		},
+	}
+	if enterpriseID != "" {
+		payload["enterprise"] = map[string]any{"id": enterpriseID}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal block_actions payload: %v", err)
+	}
+	return url.Values{"payload": {string(raw)}}.Encode()
+}
 
 // --- chooser (slash) ------------------------------------------------------
 
@@ -65,6 +90,54 @@ func TestHandleExpose_AdminRendersChooser(t *testing.T) {
 	}
 	if !strings.Contains(reply, "expose") {
 		t.Fatalf("reply = %q, want the chooser fallback text", reply)
+	}
+}
+
+// TestHandleExpose_UserSurfaceRendersChooser fences the product-facing entry:
+// admins can run `/qurl expose` and get the same two-button chooser directly,
+// instead of a wrong-surface redirect to `/qurl-admin expose`.
+func TestHandleExpose_UserSurfaceRendersChooser(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	body := url.Values{
+		fieldCommand:     {commandUser},
+		fieldText:        {"expose"},
+		fieldTeamID:      {testAdminTeamID},
+		fieldUserID:      {testAdminUserID},
+		fieldChannelID:   {testExposeChannel},
+		fieldResponseURL: {"https://hooks.slack.com/expose"},
+		fieldTriggerID:   {"trigger_test"},
+	}
+	encoded := body.Encode()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, pathSlackCommands, strings.NewReader(encoded))
+	sig, tsHeader := signSlackBody(t, encoded)
+	r.Header.Set(headerSlackSignature, sig)
+	r.Header.Set(headerSlackTimestamp, tsHeader)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, w.Body.String())
+	}
+	if text, _ := got[respFieldText].(string); strings.Contains(text, "admin command") {
+		t.Fatalf("reply = %q, want chooser rather than wrong-surface redirect", text)
+	}
+	js, err := json.Marshal(got[blockKitFieldBlocks])
+	if err != nil {
+		t.Fatalf("marshal blocks: %v", err)
+	}
+	for _, want := range []string{exposeConnectorActionID, exposeURLActionID, "Expose qURL Connector", "Expose URL"} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("/qurl expose chooser missing %q: %s", want, js)
+		}
 	}
 }
 
@@ -200,10 +273,10 @@ func TestHandleExposeURLClick_OpensModalWithResourceOptions(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLClick_NoResourcesPostsEphemeral fences that with no URL
-// resources the button posts a guidance ephemeral and never opens an empty
-// picker.
-func TestHandleExposeURLClick_NoResourcesPostsEphemeral(t *testing.T) {
+// TestHandleExposeURLClick_NoResourcesOpensCreateModal fences that with no URL
+// resources the button still opens a helpful first-run modal instead of posting
+// a terse response_url warning or rendering an empty picker.
+func TestHandleExposeURLClick_NoResourcesOpensCreateModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -211,30 +284,81 @@ func TestHandleExposeURLClick_NoResourcesPostsEphemeral(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
-	var opened atomic.Int32
-	h.cfg.OpenView = func(context.Context, string, string, []byte) error { opened.Add(1); return nil }
+	views := make(chan []byte, 1)
+	h.cfg.OpenView = func(_ context.Context, _, _ string, view []byte) error {
+		views <- view
+		return nil
+	}
 
-	captured := &capturedResponseURL{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		captured.record(b)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testExposeChannel, srv.URL, exposeURLActionID, "")
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testExposeChannel, "https://hooks.slack.com/expose", exposeURLActionID, "")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("url click ack = %d, want 200", w.Code)
 	}
 
-	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(got, "No URL resources found") {
-		t.Errorf("ephemeral = %q, want the no-resources guidance", got)
+	var view []byte
+	select {
+	case view = <-views:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView was not called for the empty URL-resource state")
 	}
-	if opened.Load() != 0 {
-		t.Errorf("OpenView called %d times with no resources, want 0", opened.Load())
+	js := string(view)
+	for _, want := range []string{callbackIDExposeURLCreate, "Create a URL resource", exposeURLActionTarget, exposeURLActionAlias, "/qurl get $alias"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("create modal missing %q: %s", want, js)
+		}
+	}
+	if strings.Contains(js, exposeURLActionResource) {
+		t.Errorf("create modal should not render URL-resource select: %s", js)
+	}
+}
+
+func TestHandleExposeURLClick_NoResourcesFallsBackToEnterpriseOpen(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, nil, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	type openCall struct {
+		tokenOwnerID string
+		view         []byte
+	}
+	opens := make(chan openCall, 2)
+	h.cfg.OpenView = func(_ context.Context, tokenOwnerID, _ string, view []byte) error {
+		opens <- openCall{tokenOwnerID: tokenOwnerID, view: view}
+		if tokenOwnerID == testAdminTeamID {
+			return auth.ErrSlackBotTokenNotConfigured
+		}
+		return nil
+	}
+
+	body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, testEnterpriseID, testAdminUserID, testExposeChannel, "https://hooks.slack.com/expose", exposeURLActionID, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("url click ack = %d, want 200", w.Code)
+	}
+
+	var first, second openCall
+	select {
+	case first = <-opens:
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace OpenView was not called")
+	}
+	select {
+	case second = <-opens:
+	case <-time.After(2 * time.Second):
+		t.Fatal("enterprise OpenView fallback was not called")
+	}
+	if first.tokenOwnerID != testAdminTeamID || second.tokenOwnerID != testEnterpriseID {
+		t.Fatalf("OpenView token owner order = %q, %q; want workspace then enterprise", first.tokenOwnerID, second.tokenOwnerID)
+	}
+	if !strings.Contains(string(second.view), "Create a URL resource") {
+		t.Fatalf("enterprise fallback opened unexpected view: %s", second.view)
 	}
 }
 
@@ -306,9 +430,9 @@ func TestHandleExposeURLBareNonAdminDenied(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLBareNoResources fences that with no URL resources the bare
-// path posts the guidance ephemeral and never opens an empty picker.
-func TestHandleExposeURLBareNoResources(t *testing.T) {
+// TestHandleExposeURLBareNoResourcesOpensCreateModal fences that with no URL
+// resources the bare path opens the same helpful first-run modal.
+func TestHandleExposeURLBareNoResourcesOpensCreateModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -316,16 +440,34 @@ func TestHandleExposeURLBareNoResources(t *testing.T) {
 	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
-	var opened atomic.Int32
-	h.cfg.OpenView = func(context.Context, string, string, []byte) error { opened.Add(1); return nil }
+	views := make(chan []byte, 1)
+	h.cfg.OpenView = func(_ context.Context, _, _ string, view []byte) error {
+		views <- view
+		return nil
+	}
 	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("expose-url", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "No URL resources found") {
-		t.Fatalf("async = %q, want the no-resources guidance", async)
+	status, ack := inv.invokeAdmin("expose-url", testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("ack status = %d, want 200", status)
 	}
-	if opened.Load() != 0 {
-		t.Errorf("OpenView called %d times with no resources, want 0", opened.Load())
+	if !strings.Contains(ack, "Working") {
+		t.Fatalf("ack = %q, want working response", ack)
+	}
+	var view []byte
+	select {
+	case view = <-views:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenView was not called for bare expose-url empty state")
+	}
+	js := string(view)
+	for _, want := range []string{callbackIDExposeURLCreate, "Create a URL resource", exposeURLActionTarget, exposeURLActionAlias, "/qurl get $alias"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("create modal missing %q: %s", want, js)
+		}
+	}
+	if strings.Contains(js, exposeURLActionResource) {
+		t.Errorf("create modal should not render URL-resource select: %s", js)
 	}
 }
 
@@ -360,6 +502,19 @@ func exposeURLViewSubmissionBody(t *testing.T, meta ExposeURLModalMetadata, payl
 		})
 }
 
+func exposeURLCreateViewSubmissionBody(t *testing.T, meta ExposeURLModalMetadata, payloadTeamID, payloadUserID, targetURL, aliasText string) string {
+	t.Helper()
+	pm, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal private_metadata: %v", err)
+	}
+	return viewSubmissionBody(t, "V_test_expose_create", callbackIDExposeURLCreate, string(pm), payloadTeamID, payloadUserID,
+		map[string]map[string]interactionStateValue{
+			exposeURLBlockTarget: {exposeURLActionTarget: {Value: targetURL}},
+			exposeURLBlockAlias:  {exposeURLActionAlias: {Value: aliasText}},
+		})
+}
+
 // TestHandleExposeURLSubmission_BindsResource fences the happy path: a submitted
 // resource + channel alias binds the alias to the resource_id and the admin sees
 // the success reply.
@@ -388,6 +543,69 @@ func TestHandleExposeURLSubmission_BindsResource(t *testing.T) {
 
 	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
 	if !strings.Contains(got, "now available as `$"+testResourceExposeChannelAlias+"`") {
+		t.Fatalf("async reply = %q", got)
+	}
+	bound, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testExposeChannel, testResourceExposeChannelAlias)
+	if err != nil {
+		t.Fatalf("LookupChannelAlias: %v", err)
+	}
+	if !found || bound != testResourceExposeID {
+		t.Fatalf("channel alias = (%q, %v), want (%q, true)", bound, found, testResourceExposeID)
+	}
+}
+
+// TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias fences the
+// first-run modal: Slack creates the URL resource, exposes it under a channel
+// alias, and points the admin at the next `/qurl get $alias` step.
+func TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+		var input client.CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode create resource body: %v", err)
+		}
+		if input.Type != client.ResourceTypeURL {
+			t.Errorf("resource type = %q, want %q", input.Type, client.ResourceTypeURL)
+		}
+		if input.TargetURL != testResourceExposeURL {
+			t.Errorf("target_url = %q, want %q", input.TargetURL, testResourceExposeURL)
+		}
+		if input.Alias != testResourceExposeChannelAlias {
+			t.Errorf("alias = %q, want %q", input.Alias, testResourceExposeChannelAlias)
+		}
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testResourceExposeID,
+			testKeyTargetURL:  testResourceExposeURL,
+			fAttrAlias:        testResourceExposeChannelAlias,
+			testKeyType:       client.ResourceTypeURL,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	meta := ExposeURLModalMetadata{TeamID: testAdminTeamID, ChannelID: testExposeChannel, UserID: testAdminUserID, ResponseURL: srv.URL}
+	body := exposeURLCreateViewSubmissionBody(t, meta, testAdminTeamID, testAdminUserID, testResourceExposeURL, "$"+testResourceExposeChannelAlias)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("submission ack = %d %q, want 200 {}", w.Code, w.Body.String())
+	}
+
+	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(got, "URL resource is ready as `$"+testResourceExposeChannelAlias+"`") ||
+		!strings.Contains(got, "/qurl get $"+testResourceExposeChannelAlias) {
 		t.Fatalf("async reply = %q", got)
 	}
 	bound, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testExposeChannel, testResourceExposeChannelAlias)
@@ -463,6 +681,52 @@ func TestParseExposeURLModalArgs(t *testing.T) {
 			}
 			if resID != tc.wantResource || alias != tc.wantAlias {
 				t.Fatalf("got (resource=%q alias=%q), want (resource=%q alias=%q)", resID, alias, tc.wantResource, tc.wantAlias)
+			}
+		})
+	}
+}
+
+// TestParseExposeURLCreateModalArgs fences the first-run modal field
+// validation: URL target must be absolute http/https, and the channel alias
+// follows the shared Slack alias contract.
+func TestParseExposeURLCreateModalArgs(t *testing.T) {
+	tests := []struct {
+		name         string
+		targetValue  string
+		aliasValue   string
+		wantTarget   string
+		wantAlias    string
+		wantErrBlock string
+	}{
+		{name: "valid", targetValue: testResourceExposeURL, aliasValue: "$docs", wantTarget: testResourceExposeURL, wantAlias: "docs"},
+		{name: "alias without sigil", targetValue: testResourceExposeURL, aliasValue: "docs", wantTarget: testResourceExposeURL, wantAlias: "docs"},
+		{name: "missing url", targetValue: "", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
+		{name: "relative url", targetValue: "docs.example.com", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
+		{name: "unsupported scheme", targetValue: "ftp://docs.example.com", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
+		{name: "missing alias", targetValue: testResourceExposeURL, aliasValue: "", wantErrBlock: exposeURLBlockAlias},
+		{name: "invalid alias", targetValue: testResourceExposeURL, aliasValue: "$Bad Alias", wantErrBlock: exposeURLBlockAlias},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			values := map[string]map[string]interactionStateValue{
+				exposeURLBlockTarget: {exposeURLActionTarget: {Value: tc.targetValue}},
+				exposeURLBlockAlias:  {exposeURLActionAlias: {Value: tc.aliasValue}},
+			}
+			got, fieldErrors := parseExposeURLCreateModalArgs(values)
+			if tc.wantErrBlock != "" {
+				if _, ok := fieldErrors[tc.wantErrBlock]; !ok {
+					t.Fatalf("field errors = %v, want an error on %q", fieldErrors, tc.wantErrBlock)
+				}
+				return
+			}
+			if len(fieldErrors) != 0 {
+				t.Fatalf("unexpected field errors: %v", fieldErrors)
+			}
+			if got == nil {
+				t.Fatal("args = nil, want parsed args")
+			}
+			if got.TargetURL != tc.wantTarget || got.ChannelAlias != tc.wantAlias {
+				t.Fatalf("got (target=%q alias=%q), want (target=%q alias=%q)", got.TargetURL, got.ChannelAlias, tc.wantTarget, tc.wantAlias)
 			}
 		})
 	}

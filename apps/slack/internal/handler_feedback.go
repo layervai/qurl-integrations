@@ -61,7 +61,7 @@ func (h *Handler) handleFeedback(w http.ResponseWriter, values url.Values) {
 	}
 	// Modal is open; the slash command needs only a prompt 200 with no body so
 	// Slack doesn't post a redundant ephemeral on top of the modal.
-	respondJSON(w, http.StatusOK, map[string]any{})
+	w.WriteHeader(http.StatusOK)
 }
 
 type feedbackArgs struct {

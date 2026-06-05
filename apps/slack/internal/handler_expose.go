@@ -54,6 +54,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	log := slog.With(
 		"command", "expose_connector_click",
 		"team_id", payload.Team.ID,
+		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
 		"user_id", payload.User.ID,
 	)
@@ -72,7 +73,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 		ResponseURL:   responseURL,
 		CreatedAtUnix: h.now().Unix(),
 	}
-	teamID, triggerID := payload.Team.ID, payload.TriggerID
+	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
 		view, err := TunnelInstallModal(meta)
 		if err != nil {
@@ -82,7 +83,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
-		if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 			log.Warn("expose connector: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
@@ -94,9 +95,11 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 // URL" button. Unlike the connector installer (a static form), this modal lists
 // the workspace's existing URL resources in a dropdown fetched at open time, so
 // the admin picks one rather than typing an alias. With no URL resources to
-// expose it posts a short ephemeral via response_url instead of opening an empty
+// expose it opens a first-run create-and-expose modal instead of an empty
 // picker. Same open posture as handleExposeConnectorClick (ack fast, open on the
-// async goroutine inside the trigger window, fail open via response_url).
+// async goroutine inside the trigger window, retry with the Enterprise Grid
+// install token when Slack includes enterprise context, fail open via
+// response_url).
 //
 // No admin re-check before the resource list fetch here, unlike the bare-verb
 // path (openExposeURLWizard re-checks because `/qurl-admin expose-url` has no
@@ -109,6 +112,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 	log := slog.With(
 		"command", "expose_url_click",
 		"team_id", payload.Team.ID,
+		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
 		"user_id", payload.User.ID,
 	)
@@ -125,7 +129,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		UserID:      payload.User.ID,
 		ResponseURL: responseURL,
 	}
-	teamID, triggerID := payload.Team.ID, payload.TriggerID
+	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
 		// Bound the resource fetch on its own short budget so a slow upstream
 		// can't eat into the views.open trigger window; the open then gets the
@@ -140,7 +144,18 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 			return
 		}
 		if len(options) == 0 {
-			_ = h.postResponse(log, responseURL, "No URL resources found to expose. Create one in the qURL dashboard, then run `/qurl-admin expose` again.")
+			view, err := ExposeURLCreateModal(meta)
+			if err != nil {
+				log.Error("expose url: create modal render failed", "error", err)
+				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
+				return
+			}
+			openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+			defer openCancel()
+			if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
+				log.Warn("expose url: create modal views.open failed", "error", err)
+				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
+			}
 			return
 		}
 		view, err := ExposeURLModal(meta, options)
@@ -151,7 +166,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
-		if err := h.cfg.OpenView(openCtx, teamID, triggerID, view); err != nil {
+		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 			log.Warn("expose url: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
@@ -337,6 +352,136 @@ func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue)
 		return "", "", fieldErrors
 	}
 	return resourceID, channelAlias, nil
+}
+
+// handleExposeURLCreateSubmission processes the first-run URL modal. It creates
+// the protected URL resource, binds the chosen channel alias, and points the
+// admin at `/qurl get $alias` to mint links from then on.
+func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload *interactionPayload) {
+	var meta ExposeURLModalMetadata
+	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
+		slog.Warn("expose url create modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		respondExposeURLModalError(w, "Could not verify this dialog. Run /qurl expose again.")
+		return
+	}
+	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
+		slog.Warn("expose url create modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		respondExposeURLModalError(w, "Could not verify this dialog. Run /qurl expose again.")
+		return
+	}
+	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
+		slog.Warn("expose url create modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
+		respondExposeURLModalError(w, "This dialog was opened for a different workspace. Run /qurl expose again.")
+		return
+	}
+	if payload.User.ID == "" || payload.User.ID != meta.UserID {
+		slog.Warn("expose url create modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
+		respondExposeURLModalError(w, "Only the admin who opened this dialog can submit it. Run /qurl expose again.")
+		return
+	}
+	if h.cfg.AdminStore == nil || h.aliasStore == nil {
+		respondExposeURLModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		return
+	}
+
+	args, fieldErrors := parseExposeURLCreateModalArgs(payload.View.State.Values)
+	if len(fieldErrors) > 0 {
+		respondViewErrors(w, fieldErrors)
+		return
+	}
+
+	adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
+	if err != nil {
+		slog.Error("expose url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
+		return
+	}
+	if !isAdmin {
+		slog.Warn("expose url create modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		respondExposeURLModalError(w, "This action is admin-only.")
+		return
+	}
+
+	log := slog.With(
+		"command", "expose_url_create_modal",
+		"team_id", meta.TeamID,
+		"channel_id", meta.ChannelID,
+		"user_id", meta.UserID,
+		"view_id", payload.View.ID,
+	)
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		msg := h.createAndExposeURLResource(ctx, log, meta.TeamID, meta.ChannelID, args)
+		_ = h.postResponse(log, meta.ResponseURL, msg)
+	}) {
+		respondExposeURLModalError(w, "Slack bot is busy. Retry in a moment.")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{})
+}
+
+type exposeURLCreateArgs struct {
+	TargetURL    string
+	ChannelAlias string
+}
+
+func parseExposeURLCreateModalArgs(values map[string]map[string]interactionStateValue) (args *exposeURLCreateArgs, fieldErrors map[string]string) {
+	fieldErrors = map[string]string{}
+
+	targetURL := strings.TrimSpace(interactionStateText(values, exposeURLBlockTarget, exposeURLActionTarget))
+	parsed, err := url.Parse(targetURL)
+	if targetURL == "" {
+		fieldErrors[exposeURLBlockTarget] = "Enter the URL to protect."
+	} else if err != nil || parsed.Host == "" || (parsed.Scheme != resourceExposeSchemeHTTP && parsed.Scheme != resourceExposeSchemeHTTPS) {
+		fieldErrors[exposeURLBlockTarget] = "Enter an absolute http or https URL."
+	}
+
+	aliasRaw := strings.TrimSpace(interactionStateText(values, exposeURLBlockAlias, exposeURLActionAlias))
+	if aliasRaw != "" && !strings.HasPrefix(aliasRaw, "$") {
+		aliasRaw = "$" + aliasRaw
+	}
+	alias, reason := validateAliasTokenForNoun(aliasRaw, "Channel alias", "channel alias")
+	if reason != "" {
+		fieldErrors[exposeURLBlockAlias] = reason
+	}
+
+	if len(fieldErrors) > 0 {
+		return nil, fieldErrors
+	}
+	return &exposeURLCreateArgs{TargetURL: targetURL, ChannelAlias: alias}, nil
+}
+
+func (h *Handler) createAndExposeURLResource(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs) string {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		log.Error("expose url create: API key lookup failed", "error", err, "team_id", teamID)
+		return "Failed to create URL resource. Please try again."
+	}
+	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
+		Type:      client.ResourceTypeURL,
+		TargetURL: args.TargetURL,
+		Alias:     args.ChannelAlias,
+	})
+	if err != nil {
+		log.Warn("expose url create: resource create failed", "error", err, "team_id", teamID)
+		return sanitizeAPIError(err, "Failed to create URL resource")
+	}
+	if resource == nil || resource.ResourceID == "" {
+		log.Error("expose url create: qurl-service returned no resource_id", "team_id", teamID)
+		return "Failed to create URL resource. Please try again."
+	}
+
+	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.ChannelAlias, resource.ResourceID)
+	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
+		return fmt.Sprintf("URL resource was created, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or expose the resource with a different alias.", args.ChannelAlias, args.ChannelAlias)
+	}
+	if err != nil {
+		log.Error("expose url create: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.ChannelAlias, "resource_id", resource.ResourceID)
+		return "URL resource was created, but Slack could not expose it in this channel. Run `/qurl expose` again and choose *Expose URL*."
+	}
+	log.Info("URL resource created and exposed to Slack channel", "team_id", teamID, "channel_id", channelID, "channel_alias", args.ChannelAlias, "resource_id", resource.ResourceID)
+	return fmt.Sprintf("URL resource is ready as `$%s` in this channel. Run `/qurl get $%s` to create a qURL.", args.ChannelAlias, args.ChannelAlias)
 }
 
 // bindURLResourceToChannel binds channelAlias → resourceID in this channel

@@ -16,13 +16,16 @@ const (
 
 	// callbackIDExposeURL is the view callback_id for the URL-expose modal's
 	// view_submission (routed in handleInteraction).
-	callbackIDExposeURL = "expose_url_modal"
+	callbackIDExposeURL       = "expose_url_modal"
+	callbackIDExposeURLCreate = "expose_url_create_modal"
 
 	// URL-expose modal block/action ids.
 	exposeURLBlockResource  = "expose_url_resource"
 	exposeURLActionResource = "expose_url_resource_select"
 	exposeURLBlockAlias     = "expose_url_alias"
 	exposeURLActionAlias    = "expose_url_alias_input"
+	exposeURLBlockTarget    = "expose_url_target"
+	exposeURLActionTarget   = "expose_url_target_input"
 
 	// exposeURLMaxOptions caps the resource dropdown at Slack's static_select
 	// option limit. The first-page scan (listResourcesScanLimit=100) already
@@ -72,7 +75,7 @@ type ExposeURLModalMetadata struct {
 // workspace's existing URL resources (built by the caller from a fresh scan) and
 // a channel-alias input. On submit the chosen resource is exposed in the channel
 // under that alias (handleExposeURLSubmission). options must be non-empty — the
-// caller posts an ephemeral instead when the workspace has no URL resources, so
+// caller opens ExposeURLCreateModal when the workspace has no URL resources, so
 // the picker never renders empty.
 func ExposeURLModal(meta ExposeURLModalMetadata, options []map[string]any) ([]byte, error) {
 	privateMeta, err := json.Marshal(meta)
@@ -93,6 +96,36 @@ func ExposeURLModal(meta ExposeURLModalMetadata, options []map[string]any) ([]by
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
 			inputBlock(exposeURLBlockResource, "URL resource", "Pick a protected URL resource to expose in this channel.", false,
 				staticSelect(exposeURLActionResource, options, nil)),
+			inputBlock(exposeURLBlockAlias, "Channel alias", "The name people type after /qurl get in this channel (e.g. $docs).", false,
+				plainTextInput(exposeURLActionAlias, "$docs", "")),
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// ExposeURLCreateModal renders the first-run URL flow: when there are no
+// existing URL resources to pick, ask for the target URL and channel alias so
+// Slack can create and expose the resource directly.
+func ExposeURLCreateModal(meta ExposeURLModalMetadata) ([]byte, error) {
+	privateMeta, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private_metadata: %w", err)
+	}
+	if len(privateMeta) > slackPrivateMetadataMaxBytes {
+		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
+	}
+	payload := map[string]any{
+		blockKitFieldType:            blockKitTypeModal,
+		blockKitFieldCallbackID:      callbackIDExposeURLCreate,
+		blockKitFieldTitle:           plainTextObj("Expose URL"),
+		blockKitFieldSubmit:          plainTextObj("Create"),
+		blockKitFieldClose:           plainTextObj("Cancel"),
+		blockKitFieldPrivateMetadata: string(privateMeta),
+		blockKitFieldBlocks: []any{
+			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
+			sectionBlock("*Create a URL resource*\nAdd the URL you want to protect. Slack will expose it in this channel so people can run `/qurl get $alias`."),
+			inputBlock(exposeURLBlockTarget, "Target URL", "Absolute http or https URL to protect.", false,
+				plainTextInput(exposeURLActionTarget, "https://docs.example.com", "")),
 			inputBlock(exposeURLBlockAlias, "Channel alias", "The name people type after /qurl get in this channel (e.g. $docs).", false,
 				plainTextInput(exposeURLActionAlias, "$docs", "")),
 		},

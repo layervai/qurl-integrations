@@ -211,6 +211,9 @@ func TestHandleFeedbackOpensModal(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
+	if body := strings.TrimSpace(w.Body.String()); body != "" {
+		t.Fatalf("slash ack body = %q, want empty body so Slack does not post it", body)
+	}
 	if len(*openedView) == 0 {
 		t.Fatal("OpenView was not called")
 	}

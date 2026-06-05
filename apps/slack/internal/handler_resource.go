@@ -182,7 +182,7 @@ func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values
 // openExposeURLWizard is the async worker for handleExposeURLWizard: admin
 // re-check, fetch the channel's exposable URL resources, then open the picker
 // modal — all bounded to fit Slack's trigger window. With no URL resources to
-// expose it posts a short ephemeral via response_url instead of an empty picker.
+// expose it opens a first-run create-and-expose modal instead of an empty picker.
 // Mirrors openTunnelInstallWizard's gate/budget posture; the modal-render half is
 // shared with handleExposeURLClick (urlResourceSelectOptions + ExposeURLModal).
 func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
@@ -214,7 +214,41 @@ func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, tea
 		return
 	}
 	if len(options) == 0 {
-		_ = h.postErrorResponse(log, responseURL, "No URL resources found to expose. Create one in the qURL dashboard, then run `/qurl-admin expose-url` again.", true)
+		view, err := ExposeURLCreateModal(ExposeURLModalMetadata{
+			TeamID:      teamID,
+			ChannelID:   channelID,
+			UserID:      userID,
+			ResponseURL: responseURL,
+		})
+		if err != nil {
+			log.Error("expose-url wizard create modal render failed", "error", err)
+			_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
+			return
+		}
+		openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+		if openBudget <= 0 {
+			log.Warn("expose-url wizard trigger expired before create modal views.open")
+			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin expose-url` again.", true)
+			return
+		}
+		openCtx, openCancel := context.WithTimeout(ctx, openBudget)
+		defer openCancel()
+		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
+			log.Warn("expose-url wizard create modal views.open failed", "error", err,
+				"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+				"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			)
+			switch {
+			case errors.Is(err, ErrSlackTriggerExpired):
+				_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin expose-url` again.", true)
+			case errors.Is(err, ErrSlackRateLimited):
+				_ = h.postErrorResponse(log, responseURL, "Slack rate-limited the guided picker. Wait a moment, then run `/qurl-admin expose-url` again.", true)
+			default:
+				_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
+			}
+			return
+		}
+		_ = h.deleteOriginalResponse(log, responseURL)
 		return
 	}
 

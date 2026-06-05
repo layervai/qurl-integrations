@@ -52,6 +52,8 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 			h.handleTunnelEditSubmission(w, payload)
 		case callbackIDExposeURL:
 			h.handleExposeURLSubmission(w, payload)
+		case callbackIDExposeURLCreate:
+			h.handleExposeURLCreateSubmission(w, payload)
 		case callbackIDFeedback:
 			h.handleFeedbackSubmission(w, payload)
 		default:
@@ -468,6 +470,9 @@ type interactionPayload struct {
 	Team struct {
 		ID string `json:"id"`
 	} `json:"team"`
+	Enterprise struct {
+		ID string `json:"id"`
+	} `json:"enterprise"`
 	User struct {
 		ID string `json:"id"`
 	} `json:"user"`
