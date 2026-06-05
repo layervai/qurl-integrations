@@ -125,9 +125,7 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 		validateResponseURLFn: url.Parse,
 	}
 
-	start := time.Now()
 	ok := h.deleteOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL)
-	elapsed := time.Since(start)
 
 	if ok {
 		t.Fatal("deleteOriginalResponse returned true for HTTP 500")
@@ -135,8 +133,27 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("response_url hits = %d, want 1 because canceled baseCtx skips retry", got)
 	}
-	if elapsed >= deleteOriginalRetryDelay/2 {
-		t.Fatalf("deleteOriginalResponse took %s with canceled baseCtx; retry sleep was not skipped", elapsed)
+}
+
+func TestWaitForDeleteOriginalRetryReturnsImmediatelyWhenCanceled(t *testing.T) {
+	t.Parallel()
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := &Handler{baseCtx: baseCtx}
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- h.waitForDeleteOriginalRetry()
+	}()
+
+	select {
+	case got := <-done:
+		if got {
+			t.Fatal("waitForDeleteOriginalRetry returned true for canceled baseCtx")
+		}
+	case <-time.After(deleteOriginalRetryDelay / 2):
+		t.Fatal("waitForDeleteOriginalRetry slept despite canceled baseCtx")
 	}
 }
 
@@ -570,11 +587,10 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 	})
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
-	// Seed the alias so the worker resolves the token and reaches
-	// authenticatedClient, where panickingProvider.APIKey panics. The
-	// panic point sits AFTER alias resolution but BEFORE the rate-limit
-	// gate — without the seed the worker would fail closed at
-	// LookupChannelAlias and never exercise the recover defer.
+	// Seed the alias so the worker resolves the token, passes the rate-limit
+	// gate, and reaches authenticatedClient, where panickingProvider.APIKey
+	// panics. Without the seed the worker would fail closed at LookupChannelAlias
+	// (before the rate-limit gate) and never exercise the recover defer.
 	seedGetAliasBinding(t, h, "T123")
 
 	body := getTokenCommandBody("T123", "trig-panic", rec.URL)

@@ -26,54 +26,52 @@ const commonGetMintFailedMessage = "Failed to create qURL. Please try again."
 // sentinel.
 const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to create a qURL for a resource. Run `/qurl list` to see what's available."
 
-// Tunnel access limits applied to every `/qurl get` mint. `/qurl get` is
-// tunnel-only (raw URLs are unsupported — see urlNotSupportedGetMessage), so
-// these bound a shared tunnel link to a single short-lived viewer:
-//   - tunnelLinkExpiry: the link only admits a NEW visitor session for this
+// Access limits applied to every `/qurl get` mint. Raw URLs are unsupported
+// (see urlNotSupportedGetMessage), but existing URL resources can be minted by
+// their listed `$alias`. These limits bound a shared Slack-created link to a
+// single short-lived viewer:
+//   - resourceLinkExpiry: the link only admits a NEW visitor session for this
 //     long after minting (qurl-service `expires_in`).
-//   - tunnelSessionDuration: how long an admitted visitor session lasts
+//   - resourceSessionDuration: how long an admitted visitor session lasts
 //     (qurl-service `session_duration`).
-//   - tunnelMaxSessions: max concurrent visitor sessions (qurl-service
+//   - resourceMaxSessions: max concurrent visitor sessions (qurl-service
 //     `max_sessions`).
 //
 // How the four limits stack (the OneTimeUse=true mint plus these three):
 // OneTimeUse burns the link on its first redemption, so in steady state only
-// one session is ever established and tunnelMaxSessions=1 is belt-and-
+// one session is ever established and resourceMaxSessions=1 is belt-and-
 // suspenders — it makes the "one viewer" intent explicit on the wire and
-// stays correct if the one-time-use default is ever relaxed. tunnelLinkExpiry
-// bounds the window to redeem; tunnelSessionDuration bounds how long that one
+// stays correct if the one-time-use default is ever relaxed. resourceLinkExpiry
+// bounds the window to redeem; resourceSessionDuration bounds how long that one
 // session then lives.
 //
 // Enforcement is entirely server-side (qurl-service + qurl-router); this just
-// sets the policy at mint time and requires the qurl-service tunnel
+// sets the policy at mint time and requires the qurl-service resource-link
 // session-limit support to be deployed (otherwise create returns 400 —
 // hence the gating in the PR). Per-visitor identity is IP-based for now;
 // layervai/qurl-service#777 tracks the cookie follow-up.
 //
-// As of qurl-service#778 these values are ALSO the server-side tunnel
+// As of qurl-service#778 these values are ALSO the server-side resource-link
 // defaults (session_duration→1h, and one_time_use→single-visitor when
 // max_sessions<=1), so setting them explicitly here is belt-and-suspenders:
 // it pins the bot's intent on the wire and decouples it from any future
 // change to the server defaults, rather than being load-bearing.
 const (
-	tunnelLinkExpiry      = "1m"
-	tunnelSessionDuration = "1h"
-	tunnelMaxSessions     = 1
-	// tunnelLinkExpiryHuman is the user-facing rendering of tunnelLinkExpiry
+	resourceLinkExpiry      = "1m"
+	resourceSessionDuration = "1h"
+	resourceMaxSessions     = 1
+	// resourceLinkExpiryHuman is the user-facing rendering of resourceLinkExpiry
 	// for the Slack reply — "1 minute" reads clearer to a recipient than the
-	// terse "1m" duration syntax. Keep in sync with tunnelLinkExpiry above.
-	tunnelLinkExpiryHuman = "1 minute"
+	// terse "1m" duration syntax. Keep in sync with resourceLinkExpiry above.
+	resourceLinkExpiryHuman = "1 minute"
 )
 
-// urlNotSupportedGetMessage is the user-facing copy for a raw-URL
-// `/qurl get`. The parser flags the case with the terse
-// [ErrURLNotSupportedGet] sentinel; this is the rich reply the handler
-// renders so multi-sentence prose stays out of the parser's error
-// values (repo convention).
-// The breadcrumb points only at `/qurl list` (not `/qurl aliases`): list is
-// ungated and now renders each resource's channel `$alias` shortcuts inline, so
-// it's the single surface that always works and shows both slugs and aliases.
-const urlNotSupportedGetMessage = "`/qurl get` only works with a `$id` or `$alias` now — raw URLs aren't supported. Run `/qurl list` to see your resources and their channel aliases."
+// urlNotSupportedGetMessage is the user-facing copy for a raw-URL `/qurl get`.
+// The parser flags the case with the terse [ErrURLNotSupportedGet] sentinel;
+// this is the rich reply the handler renders so multi-sentence prose stays out
+// of the parser's error values (repo convention). Existing URL resources are
+// still mintable by their listed `$alias`; only ad hoc raw URL input is refused.
+const urlNotSupportedGetMessage = "`/qurl get` works with a listed `$id` or `$alias` — raw URLs aren't supported. Run `/qurl list` and copy the URL resource's alias."
 
 // resourceIDNotSupportedGetMessage is the user-facing copy for a `$r_<id>`
 // `/qurl get` (the resource-id form is gone). Same terse-sentinel
@@ -85,6 +83,10 @@ const resourceIDNotSupportedGetMessage = "`/qurl get` takes a `$id` or a channel
 // looping them on a retry. See that arm for why it's distinct from
 // [commonGetMintFailedMessage].
 const unexpectedGetShapeMessage = "Couldn't process that command. Please contact your Slack admin for assistance."
+
+func ambiguousResourceAliasMessage(alias string) string {
+	return fmt.Sprintf("`$%s` matches multiple resources in this channel. Ask your Slack admin to set a channel-specific alias for the one you need.", alias)
+}
 
 // tunnelDisabledMessage is shown when the qURL service returns the
 // `tunnel_disabled` error code (the workspace doesn't have
@@ -131,7 +133,7 @@ const channelRequiredMessage = "This command must be invoked from a channel."
 // bound here), and so is `/qurl list` now — both surface only what
 // resolves in this channel, so the breadcrumb stays accurate. This also
 // closes the former list/mint asymmetry once tracked by TODO(#460): list,
-// aliases, and mint share one channel-scoped set ([Handler.resourceAllowedInChannel]),
+// aliases, and mint share one channel-scoped set ([Handler.allowedResourceIDsForGet]),
 // so a user sees here exactly what they can mint here. The remaining UX
 // nicety — telling a user which OTHER channels an alias is bound in — is
 // deliberately not surfaced (that cross-channel disclosure is what the
@@ -140,13 +142,12 @@ func noResourceForAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` is not configured for this channel. Run `/qurl aliases` to see what's available here, or contact your Slack admin to add it.", alias)
 }
 
-// legacyAliasBindingMessage is the copy surfaced when a channel alias
-// resolves to a value that isn't a tunnel resource id — a raw URL bound
-// by the pre-tunnels-only `/qurl set-alias`. Those rows still exist in
-// DDB; resolving one would hand a URL to `POST /v1/resources/<url>/qurls`
-// and surface as the generic retry-friendly [commonGetMintFailedMessage],
-// stranding the user. Name the dead shortcut plainly and route to the
-// admin (only an admin can re-point it at a resource). Same posture as
+// legacyAliasBindingMessage is the copy surfaced when a channel alias resolves
+// to a value that isn't a resource id — for example, a raw URL bound by the
+// pre-resource `/qurl set-alias`. Existing URL resources are supported, but raw
+// URL binding values are not resource rows and cannot be passed to
+// `POST /v1/resources/{id}/qurls`. Name the dead shortcut plainly and route to
+// the admin (only an admin can re-point it at a resource). Same posture as
 // [noResourceForAliasMessage].
 //
 // `alias` is interpolated verbatim into the reply AND a `/qurl-admin set-alias
@@ -159,7 +160,7 @@ func legacyAliasBindingMessage(alias string) string {
 	if !aliasCharsetPattern.MatchString(alias) {
 		return "That channel alias points at a target that's no longer supported. Please ask your Slack admin to re-point it at a resource with `/qurl-admin set-alias`."
 	}
-	return fmt.Sprintf("`$%s` points at a target that's no longer supported. Please ask your Slack admin to re-point it at a resource with `/qurl-admin set-alias $%s $<id>`.", alias, alias)
+	return fmt.Sprintf("`$%s` points directly at a URL, which is no longer supported for channel aliases. Please ask your Slack admin to re-point it at a resource with `/qurl-admin set-alias $%s $<id>`.", alias, alias)
 }
 
 // authFailureMessageGet is the auth-failure copy shown when API-key
@@ -190,16 +191,15 @@ func (e *userError) Error() string { return e.msg }
 // completed the install.
 var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Please contact your Slack admin for assistance."}
 
-// handleGet implements `/qurl get <$slug|$alias>`:
+// handleGet implements `/qurl get <$id|$alias>`:
 //  1. Parse the slash-command text → [Command]. The positional arg is a
-//     tunnel `$slug` / channel-scoped `$alias` (a workspace admin
-//     configures aliases). Raw URLs and `$r_<id>` resource IDs are
-//     rejected at parse time — Slack mints tunnels by slug/alias only.
+//     listed resource ID/alias token: a tunnel `$slug`, a channel-scoped
+//     `$alias`, or a resource-level URL alias visible in this channel. Raw URLs
+//     and `$r_<id>` resource IDs are rejected at parse time.
 //  2. Ack within 3s via [runAsync] (200 + ackWorkingOnIt).
-//  3. Async goroutine: resolve `$slug`/`$alias` → resource_id
-//     (channel_policies.alias_bindings, then tunnel-slug fallback gated
-//     against the channel allow-set) then mint. Rate-limit gates it.
-//     POSTs the result to response_url.
+//  3. Async goroutine: rate-limit, resolve the token → resource_id (channel
+//     alias binding, tunnel-slug fallback, then URL resource-alias fallback,
+//     all channel-scoped), then mint. POSTs the result to response_url.
 //
 // Optional flags:
 //   - `dm:true` → final message via PostDM to the user's DM instead
@@ -312,11 +312,10 @@ type getWorkArgs struct {
 	triggerID string
 }
 
-// getWork runs the inner resolve→rate-limit→mint pipeline for the token
-// form (`/qurl get $slug` or `/qurl get $alias`). Raw URLs and `$r_<id>`
-// resource IDs are rejected at parse time. Returns the rendered reply
-// text (without leading `:warning:`) on success, or a [*userError] whose
-// msg routes to the user.
+// getWork runs the inner resolve→rate-limit→mint pipeline for the token form
+// (`/qurl get $id` or `/qurl get $alias`). Raw URLs and `$r_<id>` resource IDs
+// are rejected at parse time. Returns the rendered reply text (without leading
+// `:warning:`) on success, or a [*userError] whose msg routes to the user.
 func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
 
@@ -341,47 +340,53 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: unexpectedGetShapeMessage}
 	}
 
+	// AdminStore is required both for token resolution (the channel-alias lookup
+	// in resolveTokenForGet) and for the rate-limit gate further down.
+	if h.cfg.AdminStore == nil {
+		log.Warn("get: AdminStore is nil; token-form lookup unavailable", "team_id", args.teamID)
+		return "", errAdminStoreNotConfigured
+	}
+
+	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
+	if err != nil {
+		// Resolution failures (typoed / unknown / not-channel-authorized aliases)
+		// return BEFORE the rate-limit gate below, so a fat-fingered
+		// `/qurl get $typo` never burns the user's quota.
+		return "", err
+	}
+
+	// Rate-limit AFTER a successful resolution: only a request that resolved to a
+	// real, channel-authorized resource — i.e. an actual mint attempt — counts
+	// against the user's quota. The dm:true delivery guard above stays earliest
+	// so an undeliverable privacy request consumes nothing either. (Resolution
+	// work for unknown aliases is instead bounded by Slack's own per-user
+	// slash-command throttle, not by spending the user's mint quota on typos.)
+	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
+	if err != nil {
+		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
+		return "", &userError{msg: commonGetMintFailedMessage}
+	}
+	if !ok {
+		return "", &userError{msg: rateLimitMessage(retry, "")}
+	}
+
 	input := client.CreateInput{
 		Reason: args.cmd.Reason(),
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
 		OneTimeUse: true,
-		// Tunnel access limits — see the const block above.
-		ExpiresIn:       tunnelLinkExpiry,
-		SessionDuration: tunnelSessionDuration,
-		MaxSessions:     tunnelMaxSessions,
+		// Slack-created resource access limits — see the const block above.
+		ExpiresIn:       resourceLinkExpiry,
+		SessionDuration: resourceSessionDuration,
+		MaxSessions:     resourceMaxSessions,
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
+		ResourceID:      boundResourceID,
 	}
-
-	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
-	if err != nil {
-		return "", err
-	}
-	input.ResourceID = boundResourceID
 
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
 		log.Error("get: API key lookup failed", "error", err)
 		return "", &userError{msg: authErrorMessage(err)}
-	}
-
-	// Rate-limit gate. The resolve above (resolveTokenForGet) already
-	// fails closed with errAdminStoreNotConfigured when AdminStore is nil,
-	// so by here AdminStore is non-nil on the minting path and the gate
-	// always runs today. The nil-check is belt-and-suspenders:
-	// if a future minting arm regressed its own AdminStore guard, this
-	// would skip the rate-limit rather than nil-panic — qurl-service's
-	// per-key quota stays the backstop. (It is NOT a forward fence that
-	// refuses such an arm; that arm would need to add its own guard.)
-	if h.cfg.AdminStore != nil {
-		ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
-		if err != nil {
-			log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-			return "", &userError{msg: commonGetMintFailedMessage}
-		}
-		if !ok {
-			return "", &userError{msg: rateLimitMessage(retry, "")}
-		}
 	}
 
 	out, err := c.Create(ctx, input)
@@ -396,19 +401,19 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 
 	// Unconditional suffix — every `/qurl get` link is one-time use (see
-	// OneTimeUse above) AND only admits a session within tunnelLinkExpiry of
+	// OneTimeUse above) AND only admits a session within resourceLinkExpiry of
 	// minting. That admit window is tight, so surface it at the point of
 	// sharing: a recipient who clicks after it lapses gets a dead link, and
 	// the suffix tells them why.
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + tunnelLinkExpiryHuman + ")"
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + resourceLinkExpiryHuman + ")"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}
 	return message, nil
 }
 
-// resolveTokenForGet resolves a `$<token>` (channel alias or tunnel
-// slug) to a mintable resource_id for /qurl get, enforcing channel
+// resolveTokenForGet resolves a `$<token>` (channel alias, tunnel slug, or URL
+// resource alias) to a mintable resource for /qurl get, enforcing channel
 // authorization. Resolution order:
 //
 //  1. Channel alias binding (`channel_policies.alias_bindings`). The
@@ -421,46 +426,52 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //     `alias_bindings` entry here (e.g. a tunnel exposed to this channel
 //     from the `/qurl list` Edit modal without an alias). Resolve the
 //     slug to its resource_id and gate it through the channel allow-set
-//     ([Handler.resourceAllowedInChannel]) so the list→get round-trip the
+//     ([Handler.allowedResourceIDsForGet]) so the list→get round-trip the
 //     list advertises stays honest — the user references the `$<slug>`,
 //     never the opaque resource_id.
+//  3. Listed URL resource-alias fallback. URL resources do not have tunnel slugs,
+//     but `/qurl list` renders resource aliases when present. Resolve that
+//     alias from the resource page and choose a channel-allowed match before
+//     minting; if more than one channel-allowed resource shares that alias,
+//     fail closed as ambiguous rather than minting an arbitrary row.
 //
-// Cost note: every binding MISS now incurs one extra upstream hop
-// (GET /v1/resources?slug=…), including for plain typos. That's the
-// deliberate price of the round-trip honesty above — don't "optimize"
-// it away by short-circuiting the fallback on a binding miss.
+// Cost note: this runs BEFORE the per-user rate-limit gate in getWork — the gate
+// only fires once a token resolves, so a typo never burns the user's quota (see
+// getWork). A binding miss therefore incurs its upstream resource lookups (slug,
+// then the first-page alias scan when needed) un-throttled by that gate,
+// including for plain typos. That's the deliberate "spend a read rather than burn
+// the user's quota on a fat-fingered alias" tradeoff — don't "optimize" it away
+// by short-circuiting the fallbacks on a binding miss. Each scan is bounded by
+// listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
+// the request rate; if the in-bot limiter (CheckRateLimit, a stub today) ever
+// needs to shed this resolution cost too, add a cheap token-shape pre-filter
+// before the alias scan rather than moving the gate back ahead of resolution.
 //
-// Returns a [*userError] on AdminStore-nil, lookup failure,
-// not-a-known-token, or not-allowed-here.
+// Caller must have already checked AdminStore (getWork does this before
+// resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
+// not-allowed-here.
 func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string) (string, error) {
-	// Refuse early on a no-DDB sandbox deploy — token resolution
-	// requires the channel-scoped binding store.
-	if h.cfg.AdminStore == nil {
-		log.Warn("get: AdminStore is nil; token-form lookup unavailable", "team_id", teamID)
-		return "", errAdminStoreNotConfigured
-	}
 	resourceID, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, token)
 	if err != nil {
 		log.Warn("get: alias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID, "token", token)
 		return "", &userError{msg: serviceUnreachableMessage}
 	}
 	if found {
-		// Legacy-binding guard: the pre-tunnels-only `/qurl set-alias`
-		// stored raw URLs verbatim in alias_bindings, and those rows
-		// survive this PR. Resolving one would hand a URL to the mint
-		// call and surface as the generic retry error, stranding the
-		// user. Gate on the `r_` prefix (not
+		// Legacy-binding guard: the pre-resource `/qurl set-alias`
+		// stored raw URLs verbatim in alias_bindings, and those rows can
+		// survive. Resolving one would hand a URL to the resource-scoped mint
+		// call and surface as the generic retry error, stranding the user.
+		// Gate on the `r_` prefix (not
 		// an exact id-shape check — a stored id is whatever qurl-service
 		// issued, length not guaranteed to match the 11-char get-token
-		// shape): a legacy `r_<id>` is a real resource and still mints,
-		// only a non-`r_` value (a URL) is refused with a re-bind hint.
+		// shape): a `r_<id>` is a real resource and still mints, only a
+		// non-`r_` value (a raw URL) is refused with a re-bind hint.
 		// Residual: a junk `r_<typo>` row (the old parser rejected only
 		// the bare `r_` sigil) passes this prefix check and 404s at mint
 		// → the generic retry copy. Accepted as rare — an admin re-bind
-		// is the same fix as for a URL row; not worth an upstream
-		// pre-resolve on every binding hit just to special-case it.
+		// is the same fix as for a raw URL row.
 		if !strings.HasPrefix(resourceID, "r_") {
-			log.Warn("get: channel alias bound to a non-resource-id (legacy URL) target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
+			log.Warn("get: channel alias bound to a non-resource-id target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
 			return "", &userError{msg: legacyAliasBindingMessage(token)}
 		}
 		return resourceID, nil
@@ -469,35 +480,111 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 	// No binding — try the token as a tunnel slug, then authorize.
 	slugResourceID, slugErr := h.resolveTunnelSlugAliasTarget(ctx, teamID, token)
 	if slugErr != nil {
-		if errors.Is(slugErr, errTunnelSlugNotFound) {
-			// Neither a channel alias nor a live tunnel slug — genuinely
-			// unknown in this channel.
+		if !errors.Is(slugErr, errTunnelSlugNotFound) {
+			log.Warn("get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
+			return "", &userError{msg: serviceUnreachableMessage}
+		}
+		aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, nil)
+		if aliasErr != nil {
+			return "", aliasErr
+		}
+		if !aliasFound {
+			// Neither a channel alias, live tunnel slug, nor resource alias.
 			return "", &userError{msg: noResourceForAliasMessage(token)}
 		}
-		log.Warn("get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
-		return "", &userError{msg: serviceUnreachableMessage}
+		return aliasResourceID, nil
 	}
-	allowed, authErr := h.resourceAllowedInChannel(ctx, log, teamID, channelID, slugResourceID)
+	allowedSet, authErr := h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
 	if authErr != nil {
 		return "", authErr
 	}
-	if !allowed {
-		// Collapse to the SAME "not configured" copy as the
-		// slug-not-found branch above. A non-admin must not be able to
-		// distinguish "this slug exists in the workspace but isn't
-		// allowed in this channel" from "no such slug" — that gap is a
-		// tunnel-slug enumeration oracle. Logs the real reason for
-		// operators; the wire text stays uniform.
+	if _, allowed := allowedSet[slugResourceID]; !allowed {
+		if aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet); aliasErr != nil {
+			return "", aliasErr
+		} else if aliasFound {
+			return aliasResourceID, nil
+		}
+		// Collapse to the SAME "not configured" copy as the slug-not-found
+		// branch above. A non-admin must not be able to distinguish "this slug
+		// exists in the workspace but isn't allowed in this channel" from "no
+		// such slug" — that gap is a tunnel-slug enumeration oracle. Logs the
+		// real reason for operators; the wire text stays uniform.
 		log.Debug("get: tunnel slug resolved but not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "slug", token)
 		return "", &userError{msg: noResourceForAliasMessage(token)}
 	}
 	return slugResourceID, nil
 }
 
-// resourceAllowedInChannel reports whether resourceID may be minted from
-// channelID: true iff the ID is in `AllowedResourceIDsForChannel` (the union
-// of `alias_bindings.values()` and `allowed_resource_ids`). The gate is purely
-// channel-scoped — it does NOT depend on who the caller is.
+func (h *Handler) resolveListedResourceAliasForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string, allowedSet map[string]struct{}) (resourceID string, found bool, err error) {
+	if allowedSet == nil {
+		var authErr error
+		allowedSet, authErr = h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
+		if authErr != nil {
+			return "", false, authErr
+		}
+	}
+	resources, aliasErr := h.lookupListedResourceAliasesForGet(ctx, log, teamID, token)
+	if aliasErr != nil {
+		log.Warn("get: resource-alias fallback lookup failed", "error", aliasErr, "team_id", teamID, "alias", token)
+		return "", false, &userError{msg: serviceUnreachableMessage}
+	}
+	if len(resources) == 0 {
+		return "", false, nil
+	}
+
+	allowedMatches := make([]string, 0, len(resources))
+	for i := range resources {
+		if _, ok := allowedSet[resources[i].ResourceID]; ok {
+			allowedMatches = append(allowedMatches, resources[i].ResourceID)
+		}
+	}
+	if len(allowedMatches) == 1 {
+		return allowedMatches[0], true, nil
+	}
+	if len(allowedMatches) > 1 {
+		log.Debug("get: resource alias matched multiple resources allowed in channel — refusing ambiguous mint", "team_id", teamID, "channel_id", channelID, "user_id", userID, "alias", token, "match_count", len(allowedMatches))
+		return "", false, &userError{msg: ambiguousResourceAliasMessage(token)}
+	}
+	if len(resources) == 1 {
+		log.Debug("get: resource alias resolved but not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "alias", token)
+	} else {
+		log.Debug("get: resource alias matched only resources not allowed in channel — surfacing not-configured copy", "team_id", teamID, "channel_id", channelID, "user_id", userID, "alias", token, "match_count", len(resources))
+	}
+	return "", false, nil
+}
+
+func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *slog.Logger, teamID, alias string) ([]client.Resource, error) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]client.Resource, 0, 1)
+	for i := range page.Resources {
+		resource := page.Resources[i]
+		if resource.Status == client.StatusRevoked {
+			continue
+		}
+		if !isURLResource(&resource) {
+			continue
+		}
+		if resource.Alias == alias {
+			out = append(out, resource)
+		}
+	}
+	if page.HasMore {
+		log.Debug("get: resource lookup scanned first page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
+	}
+	return out, nil
+}
+
+// allowedResourceIDsForGet returns the resource IDs mintable from channelID:
+// the `AllowedResourceIDsForChannel` union of `alias_bindings.values()` and
+// `allowed_resource_ids`. The gate is purely channel-scoped — it does NOT
+// depend on who the caller is.
 //
 // No admin bypass: a workspace admin who runs `/qurl get $<slug>` from a
 // channel the tunnel isn't exposed to is refused exactly like anyone else.
@@ -506,29 +593,33 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 // mint all share this one channel-scoped definition, the bypass would be a
 // hole: someone who learned a slug/alias/channel-id elsewhere must still not
 // be able to mint a tunnel from a channel it isn't exposed to.) Admins manage
-// where a tunnel is exposed via `/qurl-admin tunnel install` and the
-// `/qurl list` Edit modal — not by minting from arbitrary channels. This also
-// closes the former TODO(#460) list/mint asymmetry: you can only see what you
-// can mint here, and only mint what you can see here.
+// where a tunnel is exposed via `/qurl-admin expose-connector` and the
+// `/qurl list` Edit modal — not by minting from arbitrary channels. Together
+// with the list-side scan, this closes the former TODO(#460) list/mint
+// asymmetry for visible rows: you can only see resources exposed here, and
+// minted tokens are rechecked against this same allow-set. URL resource-alias
+// fallback and duplicate-alias ambiguity detection still depend on the first
+// listResourcesScanLimit rows until #590 moves listing/resolution to an
+// allow-set-driven fetch; channel aliases and tunnel slugs do not depend on
+// that scan.
 //
-// Returns (false, [*userError]) on AdminStore-nil or allow-set fetch failure
-// so callers fail closed. Used by the tunnel-slug fallback in
-// resolveTokenForGet to gate a slug that has no channel alias binding (the
-// alias-binding path is already channel-scoped by the binding's presence).
-func (h *Handler) resourceAllowedInChannel(ctx context.Context, log *slog.Logger, teamID, channelID, resourceID string) (bool, error) {
+// Returns [*userError] on AdminStore-nil or allow-set fetch failure so callers
+// fail closed. Used by the tunnel-slug and listed URL resource-alias fallbacks
+// in resolveTokenForGet. The alias-binding path is already channel-scoped by
+// the binding's presence.
+func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger, teamID, channelID string) (map[string]struct{}, error) {
 	// Needs an AdminStore for the channel allow-set. Same fail-closed posture
 	// as the alias-form lookup on a no-DDB sandbox.
 	if h.cfg.AdminStore == nil {
 		log.Warn("get: AdminStore is nil; authorization unavailable", "team_id", teamID)
-		return false, errAdminStoreNotConfigured
+		return nil, errAdminStoreNotConfigured
 	}
 	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(ctx, teamID, channelID)
 	if err != nil {
 		log.Warn("get: allowed-resource fetch failed", "error", err, "team_id", teamID, "channel_id", channelID)
-		return false, &userError{msg: serviceUnreachableMessage}
+		return nil, &userError{msg: serviceUnreachableMessage}
 	}
-	_, ok := allowed[resourceID]
-	return ok, nil
+	return allowed, nil
 }
 
 // deliverGetDM handles the `dm:true` variant. The link goes to the

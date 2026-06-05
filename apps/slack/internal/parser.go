@@ -75,9 +75,18 @@ const (
 // lines; naming them keeps a typo from becoming a silent mislabel in the
 // audit trail.
 const (
-	AdminActionSetAlias         AdminAction = "set_alias"
-	AdminActionUnsetAlias       AdminAction = "unset_alias"
-	AdminActionTunnelInstall    AdminAction = "tunnel_install"
+	AdminActionSetAlias   AdminAction = "set_alias"
+	AdminActionUnsetAlias AdminAction = "unset_alias"
+	// AdminActionExpose is the gate-audit label for the `/qurl-admin expose`
+	// chooser (the two-button connector/URL picker).
+	AdminActionExpose AdminAction = "expose"
+	// AdminActionExposeConnector / AdminActionExposeURL are the gate-audit labels
+	// for the single-word connector/URL verbs `/qurl-admin expose-connector` and
+	// `/qurl-admin expose-url` — both the bare guided-modal entry and the typed
+	// power-user form. Distinct from AdminActionExpose (the two-button picker) so
+	// the audit trail names the exact verb.
+	AdminActionExposeConnector  AdminAction = "expose_connector"
+	AdminActionExposeURL        AdminAction = "expose_url"
 	AdminActionSetDisplayName   AdminAction = "set_display_name"
 	AdminActionUnsetDisplayName AdminAction = "unset_display_name"
 	AdminActionRevoke           AdminAction = "revoke"

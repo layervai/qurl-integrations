@@ -176,7 +176,7 @@ func run() error {
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
-	// `/qurl-admin tunnel install` can create the resource, bind `$slug`, and
+	// `/qurl-admin expose-connector` can create the resource, bind `$slug`, and
 	// let users immediately `/qurl get $slug` against the same table shape.
 	if adminStore != nil {
 		handler.SetAliasStore(adminStore)

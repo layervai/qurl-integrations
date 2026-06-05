@@ -300,8 +300,8 @@ func (h *Handler) requireAliasAdminGate(w http.ResponseWriter, teamID string, va
 // handleSetAlias routes `/qurl-admin set-alias $<alias> <target>`.
 //
 // **Admin restriction:** Enforced in code via requireAdminSync (a
-// CheckAdmin lookup against AdminStore), the same gate handleTunnel and
-// the admin membership verbs use. Slack does NOT restrict a slash command
+// CheckAdmin lookup against AdminStore), the same gate handleExposeConnector
+// and the admin membership verbs use. Slack does NOT restrict a slash command
 // to workspace admins — the "admins only" label on the `/qurl-admin`
 // registration is display text, not enforcement — so this code gate is the
 // only real boundary. It runs before alias resolution, so the CR feedback
@@ -379,7 +379,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("Tunnel `$%s` was not found. Run `/qurl-admin tunnel install %s` first, then retry this alias.", slug, slug)
+			return fmt.Sprintf("Tunnel `$%s` was not found. Run `/qurl-admin expose-connector %s` first, then retry this alias.", slug, slug)
 		}
 		return sanitizeAPIError(err, "Failed to resolve tunnel ID")
 	}

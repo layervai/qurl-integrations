@@ -69,24 +69,25 @@ func listCreateQurlBlockActionsBody(t *testing.T, teamID, userID, channelID, res
 }
 
 // TestHandleList_RendersCreateQurlButtons fences the interactive list:
-// every tunnel with a `$<token>` renders a "Create qURL" accessory
-// button valued by that token, the slug-less row gets NO button (it has
-// no token to mint against), and the plain-text fallback still carries
-// the complete listing for notifications / accessibility.
+// every resource with a `$<token>` renders a "Create qURL" accessory button
+// valued by that token, tokenless rows get NO button, and the plain-text
+// fallback still carries the complete listing for notifications /
+// accessibility.
 func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testListResIDProdDB, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasProdDB},
+			{testKeyResourceID: testListResIDURLDocs, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs},
 			{testKeyResourceID: "r_stage_db_bb", testKeyType: client.ResourceTypeTunnel, testKeySlug: "stage-db"},
 			// Slug-less, alias-less tunnel: no `$<token>` → no button.
 			{testKeyResourceID: "r_noslug0001", testKeyType: client.ResourceTypeTunnel},
 		}, "", false)
 	})
-	// Expose all three to C_test (incl. the slug-less row, so its "no ID" line
+	// Expose every row to C_test (incl. the slug-less row, so its "no ID" line
 	// still renders) — /qurl list is channel-scoped.
-	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, "r_stage_db_bb", "r_noslug0001")
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", testListResIDProdDB, testListResIDURLDocs, "r_stage_db_bb", "r_noslug0001")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
@@ -100,9 +101,8 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 		t.Fatalf("list response carried no blocks: %s", body)
 	}
 	vals := createQurlButtonValues(t, blocks)
-	// Rows sort by token: stage-db < prod-db? No — "prod-db" < "stage-db",
-	// and the tokenless row sorts last. So buttons are [prod-db, stage-db].
-	wantVals := []string{testListAliasProdDB, "stage-db"}
+	// Rows sort by token, with the tokenless row last.
+	wantVals := []string{testListAliasDocs, testListAliasProdDB, "stage-db"}
 	if len(vals) != len(wantVals) {
 		t.Fatalf("Create qURL button values = %v, want %v", vals, wantVals)
 	}
@@ -115,10 +115,124 @@ func TestHandleList_RendersCreateQurlButtons(t *testing.T) {
 	// Text fallback still lists every resource, including the buttonless
 	// slug-less row, plus the qURL creation guidance.
 	fallback := parseSlackText(t, body)
-	for _, want := range []string{"`$prod-db`", "`$stage-db`", "no ID", "/qurl get", "create a qURL link"} {
+	for _, want := range []string{"`$docs`", "`$prod-db`", "`$stage-db`", "no ID", testListGetCommand, "create a qURL link"} {
 		if !strings.Contains(fallback, want) {
 			t.Errorf("text fallback missing %q: %q", want, fallback)
 		}
+	}
+}
+
+// TestHandleList_DuplicateURLResourceAliasesRenderButtonless keeps ambiguous
+// URL resource aliases from producing identical Create buttons. A channel alias
+// can still disambiguate a row; without one, the shared resource alias is shown
+// as admin-actionable context rather than a mintable token.
+func TestHandleList_DuplicateURLResourceAliasesRenderButtonless(t *testing.T) {
+	const (
+		firstID  = "r_url_docs_first"
+		secondID = "r_url_docs_second"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: firstID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLFirst, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: secondID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLSecond, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", firstID, secondID)
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if vals := createQurlButtonValues(t, parseSlackBlocks(t, body)); len(vals) != 0 {
+		t.Fatalf("duplicate URL aliases should not render Create buttons; got %v", vals)
+	}
+	fallback := parseSlackText(t, body)
+	for _, want := range []string{"alias `$docs` is ambiguous here", testListURLFirst, testListURLSecond} {
+		if !strings.Contains(fallback, want) {
+			t.Errorf("text fallback missing %q: %q", want, fallback)
+		}
+	}
+	if strings.Contains(fallback, "`$docs` →") {
+		t.Errorf("duplicate URL alias rendered as a mintable token: %q", fallback)
+	}
+}
+
+// TestHandleList_URLResourceAliasShadowedByChannelAliasRendersButtonless
+// covers the other ambiguous-token path: `/qurl get $docs` resolves channel
+// aliases before listed resource aliases, so a URL row whose intrinsic alias is
+// already bound to another resource in this channel must not render a `$docs`
+// Create button that would mint the other row.
+func TestHandleList_URLResourceAliasShadowedByChannelAliasRendersButtonless(t *testing.T) {
+	const (
+		urlID    = "r_url_docs_shadowed"
+		tunnelID = "r_tunnel_docs_binding"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", testListAliasDocs, []string{tunnelID, urlID})
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: urlID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: tunnelID, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListSlugOpsTunnel, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if vals := createQurlButtonValues(t, parseSlackBlocks(t, body)); len(vals) != 1 || vals[0] != testListSlugOpsTunnel {
+		t.Fatalf("button values = %v, want only the tunnel token", vals)
+	}
+	fallback := parseSlackText(t, body)
+	if !strings.Contains(fallback, "alias `$docs` is ambiguous here") {
+		t.Errorf("text fallback missing shadowed-alias hint: %q", fallback)
+	}
+	if strings.Contains(fallback, "`$docs` →") {
+		t.Errorf("shadowed URL alias rendered as a mintable token: %q", fallback)
+	}
+}
+
+// TestHandleList_URLResourceAliasShadowedByTunnelSlugRendersButtonless
+// keeps list/get honest when a URL resource alias matches a tunnel slug:
+// `/qurl get $docs` tries the allowed tunnel slug before the listed resource
+// alias fallback, so the URL row must not advertise a `$docs` button.
+func TestHandleList_URLResourceAliasShadowedByTunnelSlugRendersButtonless(t *testing.T) {
+	const (
+		urlID    = "r_url_docs_slug"
+		tunnelID = "r_tunnel_docs_slug"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", tunnelID, urlID)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: urlID, testKeyType: client.ResourceTypeURL, fAttrAlias: testListAliasDocs, testKeyTargetURL: testListURLDocs, testKeyStatus: client.StatusActive},
+			{testKeyResourceID: tunnelID, testKeyType: client.ResourceTypeTunnel, testKeySlug: testListAliasDocs, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	if vals := createQurlButtonValues(t, parseSlackBlocks(t, body)); len(vals) != 1 || vals[0] != testListAliasDocs {
+		t.Fatalf("button values = %v, want only the tunnel slug token", vals)
+	}
+	fallback := parseSlackText(t, body)
+	if !strings.Contains(fallback, "alias `$docs` is ambiguous here") {
+		t.Errorf("text fallback missing tunnel-slug shadow hint: %q", fallback)
+	}
+	if strings.Contains(fallback, "`$docs` →") {
+		t.Errorf("shadowed URL alias rendered as a mintable token: %q", fallback)
 	}
 }
 
@@ -268,7 +382,7 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	}
 	text := parseSlackText(t, body)
 	// First and last rows both present → the text path truncates nothing.
-	for _, want := range []string{"`$tun-000`", fmt.Sprintf("`$tun-%03d`", n-1), "/qurl get"} {
+	for _, want := range []string{"`$tun-000`", fmt.Sprintf("`$tun-%03d`", n-1), testListGetCommand} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text fallback missing %q", want)
 		}

@@ -170,7 +170,7 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // TunnelInstallModalMetadata is carried through Slack private_metadata from
 // the slash-command request that opened the modal to the later
 // view_submission. The response_url lets the async installer post the same
-// ephemeral follow-up shape as the direct `/qurl-admin tunnel install <slug>` path.
+// ephemeral follow-up shape as the direct `/qurl-admin expose-connector <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
 // resource or minting a bootstrap key; Slack response URLs are time-limited.
 type TunnelInstallModalMetadata struct {
@@ -395,6 +395,30 @@ func escapeMrkdwnCode(s string) string {
 	return mrkdwnCodeEscaper.Replace(s)
 }
 
+// escapeMrkdwnText escapes user-controlled text that is interpolated directly
+// into Slack mrkdwn (not inside an inline code span). Slack requires escaping
+// &, <, and >; backticks, hard line breaks, and cosmetic formatting markers are
+// neutralized too so a displayed value cannot open a code span, split a row, or
+// apply bold/italic/strike formatting to the surrounding message.
+func escapeMrkdwnText(s string) string {
+	return mrkdwnTextEscaper.Replace(s)
+}
+
+// escapeMrkdwnURL is the URL-shaped sibling of escapeMrkdwnText, used where the
+// interpolated value is a target URL displayed inline in `/qurl list`. It keeps
+// the STRUCTURAL/safety escapes (&, <, >, backtick, line breaks) so a crafted
+// target can't open a code span, forge Slack `<…>` link syntax, or split a row
+// — but it deliberately drops the cosmetic-lookalike substitutions (`*`→∗,
+// `_`→＿, `~`→～) that escapeMrkdwnText applies. Those lookalikes are non-ASCII
+// glyphs that don't round-trip on copy, so they turn an underscore-bearing URL
+// (e.g. .../my_page) into a broken, non-pasteable string. Mid-token `_`/`*`/`~`
+// inside a URL aren't at the word boundaries Slack needs to italicize/bold/strike
+// anyway, so leaving them literal is both safe and correct. Descriptions still
+// use escapeMrkdwnText (prose, where the cosmetic neutralizing matters).
+func escapeMrkdwnURL(s string) string {
+	return mrkdwnURLEscaper.Replace(s)
+}
+
 // mrkdwnCodeEscaper is the single-pass substitution table used by
 // `escapeMrkdwnCode`. Defined at package scope so the replacer is
 // constructed once at init rather than per-call. Order matters in
@@ -402,6 +426,35 @@ func escapeMrkdwnCode(s string) string {
 // before `\r` so the CRLF pair collapses to one space rather than
 // two. (`\n` and `\r` standalone are handled by their own entries.)
 var mrkdwnCodeEscaper = strings.NewReplacer(
+	"`", "ˊ",
+	"\r\n", " ",
+	"\n", " ",
+	"\r", " ",
+)
+
+var mrkdwnTextEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"`", "ˊ",
+	"*", "∗",
+	"_", "＿",
+	"~", "～",
+	"\r\n", " ",
+	"\n", " ",
+	"\r", " ",
+)
+
+// mrkdwnURLEscaper is mrkdwnTextEscaper minus the cosmetic-lookalike rows
+// (`*`/`_`/`~`): URLs commonly contain underscores, and substituting them with
+// the fullwidth ＿ glyph breaks copy/paste. The amp/angle/backtick/line-break
+// rows are kept verbatim — those are the structural escapes a target URL still
+// needs (see [escapeMrkdwnURL]). Keep this in lockstep with mrkdwnTextEscaper's
+// structural rows so a future safety addition lands in both.
+var mrkdwnURLEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
 	"`", "ˊ",
 	"\r\n", " ",
 	"\n", " ",
@@ -624,12 +677,19 @@ func multilinePlainTextInput(actionID, placeholder, initialValue string) map[str
 }
 
 func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
-	return map[string]any{
+	element := map[string]any{
 		"type":                "static_select",
 		blockKitFieldActionID: actionID,
 		"options":             options,
-		"initial_option":      initial,
 	}
+	// Omit initial_option when nil — Slack rejects `"initial_option": null`. A
+	// nil initial means "no pre-selection" (the URL-expose picker forces a
+	// deliberate choice); a non-nil one pre-selects (e.g. the connector
+	// installer's environment default). Mirrors multiConversationsSelect's guard.
+	if initial != nil {
+		element["initial_option"] = initial
+	}
+	return element
 }
 
 // multiConversationsSelect returns a multi_conversations_select element — used
