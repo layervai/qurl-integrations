@@ -97,6 +97,14 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 // expose it posts a short ephemeral via response_url instead of opening an empty
 // picker. Same open posture as handleExposeConnectorClick (ack fast, open on the
 // async goroutine inside the trigger window, fail open via response_url).
+//
+// No admin re-check before the resource list fetch here, unlike the bare-verb
+// path (openExposeURLWizard re-checks because `/qurl-admin expose-url` has no
+// prior gate). This button is only reachable from the `/qurl-admin expose`
+// chooser, which requireAliasAdminGate-gates synchronously before rendering it,
+// and the chooser is an ephemeral visible only to that admin — so the seconds-long
+// window between render and click doesn't warrant a second CheckAdmin round-trip
+// inside the trigger budget. The submit handler re-checks at the mutation boundary.
 func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interactionPayload) {
 	log := slog.With(
 		"command", "expose_url_click",
