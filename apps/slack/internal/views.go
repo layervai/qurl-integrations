@@ -68,6 +68,9 @@ const (
 	blockKitFieldType            = "type"
 	blockKitTypeModal            = "modal"
 	blockKitTypeMultiConvSelect  = "multi_conversations_select"
+	// Button styles: Slack renders `primary` filled-green and `danger` red.
+	blockKitStylePrimary = "primary"
+	blockKitStyleDanger  = "danger"
 	// Slack caps private_metadata at 3000 bytes. Today's tunnel metadata is
 	// small; this guard is mainly defense against future field additions or a
 	// pathological response_url making modal submission fail only after open.
@@ -511,7 +514,7 @@ func buttonElement(buttonText, actionID, value string) map[string]any {
 // above the secondary Edit button on admin `/qurl list` rows.
 func primaryButtonElement(buttonText, actionID, value string) map[string]any {
 	b := buttonElement(buttonText, actionID, value)
-	b["style"] = "primary"
+	b["style"] = blockKitStylePrimary
 	return b
 }
 
@@ -521,7 +524,7 @@ func primaryButtonElement(buttonText, actionID, value string) map[string]any {
 // [withConfirmDialog] so the action can't fire on a stray click.
 func dangerButtonElement(buttonText, actionID, value string) map[string]any {
 	b := buttonElement(buttonText, actionID, value)
-	b["style"] = "danger"
+	b["style"] = blockKitStyleDanger
 	return b
 }
 
@@ -536,7 +539,7 @@ func withConfirmDialog(button map[string]any, title, text, confirmLabel string) 
 		"text":    map[string]any{"type": "mrkdwn", "text": text},
 		"confirm": plainTextObj(confirmLabel),
 		"deny":    plainTextObj("Cancel"),
-		"style":   "danger",
+		"style":   blockKitStyleDanger,
 	}
 	return button
 }

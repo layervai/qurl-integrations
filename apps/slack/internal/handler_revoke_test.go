@@ -53,7 +53,7 @@ func TestHandleRevoke_PostsConfirmButton(t *testing.T) {
 	if btn == nil {
 		t.Fatalf("slash revoke didn't post a Revoke button: %v", blocks)
 	}
-	if btn["style"] != "danger" {
+	if btn["style"] != blockKitStyleDanger {
 		t.Errorf("Revoke button style = %v, want danger", btn["style"])
 	}
 	if _, ok := btn["confirm"].(map[string]any); !ok {
@@ -266,7 +266,7 @@ func TestHandleList_RendersRevokeButton(t *testing.T) {
 	if btn == nil {
 		t.Fatalf("admin /qurl list row missing a Revoke button: %v", blocks)
 	}
-	if btn["style"] != "danger" {
+	if btn["style"] != blockKitStyleDanger {
 		t.Errorf("Revoke button style = %v, want danger", btn["style"])
 	}
 	confirm, ok := btn["confirm"].(map[string]any)
