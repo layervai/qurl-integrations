@@ -83,6 +83,11 @@ const listCreateButtonMaxRows = 45
 // Name and channel aliases.
 const listEditButtonLabel = "Edit"
 
+// listRevokeButtonLabel is the text on the admin-only red "Revoke" button
+// rendered beside "Edit" on each `/qurl list` row. Clicking it (after the
+// confirm dialog) revokes the row's resource and all of its qURLs.
+const listRevokeButtonLabel = "Revoke"
+
 // listEditButtonMaxRows caps how many rows may carry the per-row Edit button.
 // An admin row renders TWO blocks (a section line + an actions block carrying
 // Create qURL + Edit) versus one for the Create-only path, so it halves
@@ -139,6 +144,77 @@ func buildTunnelEditButtonValue(resourceID, token, displayName string, boundAlia
 		return "", false
 	}
 	return string(b), true
+}
+
+// tunnelRevokeButtonValue is the JSON snapshot on a `/qurl list` Revoke
+// button's `value`: the resolved resource_id (what DELETE /v1/resources/{id}
+// needs — the list already resolved the slug, so the click handler doesn't
+// re-resolve) and the row's `$<token>` (for the reply + confirm copy). Far
+// smaller than the Edit snapshot, so it never approaches the value cap.
+type tunnelRevokeButtonValue struct {
+	ResourceID string `json:"r"`
+	Token      string `json:"t"`
+}
+
+// buildTunnelRevokeButtonValue marshals a row's revoke snapshot. Returns
+// ("", false) if it would exceed Slack's button-value cap (unreachable in
+// practice — two short fields — but mirrors buildTunnelEditButtonValue so the
+// caller can drop the button rather than emit an oversized one).
+func buildTunnelRevokeButtonValue(resourceID, token string) (string, bool) {
+	b, err := json.Marshal(tunnelRevokeButtonValue{ResourceID: resourceID, Token: token})
+	if err != nil || len(b) > slackButtonValueMaxBytes {
+		return "", false
+	}
+	return string(b), true
+}
+
+// parseTunnelRevokeButtonValue is the inverse of buildTunnelRevokeButtonValue,
+// used by handleListRevokeClick to recover the resource_id + token from a
+// clicked button. Mirrors parseTunnelEditButtonValue.
+func parseTunnelRevokeButtonValue(value string) (tunnelRevokeButtonValue, error) {
+	var v tunnelRevokeButtonValue
+	if err := json.Unmarshal([]byte(value), &v); err != nil {
+		return tunnelRevokeButtonValue{}, err
+	}
+	return v, nil
+}
+
+// listRowBlocks builds the Block Kit block(s) for one `/qurl list` tunnel
+// row's interactive surface. Extracted from processListResources to keep that
+// function under the gocognit cap.
+//
+// Create qURL is the row's headline action. It renders as the primary (filled)
+// button ONLY on admin rows, where it sits beside Edit + Revoke and `primary`
+// expresses the Create-over-(Edit/Revoke) hierarchy. A create-only row has
+// nothing to outrank, and a column of lone primaries reads as noise (Slack
+// advises using `primary` sparingly), so it gets a default-style accessory
+// button. Admin rows pack Create qURL + Edit + Revoke into one actions block
+// (a third button adds no Block Kit block, so the row-budget invariant holds);
+// the Edit button carries the row's edit snapshot and Revoke the resolved
+// resource_id, so neither click needs an extra read. An edit snapshot too
+// large for a button value falls through to the Create-only accessory path.
+func listRowBlocks(r *client.Resource, sectionText, tok string, showEdit bool, boundAliases []string) []any {
+	if showEdit {
+		if editVal, ok := buildTunnelEditButtonValue(r.ResourceID, tok, r.Description, boundAliases); ok {
+			row := []map[string]any{
+				primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
+				buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
+			}
+			// Red "Revoke" beside Edit; the confirm dialog gates the
+			// destructive action and the value carries the resolved
+			// resource_id so the click handler needs no slug re-resolve.
+			if revokeVal, ok := buildTunnelRevokeButtonValue(r.ResourceID, tok); ok {
+				row = append(row, withConfirmDialog(
+					dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
+					"Revoke $"+escapeMrkdwnCode(tok)+"?",
+					revokeConfirmText,
+					"Revoke",
+				))
+			}
+			return []any{sectionBlock(sectionText), actionsBlock(row...)}
+		}
+	}
+	return []any{sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok))}
 }
 
 // aliasesExcluding returns boundAliases without the primary token, preserving
@@ -416,25 +492,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 			blocks = append(blocks, sectionBlock(sectionText))
 			continue
 		}
-		// Create qURL is the row's headline action. It renders as the primary
-		// (filled) button ONLY when an Edit button sits beside it — admin rows,
-		// where primary expresses the Create-over-Edit hierarchy. A create-only
-		// row has nothing to outrank, and a whole column of lone primaries reads
-		// as noise (Slack advises using `primary` sparingly), so it gets a
-		// default-style button. Admin rows pair the two in an actions block; the
-		// Edit button carries the row's edit snapshot so opening the modal needs
-		// no extra read. A snapshot too large for a button value falls through to
-		// the Create-only accessory path below.
-		if showEdit {
-			if editVal, ok := buildTunnelEditButtonValue(resources[i].ResourceID, tok, resources[i].Description, aliasMap[resources[i].ResourceID]); ok {
-				blocks = append(blocks, sectionBlock(sectionText), actionsBlock(
-					primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, tok),
-					buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
-				))
-				continue
-			}
-		}
-		blocks = append(blocks, sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, tok)))
+		blocks = append(blocks, listRowBlocks(&resources[i], sectionText, tok, showEdit, aliasMap[resources[i].ResourceID])...)
 	}
 
 	body := "*Protected Resources:*\n" + strings.Join(lines, "\n") + "\n\n_" + listFooterText + "_"
