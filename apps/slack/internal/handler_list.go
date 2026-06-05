@@ -76,6 +76,11 @@ const listCreateButtonMaxRows = 45
 // Name and channel aliases.
 const listEditButtonLabel = "Edit"
 
+// listRevokeButtonLabel is the text on the admin-only red "Revoke" button
+// rendered beside "Edit" on each `/qurl list` row. Clicking it (after the
+// confirm dialog) revokes the row's resource and all of its qURLs.
+const listRevokeButtonLabel = "Revoke"
+
 // listEditButtonMaxRows caps how many rows may carry the per-row Edit button.
 // An admin row renders TWO blocks (a section line + an actions block carrying
 // Create qURL + Edit) versus one for the Create-only path, so it halves
@@ -132,6 +137,39 @@ func buildTunnelEditButtonValue(resourceID, token, displayName string, boundAlia
 		return "", false
 	}
 	return string(b), true
+}
+
+// tunnelRevokeButtonValue is the JSON snapshot on a `/qurl list` Revoke
+// button's `value`: the resolved resource_id (what DELETE /v1/resources/{id}
+// needs — the list already resolved the slug, so the click handler doesn't
+// re-resolve) and the row's `$<token>` (for the reply + confirm copy). Far
+// smaller than the Edit snapshot, so it never approaches the value cap.
+type tunnelRevokeButtonValue struct {
+	ResourceID string `json:"r"`
+	Token      string `json:"t"`
+}
+
+// buildTunnelRevokeButtonValue marshals a row's revoke snapshot. Returns
+// ("", false) if it would exceed Slack's button-value cap (unreachable in
+// practice — two short fields — but mirrors buildTunnelEditButtonValue so the
+// caller can drop the button rather than emit an oversized one).
+func buildTunnelRevokeButtonValue(resourceID, token string) (string, bool) {
+	b, err := json.Marshal(tunnelRevokeButtonValue{ResourceID: resourceID, Token: token})
+	if err != nil || len(b) > slackButtonValueMaxBytes {
+		return "", false
+	}
+	return string(b), true
+}
+
+// parseTunnelRevokeButtonValue is the inverse of buildTunnelRevokeButtonValue,
+// used by handleListRevokeClick to recover the resource_id + token from a
+// clicked button. Mirrors parseTunnelEditButtonValue.
+func parseTunnelRevokeButtonValue(value string) (tunnelRevokeButtonValue, error) {
+	var v tunnelRevokeButtonValue
+	if err := json.Unmarshal([]byte(value), &v); err != nil {
+		return tunnelRevokeButtonValue{}, err
+	}
+	return v, nil
 }
 
 // aliasesExcluding returns boundAliases without the primary token, preserving
@@ -468,10 +506,22 @@ func appendResourceListBlocks(blocks []any, resource *client.Resource, aliases [
 	// to the Create-only accessory path below.
 	if showEdit && isTunnelResource(resource) {
 		if editVal, ok := buildTunnelEditButtonValue(resource.ResourceID, token, resource.Description, aliases); ok {
-			return append(blocks, sectionBlock(sectionText), actionsBlock(
+			row := []map[string]any{
 				primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, token),
 				buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
-			))
+			}
+			// Red "Revoke" beside Edit; the confirm dialog gates the destructive
+			// action and the value carries the resolved resource_id so the click
+			// handler needs no slug re-resolve.
+			if revokeVal, ok := buildTunnelRevokeButtonValue(resource.ResourceID, token); ok {
+				row = append(row, withConfirmDialog(
+					dangerButtonElement(listRevokeButtonLabel, listRevokeTunnelActionID, revokeVal),
+					"Revoke $"+escapeMrkdwnCode(token)+"?",
+					revokeConfirmText,
+					"Revoke",
+				))
+			}
+			return append(blocks, sectionBlock(sectionText), actionsBlock(row...))
 		}
 	}
 	return append(blocks, sectionWithAccessory(sectionText, buttonElement(listCreateButtonLabel, listCreateQurlActionID, token)))

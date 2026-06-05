@@ -46,6 +46,14 @@ const listCreateQurlActionID = "list_create_qurl"
 // value (a [tunnelEditButtonValue] JSON snapshot), not the action_id.
 const listEditTunnelActionID = "list_edit_tunnel"
 
+// listRevokeTunnelActionID is the action_id on the admin-only red "Revoke"
+// button rendered beside "Edit" on each `/qurl list` row. The button carries a
+// Slack confirm dialog, so the block_actions handler only sees the click after
+// the admin confirms; it then revokes the row's resource (and all its qURLs).
+// The clicked tunnel is identified by the button's value (a
+// [tunnelRevokeButtonValue] JSON snapshot), not the action_id.
+const listRevokeTunnelActionID = "list_revoke_tunnel"
+
 const (
 	blockKitFieldActionID        = "action_id"
 	blockKitFieldValue           = "value"
@@ -60,6 +68,9 @@ const (
 	blockKitFieldType            = "type"
 	blockKitTypeModal            = "modal"
 	blockKitTypeMultiConvSelect  = "multi_conversations_select"
+	// Button styles: Slack renders `primary` filled-green and `danger` red.
+	blockKitStylePrimary = "primary"
+	blockKitStyleDanger  = "danger"
 	// Slack caps private_metadata at 3000 bytes. Today's tunnel metadata is
 	// small; this guard is mainly defense against future field additions or a
 	// pathological response_url making modal submission fail only after open.
@@ -525,8 +536,34 @@ func buttonElement(buttonText, actionID, value string) map[string]any {
 // above the secondary Edit button on admin `/qurl list` rows.
 func primaryButtonElement(buttonText, actionID, value string) map[string]any {
 	b := buttonElement(buttonText, actionID, value)
-	b["style"] = "primary"
+	b["style"] = blockKitStylePrimary
 	return b
+}
+
+// dangerButtonElement is a [buttonElement] rendered with Slack's `danger`
+// (red) style — used for the destructive "Revoke" action on admin `/qurl list`
+// rows, against the green `primary` "Create qURL". Pair it with
+// [withConfirmDialog] so the action can't fire on a stray click.
+func dangerButtonElement(buttonText, actionID, value string) map[string]any {
+	b := buttonElement(buttonText, actionID, value)
+	b["style"] = blockKitStyleDanger
+	return b
+}
+
+// withConfirmDialog attaches a Slack confirm dialog to a button element so the
+// block_action only fires after the user confirms — Slack renders it as a
+// modal-style popup. The confirm button inherits the `danger` (red) style for
+// destructive actions. title/confirmLabel are plain_text; text is mrkdwn.
+// Mutates and returns button for call-site chaining.
+func withConfirmDialog(button map[string]any, title, text, confirmLabel string) map[string]any {
+	button["confirm"] = map[string]any{
+		"title":   plainTextObj(title),
+		"text":    map[string]any{"type": "mrkdwn", "text": text},
+		"confirm": plainTextObj(confirmLabel),
+		"deny":    plainTextObj("Cancel"),
+		"style":   blockKitStyleDanger,
+	}
+	return button
 }
 
 // actionsBlock returns an `actions` block holding the given button elements as

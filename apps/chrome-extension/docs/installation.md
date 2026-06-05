@@ -2,7 +2,7 @@
 
 ## Local Unpacked Install
 
-1. From `qurl-gmail-chrome-extension/`, build the unpacked extension:
+1. From `apps/chrome-extension/`, build the unpacked extension:
 
 ```bash
 npm run release
