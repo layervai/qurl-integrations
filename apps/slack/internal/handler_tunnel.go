@@ -370,7 +370,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	}
 	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
 	defer openCancel()
-	if err := h.openTunnelInstallView(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
+	if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
 		log.Error("tunnel install wizard views.open failed",
 			"error", err,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
@@ -395,7 +395,12 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	_ = h.deleteOriginalResponse(log, responseURL)
 }
 
-func (h *Handler) openTunnelInstallView(ctx context.Context, log *slog.Logger, teamID, enterpriseID, triggerID string, view []byte) error {
+// openViewWithGridFallback opens a modal with the workspace bot token and, on a
+// missing-token error, retries with the Enterprise Grid org install token. The
+// retry only fires for ErrSlackBotTokenNotConfigured and only when the
+// enterprise ID is a distinct token owner — every other error returns
+// unchanged. Shared by the guided tunnel installer and `/qurl feedback`.
+func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger, teamID, enterpriseID, triggerID string, view []byte) error {
 	err := h.cfg.OpenView(ctx, teamID, triggerID, view)
 	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
 		return err
@@ -403,7 +408,7 @@ func (h *Handler) openTunnelInstallView(ctx context.Context, log *slog.Logger, t
 	if enterpriseID == "" || enterpriseID == teamID {
 		return err
 	}
-	log.Warn("workspace Slack bot token missing; retrying guided modal with Enterprise Grid install token",
+	log.Warn("workspace Slack bot token missing; retrying modal with Enterprise Grid install token",
 		"team_id", teamID,
 		"enterprise_id", enterpriseID,
 	)

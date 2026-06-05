@@ -102,6 +102,10 @@ var ErrCreateAPIKeyNilInput = errors.New("create api key: input is nil")
 // ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
 var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
 
+// ErrDeleteResourceEmptyID is returned by DeleteResource when resourceID
+// is empty.
+var ErrDeleteResourceEmptyID = errors.New("delete resource: resource_id is empty")
+
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
 var ErrUpdateResourceEmptyID = errors.New("update resource: resource_id is empty")
@@ -886,6 +890,25 @@ func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
 		return fmt.Errorf("build request: %w", err)
 	}
 	_, err = c.do(req, nil, "DELETE /v1/api-keys/:key_id")
+	return err
+}
+
+// DeleteResource revokes a resource by its `r_…` ID. The server revokes the
+// resource AND every qURL minted against it (DELETE /v1/resources/{id} —
+// "Revoke resource and all its qURLs"); the action is not reversible.
+// resourceID must be a resolved `r_…` ID — callers holding a slug/alias must
+// resolve it first (see the Slack bot's resolveTokenForGet). A 200/204 maps to
+// nil; 404/401/403/5xx surface as a *APIError for the caller to map.
+func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return ErrDeleteResourceEmptyID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	_, err = c.do(req, nil, "DELETE /v1/resources/:id")
 	return err
 }
 

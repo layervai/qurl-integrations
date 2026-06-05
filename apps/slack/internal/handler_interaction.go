@@ -50,6 +50,8 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 			h.handleTunnelInstallSubmission(w, payload)
 		case callbackIDTunnelEdit:
 			h.handleTunnelEditSubmission(w, payload)
+		case callbackIDFeedback:
+			h.handleFeedbackSubmission(w, payload)
 		default:
 			// Unknown callback_id — ack 200 (Slack hangs the modal
 			// otherwise) and log so a future view drift is visible.
@@ -75,8 +77,13 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
-	// Edit is checked first so a row carrying both buttons routes to the modal
-	// opener rather than the mint when Edit is the clicked element.
+	// Revoke and Edit are checked before Create: a row carries all three
+	// buttons, but a single click yields exactly one matching action_id, so
+	// matching on action_id routes each button to its own handler.
+	if revokeAction, ok := findActionByID(payload.Actions, listRevokeTunnelActionID); ok {
+		h.handleListRevokeClick(w, payload, revokeAction)
+		return
+	}
 	if editAction, ok := findActionByID(payload.Actions, listEditTunnelActionID); ok {
 		h.handleListEditClick(w, payload, editAction)
 		return
@@ -390,7 +397,7 @@ func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		respFieldResponseAction: "update",
+		respFieldResponseAction: respActionUpdate,
 		respFieldView:           json.RawMessage(view),
 	})
 }

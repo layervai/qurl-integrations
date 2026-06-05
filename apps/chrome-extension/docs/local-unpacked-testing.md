@@ -14,14 +14,14 @@ This document explains how to build the extension with `scripts/package-all.sh`,
 - Google Chrome with access to `chrome://extensions`
 - A Gmail account
 - A running qURL upload service
-- The project root at `qurl-gmail-chrome-extension/`
+- The project root at `apps/chrome-extension/`
 
 ## 1. Build the Unpacked Release
 
 From the project root, run:
 
 ```bash
-cd qurl-gmail-chrome-extension
+cd apps/chrome-extension
 ./scripts/package-all.sh 1.0.0
 ```
 
@@ -41,7 +41,7 @@ Expected output:
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
 3. Click **Load unpacked**
-4. Select the `qurl-gmail-chrome-extension/release/` directory
+4. Select the `apps/chrome-extension/release/` directory
 5. Confirm that the extension appears in the extensions list and the toolbar icon is available
 
 ![Chrome Extensions Page](./images/patch-0.png)

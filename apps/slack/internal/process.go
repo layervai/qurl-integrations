@@ -28,8 +28,11 @@ import (
 const (
 	fieldResponseURL  = "response_url"
 	fieldTeamID       = "team_id"
+	fieldTeamDomain   = "team_domain"
 	fieldUserID       = "user_id"
+	fieldUserName     = "user_name"
 	fieldChannelID    = "channel_id"
+	fieldChannelName  = "channel_name"
 	fieldCommand      = "command"
 	fieldText         = "text"
 	fieldTriggerID    = "trigger_id"
