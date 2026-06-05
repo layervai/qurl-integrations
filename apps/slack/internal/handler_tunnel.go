@@ -114,7 +114,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 		Environment: tunnelEnvDocker,
 	}
 	if !tunnelSlugPattern.MatchString(args.Slug) {
-		return nil, "qURL tunnel ID must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
+		return nil, "qURL Connector ID must be 3-64 chars, lowercase letters/numbers/hyphens, start with a letter, and end with a letter or number.\n\n" + tunnelInstallUsage()
 	}
 	for _, token := range fields[1:] {
 		if msg := parseTunnelInstallOption(args, token); msg != "" {
@@ -278,7 +278,7 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided tunnel setup is not configured on this Slack bot deployment. Use `/qurl-admin expose-connector <id> [port:8080]` instead.")
+		respondSlack(w, "Guided qURL Connector setup is not configured on this Slack bot deployment. Use `/qurl-admin expose-connector <id> [port:8080]` instead.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -364,7 +364,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 	})
 	if err != nil {
 		log.Error("tunnel install wizard modal render failed", "error", err)
-		_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
+		_ = h.postErrorResponse(log, responseURL, "Could not open guided qURL Connector setup. Please retry or contact support.", true)
 		return
 	}
 	triggerElapsed = h.now().Sub(triggerReceivedAt)
@@ -397,7 +397,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
 			_ = h.postErrorResponse(log, responseURL, h.guidedTunnelSlackAppInstallMessage(), true)
 		default:
-			_ = h.postErrorResponse(log, responseURL, "Could not open guided tunnel setup. Please retry or contact support.", true)
+			_ = h.postErrorResponse(log, responseURL, "Could not open guided qURL Connector setup. Please retry or contact support.", true)
 		}
 		return
 	}
@@ -427,9 +427,9 @@ func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger
 func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
 	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
 	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
-		return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin expose-connector` again."
+		return "Guided qURL Connector setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin expose-connector` again."
 	}
-	return "Guided tunnel setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin expose-connector` again."
+	return "Guided qURL Connector setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin expose-connector` again."
 }
 
 func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {
@@ -470,7 +470,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	})
 	if err != nil {
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
-		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create or find the tunnel resource"))
+		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"))
 		return
 	}
 
@@ -489,12 +489,12 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	preparedMessage, err := h.prepareTunnelInstallMessage(args)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		_ = h.postResponse(log, responseURL, "qURL tunnel setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.")
+		_ = h.postResponse(log, responseURL, "qURL Connector setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.")
 		return
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
-		Name:           "Slack tunnel bootstrap " + args.Slug,
+		Name:           "Slack qURL Connector bootstrap " + args.Slug,
 		Scopes:         []string{tunnelScopeAgent, tunnelScopeWrite},
 		Purpose:        client.APIKeyPurposeTunnelBootstrap,
 		TunnelSlug:     args.Slug,
@@ -503,7 +503,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	})
 	if err != nil {
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to mint a tunnel bootstrap key"))
+		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"))
 		return
 	}
 	if key.APIKey == "" {
@@ -523,7 +523,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	if err != nil {
 		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
-		_ = h.postResponse(log, responseURL, "qURL tunnel setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.")
+		_ = h.postResponse(log, responseURL, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.")
 		return
 	}
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
@@ -535,7 +535,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "response_url_delivery_failed")
-		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the tunnel install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin expose-connector` again.") {
+		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin expose-connector` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 	}
@@ -664,7 +664,7 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 		return "", err
 	}
 	var b strings.Builder
-	b.WriteString("qURL tunnel `")
+	b.WriteString("qURL Connector `")
 	b.WriteString(args.Slug)
 	b.WriteString("`")
 	// Show the tunnel's Display Name next to the id. It reuses the resource
@@ -722,9 +722,9 @@ func tunnelImageNote(usingDefaultImage bool) string {
 func tunnelInstallRateLimitMessage(err error) string {
 	retryAfter := slackRetryAfterLabel(SlackRateLimitRetryAfter(err))
 	if retryAfter == "" {
-		return "Slack rate-limited guided tunnel setup. Wait up to " + humanDurationCeilMinutes(slackRetryAfterDisplayCap) + ", then run `/qurl-admin expose-connector` again."
+		return "Slack rate-limited guided qURL Connector setup. Wait up to " + humanDurationCeilMinutes(slackRetryAfterDisplayCap) + ", then run `/qurl-admin expose-connector` again."
 	}
-	return "Slack rate-limited guided tunnel setup. Wait " + retryAfter + ", then run `/qurl-admin expose-connector` again."
+	return "Slack rate-limited guided qURL Connector setup. Wait " + retryAfter + ", then run `/qurl-admin expose-connector` again."
 }
 
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image string) (string, error) {

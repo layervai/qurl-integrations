@@ -85,7 +85,7 @@ const (
 	reasonAliasNoSigil   = "Alias must start with `$` (e.g. `$staging`)."
 	reasonAliasEmptyName = "Missing alias name after `$`."
 
-	msgAliasTargetInvalid = "Target must be a tunnel ID (`$prod-dashboard`). Tunnel IDs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
+	msgAliasTargetInvalid = "Target must be a qURL Connector ID (`$prod-dashboard`). qURL Connector IDs are 3-64 chars, start with a lowercase letter, contain lowercase letters/numbers/hyphens, and end with a letter or number.\n\n" + aliasUsage
 	msgAliasMissing       = reasonAliasMissing + "\n\n" + aliasUsage
 	msgAliasNoSigil       = reasonAliasNoSigil + "\n\n" + aliasUsage
 	msgAliasEmptyName     = reasonAliasEmptyName + "\n\n" + aliasUsage
@@ -101,7 +101,7 @@ const (
 // admins are most likely to try) rather than asserting the admin typed
 // one. Distinct from [msgAliasTargetInvalid], which fires once a
 // `$`-prefixed target fails the tunnel-slug grammar.
-const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a tunnel ID — `/qurl-admin set-alias $<alias> $<id>`. (Raw URLs and resource IDs aren't supported targets.)"
+const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a qURL Connector ID — `/qurl-admin set-alias $<alias> $<id>`. (Raw URLs and resource IDs aren't supported targets.)"
 
 // aliasArgs is the parsed shape of a `/qurl-admin set-alias $a <target>` or
 // `/qurl-admin unset-alias $a` text body. Kept as a separate value type so
@@ -379,9 +379,9 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("Tunnel `$%s` was not found. Run `/qurl-admin expose-connector %s` first, then retry this alias.", slug, slug)
+			return fmt.Sprintf("qURL Connector `$%s` was not found. Run `/qurl-admin expose-connector %s` first, then retry this alias.", slug, slug)
 		}
-		return sanitizeAPIError(err, "Failed to resolve tunnel ID")
+		return sanitizeAPIError(err, "Failed to resolve qURL Connector ID")
 	}
 
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
@@ -406,7 +406,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	// server-minted `r_<id>` with no embeddable credentials), so no
 	// redaction is needed.
 	logAliasBound(teamID, channelID, alias, slug, resourceID)
-	return fmt.Sprintf("Alias `$%s` now points to tunnel `$%s` in this channel.", alias, slug)
+	return fmt.Sprintf("Alias `$%s` now points to qURL Connector `$%s` in this channel.", alias, slug)
 }
 
 func logAliasBound(teamID, channelID, alias, slug, resourceID string) {

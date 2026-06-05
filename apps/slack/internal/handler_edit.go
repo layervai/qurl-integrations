@@ -639,7 +639,7 @@ func (h *Handler) channelHasAliasForResource(ctx context.Context, log *slog.Logg
 // defense-in-depth — same posture as the modal's tunnelEditTokenLabel. Channel
 // changes render as `<#C…>` mentions so the admin sees the channel names.
 func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReconcileResult, chanRes *channelExposureResult) string {
-	lines := []string{fmt.Sprintf("✅ Updated tunnel `$%s`.", escapeMrkdwnCode(token))}
+	lines := []string{fmt.Sprintf("✅ Updated qURL Connector `$%s`.", escapeMrkdwnCode(token))}
 	lines = append(lines, changes...)
 	if len(aliasRes.added) > 0 {
 		lines = append(lines, "Added alias(es): "+joinAliasCodes(aliasRes.added))
@@ -648,7 +648,7 @@ func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReco
 		lines = append(lines, "Removed alias(es): "+joinAliasCodes(aliasRes.removed))
 	}
 	if len(aliasRes.conflicts) > 0 {
-		lines = append(lines, "Skipped (already used by another tunnel in this channel): "+joinAliasCodes(aliasRes.conflicts))
+		lines = append(lines, "Skipped (already used by another qURL Connector in this channel): "+joinAliasCodes(aliasRes.conflicts))
 	}
 	if len(chanRes.exposed) > 0 {
 		lines = append(lines, "Exposed to: "+joinChannelMentions(chanRes.exposed))

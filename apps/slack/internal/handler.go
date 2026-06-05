@@ -1379,7 +1379,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		// to gating on both. `/qurl aliases` above gates on AdminStore
 		// because it READS channel_policies through it.
 		lines = append(lines,
-			"• `/qurl-admin set-alias $<alias> $<id>` — Point an alias at a tunnel ID in this channel",
+			"• `/qurl-admin set-alias $<alias> $<id>` — Point an alias at a qURL Connector ID in this channel",
 			"• `/qurl-admin unset-alias $<alias>` — Remove an alias from this channel",
 		)
 	}
@@ -1395,8 +1395,8 @@ func (h *Handler) adminHelpMessage(command string) string {
 		// set-display-name / unset-display-name set a friendly Display Name
 		// on a tunnel id (the `$<slug>` shown by `/qurl list`).
 		lines = append(lines,
-			"• `/qurl-admin set-display-name $<id> <display name>` — Set a tunnel's friendly Display Name shown in `/qurl list`",
-			"• `/qurl-admin unset-display-name $<id>` — Reset a tunnel's Display Name to the default",
+			"• `/qurl-admin set-display-name $<id> <display name>` — Set a qURL Connector's friendly Display Name shown in `/qurl list`",
+			"• `/qurl-admin unset-display-name $<id>` — Reset a qURL Connector's Display Name to the default",
 			// Flat membership + revoke verbs (no `admin` sub-word). `admins`
 			// lists the roster (plural noun, so it doesn't collide with
 			// `/qurl list`); `revoke` is resource-scoped via `$<id>`.

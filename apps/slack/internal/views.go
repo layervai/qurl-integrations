@@ -197,15 +197,15 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelInstall,
-		blockKitFieldTitle:           plainTextObj("Install qURL tunnel"),
+		blockKitFieldTitle:           plainTextObj("Install qURL Connector"),
 		blockKitFieldSubmit:          plainTextObj("Generate"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			inputBlock(tunnelInstallBlockSlug, "qURL tunnel ID", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
+			inputBlock(tunnelInstallBlockSlug, "qURL Connector ID", "3-64 lowercase letters, numbers, and hyphens. Start with a letter, end with a letter or number.", false,
 				plainTextInput(tunnelInstallActionSlug, "prod-dashboard", "")),
-			inputBlock(tunnelInstallBlockShortcut, "Channel alias", "Optional. Leave blank to use the tunnel ID.", true,
+			inputBlock(tunnelInstallBlockShortcut, "Channel alias", "Optional. Leave blank to use the qURL Connector ID.", true,
 				plainTextInput(tunnelInstallActionShortcut, "prod", "")),
 			inputBlock(tunnelInstallBlockEnvironment, "Target environment", "Choose the runtime shape so Slack can tailor the install output. Docker snippets assume a Linux host.", false,
 				staticSelect(tunnelInstallActionEnvironment, []map[string]any{
@@ -229,7 +229,7 @@ func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
 func TunnelInstallErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("qURL tunnel setup"),
+		blockKitFieldTitle: plainTextObj("qURL Connector setup"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),
@@ -245,7 +245,7 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 func TunnelEditErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("Edit tunnel"),
+		blockKitFieldTitle: plainTextObj("Edit qURL Connector"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),
@@ -315,23 +315,23 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelEdit,
-		blockKitFieldTitle:           plainTextObj("Edit tunnel"),
+		blockKitFieldTitle:           plainTextObj("Edit qURL Connector"),
 		blockKitFieldSubmit:          plainTextObj("Save"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
-			contextBlock("Editing tunnel " + tunnelEditTokenLabel(meta.Token)),
+			contextBlock("Editing qURL Connector " + tunnelEditTokenLabel(meta.Token)),
 			// Optional: a Display Name is not mandatory (a tunnel can have none,
 			// and `/qurl-admin unset-display-name` clears it), so a required field
 			// would block an alias-only edit on an unnamed tunnel — the empty input
 			// pre-fills empty and Slack would refuse submission. With the
 			// changed-only diff, an empty submission on an empty-named tunnel is a
 			// no-op (normalizes to "" == "" → nameChanged=false → PATCH skipped).
-			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to the tunnel in /qurl list.", true,
+			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to the qURL Connector in /qurl list.", true,
 				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
-			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this tunnel in this channel; the tunnel's own name always works and isn't listed here. Clear a line to remove that alias.", true,
+			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this qURL Connector in this channel; the qURL Connector's own name always works and isn't listed here. Clear a line to remove that alias.", true,
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
-			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this tunnel shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to expose it there; remove one to revoke it.", true,
+			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this qURL Connector shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to expose it there; remove one to revoke it.", true,
 				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
 		},
 	}
@@ -344,7 +344,7 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 // modal's target labels).
 func tunnelEditTokenLabel(token string) string {
 	if token == "" {
-		return "this tunnel"
+		return "this qURL Connector"
 	}
 	return "`$" + escapeMrkdwnCode(token) + "`"
 }

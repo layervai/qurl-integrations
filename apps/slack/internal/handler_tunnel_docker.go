@@ -63,6 +63,6 @@ docker run -d \
 	if args.WebRef == "" {
 		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
-	intro += " It writes or overwrites a per-tunnel qurl-proxy config in the current directory. Re-running this install briefly restarts the tunnel container if it already exists. Because the tunnel shares the web container's network namespace, restart the tunnel after replacing or recreating the web container."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the tunnel connects, delete the bootstrap key file.", nil
+	intro += " It writes or overwrites the qURL Connector's qurl-proxy config in the current directory. Re-running this install briefly restarts the qURL Connector container if it already exists. Because the qURL Connector shares the web container's network namespace, restart the qURL Connector after replacing or recreating the web container."
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-tunnel-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file.", nil
 }

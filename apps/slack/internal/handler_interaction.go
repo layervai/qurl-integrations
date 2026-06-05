@@ -407,7 +407,7 @@ func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
 		// Last-ditch fallback: Slack may silently drop this field-level error if
 		// the current view no longer contains the slug block, but it still gives
 		// the original install modal a user-visible failure path.
-		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "qURL tunnel setup failed. Contact support."})
+		respondViewErrors(w, map[string]string{tunnelInstallBlockSlug: "qURL Connector setup failed. Contact support."})
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{

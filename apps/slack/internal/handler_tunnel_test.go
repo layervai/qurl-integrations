@@ -351,7 +351,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack tunnel bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
@@ -408,7 +408,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
-		"qURL tunnel `" + testTunnelSlug + "` is ready to install.",
+		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$" + testTunnelSlug + "` is ready in this channel.",
 		"The shell block below prompts for it",
 		"Run this whole block on the Linux Docker host",
@@ -481,7 +481,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack tunnel bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
@@ -585,7 +585,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 		t.Fatalf("metadata = %+v, want team/channel/user/response_url", meta)
 	}
 	body := string(call.view)
-	for _, want := range []string{"Target channel", testTunnelChannelID, "qURL tunnel ID", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
+	for _, want := range []string{"Target channel", testTunnelChannelID, "qURL Connector ID", "Target environment", string(tunnelEnvCompose), string(tunnelEnvECSFargate), string(tunnelEnvKubernetes)} {
 		if !strings.Contains(body, want) {
 			t.Errorf("modal missing %q:\n%s", want, body)
 		}
@@ -826,7 +826,7 @@ func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	for _, want := range []string{"Guided tunnel setup is not configured", "/qurl-admin expose-connector <id>", "port:8080"} {
+	for _, want := range []string{"Guided qURL Connector setup is not configured", "/qurl-admin expose-connector <id>", "port:8080"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("response = %q, missing %q", got, want)
 		}
@@ -854,7 +854,7 @@ func TestTunnelInstallBareReportsOpenViewFailure(t *testing.T) {
 	}
 	asyncBody := inv.captured.waitForBody(t, 2*time.Second)
 	async := parseSlackText(t, asyncBody)
-	if !strings.Contains(async, "Could not open guided tunnel setup") {
+	if !strings.Contains(async, "Could not open guided qURL Connector setup") {
 		t.Fatalf("async reply = %q, want OpenView failure copy", async)
 	}
 	if got := parseSlackReplyBool(t, asyncBody, "replace_original"); !got {
@@ -1167,7 +1167,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelModalKey,
-			"name":            "Slack tunnel bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
@@ -1223,7 +1223,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
-		"qURL tunnel `" + testTunnelSlug + "` is ready to install.",
+		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
 		"The shell block below prompts for it",
@@ -1892,7 +1892,7 @@ func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render with Display Name: %v", err)
 	}
-	if !strings.Contains(withName, "qURL tunnel `"+testTunnelSlug+"` — Prod API gateway is ready to install.") {
+	if !strings.Contains(withName, "qURL Connector `"+testTunnelSlug+"` — Prod API gateway is ready to install.") {
 		t.Errorf("install confirmation missing Display Name on id line:\n%s", withName)
 	}
 
@@ -1900,7 +1900,7 @@ func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render without Display Name: %v", err)
 	}
-	if !strings.Contains(withoutName, "qURL tunnel `"+testTunnelSlug+"` is ready to install.") {
+	if !strings.Contains(withoutName, "qURL Connector `"+testTunnelSlug+"` is ready to install.") {
 		t.Errorf("install confirmation should show a bare id line when no Display Name is set:\n%s", withoutName)
 	}
 	if strings.Contains(withoutName, "—") {

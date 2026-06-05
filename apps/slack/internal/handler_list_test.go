@@ -136,18 +136,18 @@ func TestHandleList_ShowsBoundAliases(t *testing.T) {
 		"ops":             resID,
 	})
 	// Description doubles as the Display Name and is always set; here it
-	// carries the install default ("Slack tunnel install for <slug>"). The
+	// carries the install default ("Slack qURL Connector install for <slug>"). The
 	// row shows the bound aliases AND the Display Name after the em-dash.
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack tunnel install for kktest"},
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "kktest", testKeyDescription: "Slack qURL Connector install for kktest"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$kktest` (aliases: `$kevin-dashboard`, `$ops`) — Slack tunnel install for kktest") {
+	if !strings.Contains(async, "`$kktest` (aliases: `$kevin-dashboard`, `$ops`) — Slack qURL Connector install for kktest") {
 		t.Errorf("async reply missing slug + bound-aliases + Display Name row: %q", async)
 	}
 }
@@ -178,7 +178,7 @@ func TestFormatTunnelListLine(t *testing.T) {
 		{name: "slug + Display Name, no aliases", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "• `$prod-db` — Prod database"},
 		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`)"},
 		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`) — Prod database"},
-		{name: "install-default description renders as Display Name", resource: tunnel(testListAliasProdDB, "Slack tunnel install for "+testListAliasProdDB), boundAliases: nil, want: "• `$prod-db` — Slack tunnel install for " + testListAliasProdDB},
+		{name: "install-default description renders as Display Name", resource: tunnel(testListAliasProdDB, "Slack qURL Connector install for "+testListAliasProdDB), boundAliases: nil, want: "• `$prod-db` — Slack qURL Connector install for " + testListAliasProdDB},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
 		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
 		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no ID — ask your Slack admin to set one)"},

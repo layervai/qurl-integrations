@@ -119,7 +119,7 @@ volumes:
 		"- The pod-level `fsGroup: 65532` lets the sidecar read the bootstrap Secret and write the qURL agent-state PVC. If your app cannot accept that fsGroup, pre-provision qURL agent-state ownership separately before merging the fragment.",
 		"- `fsGroup` and `fsGroupChangePolicy` apply to every volume in the pod, including existing app volumes; pre-set ownership on those volumes before merging if a chown-on-mount would be disruptive.",
 		"- The bootstrap key is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session. The apply pipeline briefly carries a generated Secret manifest between `kubectl` processes.",
-		"- Delete the bootstrap Secret after the pod logs show the tunnel connected.",
+		"- Delete the bootstrap Secret after the pod logs show the qURL Connector connected.",
 	}, "\n")
 	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend the `qurl-tunnel` container under your existing `containers:` list, append the volumes under your existing `volumes:` list, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }

@@ -27,13 +27,13 @@ const displayNameMaxLen = 500
 // the same way so unset matches what a fresh install would have produced —
 // hence this single constructor.
 func defaultTunnelDisplayName(slug string) string {
-	return "Slack tunnel install for " + slug
+	return "Slack qURL Connector install for " + slug
 }
 
 // displayNameUsage is the help-text body returned when set-display-name /
 // unset-display-name is invoked with an obvious typo. Centralized so the
 // missing-arg path and the validation-rejection path share one copy.
-const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <display name>`\n• `/qurl-admin unset-display-name <id>`\n\nThe id is the tunnel token shown by `/qurl list` (the leading `$` is optional). The Display Name is free text up to 500 characters."
+const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <display name>`\n• `/qurl-admin unset-display-name <id>`\n\nThe id is the qURL Connector token shown by `/qurl list` (the leading `$` is optional). The Display Name is free text up to 500 characters."
 
 // parseDisplayNameID strips an optional leading `$` from a tunnel-id token
 // and validates it against tunnelSlugPattern. Shared by both display-name
@@ -47,10 +47,10 @@ const displayNameUsage = "Usage:\n• `/qurl-admin set-display-name <id> <displa
 func parseDisplayNameID(tok string) (id, userMsg string) {
 	id = strings.TrimPrefix(tok, "$")
 	if id == "" {
-		return "", "Missing tunnel id.\n\n" + displayNameUsage
+		return "", "Missing qURL Connector id.\n\n" + displayNameUsage
 	}
 	if !tunnelSlugPattern.MatchString(id) {
-		return "", fmt.Sprintf("`%s` isn't a valid tunnel id. Run `/qurl list` to see your tunnel ids, then retry.\n\n%s", echoText(id), displayNameUsage)
+		return "", fmt.Sprintf("`%s` isn't a valid qURL Connector id. Run `/qurl list` to see your qURL Connector ids, then retry.\n\n%s", echoText(id), displayNameUsage)
 	}
 	return id, ""
 }
@@ -123,7 +123,7 @@ func validateDisplayNameChars(name string) string {
 func parseUnsetDisplayNameArgs(text string) (id, userMsg string) {
 	tokens := strings.Fields(text)
 	if len(tokens) != 1 {
-		return "", "Provide exactly one tunnel id.\n\n" + displayNameUsage
+		return "", "Provide exactly one qURL Connector id.\n\n" + displayNameUsage
 	}
 	return parseDisplayNameID(tokens[0])
 }
@@ -198,7 +198,7 @@ func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values)
 
 // handleUnsetDisplayName routes `/qurl-admin unset-display-name <id>`.
 // Same in-code admin gate as handleSetDisplayName. Reverts the Display
-// Name to the install default ("Slack tunnel install for <id>") by PATCHing
+// Name to the install default ("Slack qURL Connector install for <id>") by PATCHing
 // the resource description — it does NOT blank it, because a tunnel always
 // has a Display Name (the description field doubles as it).
 func (h *Handler) handleUnsetDisplayName(w http.ResponseWriter, values url.Values) {
@@ -304,7 +304,7 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Slug: id})
 	if err != nil {
 		log.Error("display-name: tunnel id resolution failed", "error", err, "team_id", teamID, "id", id)
-		return nil, nil, sanitizeAPIError(err, "Failed to look up the tunnel")
+		return nil, nil, sanitizeAPIError(err, "Failed to look up the qURL Connector")
 	}
 	for i := range page.Resources {
 		r := &page.Resources[i]
@@ -317,5 +317,5 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 		}
 	}
 	log.Info("display-name: no active tunnel for id", "team_id", teamID, "id", id)
-	return nil, nil, fmt.Sprintf("No tunnel with id `%s` was found. Run `/qurl list` to see your tunnel ids.", id)
+	return nil, nil, fmt.Sprintf("No qURL Connector with id `%s` was found. Run `/qurl list` to see your qURL Connector ids.", id)
 }
