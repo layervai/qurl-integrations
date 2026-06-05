@@ -17,7 +17,7 @@ import (
 // handleExpose renders the `/qurl-admin expose` chooser: an ephemeral message
 // with two buttons — "Expose qURL Connector" and "Expose URL" — each of which
 // opens the matching guided modal. It's the front door that replaces having to
-// remember the typed `connector install … env: port:` / `resource expose
+// remember the typed `tunnel install … env: port:` / `resource expose
 // $alias as:` grammar; the buttons route to the same flows.
 //
 // Admin-gated in code (Slack does not gate slash-command invocation on
@@ -90,7 +90,7 @@ func (h *Handler) handleExposeURLCmd(w http.ResponseWriter, values url.Values) {
 // handleExposeConnectorClick opens the existing guided connector installer in
 // response to the "Expose qURL Connector" button. It reuses TunnelInstallModal
 // and its existing submission handler wholesale — the button is just a second
-// entry point to the wizard the bare `/qurl-admin connector install` opens.
+// entry point to the wizard the bare `/qurl-admin tunnel install` opens.
 // Mirrors handleListEditClick: ack fast, render+open on the async goroutine
 // within Slack's trigger window, fail open via the interaction's response_url.
 // Not admin-re-gated at open (the picker only renders for admins and the modal

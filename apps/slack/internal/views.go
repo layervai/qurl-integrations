@@ -404,6 +404,21 @@ func escapeMrkdwnText(s string) string {
 	return mrkdwnTextEscaper.Replace(s)
 }
 
+// escapeMrkdwnURL is the URL-shaped sibling of escapeMrkdwnText, used where the
+// interpolated value is a target URL displayed inline in `/qurl list`. It keeps
+// the STRUCTURAL/safety escapes (&, <, >, backtick, line breaks) so a crafted
+// target can't open a code span, forge Slack `<…>` link syntax, or split a row
+// — but it deliberately drops the cosmetic-lookalike substitutions (`*`→∗,
+// `_`→＿, `~`→～) that escapeMrkdwnText applies. Those lookalikes are non-ASCII
+// glyphs that don't round-trip on copy, so they turn an underscore-bearing URL
+// (e.g. .../my_page) into a broken, non-pasteable string. Mid-token `_`/`*`/`~`
+// inside a URL aren't at the word boundaries Slack needs to italicize/bold/strike
+// anyway, so leaving them literal is both safe and correct. Descriptions still
+// use escapeMrkdwnText (prose, where the cosmetic neutralizing matters).
+func escapeMrkdwnURL(s string) string {
+	return mrkdwnURLEscaper.Replace(s)
+}
+
 // mrkdwnCodeEscaper is the single-pass substitution table used by
 // `escapeMrkdwnCode`. Defined at package scope so the replacer is
 // constructed once at init rather than per-call. Order matters in
@@ -425,6 +440,22 @@ var mrkdwnTextEscaper = strings.NewReplacer(
 	"*", "∗",
 	"_", "＿",
 	"~", "～",
+	"\r\n", " ",
+	"\n", " ",
+	"\r", " ",
+)
+
+// mrkdwnURLEscaper is mrkdwnTextEscaper minus the cosmetic-lookalike rows
+// (`*`/`_`/`~`): URLs commonly contain underscores, and substituting them with
+// the fullwidth ＿ glyph breaks copy/paste. The amp/angle/backtick/line-break
+// rows are kept verbatim — those are the structural escapes a target URL still
+// needs (see [escapeMrkdwnURL]). Keep this in lockstep with mrkdwnTextEscaper's
+// structural rows so a future safety addition lands in both.
+var mrkdwnURLEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"`", "ˊ",
 	"\r\n", " ",
 	"\n", " ",
 	"\r", " ",

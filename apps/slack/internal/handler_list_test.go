@@ -220,6 +220,9 @@ func TestFormatURLListLine(t *testing.T) {
 		{name: "substituted channel alias names shadowed resource alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{"kb"}, token: "kb", blockedAlias: testListAliasDocs, want: "• `$kb` (resource alias `$docs` is shadowed here) → https://docs.example.com"},
 		{name: "no alias renders visible but unmintable row", resource: &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com", Status: client.StatusActive}, boundAliases: nil, want: "• `r_url_noalias` (no alias — ask your Slack admin to set one) → https://plain.example.com"},
 		{name: "target URL is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>", Status: client.StatusActive}, boundAliases: nil, want: "• `$docs` → https://docs.example.com/a?x=&lt;bad&gt;&amp;q=ˊtickˊ &lt;!channel&gt;"},
+		// Cosmetic-lookalike chars (`_`/`*`/`~`) stay literal in the target so the
+		// URL remains pasteable; only the structural escapes apply (see escapeMrkdwnURL).
+		{name: "target URL keeps underscores/tildes literal (pasteable)", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/~team/my_page", Status: client.StatusActive}, boundAliases: nil, want: "• `$docs` → https://docs.example.com/~team/my_page"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -304,6 +307,13 @@ func TestFormatURLListSection(t *testing.T) {
 	unsafeAlias := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs}
 	if got, want := formatURLListSectionWithToken(unsafeAlias, nil, "do`cs", ""), "*`$doˊcs`*\nhttps://docs.example.com"; got != want {
 		t.Errorf("formatURLListSectionWithToken(unsafe alias) = %q, want %q", got, want)
+	}
+
+	// Underscores/tildes in the target stay literal so the rendered URL is still
+	// pasteable (escapeMrkdwnURL drops the cosmetic-lookalike substitutions).
+	underscoreTarget := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/~team/my_page"}
+	if got, want := formatURLListSectionWithToken(underscoreTarget, nil, "docs", ""), "*`$docs`*\nhttps://docs.example.com/~team/my_page"; got != want {
+		t.Errorf("formatURLListSectionWithToken(underscore target) = %q, want %q", got, want)
 	}
 
 	noAlias := &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com"}

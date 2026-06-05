@@ -792,7 +792,7 @@ func formatURLListLineWithToken(r *client.Resource, boundAliases []string, token
 	if target == "" {
 		target = "<empty>"
 	}
-	line += " → " + escapeMrkdwnText(target)
+	line += " → " + escapeMrkdwnURL(target)
 	if r.Description != "" {
 		line += " — " + escapeMrkdwnText(r.Description)
 	}
@@ -857,7 +857,7 @@ func formatURLListSectionWithToken(r *client.Resource, boundAliases []string, to
 	if target == "" {
 		target = "<empty>"
 	}
-	b.WriteString("\n" + escapeMrkdwnText(target))
+	b.WriteString("\n" + escapeMrkdwnURL(target))
 	if r.Description != "" {
 		b.WriteString("\n" + escapeMrkdwnText(r.Description))
 	}
