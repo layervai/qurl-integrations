@@ -666,6 +666,27 @@ func TestHandleAdmin_AdminStoreUnconfigured(t *testing.T) {
 // revoke is resource-scoped via `$<id>`; and id references carry the `$`
 // sigil. newAliasTestHandler wires both aliasStore and AdminStore, so every
 // gated help line renders.
+// TestAdminHelpGroupsVerbsUnderSections fences the categorized layout: the
+// admin help renders its verbs under the four bold section headers instead of
+// one flat bullet list. newAliasTestHandler wires aliasStore + AdminStore, so
+// every section's gate passes and all four headers render. A regression that
+// dropped a header (or flattened the grouping) fails here.
+func TestAdminHelpGroupsVerbsUnderSections(t *testing.T) {
+	h, _ := newAliasTestHandler(t)
+	help := h.adminHelpMessage(commandAdmin)
+
+	for _, want := range []string{
+		"*Expose resources*",
+		"*Aliases*",
+		"*Manage resources*",
+		"*Bot admins*",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("admin help missing section header %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
 	h, _ := newAliasTestHandler(t)
 	help := h.adminHelpMessage(commandAdmin)
