@@ -579,7 +579,7 @@ func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *sl
 // mint all share this one channel-scoped definition, the bypass would be a
 // hole: someone who learned a slug/alias/channel-id elsewhere must still not
 // be able to mint a tunnel from a channel it isn't exposed to.) Admins manage
-// where a tunnel is exposed via `/qurl-admin tunnel install` and the
+// where a tunnel is exposed via `/qurl-admin expose-connector` and the
 // `/qurl list` Edit modal — not by minting from arbitrary channels. Together
 // with the list-side scan, this closes the former TODO(#460) list/mint
 // asymmetry for visible rows: you can only see resources exposed here, and

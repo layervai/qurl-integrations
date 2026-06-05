@@ -38,7 +38,7 @@ const (
 
 	// listResourcesEmptyAdminMessage is shown only after a successful admin
 	// check, so it can name the admin-only setup command and Edit recovery path.
-	listResourcesEmptyAdminMessage = ":mag: No protected resources are available in this channel yet. Install one here with `/qurl-admin tunnel install <id>`, or expose an existing resource to this channel from `/qurl list` → *Edit* in a channel where it already appears."
+	listResourcesEmptyAdminMessage = ":mag: No protected resources are available in this channel yet. Install one here with `/qurl-admin expose-connector <id>`, or expose an existing resource to this channel from `/qurl list` → *Edit* in a channel where it already appears."
 )
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
@@ -580,8 +580,8 @@ func filterResourcesAllowedInChannel(resources []client.Resource, allowed map[st
 // tunnelToken returns the resource-intrinsic `$<token>` for a tunnel.
 // Precedence:
 //
-//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin tunnel
-//     install <slug>` binds `$<slug>` as a channel alias, so the slug
+//  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin
+//     expose-connector <slug>` binds `$<slug>` as a channel alias, so the slug
 //     pastes straight into `/qurl get $<slug>`. This is the common case
 //     and the identifier we want to surface (never the opaque r_<id>).
 //  2. Resource-level alias — fallback when a tunnel somehow carries no

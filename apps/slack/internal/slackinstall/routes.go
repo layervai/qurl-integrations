@@ -66,7 +66,7 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <body>
 <div class="card">
 <h1><span class="ok">&#10003;</span> qURL Slack app installed</h1>
-<p>Guided tunnel setup is enabled for this workspace. Return to Slack and run <code>/qurl-admin tunnel install</code>.</p>
+<p>Guided tunnel setup is enabled for this workspace. Return to Slack and run <code>/qurl-admin expose-connector</code>.</p>
 <p>Install target: <code>{{.InstallTarget}}</code></p>
 </div>
 </body>

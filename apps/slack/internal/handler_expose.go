@@ -17,8 +17,8 @@ import (
 // handleExpose renders the `/qurl-admin expose` chooser: an ephemeral message
 // with two buttons — "Expose qURL Connector" and "Expose URL" — each of which
 // opens the matching guided modal. It's the front door that replaces having to
-// remember the typed `tunnel install … env: port:` / `resource expose
-// $alias as:` grammar; the buttons route to the same flows.
+// remember the typed `expose-connector … env: port:` / `expose-url $alias as:`
+// grammar; the buttons route to the same flows the bare verbs open.
 //
 // Admin-gated in code (Slack does not gate slash-command invocation on
 // workspace-admin role — the "admins only" picker hint is cosmetic). The gate
@@ -33,7 +33,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <id>` or `/qurl-admin resource expose $<alias>` instead.")
+		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin expose-connector <id>` or `/qurl-admin expose-url $<alias>` instead.")
 		return
 	}
 	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExpose) {
@@ -42,55 +42,10 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 	respondSlackBlocks(w, "What do you want to expose in this channel?", exposeChooserBlocks(channelID))
 }
 
-// handleExposeConnectorCmd renders the `/qurl-admin expose-connector` shortcut:
-// the single-button ephemeral that skips the connector-vs-URL chooser and goes
-// straight to the connector flow. The button reuses exposeConnectorActionID, so
-// a click runs handleExposeConnectorClick and opens the same guided installer
-// modal the chooser's connector button does. Same admin-gate / OpenView posture
-// as handleExpose — gated here so a non-admin never sees the button, with the
-// real mutation boundary at the modal's submit handler. The bare `/qurl-admin
-// tunnel install` wizard remains the typed-fallback entry to the identical modal.
-func (h *Handler) handleExposeConnectorCmd(w http.ResponseWriter, values url.Values) {
-	teamID, channelID, ok := h.aliasValidate(w, values, "expose-connector")
-	if !ok {
-		return
-	}
-	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin tunnel install <id>` instead.")
-		return
-	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExposeConnector) {
-		return
-	}
-	respondSlackBlocks(w, "Expose a qURL Connector in this channel?", exposeConnectorButtonBlocks(channelID))
-}
-
-// handleExposeURLCmd is the URL counterpart to handleExposeConnectorCmd: the
-// `/qurl-admin expose-url` shortcut posts the single "Expose URL" button, whose
-// click runs handleExposeURLClick to open the URL-resource picker. Routing
-// through the button (rather than opening the picker straight from the slash
-// command) keeps the picker's resource fetch on its own fresh trigger window
-// instead of the slash command's short one. The typed `/qurl-admin resource
-// expose $<alias>` path stays available as the fallback.
-func (h *Handler) handleExposeURLCmd(w http.ResponseWriter, values url.Values) {
-	teamID, channelID, ok := h.aliasValidate(w, values, "expose-url")
-	if !ok {
-		return
-	}
-	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin resource expose $<alias>` instead.")
-		return
-	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL) {
-		return
-	}
-	respondSlackBlocks(w, "Expose a URL in this channel?", exposeURLButtonBlocks(channelID))
-}
-
 // handleExposeConnectorClick opens the existing guided connector installer in
 // response to the "Expose qURL Connector" button. It reuses TunnelInstallModal
 // and its existing submission handler wholesale — the button is just a second
-// entry point to the wizard the bare `/qurl-admin tunnel install` opens.
+// entry point to the wizard the bare `/qurl-admin expose-connector` opens.
 // Mirrors handleListEditClick: ack fast, render+open on the async goroutine
 // within Slack's trigger window, fail open via the interaction's response_url.
 // Not admin-re-gated at open (the picker only renders for admins and the modal
@@ -382,7 +337,7 @@ func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue)
 // comes from the modal's dropdown, itself built from a fresh scan at open — so,
 // like the /qurl list Edit button which carries its resource_id in the button
 // value, this trusts that snapshot rather than re-resolving. The "already
-// bound" / failure copy matches the typed `resource expose` path.
+// bound" / failure copy matches the typed `expose-url` path.
 func (h *Handler) bindURLResourceToChannel(ctx context.Context, log *slog.Logger, teamID, channelID, channelAlias, resourceID string) string {
 	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, channelAlias, resourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {

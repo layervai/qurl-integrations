@@ -8,13 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
-	resourceExposeUsage       = "Usage:\n• `/qurl-admin resource expose $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin resource expose url:<target-url> as:$channel-alias`"
+	resourceExposeUsage       = "Usage:\n• `/qurl-admin expose-url` for the guided picker\n• `/qurl-admin expose-url $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin expose-url url:<target-url> as:$channel-alias`"
 	resourceExposeSchemeHTTP  = "http"
 	resourceExposeSchemeHTTPS = "https"
 	// exposeURLResourceFailedMsg is the generic failure reply shared by the
@@ -29,30 +30,32 @@ type resourceExposeArgs struct {
 	ChannelAlias  string
 }
 
-func stripResourcePrefix(text string) string {
-	_, rest := slashVerb(text, "resource")
-	return rest
-}
-
+// parseResourceExposeArgs parses the typed (power-user) form of the URL verb:
+// `/qurl-admin expose-url <target> [as:$channel-alias]`, where `text` is the
+// command body with the `expose-url` verb already stripped. The verb is a single
+// hyphenated word — there is no `expose` sub-word — so the target is the first
+// positional token and an optional `as:` flag follows. Bare `expose-url` (no
+// positional) is the guided modal, routed before this by handleExposeURL, so a
+// missing target here is a usage error.
 func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg string) {
 	tokens := strings.Fields(text)
-	if len(tokens) < 2 || len(tokens) > 3 || tokens[0] != "expose" {
+	if len(tokens) < 1 || len(tokens) > 2 {
 		return nil, resourceExposeUsage
 	}
 
 	args := &resourceExposeArgs{}
-	if len(tokens) == 3 {
-		if !strings.HasPrefix(tokens[2], "as:") {
+	if len(tokens) == 2 {
+		if !strings.HasPrefix(tokens[1], "as:") {
 			return nil, resourceExposeUsage
 		}
-		alias, reason := validateAliasTokenForNoun(strings.TrimPrefix(tokens[2], "as:"), "Channel alias", "channel alias")
+		alias, reason := validateAliasTokenForNoun(strings.TrimPrefix(tokens[1], "as:"), "Channel alias", "channel alias")
 		if reason != "" {
 			return nil, reason + "\n\n" + resourceExposeUsage
 		}
 		args.ChannelAlias = alias
 	}
 
-	target := tokens[1]
+	target := tokens[0]
 	if strings.HasPrefix(target, "$") {
 		alias, reason := validateAliasTokenForNoun(target, "Resource alias", "resource alias")
 		if reason != "" {
@@ -84,31 +87,173 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 	return nil, "Target must be a resource alias like `$docs`, or `url:<target-url>` with `as:$channel-alias`.\n\n" + resourceExposeUsage
 }
 
-// handleResource routes `/qurl-admin resource expose ...`.
+// handleExposeURL routes the URL verb `/qurl-admin expose-url`: bare (no
+// arguments) opens the guided URL-resource picker modal; `expose-url <target>
+// [as:$channel-alias]` is the typed power-user form that skips the modal. This
+// is the single-word rename of the former two-word `resource expose`.
 //
-// Minimal scope: expose an existing URL resource to THIS Slack channel by
-// binding a channel alias to the resource_id. Dashboard remains connector-blind,
-// and Slack users never type opaque `r_...` resource IDs.
-func (h *Handler) handleResource(w http.ResponseWriter, values url.Values) {
+// Either way the effect is the same: expose an existing URL resource to THIS
+// Slack channel by binding a channel alias to its resource_id. The dashboard
+// stays Slack-blind, and Slack users never type opaque `r_...` resource IDs.
+func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
-	args, userMsg := parseResourceExposeArgs(stripResourcePrefix(text))
+	_, rest := slashVerb(text, adminVerbExposeURL)
+	if strings.TrimSpace(rest) == "" {
+		// Bare verb → guided picker modal (the no-arguments path).
+		h.handleExposeURLWizard(w, values)
+		return
+	}
+
+	args, userMsg := parseResourceExposeArgs(rest)
 	if userMsg != "" {
 		respondSlack(w, userMsg)
 		return
 	}
 
-	teamID, channelID, ok := h.aliasValidate(w, values, "resource expose")
+	teamID, channelID, ok := h.aliasValidate(w, values, "expose-url")
 	if !ok {
 		return
 	}
-	if !h.requireAliasAdminGate(w, teamID, values, AdminActionResourceExpose) {
+	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExposeURL) {
 		return
 	}
 
-	h.runAsync(w, "resource_expose", values, func(ctx context.Context, log *slog.Logger) {
+	h.runAsync(w, "expose_url", values, func(ctx context.Context, log *slog.Logger) {
 		msg := h.exposeURLResourceInChannel(ctx, log, teamID, channelID, args)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
+}
+
+// handleExposeURLWizard opens the guided URL-resource picker for a bare
+// `/qurl-admin expose-url`. Like the connector wizard (handleTunnelInstallWizard)
+// it acks fast and does the admin re-check + resource fetch + views.open on the
+// async worker inside Slack's short trigger window, so the picker's first-page
+// resource scan never blocks the slash ack. The picker's button-driven sibling
+// (the `expose` chooser → handleExposeURLClick) opens the identical modal from a
+// fresh button trigger; this is the direct slash entry. OpenView must be wired —
+// without it the bare verb declines and points at the typed form.
+func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values) {
+	if !h.requireAdminStoreSync(w) {
+		return
+	}
+	if h.aliasStore == nil {
+		respondSlack(w, "Channel alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		return
+	}
+	if h.cfg.OpenView == nil {
+		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin expose-url $<alias>` instead.")
+		return
+	}
+	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	enterpriseID := strings.TrimSpace(values.Get(fieldEnterpriseID))
+	userID := strings.TrimSpace(values.Get(fieldUserID))
+	channelID := strings.TrimSpace(values.Get(fieldChannelID))
+	if channelID == "" {
+		respondSlack(w, ":warning: missing channel_id in slash command payload")
+		return
+	}
+	triggerID := strings.TrimSpace(values.Get(fieldTriggerID))
+	if triggerID == "" {
+		respondSlack(w, "Slack did not include a trigger_id, so guided setup could not open. Use `/qurl-admin expose-url $<alias>` instead.")
+		return
+	}
+	log := slog.With(
+		"command", "expose_url_wizard",
+		"team_id", teamID,
+		"enterprise_id", enterpriseID,
+		"channel_id", channelID,
+		"user_id", userID,
+		"trigger_id", triggerID,
+	)
+	triggerReceivedAt := h.now()
+	responseURL := values.Get(fieldResponseURL)
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		h.openExposeURLWizard(ctx, log, teamID, enterpriseID, channelID, userID, triggerID, responseURL, triggerReceivedAt)
+	}) {
+		respondSlack(w, ackBusy)
+		return
+	}
+	// Ack before the async admin check so Slack's short trigger_id window is
+	// preserved for views.open; denials and open failures come back via
+	// response_url. Mirrors handleTunnelInstallWizard.
+	respondSlack(w, ackWorkingOnIt)
+}
+
+// openExposeURLWizard is the async worker for handleExposeURLWizard: admin
+// re-check, fetch the channel's exposable URL resources, then open the picker
+// modal — all bounded to fit Slack's trigger window. With no URL resources to
+// expose it posts a short ephemeral via response_url instead of an empty picker.
+// Mirrors openTunnelInstallWizard's gate/budget posture; the modal-render half is
+// shared with handleExposeURLClick (urlResourceSelectOptions + ExposeURLModal).
+func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
+	openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+	if openBudget <= 0 {
+		log.Warn("expose-url wizard trigger expired before admin check")
+		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin expose-url` again.", true)
+		return
+	}
+	adminCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
+	cancel()
+	if err != nil {
+		log.Error("expose-url wizard admin check failed", "error", err)
+		_ = h.postErrorResponse(log, responseURL, "Could not verify admin status. Retry in a moment.", true)
+		return
+	}
+	if !isAdmin {
+		log.Warn("expose-url wizard denied: non-admin")
+		_ = h.postErrorResponse(log, responseURL, "This command is admin-only.", true)
+		return
+	}
+
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, adminGateBudget)
+	options, userMsg := h.urlResourceSelectOptions(fetchCtx, log, teamID)
+	fetchCancel()
+	if userMsg != "" {
+		_ = h.postErrorResponse(log, responseURL, userMsg, true)
+		return
+	}
+	if len(options) == 0 {
+		_ = h.postErrorResponse(log, responseURL, "No URL resources found to expose. Create one in the qURL dashboard, then run `/qurl-admin expose-url` again.", true)
+		return
+	}
+
+	view, err := ExposeURLModal(ExposeURLModalMetadata{
+		TeamID:      teamID,
+		ChannelID:   channelID,
+		UserID:      userID,
+		ResponseURL: responseURL,
+	}, options)
+	if err != nil {
+		log.Error("expose-url wizard modal render failed", "error", err)
+		_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
+		return
+	}
+
+	openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+	if openBudget <= 0 {
+		log.Warn("expose-url wizard trigger expired before views.open")
+		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin expose-url` again.", true)
+		return
+	}
+	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
+	defer openCancel()
+	if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
+		log.Warn("expose-url wizard views.open failed", "error", err,
+			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+		)
+		switch {
+		case errors.Is(err, ErrSlackTriggerExpired):
+			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin expose-url` again.", true)
+		case errors.Is(err, ErrSlackRateLimited):
+			_ = h.postErrorResponse(log, responseURL, "Slack rate-limited the guided picker. Wait a moment, then run `/qurl-admin expose-url` again.", true)
+		default:
+			_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
+		}
+		return
+	}
+	_ = h.deleteOriginalResponse(log, responseURL)
 }
 
 func (h *Handler) exposeURLResourceInChannel(ctx context.Context, log *slog.Logger, teamID, channelID string, args *resourceExposeArgs) string {

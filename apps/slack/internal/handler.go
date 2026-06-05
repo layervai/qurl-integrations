@@ -296,7 +296,7 @@ type Config struct {
 	// surfaces a friendly fallback in that case.
 	PostDM func(ctx context.Context, slackUserID, text string) error
 
-	// TunnelImage is the Docker image shown by `/qurl-admin tunnel install`.
+	// TunnelImage is the Docker image shown by `/qurl-admin expose-connector`.
 	// Empty falls back to the public client image with the `latest` tag for
 	// dev/sandbox installs; production deploys should set an immutable tag or
 	// digest so Slack never instructs customers to run a floating image.
@@ -690,13 +690,12 @@ func slashSubcommand(text, command string) bool {
 
 // adminVerbs are the leading verb words that belong to `/qurl-admin`.
 const (
-	adminVerbTunnel   = "tunnel"
-	adminVerbResource = "resource"
-	adminVerbExpose   = "expose"
-	// expose-connector / expose-url are the single-button shortcut verbs: each
-	// skips the `expose` chooser and posts the one matching guided button. Both
-	// are single hyphenated words (no two-word `tunnel install` / `resource
-	// expose` grammar), the shape the rest of the slash surface uses.
+	adminVerbExpose = "expose"
+	// expose-connector / expose-url are the single-word connector/URL verbs.
+	// Bare (no arguments) opens the matching guided modal; with arguments they
+	// are the typed power-user forms. They replaced the former two-word
+	// `tunnel install` / `resource expose` grammar — the slash surface is
+	// single word or hyphenated-word only, no space-separated sub-verbs.
 	adminVerbExposeConnector = "expose-connector"
 	adminVerbExposeURL       = "expose-url"
 )
@@ -716,7 +715,7 @@ const (
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbTunnel, adminVerbResource, adminVerbExpose, adminVerbExposeConnector, adminVerbExposeURL, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbExpose, adminVerbExposeConnector, adminVerbExposeURL, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -997,18 +996,16 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// already-admin command. Redirect to the flat verbs rather than
 		// silently accepting it, so muscle-memory users learn the new grammar.
 		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
-	case slashSubcommand(text, adminVerbTunnel):
-		h.handleTunnel(w, values)
-	case slashSubcommand(text, adminVerbResource):
-		h.handleResource(w, values)
 	// expose-connector / expose-url precede the bare `expose` chooser. slashVerb
 	// matches an exact token or a `verb ` (space) prefix, so `expose` can't
 	// shadow the hyphenated verbs regardless of order; the adjacency is for
-	// readability — all three expose entries sit together.
+	// readability — all three expose entries sit together. Each connector/URL
+	// verb opens its guided modal when bare and runs the typed power-user form
+	// when given arguments (handleExposeConnector / handleExposeURL).
 	case slashSubcommand(text, adminVerbExposeConnector):
-		h.handleExposeConnectorCmd(w, values)
+		h.handleExposeConnector(w, values)
 	case slashSubcommand(text, adminVerbExposeURL):
-		h.handleExposeURLCmd(w, values)
+		h.handleExposeURL(w, values)
 	case slashSubcommand(text, adminVerbExpose):
 		h.handleExpose(w, values)
 	case setAliasSubcommand(text):
@@ -1348,21 +1345,19 @@ func (h *Handler) adminHelpMessage(command string) string {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
 				"• `/qurl-admin expose` — Guided picker: choose *qURL Connector* or *URL*, then fill in a short form (recommended)",
-				"• `/qurl-admin expose-connector` — Expose a qURL Connector in this channel (guided form; skips the picker)",
-				"• `/qurl-admin expose-url` — Expose an existing URL resource in this channel (guided form; skips the picker)",
-				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes",
-				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
-				"• `/qurl-admin tunnel install <id> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<id>` in this channel",
-				"• `/qurl-admin resource expose $<alias> [as:$channel-alias]` — Expose an existing URL resource in this channel",
-				"• `/qurl-admin resource expose url:<target-url> as:$channel-alias` — Expose an existing no-alias URL resource in this channel",
-				"• Typed tunnel options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
+				"• `/qurl-admin expose-connector` — Guided connector setup (Docker, Docker Compose, ECS/Fargate, Kubernetes); opens a short form",
+				"• `/qurl-admin expose-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin expose-url` — Guided picker for an existing URL resource; opens a short form",
+				"• `/qurl-admin expose-url $<alias> [as:$channel-alias]` — Typed: expose an existing URL resource in this channel",
+				"• `/qurl-admin expose-url url:<target-url> as:$channel-alias` — Typed: expose an existing no-alias URL resource in this channel",
+				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin tunnel install <id>` — Create a Docker sidecar bootstrap key and bind `$<id>` in this channel",
-				"• `/qurl-admin resource expose $<alias> [as:$channel-alias]` — Expose an existing URL resource in this channel",
-				"• `/qurl-admin resource expose url:<target-url> as:$channel-alias` — Expose an existing no-alias URL resource in this channel",
-				"  Guided setup is not enabled in this deployment; use the typed installer form.",
+				"• `/qurl-admin expose-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar bootstrap key and bind `$<id>` in this channel",
+				"• `/qurl-admin expose-url $<alias> [as:$channel-alias]` — Expose an existing URL resource in this channel",
+				"• `/qurl-admin expose-url url:<target-url> as:$channel-alias` — Expose an existing no-alias URL resource in this channel",
+				"  Guided setup (bare `/qurl-admin expose-connector` / `expose-url`) is not enabled in this deployment; use the typed forms above.",
 			)
 		}
 	}

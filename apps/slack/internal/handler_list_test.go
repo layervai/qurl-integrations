@@ -449,7 +449,7 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 			if !strings.Contains(async, "No protected resources are available in this channel") {
 				t.Errorf("expected the channel empty state in %s: %q", channelID, async)
 			}
-			if !strings.Contains(async, "/qurl-admin tunnel install") {
+			if !strings.Contains(async, "/qurl-admin expose-connector") {
 				t.Errorf("admin empty state should include setup command in %s: %q", channelID, async)
 			}
 			if !strings.Contains(async, "Edit") {
@@ -545,14 +545,14 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 		{
 			name:    "admin sees setup command",
 			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
-			want:    []string{"/qurl-admin tunnel install", "Edit"},
+			want:    []string{"/qurl-admin expose-connector", "Edit"},
 			notWant: []string{"Ask a Slack admin"},
 		},
 		{
 			name:    "non-admin gets admin handoff",
 			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
 			want:    []string{"Ask a Slack admin"},
-			notWant: []string{"/qurl-admin tunnel install", "Edit", "tunnel"},
+			notWant: []string{"/qurl-admin expose-connector", "Edit", "tunnel"},
 		},
 		{
 			name: "admin check error gets admin handoff",
@@ -561,7 +561,7 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 				ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected workspace read failure"))
 			},
 			want:    []string{"Ask a Slack admin"},
-			notWant: []string{"/qurl-admin tunnel install", "Edit", "tunnel"},
+			notWant: []string{"/qurl-admin expose-connector", "Edit", "tunnel"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
