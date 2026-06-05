@@ -693,6 +693,12 @@ const (
 	adminVerbTunnel   = "tunnel"
 	adminVerbResource = "resource"
 	adminVerbExpose   = "expose"
+	// expose-connector / expose-url are the single-button shortcut verbs: each
+	// skips the `expose` chooser and posts the one matching guided button. Both
+	// are single hyphenated words (no two-word `tunnel install` / `resource
+	// expose` grammar), the shape the rest of the slash surface uses.
+	adminVerbExposeConnector = "expose-connector"
+	adminVerbExposeURL       = "expose-url"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
@@ -710,7 +716,7 @@ const (
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbTunnel, adminVerbResource, adminVerbExpose, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbTunnel, adminVerbResource, adminVerbExpose, adminVerbExposeConnector, adminVerbExposeURL, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -995,6 +1001,14 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		h.handleTunnel(w, values)
 	case slashSubcommand(text, adminVerbResource):
 		h.handleResource(w, values)
+	// expose-connector / expose-url precede the bare `expose` chooser. slashVerb
+	// matches an exact token or a `verb ` (space) prefix, so `expose` can't
+	// shadow the hyphenated verbs regardless of order; the adjacency is for
+	// readability — all three expose entries sit together.
+	case slashSubcommand(text, adminVerbExposeConnector):
+		h.handleExposeConnectorCmd(w, values)
+	case slashSubcommand(text, adminVerbExposeURL):
+		h.handleExposeURLCmd(w, values)
 	case slashSubcommand(text, adminVerbExpose):
 		h.handleExpose(w, values)
 	case setAliasSubcommand(text):
@@ -1334,6 +1348,8 @@ func (h *Handler) adminHelpMessage(command string) string {
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
 				"• `/qurl-admin expose` — Guided picker: choose *qURL Connector* or *URL*, then fill in a short form (recommended)",
+				"• `/qurl-admin expose-connector` — Expose a qURL Connector in this channel (guided form; skips the picker)",
+				"• `/qurl-admin expose-url` — Expose an existing URL resource in this channel (guided form; skips the picker)",
 				"• `/qurl-admin tunnel install` — Guided tunnel setup for Docker, Docker Compose, ECS Fargate, or Kubernetes",
 				"  Guided setup is enabled in this workspace; use bare `/qurl-admin tunnel install` to choose a target environment.",
 				"• `/qurl-admin tunnel install <id> [env:...] [port:8080] [alias:$alias]` — Typed tunnel setup; creates a bootstrap key and binds `$<id>` in this channel",

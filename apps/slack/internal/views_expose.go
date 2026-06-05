@@ -55,6 +55,41 @@ func exposeChooserBlocks(channelID string) []any {
 	}
 }
 
+// exposeConnectorButtonBlocks builds the single-button ephemeral posted by
+// `/qurl-admin expose-connector`: the same "Expose qURL Connector" button the
+// two-button chooser carries, on its own. The verb skips the connector-vs-URL
+// choice; the button click then opens the same guided installer modal
+// (handleExposeConnectorClick → TunnelInstallModal), so this reuses
+// exposeConnectorActionID rather than minting a parallel flow. The target
+// channel is shown so the admin confirms where the exposure lands before
+// opening the form (the "confirm" step in command → button → modal → submit).
+func exposeConnectorButtonBlocks(channelID string) []any {
+	return []any{
+		sectionBlock("*Expose a qURL Connector in this channel*\nTap below to open the guided setup form."),
+		contextBlock("Target channel: " + slackChannelMention(channelID)),
+		actionsBlock(
+			primaryButtonElement("Expose qURL Connector", exposeConnectorActionID, ""),
+		),
+	}
+}
+
+// exposeURLButtonBlocks is the URL counterpart to exposeConnectorButtonBlocks:
+// the single "Expose URL" button posted by `/qurl-admin expose-url`. The click
+// opens the URL-resource picker (handleExposeURLClick → ExposeURLModal), which
+// fetches the workspace's URL resources on its own fresh trigger — so routing
+// through the button (rather than opening the modal straight from the slash
+// command) keeps that resource fetch off the slash command's short trigger
+// window.
+func exposeURLButtonBlocks(channelID string) []any {
+	return []any{
+		sectionBlock("*Expose a URL in this channel*\nTap below to pick a protected URL resource."),
+		contextBlock("Target channel: " + slackChannelMention(channelID)),
+		actionsBlock(
+			buttonElement("Expose URL", exposeURLActionID, ""),
+		),
+	}
+}
+
 // ExposeURLModalMetadata is carried through Slack private_metadata from the
 // "Expose URL" button click (block_actions) to the later view_submission.
 // ResponseURL is the chooser message's, where the async outcome is posted. Like
