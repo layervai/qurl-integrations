@@ -74,6 +74,18 @@ All of these must pass before merge:
 - **No high-severity vulnerabilities** in new dependencies
 - **No GPL-3.0 / AGPL-3.0** licensed dependencies
 
+### Merge-result checks
+
+`main` protection requires strict status checks, so required checks must be
+green for the current `main` merge result before a PR can merge. If `main`
+moves after checks turn green, update the PR branch or rerun checks against the
+new merge result before merging.
+
+Slack-impacting PRs are gated by the always-present `slack / required` check.
+The Slack workflow's `changes` filter is the source of truth for which paths
+need Slack validation. When that filter matches, the aggregate validates every
+Slack quality gate listed in its workflow `needs:` set.
+
 ## Code Conventions
 
 - **Error handling**: Always check errors. Use `errors.Is`/`errors.As`, not type assertions.

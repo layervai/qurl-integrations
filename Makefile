@@ -65,7 +65,7 @@ release-snapshot: # Build release artifacts without publishing
 ## Security
 
 security:
-	govulncheck ./...
+	go tool govulncheck ./...
 
 ## Pre-commit
 

@@ -24,6 +24,7 @@ Brief description of changes.
 - [ ] `make check` passes locally
 - [ ] New tests added for new functionality
 - [ ] Manual testing completed
+- [ ] For Slack-impacting changes: branch is current with `main` and `slack / required` is green
 
 ## Related Issues
 
