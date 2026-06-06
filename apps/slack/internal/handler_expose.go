@@ -26,7 +26,7 @@ import (
 // boundary is each modal's submit handler, which re-checks CheckAdmin. OpenView
 // must be wired because the buttons open modals — without it the picker would
 // be dead, so it's checked up front (and adminHelpMessage only advertises
-// `expose` when OpenView is configured).
+// `protect` when OpenView is configured).
 func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 	teamID, channelID, ok := h.aliasValidate(w, values, "protect")
 	if !ok {
@@ -52,7 +52,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 // discloses nothing new); handleTunnelInstallSubmission is the mutation gate.
 func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *interactionPayload) {
 	log := slog.With(
-		"command", "expose_connector_click",
+		"command", "protect_connector_click",
 		"team_id", payload.Team.ID,
 		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
@@ -61,7 +61,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	responseURL := payload.ResponseURL
 	if h.cfg.OpenView == nil {
 		// The button shouldn't render without OpenView wired; fail safe.
-		log.Warn("expose connector: OpenView not configured")
+		log.Warn("protect connector: OpenView not configured")
 		h.Go(func() { _ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage) })
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
@@ -77,14 +77,14 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	h.Go(func() {
 		view, err := TunnelInstallModal(meta)
 		if err != nil {
-			log.Error("expose connector: modal render failed", "error", err)
+			log.Error("protect connector: modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 			return
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
 		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("expose connector: views.open failed", "error", err)
+			log.Warn("protect connector: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
 	})
@@ -110,7 +110,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 // inside the trigger budget. The submit handler re-checks at the mutation boundary.
 func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interactionPayload) {
 	log := slog.With(
-		"command", "expose_url_click",
+		"command", "protect_url_click",
 		"team_id", payload.Team.ID,
 		"enterprise_id", payload.Enterprise.ID,
 		"channel_id", payload.Channel.ID,
@@ -118,7 +118,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 	)
 	responseURL := payload.ResponseURL
 	if h.cfg.OpenView == nil {
-		log.Warn("expose url: OpenView not configured")
+		log.Warn("protect url: OpenView not configured")
 		h.Go(func() { _ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage) })
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
@@ -146,28 +146,28 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		if len(options) == 0 {
 			view, err := ExposeURLCreateModal(meta)
 			if err != nil {
-				log.Error("expose url: create modal render failed", "error", err)
+				log.Error("protect url: create modal render failed", "error", err)
 				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 				return
 			}
 			openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 			defer openCancel()
 			if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-				log.Warn("expose url: create modal views.open failed", "error", err)
+				log.Warn("protect url: create modal views.open failed", "error", err)
 				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 			}
 			return
 		}
 		view, err := ExposeURLModal(meta, options)
 		if err != nil {
-			log.Error("expose url: modal render failed", "error", err)
+			log.Error("protect url: modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 			return
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
 		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("expose url: views.open failed", "error", err)
+			log.Warn("protect url: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
 	})
@@ -185,12 +185,12 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 func (h *Handler) urlResourceSelectOptions(ctx context.Context, log *slog.Logger, teamID string) (options []map[string]any, userMsg string) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("expose url: API key lookup failed", "error", err, "team_id", teamID)
+		log.Error("protect url: API key lookup failed", "error", err, "team_id", teamID)
 		return nil, "Failed to look up URL resources. Please try again."
 	}
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
-		log.Warn("expose url: resource lookup failed", "error", err, "team_id", teamID)
+		log.Warn("protect url: resource lookup failed", "error", err, "team_id", teamID)
 		return nil, sanitizeAPIError(err, "Failed to look up URL resources")
 	}
 	options = make([]map[string]any, 0, len(page.Resources))
@@ -205,7 +205,7 @@ func (h *Handler) urlResourceSelectOptions(ctx context.Context, log *slog.Logger
 		}
 	}
 	if page.HasMore && len(options) < exposeURLMaxOptions {
-		log.Debug("expose url: scanned first resource page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
+		log.Debug("protect url: scanned first resource page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
 	}
 	return options, ""
 }
@@ -254,12 +254,12 @@ func truncateRunes(s string, maxRunes int) string {
 func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *interactionPayload) {
 	var meta ExposeURLModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
-		slog.Warn("expose url modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		slog.Warn("protect url modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify this dialog. Run /qurl-admin protect again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
-		slog.Warn("expose url modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		slog.Warn("protect url modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify this dialog. Run /qurl-admin protect again.")
 		return
 	}
@@ -267,12 +267,12 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *inte
 	// cross-checks prevent replaying one admin's modal as another user or across
 	// workspaces.
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
-		slog.Warn("expose url modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
+		slog.Warn("protect url modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "This dialog was opened for a different workspace. Run /qurl-admin protect again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
-		slog.Warn("expose url modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
+		slog.Warn("protect url modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Only the admin who opened this dialog can submit it. Run /qurl-admin protect again.")
 		return
 	}
@@ -294,18 +294,18 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *inte
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("expose url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		slog.Error("protect url modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
 		return
 	}
 	if !isAdmin {
-		slog.Warn("expose url modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		slog.Warn("protect url modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "This action is admin-only.")
 		return
 	}
 
 	log := slog.With(
-		"command", "expose_url_modal",
+		"command", "protect_url_modal",
 		"team_id", meta.TeamID,
 		"channel_id", meta.ChannelID,
 		"user_id", meta.UserID,
@@ -360,22 +360,22 @@ func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue)
 func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload *interactionPayload) {
 	var meta ExposeURLModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
-		slog.Warn("expose url create modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		slog.Warn("protect url create modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify this dialog. Run /qurl-admin protect again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
-		slog.Warn("expose url create modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		slog.Warn("protect url create modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify this dialog. Run /qurl-admin protect again.")
 		return
 	}
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
-		slog.Warn("expose url create modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
+		slog.Warn("protect url create modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "This dialog was opened for a different workspace. Run /qurl-admin protect again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
-		slog.Warn("expose url create modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
+		slog.Warn("protect url create modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Only the admin who opened this dialog can submit it. Run /qurl-admin protect again.")
 		return
 	}
@@ -394,18 +394,18 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("expose url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		slog.Error("protect url create modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "Could not verify admin status. Retry in a moment.")
 		return
 	}
 	if !isAdmin {
-		slog.Warn("expose url create modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		slog.Warn("protect url create modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
 		respondExposeURLModalError(w, "This action is admin-only.")
 		return
 	}
 
 	log := slog.With(
-		"command", "expose_url_create_modal",
+		"command", "protect_url_create_modal",
 		"team_id", meta.TeamID,
 		"channel_id", meta.ChannelID,
 		"user_id", meta.UserID,
@@ -455,7 +455,7 @@ func parseExposeURLCreateModalArgs(values map[string]map[string]interactionState
 func (h *Handler) createAndExposeURLResource(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs) string {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("expose url create: API key lookup failed", "error", err, "team_id", teamID)
+		log.Error("protect url create: API key lookup failed", "error", err, "team_id", teamID)
 		return "Failed to create URL resource. Please try again."
 	}
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
@@ -464,11 +464,11 @@ func (h *Handler) createAndExposeURLResource(ctx context.Context, log *slog.Logg
 		Alias:     args.ChannelAlias,
 	})
 	if err != nil {
-		log.Warn("expose url create: resource create failed", "error", err, "team_id", teamID)
+		log.Warn("protect url create: resource create failed", "error", err, "team_id", teamID)
 		return sanitizeAPIError(err, "Failed to create URL resource")
 	}
 	if resource == nil || resource.ResourceID == "" {
-		log.Error("expose url create: qurl-service returned no resource_id", "team_id", teamID)
+		log.Error("protect url create: qurl-service returned no resource_id", "team_id", teamID)
 		return "Failed to create URL resource. Please try again."
 	}
 
@@ -477,7 +477,7 @@ func (h *Handler) createAndExposeURLResource(ctx context.Context, log *slog.Logg
 		return fmt.Sprintf("URL resource was created, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or protect it with a different alias.", args.ChannelAlias, args.ChannelAlias)
 	}
 	if err != nil {
-		log.Error("expose url create: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.ChannelAlias, "resource_id", resource.ResourceID)
+		log.Error("protect url create: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.ChannelAlias, "resource_id", resource.ResourceID)
 		return "URL resource was created, but Slack could not protect it in this channel. Run `/qurl-admin protect` again and choose *Protect URL*."
 	}
 	log.Info("URL resource created and protected in Slack channel", "team_id", teamID, "channel_id", channelID, "channel_alias", args.ChannelAlias, "resource_id", resource.ResourceID)
@@ -497,7 +497,7 @@ func (h *Handler) bindURLResourceToChannel(ctx context.Context, log *slog.Logger
 		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", channelAlias, channelAlias)
 	}
 	if err != nil {
-		log.Error("expose url: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", channelAlias, "resource_id", resourceID)
+		log.Error("protect url: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", channelAlias, "resource_id", resourceID)
 		return exposeURLResourceFailedMsg
 	}
 	log.Info("URL resource protected in Slack channel via modal", "team_id", teamID, "channel_id", channelID, "channel_alias", channelAlias, "resource_id", resourceID)
@@ -523,7 +523,7 @@ func respondSlackBlocks(w http.ResponseWriter, fallbackText string, blocks []any
 func respondExposeURLModalError(w http.ResponseWriter, message string) {
 	view, err := ExposeURLErrorModal(message)
 	if err != nil {
-		slog.Error("expose url modal error render failed", "error", err)
+		slog.Error("protect url modal error render failed", "error", err)
 		respondViewErrors(w, map[string]string{exposeURLBlockAlias: "Protect failed. Run /qurl-admin protect again."})
 		return
 	}

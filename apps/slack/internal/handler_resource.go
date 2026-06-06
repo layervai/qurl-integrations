@@ -118,7 +118,7 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	h.runAsync(w, "expose_url", values, func(ctx context.Context, log *slog.Logger) {
+	h.runAsync(w, "protect_url", values, func(ctx context.Context, log *slog.Logger) {
 		msg := h.exposeURLResourceInChannel(ctx, log, teamID, channelID, args)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
@@ -129,7 +129,7 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 // it acks fast and does the admin re-check + resource fetch + views.open on the
 // async worker inside Slack's short trigger window, so the picker's first-page
 // resource scan never blocks the slash ack. The picker's button-driven sibling
-// (the `expose` chooser → handleExposeURLClick) opens the identical modal from a
+// (the `protect` chooser → handleExposeURLClick) opens the identical modal from a
 // fresh button trigger; this is the direct slash entry. OpenView must be wired —
 // without it the bare verb declines and points at the typed form.
 func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values) {
@@ -158,7 +158,7 @@ func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values
 		return
 	}
 	log := slog.With(
-		"command", "expose_url_wizard",
+		"command", "protect_url_wizard",
 		"team_id", teamID,
 		"enterprise_id", enterpriseID,
 		"channel_id", channelID,

@@ -63,8 +63,18 @@ func TestExposeChooserBlocks(t *testing.T) {
 	for _, b := range blocks {
 		if m, ok := b.(map[string]any); ok && m[blockKitFieldType] == blockKitTypeActions {
 			actions++
-			if els, _ := m[blockKitFieldElements].([]any); len(els) != 2 {
+			els, _ := m[blockKitFieldElements].([]any)
+			if len(els) != 2 {
 				t.Errorf("actions row has %d buttons, want 2", len(els))
+			}
+			for i, el := range els {
+				btn, ok := el.(map[string]any)
+				if !ok {
+					t.Fatalf("button %d has unexpected shape: %#v", i, el)
+				}
+				if v, _ := btn[blockKitFieldValue].(string); v == "" {
+					t.Errorf("button %d has empty Slack value: %#v", i, btn)
+				}
 			}
 		}
 	}

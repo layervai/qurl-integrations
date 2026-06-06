@@ -13,6 +13,8 @@ const (
 	// URL-resource picker (ExposeURLModal).
 	exposeConnectorActionID = "expose_connector"
 	exposeURLActionID       = "expose_url"
+	exposeConnectorValue    = "protect_connector"
+	exposeURLValue          = "protect_url"
 
 	// callbackIDExposeURL is the view callback_id for the URL-protect modal's
 	// view_submission (routed in handleInteraction).
@@ -44,7 +46,7 @@ const (
 const exposeOpenFailedMessage = "Couldn't open the dialog. Run `/qurl-admin protect` and tap the button again."
 
 // exposeChooserBlocks builds the two-button picker posted by `/qurl-admin
-// expose`: "Protect qURL Connector" opens the guided connector installer and
+// protect`: "Protect qURL Connector" opens the guided connector installer and
 // "Protect URL" opens the URL-resource picker. The target channel is shown so
 // the admin confirms where access lands (both modals act on it).
 func exposeChooserBlocks(channelID string) []any {
@@ -52,8 +54,8 @@ func exposeChooserBlocks(channelID string) []any {
 		sectionBlock("*Protect something in this channel*\nPick what to protect — a short guided form opens next."),
 		contextBlock("Target channel: " + slackChannelMention(channelID)),
 		actionsBlock(
-			primaryButtonElement("Protect qURL Connector", exposeConnectorActionID, ""),
-			buttonElement("Protect URL", exposeURLActionID, ""),
+			primaryButtonElement("Protect qURL Connector", exposeConnectorActionID, exposeConnectorValue),
+			buttonElement("Protect URL", exposeURLActionID, exposeURLValue),
 		),
 	}
 }
