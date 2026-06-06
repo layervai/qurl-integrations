@@ -296,7 +296,7 @@ type Config struct {
 	// surfaces a friendly fallback in that case.
 	PostDM func(ctx context.Context, slackUserID, text string) error
 
-	// TunnelImage is the Docker image shown by `/qurl-admin expose-connector`.
+	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
 	// Empty falls back to the public client image with the `latest` tag for
 	// dev/sandbox installs; production deploys should set an immutable tag or
 	// digest so Slack never instructs customers to run a floating image.
@@ -690,14 +690,14 @@ func slashSubcommand(text, command string) bool {
 
 // adminVerbs are the leading verb words that belong to `/qurl-admin`.
 const (
-	adminVerbExpose = "expose"
-	// expose-connector / expose-url are the single-word connector/URL verbs.
+	adminVerbProtect = "protect"
+	// protect-connector / protect-url are the single-word connector/URL verbs.
 	// Bare (no arguments) opens the matching guided modal; with arguments they
 	// are the typed power-user forms. They replaced the former two-word
-	// `tunnel install` / `resource expose` grammar — the slash surface is
+	// connector/URL grammar — the slash surface is
 	// single word or hyphenated-word only, no space-separated sub-verbs.
-	adminVerbExposeConnector = "expose-connector"
-	adminVerbExposeURL       = "expose-url"
+	adminVerbProtectConnector = "protect-connector"
+	adminVerbProtectURL       = "protect-url"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
@@ -715,7 +715,7 @@ const (
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbExpose, adminVerbExposeConnector, adminVerbExposeURL, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -934,11 +934,6 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// slashSubcommand (not exact match) so `feedback <stray text>` still
 		// opens the form rather than falling through to "unknown subcommand".
 		h.handleFeedback(w, values)
-	case slashSubcommand(text, adminVerbExpose):
-		// `/qurl expose` is the low-friction guided entry point. It reuses the
-		// admin-gated chooser instead of redirecting to `/qurl-admin expose`, so
-		// admins get the two buttons directly on the command people naturally try.
-		h.handleExpose(w, values)
 	case isAdminVerb(text):
 		// An admin verb typed on `/qurl` — redirect to `/qurl-admin` rather
 		// than the generic unknown reply. firstWord(text) is the classified
@@ -1001,17 +996,17 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// already-admin command. Redirect to the flat verbs rather than
 		// silently accepting it, so muscle-memory users learn the new grammar.
 		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
-	// expose-connector / expose-url precede the bare `expose` chooser. slashVerb
-	// matches an exact token or a `verb ` (space) prefix, so `expose` can't
+	// protect-connector / protect-url precede the bare `protect` chooser. slashVerb
+	// matches an exact token or a `verb ` (space) prefix, so `protect` can't
 	// shadow the hyphenated verbs regardless of order; the adjacency is for
-	// readability — all three expose entries sit together. Each connector/URL
+	// readability — all three protect entries sit together. Each connector/URL
 	// verb opens its guided modal when bare and runs the typed power-user form
 	// when given arguments (handleExposeConnector / handleExposeURL).
-	case slashSubcommand(text, "expose-connector"):
+	case slashSubcommand(text, adminVerbProtectConnector):
 		h.handleExposeConnector(w, values)
-	case slashSubcommand(text, adminVerbExposeURL):
+	case slashSubcommand(text, adminVerbProtectURL):
 		h.handleExposeURL(w, values)
-	case slashSubcommand(text, adminVerbExpose):
+	case slashSubcommand(text, adminVerbProtect):
 		h.handleExpose(w, values)
 	case setAliasSubcommand(text):
 		// Bare `set-alias` falls through too — parseAliasArgs renders
@@ -1298,11 +1293,6 @@ func (h *Handler) userHelpMessage(command string) string {
 			"• `/qurl aliases` — List this channel's aliases and the resource each one points to",
 		)
 	}
-	if h.aliasStore != nil && h.cfg.AdminStore != nil && h.cfg.OpenView != nil {
-		lines = append(lines,
-			"• `/qurl expose` — Admin-only guided picker for exposing a qURL Connector or URL in this channel",
-		)
-	}
 	if h.cfg.PostFeedback != nil {
 		// feedback needs no AdminStore/setup — only the PostFeedback seam —
 		// so it gates on that alone and shows even on no-DDB deploys.
@@ -1346,7 +1336,7 @@ func (h *Handler) userHelpMessage(command string) string {
 func (h *Handler) adminHelpMessage(command string) string {
 	// command is non-empty here (normalized in handleSlashCommand); see
 	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
-	// The verbs are grouped under bold section headers (Expose resources,
+	// The verbs are grouped under bold section headers (Protect resources,
 	// Aliases, Manage resources, Bot admins) rather than one flat bullet list —
 	// the admin surface grew long enough that a flat list was hard to scan. Each
 	// section is gated on the same wiring its verbs need at runtime, so an
@@ -1359,28 +1349,28 @@ func (h *Handler) adminHelpMessage(command string) string {
 	appendSectionHeader := func(title string) {
 		lines = append(lines, "", title)
 	}
-	// Expose resources: stand up new access in this channel (a connector tunnel
+	// Protect resources: stand up new access in this channel (a connector tunnel
 	// or an existing URL resource). Gates on aliasStore + AdminStore, the same
-	// pair the install/expose verbs need; the guided-vs-typed split nests under
+	// pair the install/protect verbs need; the guided-vs-typed split nests under
 	// OpenView, the condition the guided modals themselves require.
 	if h.aliasStore != nil && h.cfg.AdminStore != nil {
-		appendSectionHeader("*Expose resources*")
+		appendSectionHeader("*Protect resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl-admin expose` — Guided picker: choose *qURL Connector* or *URL*, then fill in a short form (recommended)",
-				"• `/qurl-admin expose-connector` — Guided connector setup (Docker, Docker Compose, ECS/Fargate, Kubernetes); opens a short form",
-				"• `/qurl-admin expose-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup; creates a bootstrap key and binds `$<id>` in this channel",
-				"• `/qurl-admin expose-url` — Guided picker for an existing URL resource; opens a short form",
-				"• `/qurl-admin expose-url $<alias> [as:$channel-alias]` — Typed: expose an existing URL resource in this channel",
-				"• `/qurl-admin expose-url url:<target-url> as:$channel-alias` — Typed: expose an existing no-alias URL resource in this channel",
+				"• `/qurl-admin protect` — Guided picker: choose *qURL Connector* or *URL*, then fill in a short form (recommended)",
+				"• `/qurl-admin protect-connector` — Guided connector setup (Docker, Docker Compose, ECS/Fargate, Kubernetes); opens a short form",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin protect-url` — Guided picker for an existing URL resource; opens a short form",
+				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
+				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
 				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin expose-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar bootstrap key and bind `$<id>` in this channel",
-				"• `/qurl-admin expose-url $<alias> [as:$channel-alias]` — Expose an existing URL resource in this channel",
-				"• `/qurl-admin expose-url url:<target-url> as:$channel-alias` — Expose an existing no-alias URL resource in this channel",
-				"  Guided setup (bare `/qurl-admin expose-connector` / `expose-url`) is not enabled in this deployment; use the typed forms above.",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar bootstrap key and bind `$<id>` in this channel",
+				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Protect an existing URL resource in this channel",
+				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Protect an existing no-alias URL resource in this channel",
+				"  Guided setup (bare `/qurl-admin protect-connector` / `protect-url`) is not enabled in this deployment; use the typed forms above.",
 			)
 		}
 	}

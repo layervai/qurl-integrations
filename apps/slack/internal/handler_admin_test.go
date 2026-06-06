@@ -676,7 +676,7 @@ func TestAdminHelpGroupsVerbsUnderSections(t *testing.T) {
 	help := h.adminHelpMessage(commandAdmin)
 
 	for _, want := range []string{
-		"*Expose resources*",
+		"*Protect resources*",
 		"*Aliases*",
 		"*Manage resources*",
 		"*Bot admins*",
@@ -697,7 +697,7 @@ func TestAdminHelpOmitsSectionHeadersWhenUnwired(t *testing.T) {
 	help := h.adminHelpMessage(commandAdmin)
 
 	for _, absent := range []string{
-		"*Expose resources*",
+		"*Protect resources*",
 		"*Aliases*",
 		"*Manage resources*",
 		"*Bot admins*",

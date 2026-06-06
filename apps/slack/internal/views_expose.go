@@ -5,21 +5,25 @@ import (
 	"fmt"
 )
 
-// Block Kit IDs for the `/qurl-admin expose` chooser and the URL-expose modal.
+// Block Kit IDs for the `/qurl-admin protect` chooser and the URL-protect modal.
 const (
 	// exposeConnectorActionID / exposeURLActionID are the action_ids on the two
-	// buttons posted by `/qurl-admin expose`. A click opens the matching guided
+	// buttons posted by `/qurl-admin protect`. A click opens the matching guided
 	// modal — the connector installer (reusing TunnelInstallModal) or the
-	// URL-resource picker (ExposeURLModal).
+	// URL-resource picker (ExposeURLModal). Keep action_ids stable for in-flight
+	// Slack interactions; the button values use protect wording and are non-empty
+	// because Slack can reject slash-command responses with empty button values.
 	exposeConnectorActionID = "expose_connector"
 	exposeURLActionID       = "expose_url"
+	exposeConnectorValue    = "protect_connector"
+	exposeURLValue          = "protect_url"
 
-	// callbackIDExposeURL is the view callback_id for the URL-expose modal's
+	// callbackIDExposeURL is the view callback_id for the URL-protect modal's
 	// view_submission (routed in handleInteraction).
 	callbackIDExposeURL       = "expose_url_modal"
 	callbackIDExposeURLCreate = "expose_url_create_modal"
 
-	// URL-expose modal block/action ids.
+	// URL-protect modal block/action ids.
 	exposeURLBlockResource  = "expose_url_resource"
 	exposeURLActionResource = "expose_url_resource_select"
 	exposeURLBlockAlias     = "expose_url_alias"
@@ -39,27 +43,27 @@ const (
 )
 
 // exposeOpenFailedMessage is the ephemeral shown (via the chooser's
-// response_url) when an Expose button can't open its modal — a stale trigger, a
+// response_url) when a Protect button can't open its modal — a stale trigger, a
 // rate-limited views.open, or a render failure. Mirrors listEditOpenFailedMessage.
-const exposeOpenFailedMessage = "Couldn't open the dialog. Run `/qurl-admin expose` and tap the button again."
+const exposeOpenFailedMessage = "Couldn't open the dialog. Run `/qurl-admin protect` and tap the button again."
 
 // exposeChooserBlocks builds the two-button picker posted by `/qurl-admin
-// expose`: "Expose qURL Connector" opens the guided connector installer and
-// "Expose URL" opens the URL-resource picker. The target channel is shown so
-// the admin confirms where the exposure lands (both modals act on it).
+// protect`: "Protect qURL Connector" opens the guided connector installer and
+// "Protect URL" opens the URL-resource picker. The target channel is shown so
+// the admin confirms where access lands (both modals act on it).
 func exposeChooserBlocks(channelID string) []any {
 	return []any{
-		sectionBlock("*Expose something in this channel*\nPick what to expose — a short guided form opens next."),
+		sectionBlock("*Protect something in this channel*\nPick what to protect — a short guided form opens next."),
 		contextBlock("Target channel: " + slackChannelMention(channelID)),
 		actionsBlock(
-			primaryButtonElement("Expose qURL Connector", exposeConnectorActionID, ""),
-			buttonElement("Expose URL", exposeURLActionID, ""),
+			primaryButtonElement("Protect qURL Connector", exposeConnectorActionID, exposeConnectorValue),
+			buttonElement("Protect URL", exposeURLActionID, exposeURLValue),
 		),
 	}
 }
 
 // ExposeURLModalMetadata is carried through Slack private_metadata from the
-// "Expose URL" button click (block_actions) to the later view_submission.
+// "Protect URL" button click (block_actions) to the later view_submission.
 // ResponseURL is the chooser message's, where the async outcome is posted. Like
 // the edit modal's metadata it carries no TTL/freshness field: the submission
 // binds a channel alias (mints no secret, idempotent), so a late submission
@@ -71,7 +75,7 @@ type ExposeURLModalMetadata struct {
 	ResponseURL string `json:"response_url"`
 }
 
-// ExposeURLModal renders the guided URL-expose picker: a dropdown of the
+// ExposeURLModal renders the guided URL-protect picker: a dropdown of the
 // workspace's existing URL resources (built by the caller from a fresh scan) and
 // a channel-alias input. On submit the chosen resource is exposed in the channel
 // under that alias (handleExposeURLSubmission). options must be non-empty — the
@@ -88,13 +92,13 @@ func ExposeURLModal(meta ExposeURLModalMetadata, options []map[string]any) ([]by
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDExposeURL,
-		blockKitFieldTitle:           plainTextObj("Expose URL"),
-		blockKitFieldSubmit:          plainTextObj("Expose"),
+		blockKitFieldTitle:           plainTextObj("Protect URL"),
+		blockKitFieldSubmit:          plainTextObj("Protect"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			inputBlock(exposeURLBlockResource, "URL resource", "Pick a protected URL resource to expose in this channel.", false,
+			inputBlock(exposeURLBlockResource, "URL resource", "Pick a URL resource to protect in this channel.", false,
 				staticSelect(exposeURLActionResource, options, nil)),
 			inputBlock(exposeURLBlockAlias, "Channel alias", "The name people type after /qurl get in this channel (e.g. $docs).", false,
 				plainTextInput(exposeURLActionAlias, "$docs", "")),
@@ -105,7 +109,7 @@ func ExposeURLModal(meta ExposeURLModalMetadata, options []map[string]any) ([]by
 
 // ExposeURLCreateModal renders the first-run URL flow: when there are no
 // existing URL resources to pick, ask for the target URL and channel alias so
-// Slack can create and expose the resource directly.
+// Slack can create and protect the resource directly.
 func ExposeURLCreateModal(meta ExposeURLModalMetadata) ([]byte, error) {
 	privateMeta, err := json.Marshal(meta)
 	if err != nil {
@@ -117,13 +121,13 @@ func ExposeURLCreateModal(meta ExposeURLModalMetadata) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDExposeURLCreate,
-		blockKitFieldTitle:           plainTextObj("Expose URL"),
+		blockKitFieldTitle:           plainTextObj("Protect URL"),
 		blockKitFieldSubmit:          plainTextObj("Create"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			sectionBlock("*Create a URL resource*\nAdd the URL you want to protect. Slack will expose it in this channel so people can run `/qurl get $alias`."),
+			sectionBlock("*Create a URL resource*\nAdd the URL you want to protect. Slack will protect it in this channel so people can run `/qurl get $alias`."),
 			inputBlock(exposeURLBlockTarget, "Target URL", "Absolute http or https URL to protect.", false,
 				plainTextInput(exposeURLActionTarget, "https://docs.example.com", "")),
 			inputBlock(exposeURLBlockAlias, "Channel alias", "The name people type after /qurl get in this channel (e.g. $docs).", false,
@@ -133,7 +137,7 @@ func ExposeURLCreateModal(meta ExposeURLModalMetadata) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// ExposeURLErrorModal replaces a submitted URL-expose modal with a form-level
+// ExposeURLErrorModal replaces a submitted URL-protect modal with a form-level
 // error notice, for the structural failures (stale/forged metadata, admin
 // re-check denial, missing wiring) that aren't tied to a specific input field.
 // Per-field validation problems use response_action:errors instead. Mirrors
@@ -141,7 +145,7 @@ func ExposeURLCreateModal(meta ExposeURLModalMetadata) ([]byte, error) {
 func ExposeURLErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("Expose URL"),
+		blockKitFieldTitle: plainTextObj("Protect URL"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),

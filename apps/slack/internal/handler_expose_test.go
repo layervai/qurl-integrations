@@ -53,7 +53,7 @@ func TestExposeChooserBlocks(t *testing.T) {
 		t.Fatalf("marshal chooser blocks: %v", err)
 	}
 	s := string(js)
-	for _, want := range []string{exposeConnectorActionID, exposeURLActionID, "Expose qURL Connector", "Expose URL", testExposeChannel} {
+	for _, want := range []string{exposeConnectorActionID, exposeURLActionID, "Protect qURL Connector", "Protect URL", testExposeChannel} {
 		if !strings.Contains(s, want) {
 			t.Errorf("chooser blocks missing %q: %s", want, s)
 		}
@@ -63,8 +63,18 @@ func TestExposeChooserBlocks(t *testing.T) {
 	for _, b := range blocks {
 		if m, ok := b.(map[string]any); ok && m[blockKitFieldType] == blockKitTypeActions {
 			actions++
-			if els, _ := m[blockKitFieldElements].([]any); len(els) != 2 {
+			els, _ := m[blockKitFieldElements].([]any)
+			if len(els) != 2 {
 				t.Errorf("actions row has %d buttons, want 2", len(els))
+			}
+			for i, el := range els {
+				btn, ok := el.(map[string]any)
+				if !ok {
+					t.Fatalf("button %d has unexpected shape: %#v", i, el)
+				}
+				if v, _ := btn[blockKitFieldValue].(string); v == "" {
+					t.Errorf("button %d has empty Slack value: %#v", i, btn)
+				}
 			}
 		}
 	}
@@ -74,7 +84,7 @@ func TestExposeChooserBlocks(t *testing.T) {
 }
 
 // TestHandleExpose_AdminRendersChooser fences that an admin gets the picker
-// (and that `expose` dispatches at all — a missing verb would render the
+// (and that `protect` dispatches at all — a missing verb would render the
 // unknown-subcommand reply instead).
 func TestHandleExpose_AdminRendersChooser(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -84,19 +94,110 @@ func TestHandleExpose_AdminRendersChooser(t *testing.T) {
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 	inv := newAdminSlashInvoker(t, h)
 
-	status, reply := inv.invokeAdmin("expose", testAdminTeamID, testAdminUserID)
+	status, reply := inv.invokeAdmin("protect", testAdminTeamID, testAdminUserID)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if !strings.Contains(reply, "expose") {
+	if !strings.Contains(reply, "protect") {
 		t.Fatalf("reply = %q, want the chooser fallback text", reply)
 	}
 }
 
-// TestHandleExpose_UserSurfaceRendersChooser fences the product-facing entry:
-// admins can run `/qurl expose` and get the same two-button chooser directly,
-// instead of a wrong-surface redirect to `/qurl-admin expose`.
-func TestHandleExpose_UserSurfaceRendersChooser(t *testing.T) {
+// TestHandleExpose_SandboxAdminProtectReturnsSlackValidChooser fences the exact
+// non-prod slash-command path that Slack evaluates for the immediate response.
+// A previous chooser response used buttons with empty values, which Slack can
+// reject as invalid_command_response even though the typed modal verbs work.
+func TestHandleExpose_SandboxAdminProtectReturnsSlackValidChooser(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	body := url.Values{
+		fieldCommand:     {"/qurl-sandbox-admin"},
+		fieldText:        {"protect"},
+		fieldTeamID:      {testAdminTeamID},
+		fieldUserID:      {testAdminUserID},
+		fieldChannelID:   {testExposeChannel},
+		fieldResponseURL: {"https://hooks.slack.com/protect"},
+		fieldTriggerID:   {"trigger_test"},
+	}
+	encoded := body.Encode()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, pathSlackCommands, strings.NewReader(encoded))
+	sig, tsHeader := signSlackBody(t, encoded)
+	r.Header.Set(headerSlackSignature, sig)
+	r.Header.Set(headerSlackTimestamp, tsHeader)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, w.Body.String())
+	}
+	if got[respFieldResponseType] != respTypeEphemeral {
+		t.Fatalf("response_type = %q, want %q; body=%s", got[respFieldResponseType], respTypeEphemeral, w.Body.String())
+	}
+	text, _ := got[respFieldText].(string)
+	if text == "" || !strings.Contains(strings.ToLower(text), "protect") {
+		t.Fatalf("fallback text = %q, want protect chooser text", text)
+	}
+	blocks, ok := got[blockKitFieldBlocks].([]any)
+	if !ok || len(blocks) == 0 {
+		t.Fatalf("blocks missing from chooser response: %#v", got[blockKitFieldBlocks])
+	}
+	assertProtectChooserButtonsSlackValid(t, blocks)
+}
+
+func assertProtectChooserButtonsSlackValid(t *testing.T, blocks []any) {
+	t.Helper()
+	found := map[string]bool{}
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok || m[blockKitFieldType] != blockKitTypeActions {
+			continue
+		}
+		els, _ := m[blockKitFieldElements].([]any)
+		if len(els) != 2 {
+			t.Fatalf("actions row has %d buttons, want 2: %#v", len(els), m)
+		}
+		for i, el := range els {
+			btn, ok := el.(map[string]any)
+			if !ok {
+				t.Fatalf("button %d has unexpected shape: %#v", i, el)
+			}
+			actionID, _ := btn[blockKitFieldActionID].(string)
+			value, _ := btn[blockKitFieldValue].(string)
+			textObj, _ := btn["text"].(map[string]any)
+			label, _ := textObj["text"].(string)
+			if actionID == "" {
+				t.Fatalf("button %d missing action_id: %#v", i, btn)
+			}
+			if value == "" {
+				t.Fatalf("button %d has empty Slack value: %#v", i, btn)
+			}
+			if label == "" || !strings.Contains(strings.ToLower(label), "protect") {
+				t.Fatalf("button %d label = %q, want visible protect copy: %#v", i, label, btn)
+			}
+			found[actionID] = true
+		}
+	}
+	for _, actionID := range []string{exposeConnectorActionID, exposeURLActionID} {
+		if !found[actionID] {
+			t.Fatalf("chooser response missing button action_id %q; found=%v", actionID, found)
+		}
+	}
+}
+
+// TestHandleExpose_UserSurfaceRedirects fences that protected-resource creation
+// remains on the admin command surface. Even admins should use
+// `/qurl-admin protect`, not `/qurl protect`, so the user command never looks
+// like it can create protected resources.
+func TestHandleExpose_UserSurfaceRedirects(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	h := newAdminTestHandler(t, ts)
@@ -105,7 +206,7 @@ func TestHandleExpose_UserSurfaceRendersChooser(t *testing.T) {
 
 	body := url.Values{
 		fieldCommand:     {commandUser},
-		fieldText:        {"expose"},
+		fieldText:        {"protect"},
 		fieldTeamID:      {testAdminTeamID},
 		fieldUserID:      {testAdminUserID},
 		fieldChannelID:   {testExposeChannel},
@@ -127,17 +228,12 @@ func TestHandleExpose_UserSurfaceRendersChooser(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal reply: %v body=%s", err, w.Body.String())
 	}
-	if text, _ := got[respFieldText].(string); strings.Contains(text, "admin command") {
-		t.Fatalf("reply = %q, want chooser rather than wrong-surface redirect", text)
+	text, _ := got[respFieldText].(string)
+	if !strings.Contains(text, "admin command") || !strings.Contains(text, "/qurl-admin protect") {
+		t.Fatalf("reply = %q, want wrong-surface redirect to /qurl-admin protect", text)
 	}
-	js, err := json.Marshal(got[blockKitFieldBlocks])
-	if err != nil {
-		t.Fatalf("marshal blocks: %v", err)
-	}
-	for _, want := range []string{exposeConnectorActionID, exposeURLActionID, "Expose qURL Connector", "Expose URL"} {
-		if !strings.Contains(string(js), want) {
-			t.Errorf("/qurl expose chooser missing %q: %s", want, js)
-		}
+	if got[blockKitFieldBlocks] != nil {
+		t.Fatalf("reply included chooser blocks on user surface: %#v", got[blockKitFieldBlocks])
 	}
 }
 
@@ -151,7 +247,7 @@ func TestHandleExpose_NonAdminDenied(t *testing.T) {
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("expose", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("protect", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Fatalf("reply = %q, want admin denial", reply)
 	}
@@ -168,14 +264,14 @@ func TestHandleExpose_NoOpenViewConfigured(t *testing.T) {
 	// OpenView intentionally left nil.
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("expose", testAdminTeamID, testAdminUserID)
+	_, reply := inv.invokeAdmin("protect", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "Guided setup is not configured") {
 		t.Fatalf("reply = %q, want not-configured notice", reply)
 	}
 }
 
 // TestAdminHelpReflectsExposeVerb fences that `/qurl-admin help` advertises the
-// expose chooser as the guided entry when OpenView is wired.
+// protect chooser as the guided entry when OpenView is wired.
 func TestAdminHelpReflectsExposeVerb(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -184,14 +280,14 @@ func TestAdminHelpReflectsExposeVerb(t *testing.T) {
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
 
 	help := h.adminHelpMessage(commandAdmin)
-	if !strings.Contains(help, "/qurl-admin expose") {
-		t.Fatalf("admin help missing the expose verb:\n%s", help)
+	if !strings.Contains(help, "/qurl-admin protect") {
+		t.Fatalf("admin help missing the protect verb:\n%s", help)
 	}
 }
 
 // --- button clicks (block_actions) ----------------------------------------
 
-// TestHandleExposeConnectorClick_OpensInstallModal fences that the "Expose qURL
+// TestHandleExposeConnectorClick_OpensInstallModal fences that the "Protect qURL
 // Connector" button opens the existing connector installer modal (reused
 // wholesale — same callback_id its bare-command path uses).
 func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
@@ -227,7 +323,7 @@ func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLClick_OpensModalWithResourceOptions fences that the "Expose
+// TestHandleExposeURLClick_OpensModalWithResourceOptions fences that the "Protect
 // URL" button fetches the workspace's URL resources and opens the picker
 // pre-populated with them (resource_id as the option value).
 func TestHandleExposeURLClick_OpensModalWithResourceOptions(t *testing.T) {
@@ -365,10 +461,10 @@ func TestHandleExposeURLClick_NoResourcesFallsBackToEnterpriseOpen(t *testing.T)
 // --- bare verb → guided picker (handleExposeURLWizard) --------------------
 
 // TestHandleExposeURLBareOpensPickerModal fences that a bare `/qurl-admin
-// expose-url` (no arguments) opens the same URL-resource picker the chooser's
-// "Expose URL" button does — fetching the workspace's URL resources and opening
+// protect-url` (no arguments) opens the same URL-resource picker the chooser's
+// "Protect URL" button does — fetching the workspace's URL resources and opening
 // ExposeURLModal via the slash command's own trigger. This is the no-arguments
-// guided path; `expose-url <target>` is the typed path covered elsewhere.
+// guided path; `protect-url <target>` is the typed path covered elsewhere.
 func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -388,7 +484,7 @@ func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 	}
 	inv := newAdminSlashInvoker(t, h)
 
-	status, _ := inv.invokeAdmin("expose-url", testAdminTeamID, testAdminUserID)
+	status, _ := inv.invokeAdmin("protect-url", testAdminTeamID, testAdminUserID)
 	if status != http.StatusOK {
 		t.Fatalf("ack status = %d, want 200", status)
 	}
@@ -396,7 +492,7 @@ func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 	select {
 	case view = <-views:
 	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called for bare expose-url")
+		t.Fatal("OpenView was not called for bare protect-url")
 	}
 	js := string(view)
 	if !strings.Contains(js, callbackIDExposeURL) {
@@ -406,7 +502,7 @@ func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 		t.Errorf("URL resource option (value=%s) missing: %s", testResourceExposeID, js)
 	}
 	if strings.Contains(js, "r_tunnel_x") {
-		t.Errorf("tunnel resource leaked into the bare expose-url picker: %s", js)
+		t.Errorf("tunnel resource leaked into the bare protect-url picker: %s", js)
 	}
 }
 
@@ -421,7 +517,7 @@ func TestHandleExposeURLBareNonAdminDenied(t *testing.T) {
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { opened.Add(1); return nil }
 	inv := newAdminSlashInvoker(t, h)
 
-	_, _, async := inv.invokeAdminAsync("expose-url", testAdminTeamID, testAdminUserID)
+	_, _, async := inv.invokeAdminAsync("protect-url", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "admin-only") {
 		t.Fatalf("async reply = %q, want admin denial", async)
 	}
@@ -447,7 +543,7 @@ func TestHandleExposeURLBareNoResourcesOpensCreateModal(t *testing.T) {
 	}
 	inv := newAdminSlashInvoker(t, h)
 
-	status, ack := inv.invokeAdmin("expose-url", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-url", testAdminTeamID, testAdminUserID)
 	if status != http.StatusOK {
 		t.Fatalf("ack status = %d, want 200", status)
 	}
@@ -458,7 +554,7 @@ func TestHandleExposeURLBareNoResourcesOpensCreateModal(t *testing.T) {
 	select {
 	case view = <-views:
 	case <-time.After(2 * time.Second):
-		t.Fatal("OpenView was not called for bare expose-url empty state")
+		t.Fatal("OpenView was not called for bare protect-url empty state")
 	}
 	js := string(view)
 	for _, want := range []string{callbackIDExposeURLCreate, "Create a URL resource", exposeURLActionTarget, exposeURLActionAlias, "/qurl get $alias"} {
@@ -481,8 +577,8 @@ func TestHandleExposeURLBareNoOpenViewDeclines(t *testing.T) {
 	// OpenView intentionally left nil.
 	inv := newAdminSlashInvoker(t, h)
 
-	_, reply := inv.invokeAdmin("expose-url", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "Guided setup is not configured") || !strings.Contains(reply, "expose-url $<alias>") {
+	_, reply := inv.invokeAdmin("protect-url", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "Guided setup is not configured") || !strings.Contains(reply, "protect-url $<alias>") {
 		t.Fatalf("reply = %q, want not-configured notice with the typed fallback", reply)
 	}
 }
@@ -555,7 +651,7 @@ func TestHandleExposeURLSubmission_BindsResource(t *testing.T) {
 }
 
 // TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias fences the
-// first-run modal: Slack creates the URL resource, exposes it under a channel
+// first-run modal: Slack creates the URL resource, protects it under a channel
 // alias, and points the admin at the next `/qurl get $alias` step.
 func TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias(t *testing.T) {
 	ts := newAdminTestServers(t)

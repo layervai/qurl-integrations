@@ -423,7 +423,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //  2. Tunnel-slug fallback. When no binding matches, the token may
 //     still be a tunnel slug: `/qurl list` renders `$<slug>` for tunnels
 //     granted to this channel via `allowed_resource_ids` that have no
-//     `alias_bindings` entry here (e.g. a tunnel exposed to this channel
+//     `alias_bindings` entry here (e.g. a tunnel protected in this channel
 //     from the `/qurl list` Edit modal without an alias). Resolve the
 //     slug to its resource_id and gate it through the channel allow-set
 //     ([Handler.allowedResourceIDsForGet]) so the list→get round-trip the
@@ -587,16 +587,16 @@ func (h *Handler) lookupListedResourceAliasesForGet(ctx context.Context, log *sl
 // depend on who the caller is.
 //
 // No admin bypass: a workspace admin who runs `/qurl get $<slug>` from a
-// channel the tunnel isn't exposed to is refused exactly like anyone else.
+// channel the tunnel isn't protected in is refused exactly like anyone else.
 // (A prior version let admins mint anything because `/qurl list` was
 // workspace-wide, so an admin "saw" every slug. Now that list, aliases, and
 // mint all share this one channel-scoped definition, the bypass would be a
 // hole: someone who learned a slug/alias/channel-id elsewhere must still not
-// be able to mint a tunnel from a channel it isn't exposed to.) Admins manage
-// where a tunnel is exposed via `/qurl-admin expose-connector` and the
+// be able to mint a tunnel from a channel it isn't protected in.) Admins manage
+// where a tunnel is exposed via `/qurl-admin protect-connector` and the
 // `/qurl list` Edit modal — not by minting from arbitrary channels. Together
 // with the list-side scan, this closes the former TODO(#460) list/mint
-// asymmetry for visible rows: you can only see resources exposed here, and
+// asymmetry for visible rows: you can only see resources protected here, and
 // minted tokens are rechecked against this same allow-set. URL resource-alias
 // fallback and duplicate-alias ambiguity detection still depend on the first
 // listResourcesScanLimit rows until #590 moves listing/resolution to an

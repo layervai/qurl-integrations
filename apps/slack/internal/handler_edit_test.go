@@ -406,7 +406,7 @@ func TestHandleList_AdminPastEditCapKeepsCreateButtons(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, resources, "", false)
 	})
-	// All exposed to C_test (channel-scoped list).
+	// All protected in C_test (channel-scoped list).
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", rids...)
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
@@ -1056,7 +1056,7 @@ func TestParseEditChannelSelection(t *testing.T) {
 	t.Run("drops DM and other non-channel conversation ids", func(t *testing.T) {
 		// A `D…` (DM) id can only arrive via a hand-crafted submission — the
 		// multi-select filters to public/private channels — and must be dropped:
-		// exposing a tunnel into a DM is exactly the leak channel-scoping closes.
+		// protecting a tunnel into a DM is exactly the leak channel-scoping closes.
 		got := parseEditChannelSelection(withChannels([]string{"D0123456789", testEditExtraChannel}), meta)
 		if len(got) != 2 || got[0] != testEditHomeChannel || got[1] != testEditExtraChannel {
 			t.Errorf("got %v, want [%s %s] (DM dropped)", got, testEditHomeChannel, testEditExtraChannel)
@@ -1105,9 +1105,9 @@ func TestHandleTunnelEdit_ExposesNewChannel(t *testing.T) {
 		t.Fatalf("AllowedResourceIDsForChannel: %v", err)
 	}
 	if _, ok := allowed[testEditResourceID]; !ok {
-		t.Errorf("resource not exposed to the new channel; allow-set = %v", allowed)
+		t.Errorf("resource not protected in the new channel; allow-set = %v", allowed)
 	}
-	if summary := parseSlackText(t, got); !strings.Contains(summary, "Exposed to:") || !strings.Contains(summary, newChannel) {
+	if summary := parseSlackText(t, got); !strings.Contains(summary, "Protected in:") || !strings.Contains(summary, newChannel) {
 		t.Errorf("summary missing expose line for the new channel: %s", summary)
 	}
 }
@@ -1121,7 +1121,7 @@ func TestHandleTunnelEdit_RevokesDeselectedChannel(t *testing.T) {
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, testEditChannel, map[string]string{
 		testEditToken: testEditResourceID,
 	})
-	// Also exposed to extraChannel via its allow-set.
+	// Also protected in extraChannel via its allow-set.
 	ts.seedChannelExposure(t, testAdminTeamID, extraChannel, testEditResourceID)
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
@@ -1264,7 +1264,7 @@ func TestHandleTunnelEdit_CurrentChannelNeverRevoked(t *testing.T) {
 
 // TestHandleListEditClick_PrefillsExposedChannels fences the modal-open
 // enumeration: the channels multi-select is pre-filled with every channel the
-// tunnel is exposed to (current channel via alias + another via allow-set).
+// tunnel is protected in (current channel via alias + another via allow-set).
 func TestHandleListEditClick_PrefillsExposedChannels(t *testing.T) {
 	const otherChannel = "C0other0001"
 	ts := newAdminTestServers(t)

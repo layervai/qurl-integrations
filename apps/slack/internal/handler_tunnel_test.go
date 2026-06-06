@@ -25,8 +25,8 @@ const (
 	testTunnelSlug         = "prod-dashboard"
 	testTunnelAliasDash    = "dash" // sample channel alias used across get/tunnel tests
 	testTunnelResourceID   = "r_prod_dash01"
-	testTunnelWizardCmd    = "expose-connector"                         // bare verb → guided modal
-	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug // typed: `expose-connector prod-dashboard`
+	testTunnelWizardCmd    = "protect-connector"                        // bare verb → guided modal
+	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug // typed: `protect-connector prod-dashboard`
 	testTunnelChannelID    = "C_test"
 	testTunnelImageRef     = "ghcr.io/layervai/qurl-connector:v-test"
 	testTunnelAPIKey       = "lv_live_test_bootstrap"
@@ -122,7 +122,7 @@ func TestParseTunnelInstall(t *testing.T) {
 		wantWebRef string
 	}{
 		{name: "minimal", text: testTunnelInstallCmd, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
-		{name: "slug with alias sigil", text: "expose-connector $" + testTunnelSlug, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
+		{name: "slug with alias sigil", text: "protect-connector $" + testTunnelSlug, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort},
 		{name: "port and alias", text: testTunnelInstallCmd + " port:9090 alias:$dash", wantSlug: testTunnelSlug, wantAlias: testTunnelAliasDash, wantPort: 9090},
 		{name: "alias without sigil", text: testTunnelInstallCmd + " alias:dash", wantSlug: testTunnelSlug, wantAlias: testTunnelAliasDash, wantPort: defaultTunnelLocalPort},
 		{name: "docker environment", text: testTunnelInstallCmd + " env:docker", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvDocker},
@@ -131,9 +131,9 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "compose service before environment", text: testTunnelInstallCmd + " service:" + testTunnelComposeWeb + " env:compose", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantEnv: tunnelEnvCompose, wantWebRef: testTunnelComposeWeb},
 		{name: "container ref", text: testTunnelInstallCmd + " container:" + testTunnelDockerWeb, wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: testTunnelDockerWeb},
 		{name: "web container ref", text: testTunnelInstallCmd + " web_container:web", wantSlug: testTunnelSlug, wantAlias: testTunnelSlug, wantPort: defaultTunnelLocalPort, wantWebRef: "web"},
-		{name: "bad slug uppercase", text: "expose-connector Prod", wantErr: true},
-		{name: "empty slug after sigil", text: "expose-connector $", wantErr: true},
-		{name: "double sigil slug", text: "expose-connector $$prod", wantErr: true},
+		{name: "bad slug uppercase", text: "protect-connector Prod", wantErr: true},
+		{name: "empty slug after sigil", text: "protect-connector $", wantErr: true},
+		{name: "double sigil slug", text: "protect-connector $$prod", wantErr: true},
 		{name: "verb boundary", text: "tunnelhats install prod", wantErr: true},
 		{name: "bad port", text: testTunnelInstallCmd + " port:70000", wantErr: true},
 		{name: "empty environment option", text: testTunnelInstallCmd + " env:", wantErr: true},
@@ -153,9 +153,9 @@ func TestParseTunnelInstall(t *testing.T) {
 		{name: "empty alias option", text: testTunnelInstallCmd + " alias:", wantErr: true},
 		{name: "empty alias after sigil", text: testTunnelInstallCmd + " alias:$", wantErr: true},
 		{name: "alias rejects semicolon", text: testTunnelInstallCmd + " alias:$bad;rm", wantErr: true},
-		{name: "slug rejects shell metacharacter", text: "expose-connector prod;bad", wantErr: true},
-		{name: "slug rejects command substitution", text: "expose-connector prod$(whoami)", wantErr: true},
-		{name: "slug rejects newline split", text: "expose-connector prod\nbad", wantErr: true},
+		{name: "slug rejects shell metacharacter", text: "protect-connector prod;bad", wantErr: true},
+		{name: "slug rejects command substitution", text: "protect-connector prod$(whoami)", wantErr: true},
+		{name: "slug rejects newline split", text: "protect-connector prod\nbad", wantErr: true},
 		{name: "unknown option", text: testTunnelInstallCmd + " mode:fast", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -193,7 +193,7 @@ func FuzzParseTunnelInstall(f *testing.F) {
 		testTunnelInstallCmd + " port:9090 alias:$dash env:docker container:web",
 		testTunnelInstallCmd + " env:compose service:web",
 		testTunnelInstallCmd + " alias:$",
-		"expose-connector prod$(whoami)",
+		"protect-connector prod$(whoami)",
 	} {
 		f.Add(seed)
 	}
@@ -308,7 +308,7 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 		{text: testTunnelWizardCmd, want: true},
 		{text: " " + testTunnelWizardCmd + " ", want: true},
 		{text: testTunnelInstallCmd, want: false},
-		{text: "expose-connector prod", want: false},
+		{text: "protect-connector prod", want: false},
 		{text: "tunnel install", want: false},
 		{text: "expose", want: false},
 	}
@@ -372,11 +372,11 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	// map[string]any (a map[string]string unmarshal fails on the blocks array).
 	var asyncEnvelope map[string]any
 	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
-		t.Fatalf("unmarshal expose-connector response_url body: %v", err)
+		t.Fatalf("unmarshal protect-connector response_url body: %v", err)
 	}
 	async, _ := asyncEnvelope[respFieldText].(string)
 	if asyncEnvelope[blockKitFieldBlocks] == nil {
-		t.Errorf("expose-connector body missing blocks (expected Block Kit rendering)")
+		t.Errorf("protect-connector body missing blocks (expected Block Kit rendering)")
 	}
 
 	if status != http.StatusOK {
@@ -501,7 +501,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 	}
 	var asyncEnvelope map[string]any
 	if err := json.Unmarshal(inv.captured.waitForBody(t, 2*time.Second), &asyncEnvelope); err != nil {
-		t.Fatalf("unmarshal expose-connector response_url body: %v", err)
+		t.Fatalf("unmarshal protect-connector response_url body: %v", err)
 	}
 	async, _ := asyncEnvelope[respFieldText].(string)
 
@@ -540,7 +540,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -633,7 +633,7 @@ func TestTunnelInstallBareFallsBackToEnterpriseInstallToken(t *testing.T) {
 
 	inv := newAdminSlashInvoker(t, h)
 	inv.enterpriseID = testEnterpriseID
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -704,7 +704,7 @@ func TestTunnelInstallBareReportsInstallLinkWhenWorkspaceAndEnterpriseTokensMiss
 
 	inv := newAdminSlashInvoker(t, h)
 	inv.enterpriseID = testEnterpriseID
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -728,7 +728,7 @@ func TestTunnelInstallBareReportsInstallLinkWhenWorkspaceAndEnterpriseTokensMiss
 	for _, want := range []string{
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
-		"/qurl-admin expose-connector",
+		"/qurl-admin protect-connector",
 	} {
 		if !strings.Contains(async, want) {
 			t.Fatalf("async reply = %q, missing %q", async, want)
@@ -749,7 +749,7 @@ func TestHelpListsGuidedAndTypedTunnelInstall(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	for _, want := range []string{"/qurl-admin expose-connector`", "Guided connector setup", "/qurl-admin expose-connector <id>", "Typed connector options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
+	for _, want := range []string{"/qurl-admin protect-connector`", "Guided connector setup", "/qurl-admin protect-connector <id>", "Typed connector options", "env:docker|docker-compose|ecs-fargate|kubernetes", "`env:compose` also works", "container:<name>", "service:<name>", "web_container:<name>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("/qurl help = %q, missing %q", got, want)
 		}
@@ -761,7 +761,7 @@ func TestTunnelInstallUsageSplitsTypedEnvironmentExamples(t *testing.T) {
 
 	got := tunnelInstallUsage()
 	for _, want := range []string{
-		"Guided setup is exactly `/qurl-admin expose-connector`",
+		"Guided setup is exactly `/qurl-admin protect-connector`",
 		"• Docker:",
 		"container:<name>|web_container:<name>",
 		"• Compose:",
@@ -786,7 +786,7 @@ func TestTunnelInstallBareWithoutTriggerIDFallsBackToTypedInstall(t *testing.T) 
 		return nil
 	}
 	values := url.Values{
-		fieldText:      {"expose-connector"},
+		fieldText:      {"protect-connector"},
 		fieldTeamID:    {testAdminTeamID},
 		fieldUserID:    {testAdminUserID},
 		fieldChannelID: {testTunnelChannelID},
@@ -799,7 +799,7 @@ func TestTunnelInstallBareWithoutTriggerIDFallsBackToTypedInstall(t *testing.T) 
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl-admin expose-connector <id>") {
+	if !strings.Contains(got, "trigger_id") || !strings.Contains(got, "/qurl-admin protect-connector <id>") {
 		t.Fatalf("response = %q, want trigger_id fallback guidance", got)
 	}
 }
@@ -812,7 +812,7 @@ func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.cfg.OpenView = nil
 	values := url.Values{
-		fieldText:      {"expose-connector"},
+		fieldText:      {"protect-connector"},
 		fieldTeamID:    {testAdminTeamID},
 		fieldUserID:    {testAdminUserID},
 		fieldChannelID: {testTunnelChannelID},
@@ -826,7 +826,7 @@ func TestTunnelInstallBareWithoutOpenViewFallsBackToTypedInstall(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	got := parseSlackText(t, w.Body.Bytes())
-	for _, want := range []string{"Guided qURL Connector setup is not configured", "/qurl-admin expose-connector <id>", "port:8080"} {
+	for _, want := range []string{"Guided qURL Connector setup is not configured", "/qurl-admin protect-connector <id>", "port:8080"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("response = %q, missing %q", got, want)
 		}
@@ -844,7 +844,7 @@ func TestTunnelInstallBareReportsOpenViewFailure(t *testing.T) {
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -873,7 +873,7 @@ func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -882,7 +882,7 @@ func TestTunnelInstallBareReportsTriggerExpiry(t *testing.T) {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl-admin expose-connector") {
+	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl-admin protect-connector") {
 		t.Fatalf("async reply = %q, want trigger-expiry retry copy", async)
 	}
 }
@@ -898,7 +898,7 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -907,7 +907,7 @@ func TestTunnelInstallBareReportsRateLimitRetryAfter(t *testing.T) {
 		t.Fatalf("ack = %q, want immediate guided setup copy", ack)
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "Wait 2 seconds") || !strings.Contains(async, "/qurl-admin expose-connector") {
+	if !strings.Contains(async, "Wait 2 seconds") || !strings.Contains(async, "/qurl-admin protect-connector") {
 		t.Fatalf("async reply = %q, want retry-after guidance", async)
 	}
 }
@@ -924,7 +924,7 @@ func TestTunnelInstallBareReportsSlackInstallLinkWhenWorkspaceBotTokenMissing(t 
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -936,7 +936,7 @@ func TestTunnelInstallBareReportsSlackInstallLinkWhenWorkspaceBotTokenMissing(t 
 	for _, want := range []string{
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
-		"/qurl-admin expose-connector",
+		"/qurl-admin protect-connector",
 	} {
 		if !strings.Contains(async, want) {
 			t.Fatalf("async reply = %q, missing %q", async, want)
@@ -958,7 +958,7 @@ func TestTunnelInstallBareReportsOperatorFallbackWhenSlackInstallURLUnset(t *tes
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -1006,7 +1006,7 @@ func TestTunnelInstallBareIgnoresInvalidRateLimitRetryAfter(t *testing.T) {
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -1047,7 +1047,7 @@ func TestTunnelInstallBareSkipsOpenViewWhenTriggerWindowAlreadySpent(t *testing.
 	h.openTunnelInstallWizard(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, testSlackTriggerID, inv.responseU.URL, fixedNow)
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl-admin expose-connector") {
+	if !strings.Contains(async, "setup window expired") || !strings.Contains(async, "/qurl-admin protect-connector") {
 		t.Fatalf("async reply = %q, want trigger-expiry retry copy", async)
 	}
 }
@@ -1074,7 +1074,7 @@ func TestTunnelInstallBareAcksBeforeSlowOpenView(t *testing.T) {
 	}
 	returned := make(chan reply, 1)
 	go func() {
-		status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+		status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 		returned <- reply{status: status, ack: ack}
 	}()
 	select {
@@ -1111,7 +1111,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 	}
 
 	inv := newAdminSlashInvoker(t, h)
-	status, ack := inv.invokeAdmin("expose-connector", testAdminTeamID, testAdminUserID)
+	status, ack := inv.invokeAdmin("protect-connector", testAdminTeamID, testAdminUserID)
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
@@ -1133,7 +1133,7 @@ func TestTunnelInstallBareCancelsSlowOpenViewAtBudget(t *testing.T) {
 		t.Fatal("OpenView context did not cancel within budget")
 	}
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "Slack did not respond") || !strings.Contains(async, "/qurl-admin expose-connector") {
+	if !strings.Contains(async, "Slack did not respond") || !strings.Contains(async, "/qurl-admin protect-connector") {
 		t.Fatalf("async reply = %q, want deadline-expiry retry copy", async)
 	}
 }
@@ -1439,7 +1439,7 @@ func TestTunnelInstallModalRejectsDifferentSubmitterWithRetryCopy(t *testing.T) 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
-	for _, want := range []string{"Only the admin who opened this modal", "Run /qurl-admin expose-connector again"} {
+	for _, want := range []string{"Only the admin who opened this modal", "Run /qurl-admin protect-connector again"} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("modal response = %s, want %q", w.Body.String(), want)
 		}

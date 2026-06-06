@@ -16,7 +16,7 @@ import (
 
 // listResourcesScanLimit is the per-page size for the `/v1/resources` fetches
 // backing `/qurl list`, `/qurl aliases`, the URL resource-alias fallback in
-// `/qurl get`, and the `/qurl-admin expose-url` picker.
+// `/qurl get`, and the `/qurl-admin protect-url` picker.
 //
 //   - `/qurl list` pages through resources until every resource in the channel
 //     allow-set has been seen (see [Handler.fetchAllowedResources]) — tunnels
@@ -24,7 +24,7 @@ import (
 //     owner's full resource set sorts (#590). The page size only affects how many
 //     requests that walk takes, not which resources render.
 //   - `/qurl aliases`, the `/qurl get` URL resource-alias fallback, and the
-//     `/qurl-admin expose-url` picker each scan a SINGLE page. A bound/aliased
+//     `/qurl-admin protect-url` picker each scan a SINGLE page. A bound/aliased
 //     resource_id past this page surfaces the triage warning in
 //     [Handler.processAliases] (aliases) or is missed by the get fallback /
 //     duplicate-alias ambiguity check (#590). A server-side type filter (tracked
@@ -35,11 +35,11 @@ const (
 	// listResourcesEmptyMessage is the friendly empty-state copy when no
 	// protected resource is available in THIS channel. It avoids admin-only
 	// tunnel setup terminology for ordinary users.
-	listResourcesEmptyMessage = ":mag: No protected resources are available in this channel yet. Ask a Slack admin to set one up or expose one to this channel."
+	listResourcesEmptyMessage = ":mag: No protected resources are available in this channel yet. Ask a Slack admin to set one up or make one available here."
 
 	// listResourcesEmptyAdminMessage is shown only after a successful admin
 	// check, so it can name the admin-only setup command and Edit recovery path.
-	listResourcesEmptyAdminMessage = ":mag: No protected resources are available in this channel yet. Install one here with `/qurl-admin expose-connector <id>`, or expose an existing resource to this channel from `/qurl list` → *Edit* in a channel where it already appears."
+	listResourcesEmptyAdminMessage = ":mag: No protected resources are available in this channel yet. Install one here with `/qurl-admin protect-connector <id>`, or make an existing resource available here from `/qurl list` → *Edit* in a channel where it already appears."
 )
 
 // listCreateButtonLabel is the text on the per-row "Create qURL" button.
@@ -256,13 +256,13 @@ const listFooterButtons = "Tap *Create qURL* on any row with a button, or copy a
 // The listing is CHANNEL-SCOPED: a member sees only the tunnels in this
 // channel's [slackdata.Store.AllowedResourceIDsForChannel] set (the union of
 // its `allowed_resource_ids` and `alias_bindings` values) — the same definition
-// `/qurl get` mints against and `/qurl aliases` lists. A resource exposed in
-// another channel does not appear here until an admin exposes it to this channel
+// `/qurl get` mints against and `/qurl aliases` lists. A resource available in
+// another channel does not appear here until an admin makes it available here
 // via the Edit modal or a channel alias binding. This restores #234's
 // per-channel disclosure (reverted in #459), but with the recoverable path
 // #459 lacked:
-// the empty state names the Edit-modal expose flow, and the gate applies to
-// admins too (an admin who wants a tunnel here exposes it, rather than seeing
+// the empty state names the Edit-modal recovery flow, and the gate applies to
+// admins too (an admin who wants a tunnel here grants channel access, rather than seeing
 // every workspace tunnel from every channel). List, alias, and mint now share
 // one channel-scoped definition, closing the former list/mint asymmetry
 // (TODO(#460)).
@@ -282,7 +282,7 @@ func (h *Handler) handleListResources(w http.ResponseWriter, values url.Values) 
 //   - AdminStore nil (no-DDB sandbox): the scope can't be computed, so fail
 //     closed rather than disclose everything — same posture as aliases/get.
 //   - allow-set read error: fail CLOSED (never fall back to an unscoped list).
-//   - nothing exposed here: the channel empty state, WITHOUT the upstream
+//   - nothing protected here: the channel empty state, WITHOUT the upstream
 //     ListResources call (the common case for a channel with no tunnels).
 //
 // On success it returns the non-empty allow-set and true.
@@ -319,7 +319,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 
 	// Resolve the channel scope first. This handles every fail-closed
 	// short-circuit (no channel, no AdminStore, read error, nothing exposed)
-	// and, on the common "nothing exposed here" path, avoids the upstream
+	// and, on the common "nothing protected here" path, avoids the upstream
 	// ListResources call entirely.
 	allowed, ok := h.listChannelScope(ctx, log, responseURL, teamID, channelID, userID)
 	if !ok {
@@ -337,7 +337,7 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	// resources — scoped to the channel allow-set, so every member sees exactly
 	// the resources they could `/qurl get` here, no more. The listing is driven by
 	// paging the owner's resources until every allow-set member has been seen
-	// (#590): a resource exposed to this channel can no longer be missed for
+	// (#590): a resource protected in this channel can no longer be missed for
 	// sorting past a fixed scan window, because the walk doesn't stop at one. The
 	// common case — every exposed resource on the first page — still costs a
 	// single request.
@@ -558,14 +558,14 @@ func isURLResource(r *client.Resource) bool {
 const listMaxResourcePages = 50
 
 // fetchAllowedResources returns the live resources — tunnels AND URL resources —
-// exposed to the current channel, by paging `/v1/resources` until every
+// protected in the current channel, by paging `/v1/resources` until every
 // resource_id in the channel allow-set has been seen (or the listing is
 // exhausted / the page cap is hit). This is the channel-scoped disclosure half
 // of `/qurl list`: a member sees exactly the resources they could `/qurl get`
 // here.
 //
 // Paging until the allow-set is satisfied — rather than scanning a single fixed
-// page and filtering it — is the #590 fix: a resource exposed to this channel
+// page and filtering it — is the #590 fix: a resource protected in this channel
 // can no longer be omitted for sorting past the page window. Allow-set ids are
 // matched as resources stream past and the walk stops as soon as the last one is
 // found, so a workspace whose exposed resources all land on the first page still
@@ -612,7 +612,7 @@ func (h *Handler) fetchAllowedResources(ctx context.Context, log *slog.Logger, c
 // Precedence:
 //
 //  1. Slug — the stable, owner-scoped tunnel handle. `/qurl-admin
-//     expose-connector <slug>` binds `$<slug>` as a channel alias, so the slug
+//     protect-connector <slug>` binds `$<slug>` as a channel alias, so the slug
 //     pastes straight into `/qurl get $<slug>`. This is the common case
 //     and the identifier we want to surface (never the opaque r_<id>).
 //  2. Resource-level alias — fallback when a tunnel somehow carries no

@@ -170,7 +170,7 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // TunnelInstallModalMetadata is carried through Slack private_metadata from
 // the slash-command request that opened the modal to the later
 // view_submission. The response_url lets the async installer post the same
-// ephemeral follow-up shape as the direct `/qurl-admin expose-connector <slug>` path.
+// ephemeral follow-up shape as the direct `/qurl-admin protect-connector <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
 // resource or minting a bootstrap key; Slack response URLs are time-limited.
 type TunnelInstallModalMetadata struct {
@@ -292,7 +292,7 @@ type TunnelEditModalMetadata struct {
 // TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.
 // It pre-fills the tunnel's current Display Name, its additional channel
 // aliases (the bound aliases other than the row's primary `$<token>`), and the
-// channels the tunnel is currently exposed to (meta.ExposedChannels), so the
+// channels the tunnel is currently protected in (meta.ExposedChannels), so the
 // admin edits an authoritative snapshot rather than re-typing from scratch.
 // `aliases` is the extra-alias set (sigil-free); they render one per line with
 // a leading `$` to match how the admin types them. The channels field is a
@@ -331,7 +331,7 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
 			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this qURL Connector in this channel; the qURL Connector's own name always works and isn't listed here. Clear a line to remove that alias.", true,
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
-			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this qURL Connector shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to expose it there; remove one to revoke it.", true,
+			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this qURL Connector shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to protect it there; remove one to revoke it.", true,
 				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
 		},
 	}
@@ -683,7 +683,7 @@ func staticSelect(actionID string, options []map[string]any, initial map[string]
 		"options":             options,
 	}
 	// Omit initial_option when nil — Slack rejects `"initial_option": null`. A
-	// nil initial means "no pre-selection" (the URL-expose picker forces a
+	// nil initial means "no pre-selection" (the URL-protect picker forces a
 	// deliberate choice); a non-nil one pre-selects (e.g. the connector
 	// installer's environment default). Mirrors multiConversationsSelect's guard.
 	if initial != nil {

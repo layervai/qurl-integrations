@@ -379,7 +379,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("qURL Connector `$%s` was not found. Run `/qurl-admin expose-connector %s` first, then retry this alias.", slug, slug)
+			return fmt.Sprintf("qURL Connector `$%s` was not found. Run `/qurl-admin protect-connector %s` first, then retry this alias.", slug, slug)
 		}
 		return sanitizeAPIError(err, "Failed to resolve qURL Connector ID")
 	}

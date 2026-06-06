@@ -368,7 +368,7 @@ func TestHandleList_OverflowDegradesToText(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, resources, "", false)
 	})
-	// All exposed to C_test so the full set reaches the block-ceiling guard.
+	// All protected in C_test so the full set reaches the block-ceiling guard.
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", rids...)
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)

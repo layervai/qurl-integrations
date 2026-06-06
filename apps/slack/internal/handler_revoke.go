@@ -25,7 +25,7 @@ const commonRevokeFailedMessage = "Failed to revoke the resource. Please try aga
 // revokeConfirmText is the confirm-dialog body shared by the `/qurl list`
 // Revoke button and the `/qurl-admin revoke` prompt. It spells out the blast
 // radius: revoke destroys the resource (and every qURL on it) in EVERY channel
-// it's exposed to — not an un-expose of the current channel (that's what the
+// it's protected in — not an un-expose of the current channel (that's what the
 // Edit modal's channel multi-select does). Edit and Revoke sit side by side, so
 // the copy makes the difference explicit.
 //
@@ -34,7 +34,7 @@ const commonRevokeFailedMessage = "Failed to revoke the resource. Please try aga
 // asterisks, which is what made the popup look unformatted. Newlines ARE honored
 // (an mrkdwn paragraph break), so the irreversibility warning sits on its own
 // line for weight.
-const revokeConfirmText = "This revokes the resource and every qURL on it, in every channel it's exposed to.\n\nIt can't be undone."
+const revokeConfirmText = "This revokes the resource and every qURL on it, in every channel it's protected in.\n\nIt can't be undone."
 
 // handleRevoke implements `/qurl-admin revoke $<id|alias>`. Rather than
 // revoking immediately, it resolves + channel-authorizes the token and posts

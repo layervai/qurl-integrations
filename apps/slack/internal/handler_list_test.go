@@ -59,10 +59,10 @@ func writeResourceListFixture(t *testing.T, w http.ResponseWriter, resources []m
 }
 
 // TestHandleList_RendersAllTunnels fences the happy path: /qurl list
-// renders every tunnel exposed to the invoker's channel, each row showing
+// renders every tunnel protected in the invoker's channel, each row showing
 // the slug as the copy-paste-ready `$<slug>` token. The listing is
 // channel-scoped (see TestHandleList_ScopedToChannel), so both tunnels are
-// exposed to C_test here; the admin-vs-non-admin distinction does not affect
+// protected in C_test here; the admin-vs-non-admin distinction does not affect
 // it (both see the same scoped set).
 func TestHandleList_RendersAllTunnels(t *testing.T) {
 	ts := newAdminTestServers(t)
@@ -390,7 +390,7 @@ func TestChannelAliasesByResourceID(t *testing.T) {
 }
 
 // TestHandleList_ScopedToChannel is the keystone regression fence for the
-// channel-scoping fix: /qurl list shows only the tunnels exposed to the
+// channel-scoping fix: /qurl list shows only the tunnels protected in the
 // invoker's channel — for ADMINS as well as non-admins (the reported bug was an
 // admin running `/qurl list` and seeing every tunnel in every channel,
 // including DMs). It exercises the three channel shapes:
@@ -412,7 +412,7 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 	)
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t) // testAdminUserID is admin/owner; nonAdminUserID is not
-	// prod-db is exposed to channelWithPolicy; the secret tunnel is exposed nowhere.
+	// prod-db is protected in channelWithPolicy; the secret tunnel is exposed nowhere.
 	ts.seedChannelExposure(t, testAdminTeamID, channelWithPolicy, testListResIDProdDB)
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
@@ -435,7 +435,7 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 				t.Errorf("%s should see the exposed prod-db tunnel: %q", caller.name, async)
 			}
 			if strings.Contains(async, "`$"+testListAliasSecret+"`") || strings.Contains(async, "r_secret_xx") {
-				t.Errorf("%s saw the secret tunnel, which is exposed to no channel — scope leak: %q", caller.name, async)
+				t.Errorf("%s saw the secret tunnel, which is protected in no channel — scope leak: %q", caller.name, async)
 			}
 		})
 	}
@@ -450,11 +450,11 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 			if !strings.Contains(async, "No protected resources are available in this channel") {
 				t.Errorf("expected the channel empty state in %s: %q", channelID, async)
 			}
-			if !strings.Contains(async, "/qurl-admin expose-connector") {
+			if !strings.Contains(async, "/qurl-admin protect-connector") {
 				t.Errorf("admin empty state should include setup command in %s: %q", channelID, async)
 			}
 			if !strings.Contains(async, "Edit") {
-				t.Errorf("admin empty state should include expose-via-Edit hint in %s: %q", channelID, async)
+				t.Errorf("admin empty state should include protect-via-Edit hint in %s: %q", channelID, async)
 			}
 			if strings.Contains(async, "`$"+testListAliasProdDB+"`") || strings.Contains(async, "`$"+testListAliasSecret+"`") {
 				t.Errorf("a tunnel leaked into %s, where none is exposed: %q", channelID, async)
@@ -464,7 +464,7 @@ func TestHandleList_ScopedToChannel(t *testing.T) {
 }
 
 // TestHandleList_ExposedViaAllowedSetShowsWithoutAlias fences that a tunnel
-// exposed to a channel purely via allowed_resource_ids (no alias binding —
+// protected in a channel purely via allowed_resource_ids (no alias binding —
 // the shape the Edit modal's "expose to channels" writes) is listed there. It
 // pins that the scope gate keys on the full AllowedResourceIDsForChannel union,
 // not just alias bindings.
@@ -534,7 +534,7 @@ func TestHandleList_EmptyChannelRejected(t *testing.T) {
 // TestHandleList_EmptyChannel fences the friendly empty-state copy when no
 // protected resource is available in the invoker's channel. Non-admins get a
 // plain admin handoff; confirmed admins get the admin setup command and the
-// expose-via-Edit recovery hint. A failing /v1/resources stub asserts the
+// protect-via-Edit recovery hint. A failing /v1/resources stub asserts the
 // empty allow-set short-circuits before the upstream call.
 func TestHandleList_EmptyChannel(t *testing.T) {
 	for _, tc := range []struct {
@@ -546,14 +546,14 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 		{
 			name:    "admin sees setup command",
 			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
-			want:    []string{"/qurl-admin expose-connector", "Edit"},
+			want:    []string{"/qurl-admin protect-connector", "Edit"},
 			notWant: []string{"Ask a Slack admin"},
 		},
 		{
 			name:    "non-admin gets admin handoff",
 			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
 			want:    []string{"Ask a Slack admin"},
-			notWant: []string{"/qurl-admin expose-connector", "Edit", "tunnel"},
+			notWant: []string{"/qurl-admin protect-connector", "Edit", "tunnel"},
 		},
 		{
 			name: "admin check error gets admin handoff",
@@ -562,7 +562,7 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 				ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("injected workspace read failure"))
 			},
 			want:    []string{"Ask a Slack admin"},
-			notWant: []string{"/qurl-admin expose-connector", "Edit", "tunnel"},
+			notWant: []string{"/qurl-admin protect-connector", "Edit", "tunnel"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -594,7 +594,7 @@ func TestHandleList_EmptyChannel(t *testing.T) {
 }
 
 // TestHandleList_URLResourcesListed fences the restored URL-resource scope:
-// URL resources exposed to this channel appear alongside tunnels, using their
+// URL resources protected in this channel appear alongside tunnels, using their
 // resource alias as the copy-paste token. A stray slug on a URL row must NOT
 // become the token — slugs are tunnel-only. URL rows with no alias stay visible
 // but render as "no alias" rows, so the list does not advertise an unmintable
@@ -766,7 +766,7 @@ func TestHandleList_NoTruncationFooterWhenExposedTunnelsFound(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		hits++
 		// has_more=true + a cursor: the workspace has more resources of other
-		// types, but the only tunnel exposed here is already on this page.
+		// types, but the only tunnel protected here is already on this page.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_one_aa", testKeyType: client.ResourceTypeTunnel, testKeySlug: "one-tun"},
 		}, "cursor_xyz", true)
@@ -788,7 +788,7 @@ func TestHandleList_NoTruncationFooterWhenExposedTunnelsFound(t *testing.T) {
 }
 
 // TestHandleList_FindsTunnelPastFirstPage is the #590 regression test: a
-// tunnel exposed to the channel that sorts onto the SECOND page of the owner's
+// tunnel protected in the channel that sorts onto the SECOND page of the owner's
 // resources must still render. The old single-page scan dropped it (it sorted
 // past the page window); the paginated walk follows the cursor until the
 // allow-set is satisfied.
@@ -798,18 +798,18 @@ func TestHandleList_FindsTunnelPastFirstPage(t *testing.T) {
 	const exposedID = "r_page2_tun"
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("cursor") == "" {
-			// Page 1: other resources, none exposed to this channel, more to come.
+			// Page 1: other resources, none protected in this channel, more to come.
 			writeResourceListFixture(t, w, []map[string]any{
 				{testKeyResourceID: "r_unexposed_pg1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unexposed-pg1"},
 			}, "cursor_p2", true)
 			return
 		}
-		// Page 2: the tunnel actually exposed to this channel.
+		// Page 2: the tunnel actually protected in this channel.
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: exposedID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "page2-tun"},
 		}, "", false)
 	})
-	// Only the page-2 tunnel is exposed to C_test.
+	// Only the page-2 tunnel is protected in C_test.
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", exposedID)
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
@@ -819,7 +819,7 @@ func TestHandleList_FindsTunnelPastFirstPage(t *testing.T) {
 		t.Errorf("tunnel exposed past the first page must render (#590): %q", async)
 	}
 	if strings.Contains(async, "unexposed-pg1") {
-		t.Errorf("a tunnel not exposed to this channel leaked into the listing: %q", async)
+		t.Errorf("a tunnel not protected in this channel leaked into the listing: %q", async)
 	}
 }
 

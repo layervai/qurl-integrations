@@ -57,7 +57,7 @@ func parseTunnelEditButtonValue(value string) (tunnelEditButtonValue, error) {
 //
 // Opening the modal is intentionally NOT admin-re-gated: the Edit button only
 // renders for admins, and the data the modal shows (Display Name + channel
-// aliases + the channels the tunnel is exposed to) is already visible to every
+// aliases + the channels the tunnel is protected in) is already visible to every
 // member via `/qurl list` and `/qurl aliases`, so opening it discloses nothing
 // new. The MUTATION is gated at submission time (handleTunnelEditSubmission
 // re-checks CheckAdmin).
@@ -125,7 +125,7 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 }
 
 // exposedChannelsForEdit returns the channels to pre-fill the Edit modal's
-// channels multi-select: every channel the tunnel is currently exposed to
+// channels multi-select: every channel the tunnel is currently protected in
 // (ChannelsForResource), always including the channel the modal was opened from
 // (meta.ChannelID), deduped and capped at [listEditMaxChannels]. It is also the
 // reconcile baseline carried in private_metadata, so a partial result is SAFE:
@@ -170,7 +170,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 	}
 	for _, c := range found {
 		if !addIfRoom(c) {
-			log.Warn("list edit: exposed-channel count exceeds cap; truncating modal pre-fill (un-shown channels keep access)",
+			log.Warn("list edit: protected-channel count exceeds cap; truncating modal pre-fill (un-shown channels keep access)",
 				"cap", listEditMaxChannels, "resource_id", meta.ResourceID)
 			break
 		}
@@ -350,7 +350,7 @@ func parseEditAliasLines(raw, token string, prefilled []string) (aliases []strin
 }
 
 // parseEditChannelSelection reads the Edit modal's channels multi-select into
-// the DESIRED exposed-channel set: the admin's selection, validated to Slack
+// the DESIRED protected-channel set: the admin's selection, validated to Slack
 // conversation-id shape and deduped, with the current channel force-included.
 // The channel the modal was opened from always keeps access — the reconcile
 // never revokes it — so including it here makes "kept" the default even if the
@@ -651,7 +651,7 @@ func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReco
 		lines = append(lines, "Skipped (already used by another qURL Connector in this channel): "+joinAliasCodes(aliasRes.conflicts))
 	}
 	if len(chanRes.exposed) > 0 {
-		lines = append(lines, "Exposed to: "+joinChannelMentions(chanRes.exposed))
+		lines = append(lines, "Protected in: "+joinChannelMentions(chanRes.exposed))
 	}
 	if len(chanRes.revoked) > 0 {
 		lines = append(lines, "Revoked from: "+joinChannelMentions(chanRes.revoked))
