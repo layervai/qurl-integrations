@@ -228,7 +228,7 @@ type PolicyEntry struct {
 // owner" in the LayerV admin model. Only the owner can re-run
 // `/qurl setup` after the first bind; other admins (added via
 // `/qurl admin add`) can run the rest of the admin commands but
-// cannot rotate the workspace's qURL credential. The OAuth
+// cannot re-point the workspace's qURL credential. The OAuth
 // callback gates this distinction: BindWorkspace classifies a
 // rebind attempt as AlreadyBoundToCaller iff the OwnerID stored
 // here matches the new caller's verified Slack user ID.

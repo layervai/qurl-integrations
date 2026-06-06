@@ -294,7 +294,7 @@ func TestClassifyBindErrorMapping(t *testing.T) {
 		want oauth.BindConflictCode
 	}{
 		{
-			"already bound to caller (idempotent rotation)",
+			"already bound to caller (idempotent re-entry)",
 			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBoundToCaller},
 			oauth.BindConflictAlreadyBoundToCaller,
 		},

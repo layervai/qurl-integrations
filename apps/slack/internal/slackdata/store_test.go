@@ -230,7 +230,7 @@ func TestBindWorkspace_DistinguishesSameCallerFromDifferentAdmin(t *testing.T) {
 		// after first bind), but they're NOT the owner. Pre-owner-gate
 		// this returned AlreadyBoundToCaller (idempotent); post-gate
 		// it must return AlreadyBound (refuse) so the added admin
-		// can't rotate the workspace credential to their own Auth0.
+		// can't re-point the workspace credential to their own Auth0.
 		store := newStore(&stubDDB{
 			putItemFn: func(_ *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
 				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("exists")}

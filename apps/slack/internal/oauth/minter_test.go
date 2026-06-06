@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -74,6 +75,87 @@ func TestHTTPAPIKeyMinterTolerateBaseURLTrailingSlash(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL + "/", HTTPClient: srv.Client()}
 	if _, _, _, err := m.MintAPIKey(context.Background(), "tok", "name", nil); err != nil {
 		t.Fatalf("MintAPIKey: %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterValidateAPIKeyHappyPath(t *testing.T) {
+	var (
+		gotMethod string
+		gotPath   string
+		gotAuth   string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"plan":"free"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL + "/", HTTPClient: srv.Client()}
+	if err := m.ValidateAPIKey(context.Background(), "lv_live_existing"); err != nil {
+		t.Fatalf("ValidateAPIKey: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v1/quota" {
+		t.Fatalf("request = %s %s, want GET /v1/quota", gotMethod, gotPath)
+	}
+	if gotAuth != "Bearer lv_live_existing" {
+		t.Errorf("auth: got %q want Bearer lv_live_existing", gotAuth)
+	}
+}
+
+func TestHTTPAPIKeyMinterValidateAPIKeyInvalid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.ValidateAPIKey(context.Background(), "lv_live_revoked")
+	if !errors.Is(err, ErrStoredAPIKeyInvalid) {
+		t.Fatalf("ValidateAPIKey error = %v, want ErrStoredAPIKeyInvalid", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(http.StatusUnauthorized)) {
+		t.Errorf("expected status context in error, got %q", err.Error())
+	}
+}
+
+func TestHTTPAPIKeyMinterValidateAPIKeyForbiddenIsNotReplaceable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.ValidateAPIKey(context.Background(), "lv_live_existing")
+	if err == nil {
+		t.Fatal("expected error on 403")
+	}
+	if errors.Is(err, ErrStoredAPIKeyInvalid) {
+		t.Fatalf("403 must not be classified replaceable-invalid, got %v", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(http.StatusForbidden)) {
+		t.Errorf("expected status context in error, got %q", err.Error())
+	}
+}
+
+func TestHTTPAPIKeyMinterValidateAPIKeyTransientFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.ValidateAPIKey(context.Background(), "lv_live_existing")
+	if err == nil {
+		t.Fatal("expected error on 502")
+	}
+	if errors.Is(err, ErrStoredAPIKeyInvalid) {
+		t.Fatalf("502 must stay transient, got ErrStoredAPIKeyInvalid: %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterValidateAPIKeyRejectsEmptyKey(t *testing.T) {
+	m := &HTTPAPIKeyMinter{BaseURL: "http://example.invalid"}
+	if err := m.ValidateAPIKey(context.Background(), " \t "); !errors.Is(err, ErrStoredAPIKeyInvalid) {
+		t.Fatalf("ValidateAPIKey empty key error = %v, want ErrStoredAPIKeyInvalid", err)
 	}
 }
 

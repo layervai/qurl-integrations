@@ -57,7 +57,7 @@ modifiers enabled by the current bot deployment.
 - **Runtime:** AWS Fargate (arm64, distroless container) behind an
   ALB that terminates TLS and routes `/slack/*`, `/oauth/slack/*`,
   `/oauth/qurl/*`, and `/health`.
-- **Auth:** Per-workspace qURL API key, minted via `/qurl setup <email>` →
+- **Auth:** Per-workspace qURL API key, established via `/qurl setup <email>` →
   `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying
   an email address on setup stores it in signed state, sends Auth0
   `login_hint`, and requires the verified Auth0 email claim to match before any
@@ -69,9 +69,14 @@ modifiers enabled by the current bot deployment.
   connection for the same audience. `AUTH0_EMAIL_CONNECTION` is an optional
   recovery override when a deployment must force a specific connection. The
   callback's security gate is the verified email claim, not the connection hint
-  by itself. Keys are
-  field-level encrypted in the `workspace_state` DynamoDB table using
-  KMS envelope encryption with `workspace_id` bound as AAD.
+  by itself. If a workspace already has a qURL API key and qurl-service still
+  accepts it, setup reuses that key instead of minting another one; missing or
+  revoked stored keys mint a replacement. Rerunning setup is intentionally not
+  a healthy-key rotation or qURL-account switch command; revoke the workspace
+  key from qURL's API-key management/dashboard or operator tooling first, then
+  rerun setup to mint a replacement under the newly authenticated account. Keys
+  are field-level encrypted in the `workspace_state` DynamoDB table using KMS
+  envelope encryption with `workspace_id` bound as AAD.
 - **Slack app install:** Customer workspaces install qURL through
   `/oauth/slack/install`, which redirects to Slack OAuth with the bot scopes
   needed by the slash command and modal surfaces. The callback stores Slack's
