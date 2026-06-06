@@ -1057,7 +1057,7 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		// admin set. UADMIN001 is an "admin" (can run /qurl admin
 		// list/add/remove/revoke + tunnel etc.) but is NOT the owner.
 		// /setup must refuse them — this is the load-bearing
-		// safeguard against admins rotating the workspace credential.
+		// safeguard against admins re-pointing the workspace credential.
 		ts.seedAdmin(t)
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)

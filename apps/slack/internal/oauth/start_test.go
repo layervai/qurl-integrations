@@ -58,7 +58,7 @@ func TestStartHappyPath(t *testing.T) {
 		t.Errorf("audience: %q", q.Get("audience"))
 	}
 	if q.Get("prompt") != "consent" {
-		t.Errorf("prompt: got %q want %q (rotation forces consent)", q.Get("prompt"), "consent")
+		t.Errorf("prompt: got %q want %q (setup re-entry forces consent)", q.Get("prompt"), "consent")
 	}
 	if q.Get("connection") != "" {
 		t.Errorf("connection: got %q want empty for legacy setup", q.Get("connection"))

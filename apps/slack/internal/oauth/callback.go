@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 const (
@@ -48,8 +50,14 @@ const (
 	// TimeoutHandler canceling mid-mint would orphan a key the bot
 	// can no longer revoke (no keyID to DELETE against).
 	mintTimeout         = 15 * time.Second
+	existingKeyTimeout  = 5 * time.Second
 	dmTimeout           = 5 * time.Second
 	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
+	// plus four non-secret characters. The reuse path derives this
+	// from stored plaintext because workspace_state stores api_key
+	// but not key_prefix.
+	keyPrefixLength = len("lv_live_abcd")
 )
 
 // successPageTemplate mirrors the Discord-side success page
@@ -199,9 +207,11 @@ type auth0TokenResponse struct {
 //     and short-circuits BEFORE we touch any key state, so a refused
 //     install can't overwrite the existing admin's stored API key.
 //     Same-caller re-entry is idempotent success.
-//  6. POST to qurl-service /v1/api-keys to mint the workspace key.
-//  7. Upsert via WorkspaceStore.SetAPIKey; on failure, fire-and-forget
-//     revoke on qurl-service to bound the orphan-key window.
+//  6. Reuse the stored workspace key when it still validates on
+//     qurl-service; otherwise POST to /v1/api-keys to mint one.
+//  7. For a newly minted key, upsert via WorkspaceStore.SetAPIKey; on
+//     failure, fire-and-forget revoke on qurl-service to bound the
+//     orphan-key window.
 //  8. DM the admin (fire-and-forget; failure doesn't block the page).
 //  9. Render success HTML.
 //
@@ -256,7 +266,7 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
+		keyPrefix, ok := ensureWorkspaceAPIKey(w, cfg, accessToken, verified.TeamID, verified.UserID)
 		if !ok {
 			return
 		}
@@ -477,8 +487,11 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 		// The workspace owner is re-running /qurl setup — the stored
 		// owner_id matches the verified caller (owner-only short-circuit;
 		// added admins do NOT land here, they get AlreadyBound). We
-		// continue to mint, which rotates their API key. Operator-visible
-		// effect: "key rotated, owner + admin set unchanged."
+		// continue to the key stage, which reuses a healthy stored key
+		// or mints a replacement only when the stored key is missing or
+		// revoked. Operator-visible effect: setup succeeds, owner +
+		// admin set unchanged, and no extra key is minted for a healthy
+		// workspace.
 		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID)
 		return true
@@ -509,6 +522,79 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 		return
 	}
 	go fn()
+}
+
+// ensureWorkspaceAPIKey returns a working workspace qURL API key prefix for
+// the success page. If the workspace already has a valid stored key, setup is
+// complete and no account-level API-key slot is spent. Missing or revoked
+// stored keys fall through to mintAndPersist so first setup and recovery from
+// a manually revoked key still work.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
+	keyPrefix, reused, ok := reuseStoredWorkspaceKey(w, cfg, teamID)
+	if !ok {
+		return "", false
+	}
+	if reused {
+		return keyPrefix, true
+	}
+	return mintAndPersist(w, cfg, accessToken, teamID, userID)
+}
+
+// reuseStoredWorkspaceKey checks whether the workspace already has a usable
+// qURL API key. Returning (reused=false, ok=true) means the caller should mint
+// a replacement; returning ok=false means this helper already wrote the user
+// response and minting would be unsafe.
+//
+// Replacement still enters mintAndPersist's post-timeout orphan-key window
+// tracked at #265. Keep this read+validate budget short so missing/revoked-key
+// recovery does not materially enlarge that known race.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (keyPrefix string, reused bool, ok bool) {
+	readCtx, readCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
+	defer readCancel()
+	apiKey, err := cfg.Provider.APIKey(readCtx, teamID)
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return "", false, true
+	}
+	if err != nil {
+		slog.Error("oauth/callback existing workspace key lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+			"error", err, "team_id", teamID)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't connect qURL",
+			"qURL is already connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		return "", false, false
+	}
+
+	validateCtx, validateCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
+	defer validateCancel()
+	if err := cfg.Minter.ValidateAPIKey(validateCtx, apiKey); err != nil {
+		if errors.Is(err, ErrStoredAPIKeyInvalid) {
+			// Only a definite auth failure is replaceable-invalid. We do
+			// not store the qurl-service key_id for existing workspace
+			// keys, so a possible scope/server failure must not mint a
+			// replacement that could orphan an otherwise healthy key.
+			slog.Warn("oauth/callback stored workspace key is invalid — minting replacement", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+				"team_id", teamID)
+			return "", false, true
+		}
+		slog.Error("oauth/callback stored workspace key validation failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+			"error", err, "team_id", teamID)
+		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
+			"qURL is already connected to this Slack workspace, but the stored workspace key could not be verified. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		return "", false, false
+	}
+	slog.Info("oauth/callback reused existing workspace API key", "team_id", teamID) //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+	return storedAPIKeyPrefix(apiKey), true, true
+}
+
+func storedAPIKeyPrefix(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if len(apiKey) <= keyPrefixLength {
+		return ""
+	}
+	return apiKey[:keyPrefixLength]
 }
 
 // mintAndPersist mints the API key on qurl-service and persists it via
@@ -557,7 +643,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 			// is plan-dependent (free 3 / growth 50 / unlimited) and is
 			// qurl-service's to own.
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Each run of /qurl setup <email> creates a new key — revoke one you no longer use, then run /qurl setup <email> again.")
+				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Revoke one you no longer use, then run /qurl setup <email> again.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",

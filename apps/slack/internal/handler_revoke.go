@@ -177,10 +177,10 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 				log.Info("revoke: resource not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 				return fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken))
 			case http.StatusUnauthorized, http.StatusForbidden:
-				// API key rotated/invalidated — point at /qurl setup so the
-				// admin has a concrete next step rather than a generic error.
-				log.Warn("revoke: upstream auth rejected (API key rotated?)", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-				return "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to rotate."
+				// API key rejected — point at /qurl setup so the admin has
+				// a concrete reconnect path rather than a generic error.
+				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				return "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect."
 			}
 		}
 		log.Error("revoke resource failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)

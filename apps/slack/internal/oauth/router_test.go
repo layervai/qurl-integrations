@@ -19,7 +19,7 @@ func (*noopAdminStore) BindWorkspace(_ context.Context, _ *WorkspaceMapping, _ s
 // AdminStore ↔ BindClassifyError pairing that handleBindError's
 // switch relies on. Without a classifier, every bind conflict —
 // including idempotent same-caller re-entries — would route to the
-// default 500 arm, silently downgrading "key rotated" to "500".
+// default 500 arm, silently downgrading setup re-entry to "500".
 // RegisterRoutes calls Validate() and panics on this misconfiguration
 // so callers see the boot-time error instead of mysterious 500s
 // after the first user runs /qurl setup.
@@ -60,6 +60,20 @@ func TestConfigValidateAcceptsSandboxConfig(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate rejected the sandbox config: %v", err)
 	}
+}
+
+// TestAPIKeyScopesIncludeReadForStoredKeyValidation fences the integration
+// contract with qurl-service: ValidateAPIKey probes GET /v1/quota, and that
+// route is protected by qurl:read. If this bot stops minting qurl:read,
+// healthy stored keys would validate as 403 and setup reruns would fail closed
+// instead of reusing the key.
+func TestAPIKeyScopesIncludeReadForStoredKeyValidation(t *testing.T) {
+	for _, scope := range apiKeyScopes() {
+		if scope == "qurl:read" {
+			return
+		}
+	}
+	t.Fatalf("apiKeyScopes() = %v, want qurl:read for GET /v1/quota validation", apiKeyScopes())
 }
 
 // TestRegisterRoutesPanicsOnInvalidConfig fences that RegisterRoutes

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 const (
@@ -26,13 +28,28 @@ const (
 
 // fakeWorkspaceStore captures SetAPIKey calls.
 type fakeWorkspaceStore struct {
-	mu      sync.Mutex
-	setArgs *struct {
+	mu          sync.Mutex
+	existingKey string
+	apiKeyErr   error
+	apiKeyCalls int
+	setArgs     *struct {
 		WorkspaceID, APIKey, ConfiguredBy string
 	}
 	setErr error
 }
 
+func (f *fakeWorkspaceStore) APIKey(_ context.Context, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.apiKeyCalls++
+	if f.apiKeyErr != nil {
+		return "", f.apiKeyErr
+	}
+	if f.existingKey == "" {
+		return "", auth.ErrWorkspaceNotConfigured
+	}
+	return f.existingKey, nil
+}
 func (f *fakeWorkspaceStore) SetAPIKey(_ context.Context, ws, key, by string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -49,8 +66,17 @@ type fakeMinter struct {
 	mintMu                   sync.Mutex
 	revoked                  bool
 	revokeMu                 sync.Mutex
+	validateErr              error
+	validateCalls            int
+	validateMu               sync.Mutex
 }
 
+func (f *fakeMinter) ValidateAPIKey(_ context.Context, _ string) error {
+	f.validateMu.Lock()
+	defer f.validateMu.Unlock()
+	f.validateCalls++
+	return f.validateErr
+}
 func (f *fakeMinter) MintAPIKey(_ context.Context, _, _ string, _ []string) (apiKey, keyID, keyPrefix string, err error) {
 	f.mintMu.Lock()
 	f.mintCalls++
@@ -896,13 +922,13 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 	}
 }
 
-// TestCallbackBindIdempotentForSameCaller fences the rotation
-// posture: the same Slack user re-running /qurl setup must succeed
-// idempotently. The new API key is persisted (key rotated) and the
-// admin set is unchanged. Without this, an admin re-running setup
-// to rotate keys would see the rebind-refused page.
-func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
+// TestCallbackBindIdempotentForSameCallerReusesExistingKey fences the leak
+// fix: the same Slack user re-running /qurl setup must succeed without
+// minting a second qurl-service API key when the workspace already has a
+// healthy stored key.
+func TestCallbackBindIdempotentForSameCallerReusesExistingKey(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testAPIKey
 	// The error text is irrelevant — the stubbed classifier returns
 	// the same-caller code regardless. Use sentinel text so a future
 	// reader doesn't think production reads the message string.
@@ -916,24 +942,175 @@ func TestCallbackBindIdempotentForSameCaller(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d want 200 (idempotent rotation, body=%s)", rec.Code, rec.Body.String())
+		t.Fatalf("status: got %d want 200 (idempotent reuse, body=%s)", rec.Code, rec.Body.String())
 	}
-	// The "key rotated" half of the promise — SetAPIKey must actually
-	// run after the idempotent-bind continue. A regression that
-	// short-circuited mint on AlreadyBoundToCaller would pass the
-	// 200-status check but leave the user's stale key in place.
+	if !strings.Contains(rec.Body.String(), testKeyPrefix) {
+		t.Errorf("reuse success body should render a safe key prefix, got: %s", rec.Body.String())
+	}
 	store.mu.Lock()
-	if store.setArgs == nil {
-		t.Fatal("SetAPIKey must run on idempotent rebind so the key rotates")
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKey must not run when a valid existing key can be reused")
 	}
-	if store.setArgs.APIKey != testAPIKey {
-		t.Errorf("SetAPIKey APIKey: got %q want %q (the rotation must persist the freshly minted key)", store.setArgs.APIKey, testAPIKey)
+	if store.apiKeyCalls != 1 {
+		t.Errorf("APIKey calls: got %d want 1", store.apiKeyCalls)
 	}
 	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintAPIKey calls: got %d want 0 when existing key is valid", minter.mintCalls)
+	}
+	minter.mintMu.Unlock()
+	minter.validateMu.Lock()
+	if minter.validateCalls != 1 {
+		t.Errorf("ValidateAPIKey calls: got %d want 1", minter.validateCalls)
+	}
+	minter.validateMu.Unlock()
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
 	if minter.revoked {
-		t.Error("idempotent rebind must not revoke the just-minted key")
+		t.Error("idempotent reuse must not revoke")
+	}
+}
+
+// TestCallbackBindIdempotentForSameCallerMintsWhenKeyMissing preserves the
+// recovery path for a bind-only workspace state: if an earlier setup seeded
+// workspace_mappings but failed before storing a workspace key, the owner can
+// re-run setup and mint the missing key.
+func TestCallbackBindIdempotentForSameCallerMintsWhenKeyMissing(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	admin := &fakeAdminStore{err: errors.New("classified as same-caller")}
+	cfg.AdminStore = admin
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (missing-key recovery, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKey must run when no stored workspace key exists")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 1 {
+		t.Errorf("MintAPIKey calls: got %d want 1", minter.mintCalls)
+	}
+}
+
+func TestCallbackInvalidStoredKeyMintsReplacement(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_revoked"
+	minter.validateErr = ErrStoredAPIKeyInvalid
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (invalid stored key should be replaceable, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKey must run after replacing an invalid stored key")
+	}
+	if store.setArgs.APIKey != testAPIKey {
+		t.Errorf("SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 1 {
+		t.Errorf("MintAPIKey calls: got %d want 1", minter.mintCalls)
+	}
+}
+
+func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_existing"
+	minter.validateErr = errors.New("qurl-service timeout")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (transient validation failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKey must not run when stored-key validation had a transient failure")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintAPIKey calls: got %d want 0 on transient validation failure", minter.mintCalls)
+	}
+}
+
+func TestCallbackStoredKeyForbiddenDoesNotMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_existing"
+	minter.validateErr = errors.New("qurl-service GET /v1/quota returned 403")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (403 validation failure must not mint, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKey must not run when stored-key validation returned 403")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintAPIKey calls: got %d want 0 on 403 validation failure", minter.mintCalls)
+	}
+}
+
+func TestCallbackStoredKeyLookupFailureDoesNotMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.apiKeyErr = errors.New("kms decrypt failed")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (stored-key lookup failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKey must not run when stored-key lookup failed")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintAPIKey calls: got %d want 0 on stored-key lookup failure", minter.mintCalls)
+	}
+}
+
+func TestStoredAPIKeyPrefix(t *testing.T) {
+	if got := storedAPIKeyPrefix("  " + testAPIKey + "  "); got != testKeyPrefix {
+		t.Fatalf("storedAPIKeyPrefix = %q, want %q", got, testKeyPrefix)
+	}
+	for _, short := range []string{"", "lv_live_abcd", "short"} {
+		if got := storedAPIKeyPrefix(short); got != "" {
+			t.Errorf("storedAPIKeyPrefix(%q) = %q, want empty (must not expose a whole short key)", short, got)
+		}
 	}
 }
 
@@ -1076,7 +1253,8 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 
 	// Second attempt: same caller re-runs /qurl setup. Bind now
 	// returns the same-caller-already-bound classifier code; mint
-	// succeeds; rotation completes. This is the documented recovery.
+	// succeeds and the missing workspace key is stored. This is the
+	// documented recovery.
 	admin.err = errors.New("classified as same-caller")
 	cfg.BindClassifyError = func(_ error) BindConflictCode { return BindConflictAlreadyBoundToCaller }
 	minter.mintErr = nil

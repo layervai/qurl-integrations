@@ -127,14 +127,14 @@ func TestRevokeResource_NotFound(t *testing.T) {
 	}
 }
 
-// TestRevokeResource_AuthRejected fences the 401/403 surface: a rotated API key
-// points the admin at /qurl setup rather than a generic error.
+// TestRevokeResource_AuthRejected fences the 401/403 surface: a rejected API
+// key points the admin at /qurl setup rather than a generic error.
 func TestRevokeResource_AuthRejected(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		h := newRevokeHandlerWithDeleteStatus(t, status, `{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`)
 		msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 		if !strings.Contains(msg, "API key was rejected") || !strings.Contains(msg, "setup") {
-			t.Errorf("status %d message = %q, want key-rotation guidance", status, msg)
+			t.Errorf("status %d message = %q, want setup guidance", status, msg)
 		}
 	}
 }

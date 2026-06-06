@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,6 +36,13 @@ const (
 // rather than the generic "try again" message — retrying never clears a
 // quota, so the old advice was actively misleading.
 var ErrAPIKeyLimitReached = errors.New("qurl-service API key limit reached")
+
+// ErrStoredAPIKeyInvalid is returned by ValidateAPIKey only when the
+// workspace's stored qURL API key is empty or rejected by qurl-service as
+// unauthenticated. The callback may mint a replacement for this case; other
+// validation errors, including 403, are treated as non-replaceable failures
+// because they may indicate a scope/server issue on an otherwise live key.
+var ErrStoredAPIKeyInvalid = errors.New("stored qURL API key is invalid")
 
 // HTTPAPIKeyMinter is the production QURLAPIKeyMinter, calling
 // qurl-service /v1/api-keys with the Auth0 access_token as Bearer.
@@ -86,6 +94,46 @@ func (m *HTTPAPIKeyMinter) joinAPIKeyURL(elem ...string) (string, error) {
 		return "", fmt.Errorf("compose qurl-service URL: %w", err)
 	}
 	return u, nil
+}
+
+// ValidateAPIKey performs a cheap authenticated read with the stored workspace
+// key. This is an auth-liveness check for keys minted by this bot. The
+// qurl-service contract is: GET /v1/quota is reachable with qurl:read, and
+// missing/expired/revoked API keys fail API-key auth with 401. 403 stays a
+// non-replaceable error so scope or service drift can't burn another
+// account-level API-key slot on an otherwise live key.
+func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ErrStoredAPIKeyInvalid
+	}
+	reqURL, err := url.JoinPath(m.BaseURL, "v1", "quota")
+	if err != nil {
+		return fmt.Errorf("compose qurl-service URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+	resp, err := m.client().Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer func() {
+		// Bounded drain — see callback.go drainCap rationale.
+		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
+		_ = resp.Body.Close()
+	}()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return fmt.Errorf("%w (status %d)", ErrStoredAPIKeyInvalid, resp.StatusCode)
+	case resp.StatusCode >= 400:
+		return fmt.Errorf("qurl-service GET /v1/quota returned %d", resp.StatusCode)
+	default:
+		return nil
+	}
 }
 
 // MintAPIKey posts to POST /v1/api-keys with Bearer = accessToken.

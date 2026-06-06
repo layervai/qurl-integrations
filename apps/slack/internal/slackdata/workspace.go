@@ -218,16 +218,17 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 // OwnerID is the Slack user ID of the first /setup invoker — written
 // once at first bind, never mutated by /qurl admin add. Only the
 // owner can re-run /setup; other admins can run the rest of the
-// admin verbs but cannot rotate the workspace's qURL credential.
+// admin verbs but cannot re-point the workspace's qURL credential.
 //
 // Returns 409 (via *Error) if the row already exists. Two sub-cases:
 //   - the existing row's owner_id matches the caller's seedAdmin →
 //     ErrCodeWorkspaceAlreadyBoundToCaller. The callback treats this
-//     as idempotent success and continues to mint, rotating the API
-//     key without mutating the admin set. Only the OWNER short-
-//     circuits this way — admins added via /qurl admin add cannot
-//     re-run /setup, by design (prevents them from rotating the
-//     workspace credential to a different Auth0 account).
+//     as idempotent success and continues to the key stage, which
+//     reuses a healthy key or mints only when the key is missing or
+//     revoked. Only the OWNER short-circuits this way — admins added
+//     via /qurl admin add cannot re-run /setup, by design (prevents
+//     them from re-pointing the workspace credential to a different
+//     Auth0 account).
 //   - the existing owner_id is a shape-bad pre-pivot Auth0 sub →
 //     reclaim the orphaned row for the caller and return nil (the
 //     callback then mints as on a fresh install). See
@@ -334,7 +335,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 		// rebind: any caller whose Slack ID isn't the owner gets the
 		// "different admin" branch, including admins added via
 		// /qurl admin add. This is the load-bearing safeguard — a
-		// non-owner admin re-running /setup would otherwise rotate
+		// non-owner admin re-running /setup would otherwise re-point
 		// the workspace's qURL credential to their own Auth0 account,
 		// silently locking the original owner out at the qurl-service
 		// layer (workspace_keys reassigned to a different auth0_subject).

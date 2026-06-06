@@ -8,8 +8,9 @@
 // state token, sets a double-submit CSRF cookie and 302s to Auth0.
 // Auth0 redirects to /callback with `code` + `state`. /callback exchanges
 // the code for an access_token, verifies the id_token against Auth0's
-// JWKS, mints a workspace-scoped qURL API key via POST /v1/api-keys,
-// persists it via DDBProvider, and DMs the admin.
+// JWKS, reuses an existing valid workspace qURL API key when possible,
+// otherwise mints one via POST /v1/api-keys, persists it via DDBProvider,
+// and DMs the admin.
 //
 // The Slack workspace install side is handled by apps/slack/internal/slackinstall's
 // /oauth/slack/install routes. This package owns the qURL account connection
@@ -115,6 +116,7 @@ type SlackClient interface {
 // mint the workspace-scoped key. Interface for the same testability
 // reason as SlackClient.
 type QURLAPIKeyMinter interface {
+	ValidateAPIKey(ctx context.Context, apiKey string) error
 	MintAPIKey(ctx context.Context, accessToken, name string, scopes []string) (apiKey, keyID, keyPrefix string, err error)
 	RevokeAPIKey(ctx context.Context, accessToken, keyID string) error
 }
@@ -232,8 +234,9 @@ type Config struct {
 	// constructor refuses anything shorter than stateMinSecret.
 	OAuthStateSecret []byte
 
-	// Provider is the DDB-backed key store. The callback handler calls
-	// SetAPIKey on it after a successful mint.
+	// Provider is the DDB-backed key store. The callback handler first
+	// checks for a reusable workspace key, then calls SetAPIKey only
+	// when a new key had to be minted.
 	Provider WorkspaceStore
 
 	// IDTokenVerifier validates Auth0 id_tokens against JWKS. Tests
@@ -305,9 +308,11 @@ func (c Config) now() func() time.Time {
 	return time.Now
 }
 
-// WorkspaceStore is the write-path the callback hits after a successful
-// mint. Implemented by *auth.DDBProvider.
+// WorkspaceStore is the callback's workspace-key store. APIKey is used to
+// reuse an already configured workspace key before minting; SetAPIKey is hit
+// only after a successful replacement mint. Implemented by *auth.DDBProvider.
 type WorkspaceStore interface {
+	APIKey(ctx context.Context, workspaceID string) (string, error)
 	SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error
 	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
@@ -349,9 +354,9 @@ func RegisterRoutes(mux *http.ServeMux, cfg Config) {
 func (c Config) Validate() error {
 	// AdminStore wired without BindClassifyError would route every
 	// bind error — including the idempotent same-caller case — to
-	// handleBindError's default 500 arm. Same-caller rotation
-	// surfaces as a generic failure instead of "key rotated, admin
-	// set unchanged." Callers MUST pair the two.
+	// handleBindError's default 500 arm. Same-caller setup re-entry
+	// would surface as a generic failure instead of reusing or
+	// replacing the workspace key. Callers MUST pair the two.
 	if c.AdminStore != nil && c.BindClassifyError == nil {
 		return errors.New("AdminStore wired without BindClassifyError — same-caller idempotent re-entries would silently surface as 500")
 	}
@@ -360,12 +365,12 @@ func (c Config) Validate() error {
 
 // authorizeURL composes the Auth0 /authorize redirect target.
 //
-// prompt=consent matches the Discord rotation contract: even though the
-// signed-state-token round-trip already enforces same-user origin
-// binding, an admin re-running /qurl setup to rotate keys would
-// otherwise hit Auth0's silent-consent shortcut and skip the user-facing
-// confirmation. Forcing consent keeps the surface predictable: every
-// /qurl setup ends in a fresh Auth0 prompt → new key → new DDB row.
+// prompt=consent keeps setup re-entry explicit: even when an existing
+// workspace key is reused, the admin still confirms the Auth0 account/email
+// that is allowed to keep the Slack workspace bound. Confirmation alone is not
+// a healthy-key rotation or qURL-account switch; the stored key must be revoked
+// first so validation fails 401 and the callback mints under the newly
+// authenticated account.
 //
 //nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
 func authorizeURL(cfg Config, state string, verified VerifiedState) string {

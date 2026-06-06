@@ -1100,17 +1100,18 @@ func setupVerbRest(text string) (rest string, matched bool) {
 // runs only the owner is permitted; other workspace members (including
 // admins added via `/qurl-admin admin add`) get an "owner-only" reply.
 // Without this gate, any added admin could complete OAuth against their
-// own Auth0 account and silently rotate the workspace's qURL credential —
+// own Auth0 account and silently re-point the workspace's qURL credential —
 // the OAuth callback's BindWorkspace pre-flight (see oauth.checkBindAllowed)
 // also rejects that case as a defense in depth, but gating here means
 // non-owners don't get a setup URL minted in their name at all (cleaner
 // audit, no half-completed OAuth flows).
 //
 // AdminStore=nil (sandbox / no-DDB) skips the owner gate — same posture
-// as every other admin verb; the caller falls through to mint as on a
-// fresh install. That is a separate short-circuit from the oauthSetup==nil
-// check below, which is the branch that returns "qURL OAuth is not
-// configured" (and which fires first, before AdminStore is consulted).
+// as every other admin verb; the caller falls through to the OAuth
+// callback's normal key reuse/replacement path. That is a separate
+// short-circuit from the oauthSetup==nil check below, which is the branch
+// that returns "qURL OAuth is not configured" (and which fires first,
+// before AdminStore is consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEmail string) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
@@ -1151,8 +1152,9 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 		// trip, and the empty-owner Warn there flags the bad row). That
 		// requires DDB tampering, so it isn't worth a second read to
 		// distinguish at the gate.
-		// ownerID==userID → idempotent rerun by owner (rotates the
-		// API key on OAuth-callback success), allow.
+		// ownerID==userID → idempotent rerun by owner; the OAuth
+		// callback reuses a healthy key and only replaces a missing
+		// or revoked key, allow.
 		// otherwise → non-owner rebind attempt, refuse here so we
 		// don't even mint the state token / setup URL.
 		//
@@ -1249,9 +1251,10 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	// setup is a user verb (first-come-claims), so it leads the user
 	// surface. The owner semantics only exist when AdminStore is wired; on
-	// the sandbox/no-DDB path the owner gate in handleSetup is skipped, so
-	// re-running /setup just mints again. Append the owner parenthetical
-	// only there so the help text matches the deployment's actual behavior.
+	// the sandbox/no-DDB path the owner gate in handleSetup is skipped and
+	// the OAuth callback still owns key reuse/replacement. Append the owner
+	// parenthetical only there so the help text matches the deployment's
+	// actual behavior.
 	setupLine := "• `/qurl setup <email>` — Connect qURL to your Slack workspace"
 	if h.cfg.AdminStore != nil {
 		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
