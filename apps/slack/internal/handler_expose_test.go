@@ -103,6 +103,96 @@ func TestHandleExpose_AdminRendersChooser(t *testing.T) {
 	}
 }
 
+// TestHandleExpose_SandboxAdminProtectReturnsSlackValidChooser fences the exact
+// non-prod slash-command path that Slack evaluates for the immediate response.
+// A previous chooser response used buttons with empty values, which Slack can
+// reject as invalid_command_response even though the typed modal verbs work.
+func TestHandleExpose_SandboxAdminProtectReturnsSlackValidChooser(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+
+	body := url.Values{
+		fieldCommand:     {"/qurl-sandbox-admin"},
+		fieldText:        {"protect"},
+		fieldTeamID:      {testAdminTeamID},
+		fieldUserID:      {testAdminUserID},
+		fieldChannelID:   {testExposeChannel},
+		fieldResponseURL: {"https://hooks.slack.com/protect"},
+		fieldTriggerID:   {"trigger_test"},
+	}
+	encoded := body.Encode()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, pathSlackCommands, strings.NewReader(encoded))
+	sig, tsHeader := signSlackBody(t, encoded)
+	r.Header.Set(headerSlackSignature, sig)
+	r.Header.Set(headerSlackTimestamp, tsHeader)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal reply: %v body=%s", err, w.Body.String())
+	}
+	if got[respFieldResponseType] != respTypeEphemeral {
+		t.Fatalf("response_type = %q, want %q; body=%s", got[respFieldResponseType], respTypeEphemeral, w.Body.String())
+	}
+	text, _ := got[respFieldText].(string)
+	if text == "" || !strings.Contains(strings.ToLower(text), "protect") {
+		t.Fatalf("fallback text = %q, want protect chooser text", text)
+	}
+	blocks, ok := got[blockKitFieldBlocks].([]any)
+	if !ok || len(blocks) == 0 {
+		t.Fatalf("blocks missing from chooser response: %#v", got[blockKitFieldBlocks])
+	}
+	assertProtectChooserButtonsSlackValid(t, blocks)
+}
+
+func assertProtectChooserButtonsSlackValid(t *testing.T, blocks []any) {
+	t.Helper()
+	found := map[string]bool{}
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok || m[blockKitFieldType] != blockKitTypeActions {
+			continue
+		}
+		els, _ := m[blockKitFieldElements].([]any)
+		if len(els) != 2 {
+			t.Fatalf("actions row has %d buttons, want 2: %#v", len(els), m)
+		}
+		for i, el := range els {
+			btn, ok := el.(map[string]any)
+			if !ok {
+				t.Fatalf("button %d has unexpected shape: %#v", i, el)
+			}
+			actionID, _ := btn[blockKitFieldActionID].(string)
+			value, _ := btn[blockKitFieldValue].(string)
+			textObj, _ := btn["text"].(map[string]any)
+			label, _ := textObj["text"].(string)
+			if actionID == "" {
+				t.Fatalf("button %d missing action_id: %#v", i, btn)
+			}
+			if value == "" {
+				t.Fatalf("button %d has empty Slack value: %#v", i, btn)
+			}
+			if label == "" || !strings.Contains(strings.ToLower(label), "protect") {
+				t.Fatalf("button %d label = %q, want visible protect copy: %#v", i, label, btn)
+			}
+			found[actionID] = true
+		}
+	}
+	for _, actionID := range []string{exposeConnectorActionID, exposeURLActionID} {
+		if !found[actionID] {
+			t.Fatalf("chooser response missing button action_id %q; found=%v", actionID, found)
+		}
+	}
+}
+
 // TestHandleExpose_UserSurfaceRedirects fences that protected-resource creation
 // remains on the admin command surface. Even admins should use
 // `/qurl-admin protect`, not `/qurl protect`, so the user command never looks
