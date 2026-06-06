@@ -3,22 +3,8 @@ name: "slack: Build and Test"
 on:
   push:
     branches: [main]
-    paths:
-      - 'apps/slack/**'
-      - 'shared/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.golangci.yml'
-      - '.github/workflows/slack.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'apps/slack/**'
-      - 'shared/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.golangci.yml'
-      - '.github/workflows/slack.yml'
 
 permissions:
   contents: read
@@ -28,9 +14,41 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  lint:
-    name: Lint
+  changes:
+    name: slack / detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      slack: ${{ steps.filter.outputs.slack }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            slack:
+              # Source of truth for Slack-impacting paths on PR and main push events.
+              - 'apps/slack/**'
+              - 'shared/**'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci.yml'
+              - '.github/workflows/slack.yml'
+
+  lint:
+    name: slack / lint
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.slack == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -46,8 +64,10 @@ jobs:
           args: --timeout=5m
 
   test:
-    name: Test
+    name: slack / test
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.slack == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -74,8 +94,10 @@ jobs:
         run: go vet ./apps/slack/... ./shared/...
 
   vulnerability-scan:
-    name: Vulnerability Scan
+    name: slack / govulncheck
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.slack == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -84,15 +106,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: go tool govulncheck ./...
 
   docker-check:
-    name: Docker
+    name: slack / docker
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.slack == 'true'
     # arm64 Go builds under QEMU routinely take several minutes, and Buildx's
     # GitHub Actions cache export is part of the job. Keep the timeout above
     # the observed build+cache path so successful image builds do not get
@@ -119,9 +140,82 @@ jobs:
           build-args: |
             VERSION=${{ github.sha }}
 
+  required:
+    name: slack / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every Slack quality gate must be listed here; slack / required only
+    # validates jobs in this needs set. display_names below is annotation-only.
+    needs: [changes, lint, test, vulnerability-scan, docker-check]
+    if: always()
+    steps:
+      - name: Verify Slack CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SLACK_CHANGED: ${{ needs.changes.outputs.slack }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::slack / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$SLACK_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No Slack-impacting changes detected; Slack CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::slack / detect changes emitted unexpected slack output: ${SLACK_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              lint)
+                echo "slack / lint"
+                ;;
+              test)
+                echo "slack / test"
+                ;;
+              vulnerability-scan)
+                echo "slack / govulncheck"
+                ;;
+              docker-check)
+                echo "slack / docker"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a Slack quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Slack-impacting changes require every quality gate listed
+              # in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"
+
   trigger-deploy:
-    needs: [lint, test, vulnerability-scan, docker-check]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [changes, required]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.slack == 'true'
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
