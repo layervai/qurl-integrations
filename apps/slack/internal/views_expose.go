@@ -10,7 +10,9 @@ const (
 	// exposeConnectorActionID / exposeURLActionID are the action_ids on the two
 	// buttons posted by `/qurl-admin protect`. A click opens the matching guided
 	// modal — the connector installer (reusing TunnelInstallModal) or the
-	// URL-resource picker (ExposeURLModal).
+	// URL-resource picker (ExposeURLModal). Keep action_ids stable for in-flight
+	// Slack interactions; the button values use protect wording and are non-empty
+	// because Slack can reject slash-command responses with empty button values.
 	exposeConnectorActionID = "expose_connector"
 	exposeURLActionID       = "expose_url"
 	exposeConnectorValue    = "protect_connector"
