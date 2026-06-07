@@ -201,15 +201,27 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 	})
 }
 
-func TestFormatTunnelEditSummary_EscapesToken(t *testing.T) {
+func TestFormatResourceEditSummary_EscapesToken(t *testing.T) {
 	// A token can be an upstream slug that never passed the alias charset fence,
 	// so a backtick must be escaped or it breaks the code span (defense-in-depth).
-	out := formatTunnelEditSummary("ev`il", nil, &aliasReconcileResult{}, &channelExposureResult{})
+	out := formatResourceEditSummary("ev`il", "", nil, &aliasReconcileResult{}, &channelExposureResult{})
 	if strings.Contains(out, "ev`il") {
 		t.Errorf("raw backtick token leaked into the summary: %q", out)
 	}
 	if !strings.Contains(out, "evˊil") {
 		t.Errorf("expected the token's backtick escaped to ˊ, got: %q", out)
+	}
+}
+
+func TestFormatResourceEditSummary_UsesURLResourceConflictCopy(t *testing.T) {
+	out := formatResourceEditSummary("docs", client.ResourceTypeURL, nil, &aliasReconcileResult{conflicts: []string{"taken"}}, &channelExposureResult{})
+	for _, want := range []string{"Updated URL resource `$docs`", "Skipped (already used by another URL resource in this channel): `$taken`"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "qURL Connector") {
+		t.Errorf("summary used connector copy for URL resource: %s", out)
 	}
 }
 
@@ -307,6 +319,70 @@ func TestHandleList_RendersEditButtonForOwnerNotOnAdminSet(t *testing.T) {
 	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
 	if vals := editButtonValues(t, blocks); len(vals) != 1 {
 		t.Fatalf("Edit button count = %d for owner caller not on admin set, want 1; blocks=%v", len(vals), blocks)
+	}
+}
+
+// TestHandleList_RendersAdminButtonsForURLResource fences the reported
+// regression: admin /qurl list rows for URL resources get the same admin action
+// row as qURL Connector resources. Create qURL is primary because it is paired
+// with Edit/Revoke, and the edit snapshot carries the URL resource type so the
+// modal copy is URL-specific rather than connector-specific.
+func TestHandleList_RendersAdminButtonsForURLResource(t *testing.T) {
+	const (
+		urlResourceID = "r_url_docs01"
+		urlAlias      = "docs"
+		urlDisplay    = "Docs portal"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: urlResourceID, testKeyType: client.ResourceTypeURL, fAttrAlias: urlAlias, testKeyTargetURL: "https://docs.example.com", testKeyDescription: urlDisplay},
+		}, "", false)
+	})
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", urlResourceID)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+	inv := newAdminSlashInvoker(t, h)
+
+	if status, _ := inv.invokeAdmin("list", testAdminTeamID, testAdminUserID); status != http.StatusOK {
+		t.Fatalf("status != 200")
+	}
+	blocks := parseSlackBlocks(t, inv.captured.waitForBody(t, 2*time.Second))
+
+	create := findActionButton(blocks, listCreateQurlActionID)
+	if create == nil {
+		t.Fatalf("URL resource admin row missing Create qURL action: %v", blocks)
+	}
+	if create["style"] != blockKitStylePrimary {
+		t.Errorf("URL resource Create qURL style = %v, want primary", create["style"])
+	}
+	if got, _ := create[blockKitFieldValue].(string); got != urlAlias {
+		t.Errorf("URL resource Create qURL value = %q, want %q", got, urlAlias)
+	}
+
+	edit := findActionButton(blocks, listEditTunnelActionID)
+	if edit == nil {
+		t.Fatalf("URL resource admin row missing Edit action: %v", blocks)
+	}
+	var snap tunnelEditButtonValue
+	if err := json.Unmarshal([]byte(edit[blockKitFieldValue].(string)), &snap); err != nil {
+		t.Fatalf("Edit value not JSON: %v", err)
+	}
+	if snap.ResourceID != urlResourceID || snap.Token != urlAlias || snap.DisplayName != urlDisplay || snap.ResourceType != client.ResourceTypeURL {
+		t.Errorf("URL edit snapshot = %+v", snap)
+	}
+
+	revoke := findActionButton(blocks, listRevokeTunnelActionID)
+	if revoke == nil {
+		t.Fatalf("URL resource admin row missing Revoke action: %v", blocks)
+	}
+	if revoke["style"] != blockKitStyleDanger {
+		t.Errorf("URL resource Revoke style = %v, want danger", revoke["style"])
+	}
+	if v, _ := revoke[blockKitFieldValue].(string); !strings.Contains(v, urlResourceID) {
+		t.Errorf("URL resource Revoke value missing resource_id: %q", v)
 	}
 }
 

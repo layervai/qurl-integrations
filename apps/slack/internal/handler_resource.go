@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	resourceExposeUsage       = "Usage:\n• `/qurl-admin protect-url` for the guided picker\n• `/qurl-admin protect-url $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin protect-url url:<target-url> as:$channel-alias`"
+	resourceExposeUsage       = "Usage:\n• `/qurl-admin protect-url` for guided URL creation\n• `/qurl-admin protect-url $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin protect-url url:<target-url> as:$channel-alias`"
 	resourceExposeSchemeHTTP  = "http"
 	resourceExposeSchemeHTTPS = "https"
 	// exposeURLResourceFailedMsg is the generic failure reply shared by the
@@ -73,6 +73,9 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 		if targetURL == "" {
 			return nil, "Missing URL after `url:`.\n\n" + resourceExposeUsage
 		}
+		// This typed path exposes an existing no-alias URL resource by exact
+		// target lookup. New guided URL creation is handled by
+		// ExposeURLCreateModal and is intentionally HTTPS-only.
 		parsed, err := url.Parse(targetURL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != resourceExposeSchemeHTTP && parsed.Scheme != resourceExposeSchemeHTTPS) {
 			return nil, "URL target must be an absolute http or https URL.\n\n" + resourceExposeUsage
@@ -88,9 +91,9 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 }
 
 // handleExposeURL routes the URL verb `/qurl-admin protect-url`: bare (no
-// arguments) opens the guided URL-resource picker modal; `protect-url <target>
-// [as:$channel-alias]` is the typed power-user form that skips the modal. This
-// is the single-word URL protection verb.
+// arguments) opens the guided create-and-protect URL modal; `protect-url
+// <target> [as:$channel-alias]` is the typed power-user form that skips the
+// modal. This is the single-word URL protection verb.
 //
 // Either way the effect is the same: make an existing URL resource available in
 // THIS Slack channel by binding a channel alias to its resource_id. The dashboard
@@ -99,7 +102,7 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	_, rest := slashVerb(text, adminVerbProtectURL)
 	if strings.TrimSpace(rest) == "" {
-		// Bare verb → guided picker modal (the no-arguments path).
+		// Bare verb → guided create modal (the no-arguments path).
 		h.handleExposeURLWizard(w, values)
 		return
 	}
@@ -124,14 +127,13 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	})
 }
 
-// handleExposeURLWizard opens the guided URL-resource picker for a bare
+// handleExposeURLWizard opens the guided URL create-and-protect form for a bare
 // `/qurl-admin protect-url`. Like the connector wizard (handleTunnelInstallWizard)
-// it acks fast and does the admin re-check + resource fetch + views.open on the
-// async worker inside Slack's short trigger window, so the picker's first-page
-// resource scan never blocks the slash ack. The picker's button-driven sibling
-// (the `protect` chooser → handleExposeURLClick) opens the identical modal from a
-// fresh button trigger; this is the direct slash entry. OpenView must be wired —
-// without it the bare verb declines and points at the typed form.
+// it acks fast and does the admin re-check + views.open on the async worker
+// inside Slack's short trigger window. The button-driven sibling (the `protect`
+// chooser → handleExposeURLClick) opens the identical modal from a fresh button
+// trigger; this is the direct slash entry. OpenView must be wired, without it the
+// bare verb declines and points at the typed form.
 func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values) {
 	if !h.requireAdminStoreSync(w) {
 		return
@@ -180,11 +182,8 @@ func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values
 }
 
 // openExposeURLWizard is the async worker for handleExposeURLWizard: admin
-// re-check, fetch the channel's exposable URL resources, then open the picker
-// modal — all bounded to fit Slack's trigger window. With no URL resources to
-// protect it opens a first-run create-and-protect modal instead of an empty picker.
-// Mirrors openTunnelInstallWizard's gate/budget posture; the modal-render half is
-// shared with handleExposeURLClick (urlResourceSelectOptions + ExposeURLModal).
+// re-check, then open the HTTPS URL create-and-protect modal, all bounded to fit
+// Slack's trigger window. Mirrors openTunnelInstallWizard's gate/budget posture.
 func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
 	openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 	if openBudget <= 0 {
@@ -206,74 +205,28 @@ func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, tea
 		return
 	}
 
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, adminGateBudget)
-	options, userMsg := h.urlResourceSelectOptions(fetchCtx, log, teamID)
-	fetchCancel()
-	if userMsg != "" {
-		_ = h.postErrorResponse(log, responseURL, userMsg, true)
-		return
-	}
-	if len(options) == 0 {
-		view, err := ExposeURLCreateModal(ExposeURLModalMetadata{
-			TeamID:      teamID,
-			ChannelID:   channelID,
-			UserID:      userID,
-			ResponseURL: responseURL,
-		})
-		if err != nil {
-			log.Error("protect-url wizard create modal render failed", "error", err)
-			_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
-			return
-		}
-		openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
-		if openBudget <= 0 {
-			log.Warn("protect-url wizard trigger expired before create modal views.open")
-			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin protect-url` again.", true)
-			return
-		}
-		openCtx, openCancel := context.WithTimeout(ctx, openBudget)
-		defer openCancel()
-		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("protect-url wizard create modal views.open failed", "error", err,
-				"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
-				"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
-			)
-			switch {
-			case errors.Is(err, ErrSlackTriggerExpired):
-				_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin protect-url` again.", true)
-			case errors.Is(err, ErrSlackRateLimited):
-				_ = h.postErrorResponse(log, responseURL, "Slack rate-limited the guided picker. Wait a moment, then run `/qurl-admin protect-url` again.", true)
-			default:
-				_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
-			}
-			return
-		}
-		_ = h.deleteOriginalResponse(log, responseURL)
-		return
-	}
-
-	view, err := ExposeURLModal(ExposeURLModalMetadata{
+	view, err := ExposeURLCreateModal(ExposeURLModalMetadata{
 		TeamID:      teamID,
 		ChannelID:   channelID,
 		UserID:      userID,
 		ResponseURL: responseURL,
-	}, options)
+	})
 	if err != nil {
-		log.Error("protect-url wizard modal render failed", "error", err)
-		_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
+		log.Error("protect-url wizard create modal render failed", "error", err)
+		_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL form. Please retry or contact support.", true)
 		return
 	}
 
 	openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 	if openBudget <= 0 {
-		log.Warn("protect-url wizard trigger expired before views.open")
+		log.Warn("protect-url wizard trigger expired before create modal views.open")
 		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin protect-url` again.", true)
 		return
 	}
 	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
 	defer openCancel()
 	if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-		log.Warn("protect-url wizard views.open failed", "error", err,
+		log.Warn("protect-url wizard create modal views.open failed", "error", err,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
 			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
 		)
@@ -281,9 +234,9 @@ func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, tea
 		case errors.Is(err, ErrSlackTriggerExpired):
 			_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin protect-url` again.", true)
 		case errors.Is(err, ErrSlackRateLimited):
-			_ = h.postErrorResponse(log, responseURL, "Slack rate-limited the guided picker. Wait a moment, then run `/qurl-admin protect-url` again.", true)
+			_ = h.postErrorResponse(log, responseURL, "Slack rate-limited the guided URL form. Wait a moment, then run `/qurl-admin protect-url` again.", true)
 		default:
-			_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL picker. Please retry or contact support.", true)
+			_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL form. Please retry or contact support.", true)
 		}
 		return
 	}

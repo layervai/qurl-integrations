@@ -15,20 +15,20 @@ import (
 )
 
 // listResourcesScanLimit is the per-page size for the `/v1/resources` fetches
-// backing `/qurl list`, `/qurl aliases`, the URL resource-alias fallback in
-// `/qurl get`, and the `/qurl-admin protect-url` picker.
+// backing `/qurl list`, `/qurl aliases`, and the URL resource-alias fallback in
+// `/qurl get`.
 //
 //   - `/qurl list` pages through resources until every resource in the channel
 //     allow-set has been seen (see [Handler.fetchAllowedResources]) — tunnels
 //     and URL resources alike — so the listing is complete regardless of how the
 //     owner's full resource set sorts (#590). The page size only affects how many
 //     requests that walk takes, not which resources render.
-//   - `/qurl aliases`, the `/qurl get` URL resource-alias fallback, and the
-//     `/qurl-admin protect-url` picker each scan a SINGLE page. A bound/aliased
-//     resource_id past this page surfaces the triage warning in
-//     [Handler.processAliases] (aliases) or is missed by the get fallback /
-//     duplicate-alias ambiguity check (#590). A server-side type filter (tracked
-//     in #531) would let those single-page surfaces drop to a normal size.
+//   - `/qurl aliases` and the `/qurl get` URL resource-alias fallback each scan
+//     a SINGLE page. A bound/aliased resource_id past this page surfaces the
+//     triage warning in [Handler.processAliases] (aliases) or is missed by the
+//     get fallback / duplicate-alias ambiguity check (#590). A server-side type
+//     filter (tracked in #531) would let those single-page surfaces drop to a
+//     normal size.
 const listResourcesScanLimit = 100
 
 const (
@@ -115,23 +115,40 @@ const (
 // channel aliases bound to this tunnel other than the row's primary Token — so
 // the modal never offers to unbind the tunnel's own canonical name.
 type tunnelEditButtonValue struct {
-	ResourceID  string   `json:"r"`
-	Token       string   `json:"t"`
-	DisplayName string   `json:"d,omitempty"`
-	Aliases     []string `json:"a,omitempty"`
+	ResourceID   string   `json:"r"`
+	Token        string   `json:"t"`
+	DisplayName  string   `json:"d,omitempty"`
+	Aliases      []string `json:"a,omitempty"`
+	ResourceType string   `json:"y,omitempty"`
 }
 
-// buildTunnelEditButtonValue marshals a row's edit snapshot. boundAliases is
-// the full channel-alias set for the resource; the primary token is excluded
-// (the modal manages only the extra aliases). Returns ("", false) when the
-// marshaled value would exceed Slack's button-value cap, so the caller renders
-// a Create-only button instead.
+// buildTunnelEditButtonValue marshals a connector row's edit snapshot.
+// boundAliases is the full channel-alias set for the resource; the primary
+// token is excluded (the modal manages only the extra aliases). Returns ("",
+// false) when the marshaled value would exceed Slack's button-value cap, so the
+// caller renders a Create-only button instead.
 func buildTunnelEditButtonValue(resourceID, token, displayName string, boundAliases []string) (string, bool) {
+	return buildResourceEditButtonValue(&client.Resource{ResourceID: resourceID, Type: client.ResourceTypeTunnel, Description: displayName}, token, boundAliases)
+}
+
+// buildResourceEditButtonValue marshals a protected-resource edit snapshot for
+// the admin /qurl list row. URL resources share the same edit/revoke affordance
+// as qURL Connector resources: display name, channel aliases, and channel
+// availability all reconcile through the same resource_id-backed paths.
+func buildResourceEditButtonValue(resource *client.Resource, token string, boundAliases []string) (string, bool) {
+	if resource == nil {
+		return "", false
+	}
+	resourceType := resource.Type
+	if isURLResource(resource) {
+		resourceType = client.ResourceTypeURL
+	}
 	v := tunnelEditButtonValue{
-		ResourceID:  resourceID,
-		Token:       token,
-		DisplayName: displayName,
-		Aliases:     aliasesExcluding(boundAliases, token),
+		ResourceID:   resource.ResourceID,
+		Token:        token,
+		DisplayName:  resource.Description,
+		Aliases:      aliasesExcluding(boundAliases, token),
+		ResourceType: resourceType,
 	}
 	b, err := json.Marshal(v)
 	if err != nil || len(b) > slackButtonValueMaxBytes {
@@ -479,16 +496,16 @@ func appendResourceListBlocks(blocks []any, resource *client.Resource, aliases [
 		return append(blocks, sectionBlock(sectionText))
 	}
 	// Create qURL is the row's headline action. It renders as the primary
-	// (filled) button ONLY when an Edit button sits beside it — admin tunnel
-	// rows, where primary expresses the Create-over-Edit hierarchy. A
-	// create-only row has nothing to outrank, and a whole column of lone
-	// primaries reads as noise (Slack advises using `primary` sparingly), so it
-	// gets a default-style button. Admin tunnel rows pair the two in an actions
-	// block; the Edit button carries the row's edit snapshot so opening the modal
-	// needs no extra read. A snapshot too large for a button value falls through
-	// to the Create-only accessory path below.
-	if showEdit && isTunnelResource(resource) {
-		if editVal, ok := buildTunnelEditButtonValue(resource.ResourceID, token, resource.Description, aliases); ok {
+	// (filled) button ONLY when admin actions sit beside it, where primary
+	// expresses the Create-over-Edit/Revoke hierarchy. A create-only row has
+	// nothing to outrank, and a whole column of lone primaries reads as noise
+	// (Slack advises using `primary` sparingly), so it gets a default-style
+	// button. Admin rows pair Create qURL with Edit/Revoke in an actions block;
+	// the Edit button carries the row's edit snapshot so opening the modal needs
+	// no extra read. A snapshot too large for a button value falls through to the
+	// Create-only accessory path below.
+	if showEdit {
+		if editVal, ok := buildResourceEditButtonValue(resource, token, aliases); ok {
 			row := []map[string]any{
 				primaryButtonElement(listCreateButtonLabel, listCreateQurlActionID, token),
 				buttonElement(listEditButtonLabel, listEditTunnelActionID, editVal),
@@ -816,14 +833,6 @@ func formatURLListLineWithToken(r *client.Resource, boundAliases []string, token
 			line += " (" + aliasNoun(len(extras)) + ": " + strings.Join(extras, ", ") + ")"
 		}
 	}
-	// URL resources intentionally show their destination. /qurl list is already
-	// channel-scoped to the allow-set, and the target is the user-meaningful label
-	// for this resource type; raw URLs still cannot be passed to /qurl get.
-	target := r.TargetURL
-	if target == "" {
-		target = "<empty>"
-	}
-	line += " → " + escapeMrkdwnURL(target)
 	if r.Description != "" {
 		line += " — " + escapeMrkdwnText(r.Description)
 	}
@@ -884,11 +893,6 @@ func formatURLListSectionWithToken(r *client.Resource, boundAliases []string, to
 			b.WriteString("\n_Resource alias " + mrkdwnTokenSpan(blockedAlias) + " is shadowed here._")
 		}
 	}
-	target := r.TargetURL
-	if target == "" {
-		target = "<empty>"
-	}
-	b.WriteString("\n" + escapeMrkdwnURL(target))
 	if r.Description != "" {
 		b.WriteString("\n" + escapeMrkdwnText(r.Description))
 	}

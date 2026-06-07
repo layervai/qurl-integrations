@@ -15,10 +15,10 @@ import (
 )
 
 // handleExpose renders the `/qurl-admin protect` chooser: an ephemeral message
-// with two buttons — "Protect qURL Connector" and "Protect URL" — each of which
+// with two buttons, "Protect qURL Connector" and "Protect URL", each of which
 // opens the matching guided modal. It's the front door that replaces having to
-// remember the typed `protect-connector … env: port:` / `protect-url $alias as:`
-// grammar; the buttons route to the same flows the bare verbs open.
+// remember the typed `protect-connector … env: port:` / `protect-url …` grammar;
+// the buttons route to the same flows the bare verbs open.
 //
 // Admin-gated in code (Slack does not gate slash-command invocation on
 // workspace-admin role — the "admins only" picker hint is cosmetic). The gate
@@ -91,23 +91,18 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	respondJSON(w, http.StatusOK, map[string]any{})
 }
 
-// handleExposeURLClick opens the URL-protect modal in response to the "Protect
-// URL" button. Unlike the connector installer (a static form), this modal lists
-// the workspace's existing URL resources in a dropdown fetched at open time, so
-// the admin picks one rather than typing an alias. With no URL resources to
-// protect it opens a first-run create-and-protect modal instead of an empty
-// picker. Same open posture as handleExposeConnectorClick (ack fast, open on the
-// async goroutine inside the trigger window, retry with the Enterprise Grid
-// install token when Slack includes enterprise context, fail open via
-// response_url).
+// handleExposeURLClick opens the URL create-and-protect modal in response to
+// the "Protect URL" button. Same open posture as handleExposeConnectorClick
+// (ack fast, open on the async goroutine inside the trigger window, retry with
+// the Enterprise Grid install token when Slack includes enterprise context, fail
+// open via response_url).
 //
-// No admin re-check before the resource list fetch here, unlike the bare-verb
-// path (openExposeURLWizard re-checks because `/qurl-admin protect-url` has no
-// prior gate). This button is only reachable from the `/qurl-admin protect`
-// chooser, which requireAliasAdminGate-gates synchronously before rendering it,
-// and the chooser is an ephemeral visible only to that admin — so the seconds-long
-// window between render and click doesn't warrant a second CheckAdmin round-trip
-// inside the trigger budget. The submit handler re-checks at the mutation boundary.
+// No admin re-check before opening here, unlike the bare-verb path
+// (openExposeURLWizard re-checks because `/qurl-admin protect-url` has no prior
+// gate). This button is only reachable from the `/qurl-admin protect` chooser,
+// which requireAliasAdminGate-gates synchronously before rendering it, and the
+// chooser is an ephemeral visible only to that admin. The submit handler
+// re-checks at the mutation boundary.
 func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interactionPayload) {
 	log := slog.With(
 		"command", "protect_url_click",
@@ -131,116 +126,20 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 	}
 	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
-		// Bound the resource fetch on its own short budget so a slow upstream
-		// can't eat into the views.open trigger window; the open then gets the
-		// full slackTriggerOpenViewBudget. Both derive from h.baseCtx so a
-		// process shutdown cancels them coherently. Mirrors handleListEditClick's
-		// enumeration/open split.
-		fetchCtx, fetchCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
-		options, userMsg := h.urlResourceSelectOptions(fetchCtx, log, teamID)
-		fetchCancel()
-		if userMsg != "" {
-			_ = h.postResponse(log, responseURL, ":warning: "+userMsg)
-			return
-		}
-		if len(options) == 0 {
-			view, err := ExposeURLCreateModal(meta)
-			if err != nil {
-				log.Error("protect url: create modal render failed", "error", err)
-				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
-				return
-			}
-			openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
-			defer openCancel()
-			if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-				log.Warn("protect url: create modal views.open failed", "error", err)
-				_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
-			}
-			return
-		}
-		view, err := ExposeURLModal(meta, options)
+		view, err := ExposeURLCreateModal(meta)
 		if err != nil {
-			log.Error("protect url: modal render failed", "error", err)
+			log.Error("protect url: create modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 			return
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
 		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("protect url: views.open failed", "error", err)
+			log.Warn("protect url: create modal views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
 	})
 	respondJSON(w, http.StatusOK, map[string]any{})
-}
-
-// urlResourceSelectOptions fetches the workspace's URL resources (the same
-// first-page scan as /qurl list/get) and returns them as static_select option
-// objects for the URL-protect modal: each option's text is a human label (the
-// resource's alias, display name, or target URL) and its value is the
-// resource_id the submission binds the channel alias to. Revoked resources and
-// tunnel resources are skipped. Returns (nil, userMsg) on an upstream failure
-// (userMsg is sanitized for display); (empty, "") when the workspace has no URL
-// resources to protect.
-func (h *Handler) urlResourceSelectOptions(ctx context.Context, log *slog.Logger, teamID string) (options []map[string]any, userMsg string) {
-	c, err := h.authenticatedClient(ctx, teamID)
-	if err != nil {
-		log.Error("protect url: API key lookup failed", "error", err, "team_id", teamID)
-		return nil, "Failed to look up URL resources. Please try again."
-	}
-	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
-	if err != nil {
-		log.Warn("protect url: resource lookup failed", "error", err, "team_id", teamID)
-		return nil, sanitizeAPIError(err, "Failed to look up URL resources")
-	}
-	options = make([]map[string]any, 0, len(page.Resources))
-	for i := range page.Resources {
-		r := page.Resources[i]
-		if r.Status == client.StatusRevoked || !isURLResource(&r) {
-			continue
-		}
-		options = append(options, optionObj(exposeURLOptionLabel(&r), r.ResourceID))
-		if len(options) >= exposeURLMaxOptions {
-			break
-		}
-	}
-	if page.HasMore && len(options) < exposeURLMaxOptions {
-		log.Debug("protect url: scanned first resource page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
-	}
-	return options, ""
-}
-
-// exposeURLOptionLabel renders a URL resource as a dropdown option label,
-// preferring its `$alias`, then its Display Name, then its target URL, and
-// finally the resource_id so the label is never empty (Slack rejects an
-// empty-text option). Truncated to Slack's per-option text cap.
-func exposeURLOptionLabel(r *client.Resource) string {
-	switch {
-	case r.Alias != "":
-		return truncateRunes("$"+r.Alias, slackOptionTextMaxRunes)
-	case r.Description != "":
-		return truncateRunes(r.Description, slackOptionTextMaxRunes)
-	case r.TargetURL != "":
-		return truncateRunes(r.TargetURL, slackOptionTextMaxRunes)
-	default:
-		return truncateRunes(r.ResourceID, slackOptionTextMaxRunes)
-	}
-}
-
-// truncateRunes caps s at maxRunes runes, appending an ellipsis when it
-// truncates (so the rendered length is maxRunes). maxRunes <= 0 returns "".
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	if maxRunes == 1 {
-		return "…"
-	}
-	return string(r[:maxRunes-1]) + "…"
 }
 
 // handleExposeURLSubmission processes the URL-protect modal's view_submission. It
@@ -431,10 +330,13 @@ func parseExposeURLCreateModalArgs(values map[string]map[string]interactionState
 
 	targetURL := strings.TrimSpace(interactionStateText(values, exposeURLBlockTarget, exposeURLActionTarget))
 	parsed, err := url.Parse(targetURL)
-	if targetURL == "" {
+	switch {
+	case targetURL == "":
 		fieldErrors[exposeURLBlockTarget] = "Enter the URL to protect."
-	} else if err != nil || parsed.Host == "" || (parsed.Scheme != resourceExposeSchemeHTTP && parsed.Scheme != resourceExposeSchemeHTTPS) {
-		fieldErrors[exposeURLBlockTarget] = "Enter an absolute http or https URL."
+	case !hasASCIIPrefixFold(targetURL, "https://"):
+		fieldErrors[exposeURLBlockTarget] = "URL must start with https://."
+	case err != nil || parsed.Host == "" || parsed.Scheme != resourceExposeSchemeHTTPS:
+		fieldErrors[exposeURLBlockTarget] = "Enter a valid https:// URL."
 	}
 
 	aliasRaw := strings.TrimSpace(interactionStateText(values, exposeURLBlockAlias, exposeURLActionAlias))

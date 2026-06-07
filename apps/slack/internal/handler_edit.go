@@ -89,14 +89,15 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 		return
 	}
 	meta := TunnelEditModalMetadata{
-		TeamID:      payload.Team.ID,
-		ChannelID:   payload.Channel.ID,
-		UserID:      payload.User.ID,
-		ResponseURL: responseURL,
-		ResourceID:  snapshot.ResourceID,
-		Token:       snapshot.Token,
-		DisplayName: snapshot.DisplayName,
-		Aliases:     snapshot.Aliases,
+		TeamID:       payload.Team.ID,
+		ChannelID:    payload.Channel.ID,
+		UserID:       payload.User.ID,
+		ResponseURL:  responseURL,
+		ResourceID:   snapshot.ResourceID,
+		Token:        snapshot.Token,
+		DisplayName:  snapshot.DisplayName,
+		Aliases:      snapshot.Aliases,
+		ResourceType: snapshot.ResourceType,
 	}
 	teamID, triggerID := payload.Team.ID, payload.TriggerID
 	h.Go(func() {
@@ -420,7 +421,7 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 
 	aliasResult := h.reconcileChannelAliases(ctx, log, meta, desiredAliases)
 	channelResult := h.reconcileChannelExposure(ctx, log, meta, desiredChannels)
-	_ = h.postResponse(log, meta.ResponseURL, formatTunnelEditSummary(meta.Token, changes, &aliasResult, &channelResult))
+	_ = h.postResponse(log, meta.ResponseURL, formatResourceEditSummary(meta.Token, meta.ResourceType, changes, &aliasResult, &channelResult))
 }
 
 // aliasReconcileResult buckets the outcome of reconciling a tunnel's channel
@@ -632,14 +633,15 @@ func (h *Handler) channelHasAliasForResource(ctx context.Context, log *slog.Logg
 	return false
 }
 
-// formatTunnelEditSummary renders the admin-facing ephemeral summarizing an
-// edit. Aliases are shown as `$<alias>` code spans (charset-validated, so
-// backtick-free); the token is the tunnel's id and CAN be an upstream slug that
-// never passed the alias charset fence, so it's escaped for the code span as
-// defense-in-depth — same posture as the modal's tunnelEditTokenLabel. Channel
-// changes render as `<#C…>` mentions so the admin sees the channel names.
-func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReconcileResult, chanRes *channelExposureResult) string {
-	lines := []string{fmt.Sprintf("✅ Updated qURL Connector `$%s`.", escapeMrkdwnCode(token))}
+func formatResourceEditSummary(token, resourceType string, changes []string, aliasRes *aliasReconcileResult, chanRes *channelExposureResult) string {
+	label := editResourceLabel(resourceType)
+	var first string
+	if token == "" {
+		first = fmt.Sprintf("✅ Updated %s.", label)
+	} else {
+		first = fmt.Sprintf("✅ Updated %s `$%s`.", label, escapeMrkdwnCode(token))
+	}
+	lines := []string{first}
 	lines = append(lines, changes...)
 	if len(aliasRes.added) > 0 {
 		lines = append(lines, "Added alias(es): "+joinAliasCodes(aliasRes.added))
@@ -648,7 +650,7 @@ func formatTunnelEditSummary(token string, changes []string, aliasRes *aliasReco
 		lines = append(lines, "Removed alias(es): "+joinAliasCodes(aliasRes.removed))
 	}
 	if len(aliasRes.conflicts) > 0 {
-		lines = append(lines, "Skipped (already used by another qURL Connector in this channel): "+joinAliasCodes(aliasRes.conflicts))
+		lines = append(lines, "Skipped (already used by another "+label+" in this channel): "+joinAliasCodes(aliasRes.conflicts))
 	}
 	if len(chanRes.exposed) > 0 {
 		lines = append(lines, "Protected in: "+joinChannelMentions(chanRes.exposed))

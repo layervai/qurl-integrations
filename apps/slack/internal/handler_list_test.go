@@ -34,6 +34,7 @@ const (
 	testListResIDProdDB   = "r_prod_db_aa"
 	testListResIDURLDocs  = "r_url_docs01"
 	testListURLDocs       = "https://docs.example.com"
+	testListURLDocsLine   = "• `$docs`"
 	testListURLFirst      = "https://first.example.com"
 	testListURLSecond     = "https://second.example.com"
 	testListGetCommand    = "/qurl get"
@@ -212,18 +213,15 @@ func TestFormatURLListLine(t *testing.T) {
 		blockedAlias string
 		want         string
 	}{
-		{name: "resource alias token", resource: urlResource(testListAliasDocs, ""), boundAliases: nil, want: "• `$docs` → https://docs.example.com"},
-		{name: "resource alias plus description", resource: urlResource("billing", "Billing portal"), boundAliases: nil, want: "• `$billing` → https://billing.example.com — Billing portal"},
-		{name: "description is mrkdwn escaped", resource: urlResource("alerts", "Use <!channel> *now*"), boundAliases: nil, want: "• `$alerts` → https://alerts.example.com — Use &lt;!channel&gt; ∗now∗"},
-		{name: "channel alias fallback when resource alias missing", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: []string{testListAliasDocs}, want: "• `$docs` → https://docs.example.com"},
-		{name: "resource alias excludes matching channel alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{testListAliasDocs, "kb"}, want: "• `$docs` (alias: `$kb`) → https://docs.example.com"},
-		{name: "resource alias token is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: nil, want: "• `$doˊcs` → https://docs.example.com"},
-		{name: "substituted channel alias names shadowed resource alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{"kb"}, token: "kb", blockedAlias: testListAliasDocs, want: "• `$kb` (resource alias `$docs` is shadowed here) → https://docs.example.com"},
-		{name: "no alias renders visible but unmintable row", resource: &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com", Status: client.StatusActive}, boundAliases: nil, want: "• `r_url_noalias` (no alias — ask your Slack admin to set one) → https://plain.example.com"},
-		{name: "target URL is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>", Status: client.StatusActive}, boundAliases: nil, want: "• `$docs` → https://docs.example.com/a?x=&lt;bad&gt;&amp;q=ˊtickˊ &lt;!channel&gt;"},
-		// Cosmetic-lookalike chars (`_`/`*`/`~`) stay literal in the target so the
-		// URL remains pasteable; only the structural escapes apply (see escapeMrkdwnURL).
-		{name: "target URL keeps underscores/tildes literal (pasteable)", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/~team/my_page", Status: client.StatusActive}, boundAliases: nil, want: "• `$docs` → https://docs.example.com/~team/my_page"},
+		{name: "resource alias token", resource: urlResource(testListAliasDocs, ""), boundAliases: nil, want: testListURLDocsLine},
+		{name: "resource alias plus description", resource: urlResource("billing", "Billing portal"), boundAliases: nil, want: "• `$billing` — Billing portal"},
+		{name: "description is mrkdwn escaped", resource: urlResource("alerts", "Use <!channel> *now*"), boundAliases: nil, want: "• `$alerts` — Use &lt;!channel&gt; ∗now∗"},
+		{name: "channel alias fallback when resource alias missing", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: []string{testListAliasDocs}, want: testListURLDocsLine},
+		{name: "resource alias excludes matching channel alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{testListAliasDocs, "kb"}, want: "• `$docs` (alias: `$kb`)"},
+		{name: "resource alias token is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: nil, want: "• `$doˊcs`"},
+		{name: "substituted channel alias names shadowed resource alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{"kb"}, token: "kb", blockedAlias: testListAliasDocs, want: "• `$kb` (resource alias `$docs` is shadowed here)"},
+		{name: "no alias renders visible but unmintable row", resource: &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com", Status: client.StatusActive}, boundAliases: nil, want: "• `r_url_noalias` (no alias — ask your Slack admin to set one)"},
+		{name: "target URL is not rendered", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>", Status: client.StatusActive}, boundAliases: nil, want: testListURLDocsLine},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,38 +285,36 @@ func TestFormatURLListSection(t *testing.T) {
 		Status:      client.StatusActive,
 	}
 	boundAliases := []string{testListAliasDocs, "kb"}
-	if got, want := formatURLListSectionWithToken(r, boundAliases, urlDisplayToken(r, boundAliases), ""), "*`$docs`*\nhttps://docs.example.com\nDocs portal\n_alias:_ `$kb`"; got != want {
+	if got, want := formatURLListSectionWithToken(r, boundAliases, urlDisplayToken(r, boundAliases), ""), "*`$docs`*\nDocs portal\n_alias:_ `$kb`"; got != want {
 		t.Errorf("formatURLListSectionWithToken = %q, want %q", got, want)
 	}
 
 	unsafeDescription := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: testListURLDocs, Description: "Use <!channel> *now*"}
-	if got, want := formatURLListSectionWithToken(unsafeDescription, nil, "docs", ""), "*`$docs`*\nhttps://docs.example.com\nUse &lt;!channel&gt; ∗now∗"; got != want {
+	if got, want := formatURLListSectionWithToken(unsafeDescription, nil, "docs", ""), "*`$docs`*\nUse &lt;!channel&gt; ∗now∗"; got != want {
 		t.Errorf("formatURLListSectionWithToken(unsafe description) = %q, want %q", got, want)
 	}
 
-	if got, want := formatURLListSectionWithToken(r, []string{"kb"}, "kb", testListAliasDocs), "*`$kb`*\n_Resource alias `$docs` is shadowed here._\nhttps://docs.example.com\nDocs portal"; got != want {
+	if got, want := formatURLListSectionWithToken(r, []string{"kb"}, "kb", testListAliasDocs), "*`$kb`*\n_Resource alias `$docs` is shadowed here._\nDocs portal"; got != want {
 		t.Errorf("formatURLListSectionWithToken(shadowed alias) = %q, want %q", got, want)
 	}
 
 	unsafeTarget := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/a?x=<bad>&q=`tick`\n<!channel>"}
-	if got, want := formatURLListSectionWithToken(unsafeTarget, nil, "docs", ""), "*`$docs`*\nhttps://docs.example.com/a?x=&lt;bad&gt;&amp;q=ˊtickˊ &lt;!channel&gt;"; got != want {
-		t.Errorf("formatURLListSectionWithToken(unsafe target) = %q, want %q", got, want)
+	if got, want := formatURLListSectionWithToken(unsafeTarget, nil, "docs", ""), "*`$docs`*"; got != want {
+		t.Errorf("formatURLListSectionWithToken(target hidden) = %q, want %q", got, want)
 	}
 
 	unsafeAlias := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs}
-	if got, want := formatURLListSectionWithToken(unsafeAlias, nil, "do`cs", ""), "*`$doˊcs`*\nhttps://docs.example.com"; got != want {
+	if got, want := formatURLListSectionWithToken(unsafeAlias, nil, "do`cs", ""), "*`$doˊcs`*"; got != want {
 		t.Errorf("formatURLListSectionWithToken(unsafe alias) = %q, want %q", got, want)
 	}
 
-	// Underscores/tildes in the target stay literal so the rendered URL is still
-	// pasteable (escapeMrkdwnURL drops the cosmetic-lookalike substitutions).
 	underscoreTarget := &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: testListAliasDocs, TargetURL: "https://docs.example.com/~team/my_page"}
-	if got, want := formatURLListSectionWithToken(underscoreTarget, nil, "docs", ""), "*`$docs`*\nhttps://docs.example.com/~team/my_page"; got != want {
-		t.Errorf("formatURLListSectionWithToken(underscore target) = %q, want %q", got, want)
+	if got, want := formatURLListSectionWithToken(underscoreTarget, nil, "docs", ""), "*`$docs`*"; got != want {
+		t.Errorf("formatURLListSectionWithToken(target hidden with underscore) = %q, want %q", got, want)
 	}
 
 	noAlias := &client.Resource{ResourceID: "r_url_noalias", Type: client.ResourceTypeURL, TargetURL: "https://plain.example.com"}
-	if got, want := formatURLListSectionWithToken(noAlias, nil, "", ""), "*`r_url_noalias`*\n_No alias set — ask your Slack admin to set one._\nhttps://plain.example.com"; got != want {
+	if got, want := formatURLListSectionWithToken(noAlias, nil, "", ""), "*`r_url_noalias`*\n_No alias set — ask your Slack admin to set one._"; got != want {
 		t.Errorf("formatURLListSectionWithToken(no alias) = %q, want %q", got, want)
 	}
 }
@@ -619,11 +615,14 @@ func TestHandleList_URLResourcesListed(t *testing.T) {
 	if !strings.Contains(async, "`$alpha-tunnel`") {
 		t.Errorf("async reply missing the tunnel row: %q", async)
 	}
-	if !strings.Contains(async, "`$burl` → https://b.example.com — Billing portal") {
+	if !strings.Contains(async, "`$burl` — Billing portal") {
 		t.Errorf("async reply missing URL resource alias row: %q", async)
 	}
-	if !strings.Contains(async, "`r_url_stray1` (no alias — ask your Slack admin to set one) → https://c.example.com") {
+	if !strings.Contains(async, "`r_url_stray1` (no alias — ask your Slack admin to set one)") {
 		t.Errorf("async reply missing no-alias URL row: %q", async)
+	}
+	if strings.Contains(async, "https://b.example.com") || strings.Contains(async, "https://c.example.com") {
+		t.Errorf("URL resource target rendered in /qurl list; rows should match connector formatting: %q", async)
 	}
 	if strings.Contains(async, "`$stray-slug`") {
 		t.Errorf("URL resource with stray slug rendered a tunnel slug token: %q", async)
