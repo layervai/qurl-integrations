@@ -85,8 +85,8 @@ need to change anything. If your organization runs its own qURL server:
 
 - Your files are uploaded only to the qURL server you're configured to use —
   the default hosted server, or the custom one you set in settings.
-- The extension doesn't read or upload the contents of the web pages you
-  browse — only the files you choose are sent.
+- The only thing the extension uploads is the files you choose — it never
+  sends the contents of the pages you browse.
 - A custom server is used only after you enter it and approve Chrome's
   per-server permission prompt.
 
