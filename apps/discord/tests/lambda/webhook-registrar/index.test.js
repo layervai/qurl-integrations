@@ -110,7 +110,7 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
         webhook_id: 'wh_lambda_created',
         secret: 'whsec_from_lambda',
         url: BASE_EVENT.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       } } }),
     });
     
@@ -144,7 +144,7 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing',
         url: BASE_EVENT.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         rotateHit = true;
@@ -173,7 +173,7 @@ describe('webhook-registrar Lambda — secret never echoes in handler response (
       .resolves({});
     mockQurlService({
       'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed'],
+        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({
         body: { data: { webhook_id: 'wh_existing', secret: 'whsec_secret_to_hide' } },
@@ -193,7 +193,7 @@ describe('webhook-registrar Lambda — secret never echoes in handler response (
       .resolves({ Parameter: { Value: 'whsec_already_known_secret' } });
     mockQurlService({
       'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed'],
+        webhook_id: 'wh_existing', url: BASE_EVENT.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
     });
     const result = await handler(BASE_EVENT, CONTEXT);
@@ -222,7 +222,7 @@ describe('webhook-registrar Lambda — bootstrap rotate (existing sub, SSM empty
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing',
         url: BASE_EVENT.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         rotateHit = true;
@@ -330,7 +330,7 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing',
         url: BASE_EVENT.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
     });
     const result = await handler(BASE_EVENT, CONTEXT);

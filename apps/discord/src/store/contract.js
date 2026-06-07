@@ -89,10 +89,14 @@ const STORE_METHODS = Object.freeze([
   'markSendDMDelivered',
   'getRecentSends',
   'markSendRevoked',
+  'isSendRevoked',
   'saveSendConfig',
   'getSendConfig',
   'getSendResourceIds',
   'getSendItems',
+  'findSendsByQurlId',
+  'markExpiredDMEdited',
+  'clearExpiredDMEdited',
 
   // QURL views (webhook-fed view counter)
   'recordQurlView',

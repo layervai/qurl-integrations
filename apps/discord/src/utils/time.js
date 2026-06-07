@@ -191,6 +191,12 @@ function formatSessionDurationSeconds(seconds) {
 module.exports = {
   expiryToISO,
   expiryToMs,
+  // Exposed so callers that need the parse-or-fail signal (`null` on
+  // off-set / malformed input) can opt out of expiryToMs's silent
+  // DEFAULT_EXPIRY_MS fallback — used by the qurl.expired webhook
+  // handler so a corrupt `expires_in` row skips the edit instead of
+  // rendering a wrong-time marker.
+  parseExpiryMs,
   formatSelfDestructLabel,
   formatSelfDestructSegment,
   formatSessionDurationSeconds,
