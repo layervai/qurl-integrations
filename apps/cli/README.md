@@ -63,8 +63,9 @@ qurl create https://api.example.com/data --expires 24h
 qurl list --status active
 
 # Resolve an access token. Pipe it in to keep the token out of shell history:
-qurl resolve at_k8xqp9h2sj9lx7r4a
 echo "$TOKEN" | qurl resolve
+# (or pass it as an argument — convenient, but visible in shell history)
+qurl resolve at_k8xqp9h2sj9lx7r4a
 
 # Revoke a qURL when you're done with it
 qurl delete r_k8xqp9h2sj9 --yes
@@ -155,7 +156,7 @@ Homebrew installs completions and the `qurl(1)` man page automatically.
 | `Error: … (401)` | API key is wrong, revoked, or for another environment | Recheck the key, and confirm `--endpoint` matches where it was issued |
 | `qurl: command not found` | The binary isn't on your `PATH` | Move `qurl` onto your `PATH` (Homebrew does this for you) |
 | You can't see qURLs you created | The CLI is pointed at the wrong environment | Check `--endpoint` / `QURL_ENDPOINT` — production is `https://api.layerv.ai` |
-| `Error: resolve qURL: … (404)` | The token is expired, revoked, or already consumed | Mint a fresh link with `qurl mint <resource-id>` |
+| `Error: resolve qURL: …` | The token is expired, revoked, or already consumed | Mint a fresh link with `qurl mint <resource-id>` |
 | `Error: … (429)` with a retry hint | Rate limited | Wait the suggested interval, then retry |
 
 Add `--verbose` to any command to see the underlying HTTP request and response.
