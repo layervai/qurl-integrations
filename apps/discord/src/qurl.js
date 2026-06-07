@@ -5,7 +5,7 @@ const dns = require('dns').promises;
 
 /**
  * Lightweight qURL API client using fetch.
- * Avoids ESM/CJS compatibility issues with the @layerv/qurl SDK.
+ * Avoids ESM/CJS compatibility issues with the @layervai/qurl SDK.
  */
 
 // Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
