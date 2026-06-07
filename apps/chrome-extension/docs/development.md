@@ -25,28 +25,27 @@ npm run lint      # eslint, zero warnings allowed
 npm test          # node --test unit suite
 ```
 
-`npm run release` produces a clean `release/` directory containing only the
-files Chrome needs. Load it through **Load unpacked** as described in
-[installation.md](./installation.md), which also covers the build-time default
-server override (`QURL_API_BASE`).
+The `release/` directory holds the unpacked extension. Load it through **Load
+unpacked** as described in [installation.md](./installation.md), which also
+covers the build-time default server override (`QURL_API_BASE`).
 
 For a full screenshot-based smoke test against live Gmail before a release,
 follow [local-unpacked-testing.md](./local-unpacked-testing.md).
 
 ## Default qURL server
 
-The built-in default server lives in one place — `lib/qurl-config.js` — and is
-the single source of truth read by the popup, the API client, and the release
-build. To point a packaged build at a non-production server (e.g. a sandbox),
-set `QURL_API_BASE` before building; the build regenerates `lib/qurl-config.js`
-and the manifest host permission together. See
-[installation.md](./installation.md#build-time-default-server-override) for
-the exact steps and `.env.example` for the template.
+The built-in default server is centralized in `lib/qurl-config.js` (see the
+[DESIGN.md configuration table](./DESIGN.md#configuration)). To point a
+packaged build at a non-production server (e.g. a sandbox), set `QURL_API_BASE`
+before building; the build regenerates `lib/qurl-config.js` and the manifest
+host permission together. See
+[installation.md](./installation.md#build-time-default-server-override) for the
+exact steps and `.env.example` for the template.
 
 ## Icons
 
-Icons are SVG source files in `icons/` converted to PNG. The SVG files are
-canonical — never edit the PNGs directly, as they are regenerated:
+Regenerate the PNG icons from the SVG sources in `icons/` (the SVGs are
+canonical — see [DESIGN.md](./DESIGN.md#extension-icons)):
 
 ```bash
 npm run icons

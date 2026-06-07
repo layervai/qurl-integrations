@@ -47,8 +47,7 @@ covered in the [developer guide](docs/development.md).
 A few things worth knowing:
 
 - **Keep the popup open while uploading.** Clicking elsewhere or switching
-  windows closes the popup and cancels any upload still in progress. The popup
-  shows a "keep this popup open" reminder while files are uploading.
+  windows closes the popup and cancels any upload still in progress.
 - **Gmail must be the active tab** in the focused window when you open the
   popup. A Gmail tab in a different window won't be picked up.
 - **Files are capped at 100 MB each.** Larger files are reported individually
@@ -86,8 +85,8 @@ need to change anything. If your organization runs its own qURL server:
 
 - Your files are uploaded only to the qURL server you're configured to use —
   the default hosted server, or the custom one you set in settings.
-- The only thing sent to that server is the files you pick. The extension
-  doesn't read or upload the contents of the web pages you browse.
+- The extension doesn't read or upload the contents of the web pages you
+  browse — only the files you choose are sent.
 - A custom server is used only after you enter it and approve Chrome's
   per-server permission prompt.
 
