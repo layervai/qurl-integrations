@@ -1064,10 +1064,9 @@ func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
 }
 
 // TestCreateLabelOnWire pins that CreateInput.Label serializes as `label`
-// (not `description`) on both create wire shapes. The qURL service's
-// CreateQurlRequest / CreateQurlForResourceRequest use `label`; the
-// resource-level `description` belongs only to Update / Resource bodies and
-// the GET response. Regression guard for sending the wrong create field.
+// (not `description`) on both create wire shapes — a regression guard for
+// sending the wrong create field. See CreateInput.Label for the wire-field
+// rationale.
 // TODO(upstream-rebrand): keep aligned with qurl-service's openapi.
 func TestCreateLabelOnWire(t *testing.T) {
 	const wantLabel = "Alice from Acme"
