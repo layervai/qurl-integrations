@@ -581,7 +581,7 @@ describe('qURL client', () => {
         }),
       });
 
-      const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test desc');
+      const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test label');
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
@@ -591,7 +591,9 @@ describe('qURL client', () => {
       expect(body.one_time_use).toBe(true);
       expect(body.target_url).toBe('https://example.com');
       expect(body.expires_in).toBe('24h');
-      expect(body.description).toBe('test desc');
+      // create uses `label`, not `description`
+      expect(body.label).toBe('test label');
+      expect(body.description).toBeUndefined();
 
       expect(result.resource_id).toBe('res-1');
       expect(result.qurl_link).toBe('https://q.test/abc');
@@ -604,7 +606,7 @@ describe('qURL client', () => {
         text: async () => 'Internal Server Error',
       });
 
-      await expect(qurl.createOneTimeLink('https://example.com', '1h', 'desc'))
+      await expect(qurl.createOneTimeLink('https://example.com', '1h', 'label'))
         .rejects.toThrow(/qURL API POST.*failed.*500/);
     });
 
@@ -615,7 +617,7 @@ describe('qURL client', () => {
         json: async () => ({ data: { resource_id: 'r1', qurl_link: 'l1' } }),
       });
 
-      await qurl.createOneTimeLink('https://example.com', '1h', 'd');
+      await qurl.createOneTimeLink('https://example.com', '1h', 'label');
 
       const headers = globalThis.fetch.mock.calls[0][1].headers;
       expect(headers.Authorization).toBe('Bearer test-api-key');
