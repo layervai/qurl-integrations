@@ -158,4 +158,4 @@ Commands** permission.
 
 ## License
 
-Apache-2.0
+[MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.
