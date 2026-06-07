@@ -102,7 +102,8 @@ Run `qurl <command> --help` for the full flag list. Frequently used flags:
 | `-e, --expires <dur>` | `create` | Expiration duration, e.g. `1h`, `24h`, `7d` |
 | `--one-time` | `create` | Single-use token, consumed after the first access |
 | `--max-sessions <n>` | `create` | Cap concurrent sessions (`0` = unlimited) |
-| `-d, --description <s>` | `create`, `update` | Human-readable description |
+| `--label <s>` | `create` | Human-readable label identifying who the qURL is for |
+| `-d, --description <s>` | `update` | Update the qURL's description |
 | `-b, --by <dur>` | `extend` | Duration to extend by, e.g. `24h` (required) |
 | `--status <s>` | `list` | Filter by `active`, `expired`, `revoked`, or `consumed` |
 | `--query <s>` | `list` | Search description and target URL |

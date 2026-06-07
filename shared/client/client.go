@@ -286,8 +286,13 @@ type CreateInput struct {
 	// ResourceID, when set, mints a qURL bound to an existing resource
 	// (e.g. an existing tunnel resource). Mutually exclusive with
 	// TargetURL on the wire.
-	ResourceID  string `json:"resource_id,omitempty"`
-	Description string `json:"description,omitempty"`
+	ResourceID string `json:"resource_id,omitempty"`
+	// Label is the qURL's human-readable label. The create endpoints
+	// (CreateQurlRequest / CreateQurlForResourceRequest) use `label`, NOT
+	// `description` — the resource-level `description` lives on the Update /
+	// Resource bodies and on the GET response (QurlData.description).
+	// TODO(upstream-rebrand): keep aligned with qurl-service's openapi.
+	Label       string `json:"label,omitempty"`
 	ExpiresIn   string `json:"expires_in,omitempty"`
 	OneTimeUse  bool   `json:"one_time_use,omitempty"`
 	MaxSessions int    `json:"max_sessions,omitempty"`
@@ -400,7 +405,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
 		logLabel = "POST /v1/resources/:id/qurls"
 		body, err = json.Marshal(createForResourceBody{
-			Description:     input.Description,
+			Label:           input.Label,
 			ExpiresIn:       input.ExpiresIn,
 			OneTimeUse:      input.OneTimeUse,
 			MaxSessions:     input.MaxSessions,
@@ -442,7 +447,8 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 // path, so it doesn't repeat in the body; target_url is absent for
 // the same reason — the resource already owns it).
 type createForResourceBody struct {
-	Description     string        `json:"description,omitempty"`
+	// `label` per CreateQurlForResourceRequest (not `description`).
+	Label           string        `json:"label,omitempty"`
 	ExpiresIn       string        `json:"expires_in,omitempty"`
 	OneTimeUse      bool          `json:"one_time_use,omitempty"`
 	MaxSessions     int           `json:"max_sessions,omitempty"`
