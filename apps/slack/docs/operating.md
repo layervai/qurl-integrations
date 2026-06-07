@@ -166,10 +166,10 @@ The `Slack install` group is required for low-friction customer onboarding.
 Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
 fallback, but customers cannot self-install the bot.
 
-The `OAuth` group is required only when the bot needs to serve the
-`/oauth/qurl/{start,callback}` surface. Boots without these vars still serve
+The `OAuth` group is required only to serve the
+`/oauth/qurl/{start,callback}` surface. Without it the bot still serves
 `/slack/*` and `/health`; `/qurl setup <email>` replies "OAuth is not
-configured" until the OAuth env vars are populated.
+configured" until the OAuth env vars are set.
 
 ## Slack app configuration
 
@@ -193,6 +193,5 @@ With per-workspace token storage in place, existing customer workspaces must
 reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
 token. New installs through `/oauth/slack/install` store that token
 automatically, and guided `/qurl-admin protect-connector` uses it for
-`views.open` (which requires no scope). If Slack tells a customer guided
-connector setup needs the latest qURL Slack app install, send them through
-this reinstall link.
+`views.open`. If Slack tells a customer guided connector setup needs the
+latest qURL Slack app install, send them through this reinstall link.
