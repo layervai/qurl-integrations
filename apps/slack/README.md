@@ -16,7 +16,7 @@ longer than it needs to.
    Slack. The first person to run this becomes the workspace **owner**.
 3. **Protect a resource** (admins): run `/qurl-admin protect` and follow the
    guided form to expose a service or an existing URL in the current channel.
-4. **Share a link**: anyone in that channel runs `/qurl get $your-resource`
+4. **Share a link**: anyone in that channel runs `/qurl get $id`
    to mint a one-time qURL.
 
 Run `/qurl help` (or `/qurl-admin help`) any time for the exact commands your
@@ -69,8 +69,8 @@ command variants below it are for power users and scripting.
 | `/qurl-admin protect-connector` | Guided setup for a qURL Connector; opens a form and returns copy-paste deploy steps. |
 | `/qurl-admin protect-connector <id> [env:…] [port:8080] [alias:$alias]` | Typed connector setup for power users. |
 | `/qurl-admin protect-url` | Guided setup to protect an existing URL resource. |
-| `/qurl-admin protect-url $<alias> [as:$channel-alias]` | Typed: protect an existing URL resource in this channel. |
-| `/qurl-admin protect-url url:<target-url> as:$channel-alias` | Typed: protect an existing URL that has no alias yet. |
+| `/qurl-admin protect-url $<alias> [as:$channel-alias]` | Typed: protect a URL resource that **already has an alias** in this channel. |
+| `/qurl-admin protect-url url:<target-url> as:$channel-alias` | Typed: protect a URL that **has no alias yet** by its target URL. |
 
 **Aliases**
 
@@ -116,11 +116,11 @@ immediately available for `/qurl get` in the channel.
 
 ## Sharing a link
 
-`/qurl get $your-resource` mints a one-time qURL link for any resource
-available in the current channel. The reply includes how long the link stays
-valid. Every link is single-use: it burns on first open. Add `dm:true` to
-receive the link privately, or `reason:"…"` to note why you minted it in the
-audit log.
+`/qurl get $id` mints a one-time qURL link for any resource available in the
+current channel (pass a resource `$id` or a channel `$alias`). The reply
+includes how long the link stays valid. Every link is single-use: it burns on
+first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
+note why you minted it in the audit log.
 
 ## FAQ
 

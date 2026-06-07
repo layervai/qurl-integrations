@@ -19,6 +19,11 @@ coverage.html
 .DS_Store
 Thumbs.db
 
+# Claude Code runtime artifacts (the tracked .claude/skills/ live alongside
+# these — keep this list specific so it doesn't shadow them)
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
 # Build artifacts
 dist/
 release/

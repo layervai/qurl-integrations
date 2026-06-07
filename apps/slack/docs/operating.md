@@ -62,32 +62,38 @@ at the OAuth-callback bind layer.
   Enterprise Grid org-level installs are also supported: the enterprise-scoped
   bot token is stored under the Slack `enterprise_id`, while qURL API keys and
   admin state remain scoped to each invoking workspace's `team_id`.
-- **Connector onboarding:** `/qurl-admin protect-connector` opens a Slack
-  modal with the bot token for the invoking workspace, letting an admin choose
-  the qURL Connector ID, optional channel alias, local port, and target
-  environment (Docker, Docker Compose, ECS/Fargate, or Kubernetes).
-  `/qurl-admin protect-connector <id>` (or `$id`) remains available for
-  CLI-style admins. Both paths use the workspace API key to find-or-create a
-  qURL Connector resource scoped to the connected qURL account, bind `$<id>`
-  or the `alias:` shortcut override in the current Slack channel, and mint a
-  one-hour bootstrap API key. When `alias:` is omitted, the ID doubles as the
-  channel alias. Retrying the install within the modal's 25-minute validity
-  window reuses the same bootstrap-key idempotency bucket. Retrying after that
-  window can mint a new key, so operators should run the newest Slack install
-  block and discard older bootstrap-key messages. The Slack response hides the
-  internal resource id and renders output tailored to the selected
-  environment. Docker and Docker Compose receive guarded pasteable shell
-  blocks that write `qurl-proxy.yaml`, create a bootstrap-key file,
-  create/chown per-connector durable agent state, pass `QURL_API_KEY_FILE`,
-  and pass `QURL_CONNECTOR_ID=<id>` to the client. ECS/Fargate and Kubernetes
-  receive the same contract as deployment snippets: co-locate the sidecar with
-  the target container, mount durable per-instance state at
-  `/var/lib/layerv/agent`, mount or inject the bootstrap key through the
-  runtime's secret mechanism, and remove the key after the logs show a
-  successful connection. ECS/Fargate uses the client's supported `QURL_API_KEY`
-  fallback because AWS injects task secrets as environment variables; Docker,
-  Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`. Do not share one
-  agent state volume across concurrently running sidecars.
+- **Connector onboarding:** `/qurl-admin protect-connector` provisions a qURL
+  Connector sidecar.
+  - **Entry points** — a guided modal (opens with the bot token for the
+    invoking workspace; the admin chooses the qURL Connector ID, optional
+    channel alias, local port, and target environment: Docker, Docker Compose,
+    ECS/Fargate, or Kubernetes), or the typed
+    `/qurl-admin protect-connector <id>` (or `$id`) for CLI-style admins.
+  - **Backend work (both paths)** — use the workspace API key to
+    find-or-create a qURL Connector resource scoped to the connected qURL
+    account, bind `$<id>` or the `alias:` override in the current Slack
+    channel, and mint a one-hour bootstrap API key. When `alias:` is omitted,
+    the ID doubles as the channel alias.
+  - **Idempotency** — retrying the install within the modal's 25-minute
+    validity window reuses the same bootstrap-key idempotency bucket. Retrying
+    after that window can mint a new key, so operators should run the newest
+    Slack install block and discard older bootstrap-key messages.
+  - **Output** — hides the internal resource id and is tailored to the selected
+    environment:
+    - **Docker / Docker Compose** — guarded pasteable shell blocks that write
+      `qurl-proxy.yaml`, create a bootstrap-key file, create/chown
+      per-connector durable agent state, pass `QURL_API_KEY_FILE`, and pass
+      `QURL_CONNECTOR_ID=<id>` to the client.
+    - **ECS/Fargate / Kubernetes** — the same contract as deployment snippets:
+      co-locate the sidecar with the target container, mount durable
+      per-instance state at `/var/lib/layerv/agent`, mount or inject the
+      bootstrap key through the runtime's secret mechanism, and remove the key
+      after the logs show a successful connection.
+  - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
+    fallback because AWS injects task secrets as environment variables; Docker,
+    Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.
+  - **Constraint** — do not share one agent state volume across concurrently
+    running sidecars.
 
 ## Endpoints
 
