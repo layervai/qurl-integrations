@@ -43,9 +43,9 @@ func exposeBlockActionsBodyWithEnterprise(t *testing.T, teamID, enterpriseID, us
 
 // --- chooser (slash) ------------------------------------------------------
 
-// TestExposeChooserBlocks fences the picker's shape: a section, a target-channel
-// context line, and an actions row with exactly the two buttons wired to the
-// connector/URL action_ids.
+// TestExposeChooserBlocks fences the chooser's shape: concise option
+// descriptions, a target-channel context line, and an actions row with exactly
+// the two default-style buttons wired to the connector/URL action_ids.
 func TestExposeChooserBlocks(t *testing.T) {
 	blocks := exposeChooserBlocks(testExposeChannel)
 	js, err := json.Marshal(blocks)
@@ -53,9 +53,22 @@ func TestExposeChooserBlocks(t *testing.T) {
 		t.Fatalf("marshal chooser blocks: %v", err)
 	}
 	s := string(js)
-	for _, want := range []string{exposeConnectorActionID, exposeURLActionID, "Protect qURL Connector", "Protect URL", testExposeChannel} {
+	for _, want := range []string{
+		exposeConnectorActionID,
+		exposeURLActionID,
+		"Protect qURL Connector",
+		"Protect URL",
+		"Generate install instructions and a bootstrap key",
+		"Create an HTTPS URL resource and bind a channel alias",
+		testExposeChannel,
+	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("chooser blocks missing %q: %s", want, s)
+		}
+	}
+	for _, forbidden := range []string{"Pick what to protect", "short guided form"} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("chooser blocks kept stale copy %q: %s", forbidden, s)
 		}
 	}
 	// Exactly one actions block carrying both buttons.
@@ -74,6 +87,9 @@ func TestExposeChooserBlocks(t *testing.T) {
 				}
 				if v, _ := btn[blockKitFieldValue].(string); v == "" {
 					t.Errorf("button %d has empty Slack value: %#v", i, btn)
+				}
+				if style, ok := btn["style"]; ok {
+					t.Errorf("button %d style = %v, want default Slack style", i, style)
 				}
 			}
 		}
@@ -323,16 +339,32 @@ func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLClick_OpensModalWithResourceOptions fences that the "Protect
-// URL" button fetches the workspace's URL resources and opens the picker
-// pre-populated with them (resource_id as the option value).
-func TestHandleExposeURLClick_OpensModalWithResourceOptions(t *testing.T) {
+func assertURLCreateModal(t *testing.T, view []byte) {
+	t.Helper()
+	js := string(view)
+	for _, want := range []string{callbackIDExposeURLCreate, "Create a URL resource", exposeURLActionTarget, exposeURLActionAlias, "Must start with https://", "/qurl get $alias"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("create modal missing %q: %s", want, js)
+		}
+	}
+	for _, forbidden := range []string{callbackIDExposeURL, exposeURLActionResource, "static_select"} {
+		if strings.Contains(js, forbidden) {
+			t.Errorf("create modal should not render URL-resource dropdown %q: %s", forbidden, js)
+		}
+	}
+}
+
+// TestHandleExposeURLClick_OpensCreateModal fences that the "Protect URL"
+// button opens the create-and-protect form directly, without listing existing
+// URL resources or rendering a dropdown.
+func TestHandleExposeURLClick_OpensCreateModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var listCalls atomic.Int32
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listCalls.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testResourceExposeID, testKeyType: client.ResourceTypeURL, fAttrAlias: testResourceExposeAlias, testKeyTargetURL: testResourceExposeURL, testKeyStatus: client.StatusActive},
-			// A tunnel resource must be filtered out of the URL picker.
 			{testKeyResourceID: "r_tunnel_x", testKeyType: client.ResourceTypeTunnel, testKeySlug: "tun", testKeyStatus: client.StatusActive},
 		}, "", false)
 	})
@@ -357,27 +389,17 @@ func TestHandleExposeURLClick_OpensModalWithResourceOptions(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("OpenView was not called")
 	}
-	js := string(view)
-	if !strings.Contains(js, callbackIDExposeURL) {
-		t.Errorf("modal callback_id missing %q: %s", callbackIDExposeURL, js)
-	}
-	if !strings.Contains(js, testResourceExposeID) {
-		t.Errorf("URL resource option (value=%s) missing: %s", testResourceExposeID, js)
-	}
-	if strings.Contains(js, "r_tunnel_x") {
-		t.Errorf("tunnel resource leaked into the URL picker: %s", js)
+	assertURLCreateModal(t, view)
+	if listCalls.Load() != 0 {
+		t.Errorf("Protect URL fetched resource list %d times, want 0", listCalls.Load())
 	}
 }
 
-// TestHandleExposeURLClick_NoResourcesOpensCreateModal fences that with no URL
-// resources the button still opens a helpful first-run modal instead of posting
-// a terse response_url warning or rendering an empty picker.
-func TestHandleExposeURLClick_NoResourcesOpensCreateModal(t *testing.T) {
+// TestHandleExposeURLClick_OpensCreateModalWithoutResourceList fences that the
+// URL form does not depend on a prior resource-list fetch.
+func TestHandleExposeURLClick_OpensCreateModalWithoutResourceList(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, nil, "", false)
-	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 	views := make(chan []byte, 1)
@@ -399,23 +421,12 @@ func TestHandleExposeURLClick_NoResourcesOpensCreateModal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("OpenView was not called for the empty URL-resource state")
 	}
-	js := string(view)
-	for _, want := range []string{callbackIDExposeURLCreate, "Create a URL resource", exposeURLActionTarget, exposeURLActionAlias, "/qurl get $alias"} {
-		if !strings.Contains(js, want) {
-			t.Errorf("create modal missing %q: %s", want, js)
-		}
-	}
-	if strings.Contains(js, exposeURLActionResource) {
-		t.Errorf("create modal should not render URL-resource select: %s", js)
-	}
+	assertURLCreateModal(t, view)
 }
 
-func TestHandleExposeURLClick_NoResourcesFallsBackToEnterpriseOpen(t *testing.T) {
+func TestHandleExposeURLClick_FallsBackToEnterpriseOpen(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, nil, "", false)
-	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 
@@ -453,25 +464,23 @@ func TestHandleExposeURLClick_NoResourcesFallsBackToEnterpriseOpen(t *testing.T)
 	if first.tokenOwnerID != testAdminTeamID || second.tokenOwnerID != testEnterpriseID {
 		t.Fatalf("OpenView token owner order = %q, %q; want workspace then enterprise", first.tokenOwnerID, second.tokenOwnerID)
 	}
-	if !strings.Contains(string(second.view), "Create a URL resource") {
-		t.Fatalf("enterprise fallback opened unexpected view: %s", second.view)
-	}
+	assertURLCreateModal(t, second.view)
 }
 
-// --- bare verb → guided picker (handleExposeURLWizard) --------------------
+// --- bare verb → guided URL create form (handleExposeURLWizard) ------------
 
-// TestHandleExposeURLBareOpensPickerModal fences that a bare `/qurl-admin
-// protect-url` (no arguments) opens the same URL-resource picker the chooser's
-// "Protect URL" button does — fetching the workspace's URL resources and opening
-// ExposeURLModal via the slash command's own trigger. This is the no-arguments
-// guided path; `protect-url <target>` is the typed path covered elsewhere.
-func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
+// TestHandleExposeURLBareOpensCreateModal fences that a bare `/qurl-admin
+// protect-url` (no arguments) opens the same create-and-protect form as the
+// chooser's "Protect URL" button. This is the no-arguments guided path;
+// `protect-url <target>` is the typed path covered elsewhere.
+func TestHandleExposeURLBareOpensCreateModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var listCalls atomic.Int32
 	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listCalls.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testResourceExposeID, testKeyType: client.ResourceTypeURL, fAttrAlias: testResourceExposeAlias, testKeyTargetURL: testResourceExposeURL, testKeyStatus: client.StatusActive},
-			// A tunnel resource must be filtered out of the URL picker.
 			{testKeyResourceID: "r_tunnel_x", testKeyType: client.ResourceTypeTunnel, testKeySlug: "tun", testKeyStatus: client.StatusActive},
 		}, "", false)
 	})
@@ -494,20 +503,14 @@ func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("OpenView was not called for bare protect-url")
 	}
-	js := string(view)
-	if !strings.Contains(js, callbackIDExposeURL) {
-		t.Errorf("modal callback_id missing %q: %s", callbackIDExposeURL, js)
-	}
-	if !strings.Contains(js, testResourceExposeID) {
-		t.Errorf("URL resource option (value=%s) missing: %s", testResourceExposeID, js)
-	}
-	if strings.Contains(js, "r_tunnel_x") {
-		t.Errorf("tunnel resource leaked into the bare protect-url picker: %s", js)
+	assertURLCreateModal(t, view)
+	if listCalls.Load() != 0 {
+		t.Errorf("bare protect-url fetched resource list %d times, want 0", listCalls.Load())
 	}
 }
 
 // TestHandleExposeURLBareNonAdminDenied fences the admin re-check on the bare
-// path: a non-admin gets the denial via response_url, not the picker.
+// path: a non-admin gets the denial via response_url, not the form.
 func TestHandleExposeURLBareNonAdminDenied(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
@@ -526,14 +529,11 @@ func TestHandleExposeURLBareNonAdminDenied(t *testing.T) {
 	}
 }
 
-// TestHandleExposeURLBareNoResourcesOpensCreateModal fences that with no URL
-// resources the bare path opens the same helpful first-run modal.
-func TestHandleExposeURLBareNoResourcesOpensCreateModal(t *testing.T) {
+// TestHandleExposeURLBareAcksBeforeOpeningCreateModal fences that the bare path
+// preserves Slack's quick slash-command ack before opening the create modal.
+func TestHandleExposeURLBareAcksBeforeOpeningCreateModal(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, nil, "", false)
-	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
 	views := make(chan []byte, 1)
@@ -556,15 +556,7 @@ func TestHandleExposeURLBareNoResourcesOpensCreateModal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("OpenView was not called for bare protect-url empty state")
 	}
-	js := string(view)
-	for _, want := range []string{callbackIDExposeURLCreate, "Create a URL resource", exposeURLActionTarget, exposeURLActionAlias, "/qurl get $alias"} {
-		if !strings.Contains(js, want) {
-			t.Errorf("create modal missing %q: %s", want, js)
-		}
-	}
-	if strings.Contains(js, exposeURLActionResource) {
-		t.Errorf("create modal should not render URL-resource select: %s", js)
-	}
+	assertURLCreateModal(t, view)
 }
 
 // TestHandleExposeURLBareNoOpenViewDeclines fences that without guided setup
@@ -713,9 +705,8 @@ func TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias(t *testing.T)
 	}
 }
 
-// TestHandleExposeURLSubmission_NonAdminDenied fences the mutation gate: a
-// non-admin submission is refused and binds nothing (the picker is only shown to
-// admins, but the submit re-checks rather than trusting the render-time gate).
+// TestHandleExposeURLSubmission_NonAdminDenied fences the legacy picker
+// mutation gate: a non-admin submission is refused and binds nothing.
 func TestHandleExposeURLSubmission_NonAdminDenied(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
@@ -782,9 +773,9 @@ func TestParseExposeURLModalArgs(t *testing.T) {
 	}
 }
 
-// TestParseExposeURLCreateModalArgs fences the first-run modal field
-// validation: URL target must be absolute http/https, and the channel alias
-// follows the shared Slack alias contract.
+// TestParseExposeURLCreateModalArgs fences the create modal field validation:
+// URL target must start with https://, and the channel alias follows the shared
+// Slack alias contract.
 func TestParseExposeURLCreateModalArgs(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -798,6 +789,7 @@ func TestParseExposeURLCreateModalArgs(t *testing.T) {
 		{name: "alias without sigil", targetValue: testResourceExposeURL, aliasValue: "docs", wantTarget: testResourceExposeURL, wantAlias: "docs"},
 		{name: "missing url", targetValue: "", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
 		{name: "relative url", targetValue: "docs.example.com", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
+		{name: "http url", targetValue: "http://docs.example.com", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
 		{name: "unsupported scheme", targetValue: "ftp://docs.example.com", aliasValue: "$docs", wantErrBlock: exposeURLBlockTarget},
 		{name: "missing alias", targetValue: testResourceExposeURL, aliasValue: "", wantErrBlock: exposeURLBlockAlias},
 		{name: "invalid alias", targetValue: testResourceExposeURL, aliasValue: "$Bad Alias", wantErrBlock: exposeURLBlockAlias},

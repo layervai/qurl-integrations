@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Block Kit JSON templates for the Slack bot's view-side surfaces.
@@ -245,7 +247,7 @@ func TunnelInstallErrorModal(message string) ([]byte, error) {
 func TunnelEditErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
-		blockKitFieldTitle: plainTextObj("Edit qURL Connector"),
+		blockKitFieldTitle: plainTextObj("Edit resource"),
 		blockKitFieldClose: plainTextObj("Close"),
 		blockKitFieldBlocks: []any{
 			sectionBlock(":warning: " + message),
@@ -287,6 +289,10 @@ type TunnelEditModalMetadata struct {
 	// the submit to drop a channel the admin never saw. Always includes the
 	// current channel (ChannelID), which the reconcile never revokes.
 	ExposedChannels []string `json:"exposed_channels,omitempty"`
+	// ResourceType is carried for copy only. Empty is treated as a qURL
+	// Connector for backwards compatibility with already-rendered connector
+	// buttons that predate this field.
+	ResourceType string `json:"resource_type,omitempty"`
 }
 
 // TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.
@@ -312,39 +318,47 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 	if len(aliases) > 0 {
 		aliasInitial = "$" + strings.Join(aliases, "\n$")
 	}
+	label := editResourceLabel(meta.ResourceType)
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelEdit,
-		blockKitFieldTitle:           plainTextObj("Edit qURL Connector"),
+		blockKitFieldTitle:           plainTextObj("Edit " + label),
 		blockKitFieldSubmit:          plainTextObj("Save"),
 		blockKitFieldClose:           plainTextObj("Cancel"),
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
-			contextBlock("Editing qURL Connector " + tunnelEditTokenLabel(meta.Token)),
+			contextBlock("Editing " + label + " " + editResourceTokenLabel(meta.Token, meta.ResourceType)),
 			// Optional: a Display Name is not mandatory (a tunnel can have none,
 			// and `/qurl-admin unset-display-name` clears it), so a required field
 			// would block an alias-only edit on an unnamed tunnel — the empty input
 			// pre-fills empty and Slack would refuse submission. With the
 			// changed-only diff, an empty submission on an empty-named tunnel is a
 			// no-op (normalizes to "" == "" → nameChanged=false → PATCH skipped).
-			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to the qURL Connector in /qurl list.", true,
+			inputBlock(tunnelEditBlockDisplayName, "Display name", "Optional. Shown next to this resource in /qurl list.", true,
 				plainTextInput(tunnelEditActionDisplayName, "Prod dashboard", displayName)),
-			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this qURL Connector in this channel; the qURL Connector's own name always works and isn't listed here. Clear a line to remove that alias.", true,
+			inputBlock(tunnelEditBlockAliases, "Channel aliases", "Optional. One alias per line (e.g. $staging). These are extra names that resolve to this resource in this channel. Clear a line to remove that alias.", true,
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
-			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this qURL Connector shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to protect it there; remove one to revoke it.", true,
+			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this resource shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to protect it there; remove one to revoke it.", true,
 				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
 		},
 	}
 	return json.Marshal(payload)
 }
 
-// tunnelEditTokenLabel renders the edited tunnel's `$<token>` for the modal
+func editResourceLabel(resourceType string) string {
+	if resourceType == client.ResourceTypeURL {
+		return "URL resource"
+	}
+	return "qURL Connector"
+}
+
+// editResourceTokenLabel renders the edited resource's `$<token>` for the modal
 // context line. The token is a charset-validated slug/alias, but it is escaped
 // for the mrkdwn code span as defense-in-depth (same posture as the rebind
 // modal's target labels).
-func tunnelEditTokenLabel(token string) string {
+func editResourceTokenLabel(token, resourceType string) string {
 	if token == "" {
-		return "this qURL Connector"
+		return "this " + editResourceLabel(resourceType)
 	}
 	return "`$" + escapeMrkdwnCode(token) + "`"
 }
@@ -404,21 +418,6 @@ func escapeMrkdwnText(s string) string {
 	return mrkdwnTextEscaper.Replace(s)
 }
 
-// escapeMrkdwnURL is the URL-shaped sibling of escapeMrkdwnText, used where the
-// interpolated value is a target URL displayed inline in `/qurl list`. It keeps
-// the STRUCTURAL/safety escapes (&, <, >, backtick, line breaks) so a crafted
-// target can't open a code span, forge Slack `<…>` link syntax, or split a row
-// — but it deliberately drops the cosmetic-lookalike substitutions (`*`→∗,
-// `_`→＿, `~`→～) that escapeMrkdwnText applies. Those lookalikes are non-ASCII
-// glyphs that don't round-trip on copy, so they turn an underscore-bearing URL
-// (e.g. .../my_page) into a broken, non-pasteable string. Mid-token `_`/`*`/`~`
-// inside a URL aren't at the word boundaries Slack needs to italicize/bold/strike
-// anyway, so leaving them literal is both safe and correct. Descriptions still
-// use escapeMrkdwnText (prose, where the cosmetic neutralizing matters).
-func escapeMrkdwnURL(s string) string {
-	return mrkdwnURLEscaper.Replace(s)
-}
-
 // mrkdwnCodeEscaper is the single-pass substitution table used by
 // `escapeMrkdwnCode`. Defined at package scope so the replacer is
 // constructed once at init rather than per-call. Order matters in
@@ -440,22 +439,6 @@ var mrkdwnTextEscaper = strings.NewReplacer(
 	"*", "∗",
 	"_", "＿",
 	"~", "～",
-	"\r\n", " ",
-	"\n", " ",
-	"\r", " ",
-)
-
-// mrkdwnURLEscaper is mrkdwnTextEscaper minus the cosmetic-lookalike rows
-// (`*`/`_`/`~`): URLs commonly contain underscores, and substituting them with
-// the fullwidth ＿ glyph breaks copy/paste. The amp/angle/backtick/line-break
-// rows are kept verbatim — those are the structural escapes a target URL still
-// needs (see [escapeMrkdwnURL]). Keep this in lockstep with mrkdwnTextEscaper's
-// structural rows so a future safety addition lands in both.
-var mrkdwnURLEscaper = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-	"`", "ˊ",
 	"\r\n", " ",
 	"\n", " ",
 	"\r", " ",

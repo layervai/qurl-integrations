@@ -151,12 +151,15 @@ func TestHandleList_DuplicateURLResourceAliasesRenderButtonless(t *testing.T) {
 		t.Fatalf("duplicate URL aliases should not render Create buttons; got %v", vals)
 	}
 	fallback := parseSlackText(t, body)
-	for _, want := range []string{"alias `$docs` is ambiguous here", testListURLFirst, testListURLSecond} {
+	for _, want := range []string{"alias `$docs` is ambiguous here", firstID, secondID} {
 		if !strings.Contains(fallback, want) {
 			t.Errorf("text fallback missing %q: %q", want, fallback)
 		}
 	}
-	if strings.Contains(fallback, "`$docs` →") {
+	if strings.Contains(fallback, testListURLFirst) || strings.Contains(fallback, testListURLSecond) {
+		t.Errorf("duplicate URL alias rendered target URL in list fallback: %q", fallback)
+	}
+	if strings.Contains(fallback, "• `$docs`") {
 		t.Errorf("duplicate URL alias rendered as a mintable token: %q", fallback)
 	}
 }

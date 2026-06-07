@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // testEditModalResponseURL is a placeholder Slack response_url for the edit
@@ -314,6 +316,45 @@ func TestTunnelEditModal_NoChannelsOmitsInitialConversations(t *testing.T) {
 	}
 	if strings.Contains(body, "initial_conversations") {
 		t.Errorf("initial_conversations must be omitted when empty (Slack rejects an empty array): %s", body)
+	}
+}
+
+func TestTunnelEditModal_UsesURLResourceCopy(t *testing.T) {
+	t.Parallel()
+	meta := &TunnelEditModalMetadata{
+		TeamID:       testAdminTeamID,
+		ChannelID:    testEditHomeChannel,
+		UserID:       testAdminUserID,
+		ResponseURL:  testEditModalResponseURL,
+		ResourceID:   "r_url_edit01",
+		Token:        testListAliasDocs,
+		ResourceType: client.ResourceTypeURL,
+	}
+	raw, err := TunnelEditModal(meta, "Docs portal", nil)
+	if err != nil {
+		t.Fatalf("TunnelEditModal: %v", err)
+	}
+	body := string(raw)
+	for _, want := range []string{"Edit URL resource", "Editing URL resource"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("URL edit modal missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Edit qURL Connector") || strings.Contains(body, "Editing qURL Connector") {
+		t.Errorf("URL edit modal used connector copy: %s", body)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	pm, _ := got[blockKitFieldPrivateMetadata].(string)
+	var rt TunnelEditModalMetadata
+	if err := json.Unmarshal([]byte(pm), &rt); err != nil {
+		t.Fatalf("private_metadata JSON: %v", err)
+	}
+	if rt.ResourceType != "url" {
+		t.Errorf("private_metadata ResourceType = %q, want url", rt.ResourceType)
 	}
 }
 
