@@ -3,11 +3,11 @@
 Create, resolve, and manage **qURLs** — secure, time-limited access links — from
 your terminal or a script.
 
-A **qURL** (Quantum URL) is a secure access link to a protected resource. The
+A **qURL™** (Quantum URL) is a secure access link to a protected resource. The
 resource stays invisible on the network until an authorized caller resolves the
-link's access token, which opens firewall access for that caller's IP for a
-limited window. qURLs expire on their own and can be revoked at any time. See
-the [repo README](../../README.md) for the full concept.
+link's access token, which grants that caller's IP network access for a limited
+window. qURLs expire on their own and can be revoked at any time. See the
+[repo README](../../README.md) for the full concept.
 
 ## Install
 
@@ -85,7 +85,7 @@ LINK=$(qurl create https://api.example.com/data -e 1h --quiet)
 | `qurl create <target-url>` | Create a qURL for a target URL |
 | `qurl list` | List your qURLs |
 | `qurl get <resource-id>` | Show details for one qURL |
-| `qurl resolve <access-token>` | Resolve a token and open firewall access (headless) |
+| `qurl resolve <access-token>` | Resolve a token and grant network access (headless) |
 | `qurl mint <resource-id>` | Mint a fresh access link for an existing qURL |
 | `qurl extend <resource-id>` | Extend a qURL's expiration |
 | `qurl update <resource-id>` | Update a qURL's properties |
