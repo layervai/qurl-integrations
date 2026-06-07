@@ -32,8 +32,9 @@ func createCmd(opts *globalOpts) *cobra.Command {
 				return err
 			}
 
-			// --description is a deprecated alias for --label.
-			if label == "" {
+			// --description is a deprecated alias for --label; --label wins
+			// when explicitly set (including to an empty string).
+			if !cmd.Flags().Changed("label") {
 				label = labelCompat
 			}
 
