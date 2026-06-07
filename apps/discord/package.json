@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "register": "node src/register-commands.js",
     "lint": "eslint src tests scripts --max-warnings 0",
     "test": "jest --coverage"
   },
