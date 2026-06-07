@@ -72,7 +72,7 @@ const listHeaderBlockText = ":lock: Protected Resources"
 const listCreateButtonMaxRows = 45
 
 // listEditButtonLabel is the text on the admin-only "Edit" button rendered
-// alongside "Create qURL" on each `/qurl list` row for qURL bot admins.
+// alongside "Create qURL" on each `/qurl list` row for qURL admins.
 // Clicking it opens the TunnelEditModal pre-filled with the tunnel's Display
 // Name and channel aliases.
 const listEditButtonLabel = "Edit"
@@ -189,7 +189,7 @@ func aliasesExcluding(boundAliases []string, token string) []string {
 // listCallerCanEdit reports whether the `/qurl list` caller should see the
 // admin-only Edit button. It requires the full edit wiring — the modal opener
 // (OpenView), the alias store (to reconcile bindings on submit), and the admin
-// store (to gate) — plus the caller being a qURL bot admin. A CheckAdmin error
+// store (to gate) — plus the caller being a qURL admin. A CheckAdmin error
 // hides the button (fail-closed for the affordance) WITHOUT failing the
 // listing: the list still renders with Create qURL buttons. Runs on the async
 // worker ctx, bounded by adminGateBudget like the other admin gates.

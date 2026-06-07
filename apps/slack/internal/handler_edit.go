@@ -180,7 +180,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 
 // handleTunnelEditSubmission processes the Edit modal's view_submission: it
 // validates the submitted Display Name + alias lines, re-checks that the
-// submitter is still a qURL bot admin (the real mutation gate), then applies
+// submitter is still a qURL admin (the real mutation gate), then applies
 // the changes asynchronously and posts the result to the list message's
 // response_url. Mirrors handleTunnelInstallSubmission's posture: per-field
 // validation surfaces inline (response_action:errors); structural/auth

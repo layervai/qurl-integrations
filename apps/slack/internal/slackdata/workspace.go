@@ -466,7 +466,7 @@ func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping,
 	return ddbToError("BindWorkspace.reclaim", err)
 }
 
-// AddAdmin promotes targetUserID to bot admin on the (teamID)
+// AddAdmin promotes targetUserID to admin on the (teamID)
 // workspace_mappings row. A single conditional UpdateItem folds the
 // "row exists + user not already on the set" check into the same DDB
 // item-lock as the mutation:
@@ -581,7 +581,7 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 	}
 }
 
-// RemoveAdmin demotes targetUserID from bot admin on the (teamID)
+// RemoveAdmin demotes targetUserID from admin on the (teamID)
 // workspace_mappings row.
 //
 // Refuses to demote the workspace owner — the owner is the OAuth

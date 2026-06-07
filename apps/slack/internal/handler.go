@@ -1340,7 +1340,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 	// command is non-empty here (normalized in handleSlashCommand); see
 	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
 	// The verbs are grouped under bold section headers (Protect resources,
-	// Aliases, Manage resources, Bot admins) rather than one flat bullet list —
+	// Aliases, Manage resources, Admins) rather than one flat bullet list —
 	// the admin surface grew long enough that a flat list was hard to scan. Each
 	// section is gated on the same wiring its verbs need at runtime, so an
 	// unwired deploy never renders an empty header; in practice aliasStore and

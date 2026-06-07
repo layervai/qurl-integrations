@@ -298,7 +298,7 @@ func TestHandleList_RendersRevokeButton(t *testing.T) {
 // role. The Create qURL button still renders; the list itself works for all.
 func TestHandleList_NoRevokeButtonForNonAdmin(t *testing.T) {
 	ts := newAdminTestServers(t)
-	ts.seedNonAdmin(t) // workspace bound, but testAdminUserID is NOT on the bot admin set
+	ts.seedNonAdmin(t) // workspace bound, but testAdminUserID is NOT on the admin set
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: testRevokeResourceID, testKeyType: client.ResourceTypeTunnel, testKeySlug: testRevokeAlias},
