@@ -6,7 +6,7 @@ Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that 
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries used by the Go apps. Microsoft Teams and Zapier are planned.
+This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. Microsoft Teams and Zapier are planned.
 
 ## Structure
 
