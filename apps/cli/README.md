@@ -89,7 +89,7 @@ LINK=$(qurl create https://api.example.com/data -e 1h --quiet)
 | `qurl mint <resource-id>` | Mint a fresh access link for an existing qURL |
 | `qurl extend <resource-id>` | Extend a qURL's expiration |
 | `qurl update <resource-id>` | Update a qURL's properties |
-| `qurl delete <resource-id>` | Revoke a qURL and its tokens |
+| `qurl delete <resource-id>` | Revoke a qURL and its tokens (alias: `qurl revoke`) |
 | `qurl quota` | Show usage quota and plan info |
 | `qurl config` | Manage CLI configuration and profiles |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
@@ -105,7 +105,10 @@ Run `qurl <command> --help` for the full flag list. Frequently used flags:
 | `-d, --description <s>` | `create`, `update` | Human-readable description |
 | `-b, --by <dur>` | `extend` | Duration to extend by, e.g. `24h` (required) |
 | `--status <s>` | `list` | Filter by `active`, `expired`, `revoked`, or `consumed` |
+| `--query <s>` | `list` | Search description and target URL |
+| `-l, --limit <n>` | `list` | Max results to return (default 20) |
 | `-y, --yes` | `delete` | Skip the confirmation prompt |
+| `--dry-run` | `delete` | Show what would be revoked without making changes |
 
 ### Global flags
 
