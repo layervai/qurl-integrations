@@ -315,7 +315,7 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *inte
 		msg := h.bindURLResourceToChannel(ctx, log, meta.TeamID, meta.ChannelID, channelAlias, resourceID)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
-		respondExposeURLModalError(w, "Secure Access Agent is busy. Retry in a moment.")
+		respondExposeURLModalError(w, modalBusyMsg)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
@@ -415,7 +415,7 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 		msg := h.createAndExposeURLResource(ctx, log, meta.TeamID, meta.ChannelID, args)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
-		respondExposeURLModalError(w, "Secure Access Agent is busy. Retry in a moment.")
+		respondExposeURLModalError(w, modalBusyMsg)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})

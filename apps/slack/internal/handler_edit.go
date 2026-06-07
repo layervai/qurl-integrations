@@ -251,7 +251,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases, desiredChannels)
 	}) {
-		respondTunnelEditModalError(w, "Secure Access Agent is busy. Retry in a moment.")
+		respondTunnelEditModalError(w, modalBusyMsg)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})

@@ -107,6 +107,11 @@ const ackWorkingOnIt = ":hourglass: Working on it…"
 // visible and gives them an actionable next step.
 const ackBusy = ":warning: Secure Access Agent is busy — please retry in a moment."
 
+// modalBusyMsg is the modal-surface counterpart to ackBusy, shown when the
+// async pool is saturated and a modal action can't be served. A single const
+// keeps the wording identical across every modal handler.
+const modalBusyMsg = "Secure Access Agent is busy. Retry in a moment."
+
 const (
 	headerSlackSignature = "X-Slack-Signature"
 	headerSlackTimestamp = "X-Slack-Request-Timestamp"

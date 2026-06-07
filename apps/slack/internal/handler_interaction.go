@@ -288,7 +288,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		h.processTunnelInstall(ctx, log, meta.TeamID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, setupStartedAt)
 	}) {
-		respondTunnelInstallModalError(w, "Secure Access Agent is busy. Retry in a moment.")
+		respondTunnelInstallModalError(w, modalBusyMsg)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
