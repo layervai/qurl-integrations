@@ -66,8 +66,9 @@ need to change anything. If your organization runs its own qURL server:
 2. Enter your server's address in the **qURL server** field — either the base
    URL (`https://files.example.com`) or a full upload URL; the extension
    tidies it up for you. The address must use `https://`.
-3. Click **Save**. Chrome asks for your permission to access that server the
-   first time, naming the exact address. Approve it to start uploading there.
+3. Click **Save**. The extension first asks you to confirm the exact address,
+   then Chrome shows its own permission prompt for that server. Approve both to
+   start uploading there.
 4. Click **Use default** at any time to switch back to the built-in server.
 
 ## Troubleshooting
