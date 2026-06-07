@@ -58,6 +58,9 @@ workspace's bot supports.
 Admin commands live under a separate `/qurl-admin` slash command. They're
 enforced by the bot: only the owner and bot admins can run them.
 
+Most setup runs through `/qurl-admin protect`, a guided picker. The typed
+command variants below it are for power users and scripting.
+
 **Protect resources**
 
 | Command | What it does |
