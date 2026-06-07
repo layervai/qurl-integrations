@@ -58,7 +58,7 @@ describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no rea
         webhook_id: 'wh_cold_bootstrap',
         secret: 'whsec_fresh',
         url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret });
@@ -79,14 +79,14 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
           webhook_id: 'wh_test_new',
           secret: 'whsec_fresh_secret',
           url: BASE_OPTS.bridgeUrl,
-          events: ['qurl.accessed'],
+          events: ['qurl.accessed', 'qurl.expired'],
         } } };
       },
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
     expect(createBody).toEqual({
       url: BASE_OPTS.bridgeUrl,
-      events: ['qurl.accessed'],
+      events: ['qurl.accessed', 'qurl.expired'],
       description: BASE_OPTS.description,
     });
     expect(result).toEqual({
@@ -104,7 +104,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing',
         url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         rotatedFor = 'wh_existing';
@@ -123,7 +123,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
   it('also rotates when initialSecret is the empty string (SSM param not yet populated)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({
         body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } },
@@ -134,7 +134,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
     expect(result.secret).toBe('whsec_post_bootstrap');
   });
 
-  it('patches events if the existing list does not include qurl.accessed', async () => {
+  it('patches events to the target set if the existing list is missing any target event', async () => {
     let patchedEvents = null;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -151,7 +151,7 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
       }),
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
-    expect(patchedEvents).toEqual(['qurl.accessed']);
+    expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
     expect(result.secret).toBe('whsec_post_patch');
   });
 });
@@ -165,7 +165,7 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
     let secretEndpointHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         secretEndpointHit = true;
@@ -213,11 +213,11 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
     expect(result.webhookId).toBe('wh_existing');
   });
 
-  it('does NOT PATCH when events already include qurl.accessed (no-drift positive case)', async () => {
+  it('does NOT PATCH when events already match the target set (no-drift positive case)', async () => {
     let patched = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
     });
@@ -233,7 +233,7 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing',
         url: 'https://bot.test.example/webhooks/qurl/', // trailing slash
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         rotated = true;
@@ -259,11 +259,11 @@ describe('ensureWebhookSubscription — pagination', () => {
     // first-page handler for every call → cursor walk would loop).
     mockFetchResponses({
       'GET /v1/webhooks?limit=100': () => ({ body: {
-        data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed'] }],
+        data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed', 'qurl.expired'] }],
         meta: { next_cursor: 'page2', has_more: true },
       } }),
       'GET /v1/webhooks?cursor=page2&limit=100': () => ({ body: {
-        data: [{ webhook_id: 'wh_match', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] }],
+        data: [{ webhook_id: 'wh_match', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] }],
         meta: { next_cursor: '', has_more: false },
       } }),
     });
@@ -276,7 +276,7 @@ describe('ensureWebhookSubscription — pagination', () => {
     let createCalled = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: {
-        data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed'] }],
+        data: [{ webhook_id: 'wh_other', url: 'https://other.example/foo', events: ['qurl.accessed', 'qurl.expired'] }],
         meta: { next_cursor: '', has_more: false },
       } }),
       'POST /v1/webhooks': () => {
@@ -287,6 +287,97 @@ describe('ensureWebhookSubscription — pagination', () => {
     const result = await ensureWebhookSubscription(BASE_OPTS);
     expect(createCalled).toBe(true);
     expect(result.action).toBe('created');
+  });
+});
+
+describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fix)', () => {
+  // The pre-fix reconcile short-circuited on `events.includes('qurl.accessed')`,
+  // which would leave an `accessed`-only subscription in place even after
+  // the target set grew to include `expired`. These tests pin the
+  // strict-set-equality semantics so a future event-list addition can
+  // never silently under-cover via the inclusion-check pattern again.
+  it('PATCHes when accessed is present but expired is missing (the original latent-bug shape)', async () => {
+    let patchedEvents = null;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': (opts) => {
+        patchedEvents = JSON.parse(opts.body).events;
+        return { body: { data: { webhook_id: 'wh_existing' } } };
+      },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
+  });
+
+  it('PATCHes when expired is present but accessed is missing (symmetric case)', async () => {
+    let patchedEvents = null;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.expired'],
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': (opts) => {
+        patchedEvents = JSON.parse(opts.body).events;
+        return { body: { data: { webhook_id: 'wh_existing' } } };
+      },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
+  });
+
+  it('PATCHes when an extra non-target event is present (set equality, not subset)', async () => {
+    // Set equality drops drift extras — a stale event from a removed
+    // target stays subscribed otherwise. Trade-off accepted: if a
+    // future peer ever co-subscribes a third event on the same sub,
+    // this would drop it. There is no co-subscriber today (the bot
+    // owns this subscription, owner_id-scoped).
+    let patchedEvents = null;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl,
+        events: ['qurl.accessed', 'qurl.expired', 'qurl.stale_event'],
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': (opts) => {
+        patchedEvents = JSON.parse(opts.body).events;
+        return { body: { data: { webhook_id: 'wh_existing' } } };
+      },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
+  });
+
+  it('does NOT PATCH when target events are present in different order (order-independent)', async () => {
+    let patched = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl,
+        events: ['qurl.expired', 'qurl.accessed'], // reversed
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patched).toBe(false);
+  });
+
+  it('PATCHes when events field is a string instead of an array (treats non-array as missing)', async () => {
+    // Defensive against a future contract drift where qurl-service
+    // returns events: "qurl.accessed,qurl.expired" — the pre-fix
+    // .includes() would have matched via string-contains and
+    // silently skipped the PATCH despite drift.
+    let patchedEvents = null;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl,
+        events: 'qurl.accessed,qurl.expired',
+      }] } }),
+      'PATCH /v1/webhooks/wh_existing': (opts) => {
+        patchedEvents = JSON.parse(opts.body).events;
+        return { body: { data: { webhook_id: 'wh_existing' } } };
+      },
+    });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
   });
 });
 
@@ -338,7 +429,7 @@ describe('ensureWebhookSubscription — error paths', () => {
   it('throws if rotate response has no secret (contract drift)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'],
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({ body: { data: { webhook_id: 'wh_existing' /* no secret */ } } }),
     });
@@ -520,7 +611,7 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
       },
     });
     await ensureWebhookSubscription(BASE_OPTS);
-    expect(body.events).toEqual(['qurl.accessed']);
+    expect(body.events).toEqual(['qurl.accessed', 'qurl.expired']);
   });
 });
 
@@ -532,9 +623,9 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     const deletedIds = [];
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T12:00:00Z' },
-        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T10:00:00Z' }, // older — survivor
-        { webhook_id: 'wh_c', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T14:00:00Z' },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T12:00:00Z' },
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T10:00:00Z' }, // older — survivor
+        { webhook_id: 'wh_c', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T14:00:00Z' },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => { deletedIds.push('wh_b'); return { status: 204, body: '' }; },
       'DELETE /v1/webhooks/wh_c': () => { deletedIds.push('wh_c'); return { status: 204, body: '' }; },
@@ -550,8 +641,8 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     const deletedIds = [];
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_zzz', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
-        { webhook_id: 'wh_aaa', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] }, // lex-first — survivor
+        { webhook_id: 'wh_zzz', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
+        { webhook_id: 'wh_aaa', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] }, // lex-first — survivor
       ] } }),
       'DELETE /v1/webhooks/wh_zzz': () => { deletedIds.push('wh_zzz'); return { status: 204, body: '' }; },
       'POST /v1/webhooks/wh_aaa/secret': () => ({ body: { data: { webhook_id: 'wh_aaa', secret: 'whsec_rot' } } }),
@@ -567,8 +658,8 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     // The dedupe path must NOT crash on this.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
-        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 404, body: { error: 'not found' } }),
       'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot' } } }),
@@ -588,8 +679,8 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     let rotated = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T10:00:00Z' }, // survivor
-        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'], created_at: '2026-05-19T11:00:00Z' },
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T10:00:00Z' }, // survivor
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'], created_at: '2026-05-19T11:00:00Z' },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 204, body: '' }),
       'POST /v1/webhooks/wh_a/secret': () => {
@@ -611,8 +702,8 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
   it('propagates non-404 DELETE errors so a real failure surfaces', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
-        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
     });
@@ -627,8 +718,8 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     let rotateHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
-        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_a', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
+        { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
       'POST /v1/webhooks/wh_a/secret': () => {
@@ -650,9 +741,9 @@ describe('ensureWebhookSubscription — multi-subscription scan', () => {
   it('matches the correct sub when several non-matching ones share the page', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_other_1', url: 'https://elsewhere.example/hook1', events: ['qurl.accessed'] },
-        { webhook_id: 'wh_match',   url: BASE_OPTS.bridgeUrl,              events: ['qurl.accessed'] },
-        { webhook_id: 'wh_other_2', url: 'https://elsewhere.example/hook2', events: ['qurl.accessed'] },
+        { webhook_id: 'wh_other_1', url: 'https://elsewhere.example/hook1', events: ['qurl.accessed', 'qurl.expired'] },
+        { webhook_id: 'wh_match',   url: BASE_OPTS.bridgeUrl,              events: ['qurl.accessed', 'qurl.expired'] },
+        { webhook_id: 'wh_other_2', url: 'https://elsewhere.example/hook2', events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
@@ -898,7 +989,7 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing',
         url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
         owner_id: 'auth0|existing',
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({ status: 200, body: { data: {
@@ -915,7 +1006,7 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_reused',
         url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed'],
+        events: ['qurl.accessed', 'qurl.expired'],
         owner_id: 'auth0|reused',
       }] } }),
     });

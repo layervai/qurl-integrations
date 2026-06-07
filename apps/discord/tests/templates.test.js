@@ -12,7 +12,8 @@ jest.mock('../src/constants', () => ({
   // Required by qurl-webhook-registrar (transitively loaded via
   // qurl-webhook route → server.js). Keep the wire literal exact —
   // qurl-service rejects any other event-type string.
-  QURL_WEBHOOK_EVENTS: { ACCESSED: 'qurl.accessed' },
+  QURL_WEBHOOK_EVENTS: { ACCESSED: 'qurl.accessed', EXPIRED: 'qurl.expired' },
+  DM_STATUS: { SENT: 'sent' },
   // Required by qurl-webhook route — receiver-side audit-event keys.
   AUDIT_EVENTS: {
     QURL_WEBHOOK_RATE_LIMITED: 'qurl_webhook_rate_limited',

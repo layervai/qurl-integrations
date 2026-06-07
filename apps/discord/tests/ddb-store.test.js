@@ -775,6 +775,57 @@ describe('qurl sends', () => {
     expect(item.sender_discord_id).toBe('sender');
   });
 
+  test('recordQURLSend: writes qurl_id when provided (GSI hash key for qurl.expired lookup)', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await store.recordQURLSend({
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'rcpt',
+      resourceId: 'r1', resourceType: 'file', qurlLink: 'https://…',
+      qurlId: 'q_aaaaaaaaaa1',
+      expiresIn: '24h', channelId: 'ch1', targetType: 'user',
+    });
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(item.qurl_id).toBe('q_aaaaaaaaaa1');
+  });
+
+  test('recordQURLSend: omits qurl_id when empty/missing (sparse GSI — keep row off the index)', async () => {
+    // Sparse semantics: a row missing the GSI hash-key attribute
+    // doesn't appear in the GSI. Writing an empty string would still
+    // create an index entry, pinning the no-qurl_id row to PK="" and
+    // hot-partitioning the GSI on a single sentinel value.
+    ddbMock.on(PutCommand).resolves({});
+    for (const bad of [undefined, '', null]) {
+      ddbMock.reset();
+      ddbMock.on(PutCommand).resolves({});
+      await store.recordQURLSend({
+        sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'rcpt',
+        resourceId: 'r1', resourceType: 'file', qurlLink: 'https://…',
+        qurlId: bad,
+        expiresIn: '24h', channelId: 'ch1', targetType: 'user',
+      });
+      const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+      expect('qurl_id' in item).toBe(false);
+    }
+  });
+
+  test('recordQURLSendBatch: writes qurl_id per row when provided, sparsely', async () => {
+    ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
+    await store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+        resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
+        qurlId: 'q_aaaaaaaaaa1',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r2',
+        resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
+        // qurlId omitted → row should not surface a qurl_id attribute
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ]);
+    const calls = ddbMock.commandCalls(BatchWriteCommand);
+    expect(calls).toHaveLength(1);
+    const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends'];
+    expect(writes[0].PutRequest.Item.qurl_id).toBe('q_aaaaaaaaaa1');
+    expect('qurl_id' in writes[1].PutRequest.Item).toBe(false);
+  });
+
   test('recordQURLSendBatch: chunks >25 items into multiple BatchWrite calls', async () => {
     ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
     const sends = Array.from({ length: 30 }, (_, i) => ({
@@ -1073,6 +1124,113 @@ describe('qurl sends', () => {
     });
     const result = await store.getSendConfig('s1', 'attacker');
     expect(result).toBeUndefined();
+  });
+
+  test('findSendsByQurlId: Queries qurl_id-index GSI with the qurl_id hash key', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ send_id: 's1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1' }],
+    });
+    const rows = await store.findSendsByQurlId('q_aaaaaaaaaa1');
+    expect(rows).toEqual([{ send_id: 's1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1' }]);
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.IndexName).toBe('qurl_id-index');
+    expect(input.KeyConditionExpression).toBe('qurl_id = :q');
+    expect(input.ExpressionAttributeValues[':q']).toBe('q_aaaaaaaaaa1');
+    // Limit: 2 is the defense-in-depth cap — the handler only needs
+    // to distinguish 0 / 1 / >1, so a pathological duplicate-key
+    // explosion can't blow up RCU. A regression that removed it
+    // would let a runaway GSI page pull MB of rows the handler
+    // doesn't need.
+    expect(input.Limit).toBe(2);
+  });
+
+  test('findSendsByQurlId: returns [] without querying when qurlId is empty/missing', async () => {
+    for (const bad of [undefined, '', null, 0]) {
+      const rows = await store.findSendsByQurlId(bad);
+      expect(rows).toEqual([]);
+    }
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  test('findSendsByQurlId: tolerates DDB returning Count>1 (consumer handles defensively)', async () => {
+    // DDB doesn't enforce GSI hash-key uniqueness — the write-path
+    // invariant is supposed to keep this at 1, but the function MUST
+    // surface the full result set so the caller can detect + log
+    // the regression rather than silent-pick row[0].
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { send_id: 's1', recipient_discord_id: 'r1', qurl_id: 'q_x' },
+        { send_id: 's2', recipient_discord_id: 'r2', qurl_id: 'q_x' },
+      ],
+    });
+    const rows = await store.findSendsByQurlId('q_x');
+    expect(rows).toHaveLength(2);
+  });
+
+  test('markExpiredDMEdited: conditional UpdateItem with attribute_not_exists(expired_edited_at)', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const result = await store.markExpiredDMEdited('s1', 'rcpt');
+    expect(result).toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+    expect(input.ConditionExpression).toBe('attribute_not_exists(expired_edited_at)');
+    expect(input.UpdateExpression).toBe('SET expired_edited_at = :t');
+    expect(typeof input.ExpressionAttributeValues[':t']).toBe('string');
+  });
+
+  test('markExpiredDMEdited: returns false on ConditionalCheckFailedException (already edited)', async () => {
+    const ccfe = new Error('conditional');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    const result = await store.markExpiredDMEdited('s1', 'rcpt');
+    expect(result).toBe(false);
+  });
+
+  test('markExpiredDMEdited: rethrows non-CCFE errors (caller maps to 503/mark-error)', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('ProvisionedThroughputExceededException'));
+    await expect(store.markExpiredDMEdited('s1', 'rcpt')).rejects.toThrow();
+  });
+
+  test('clearExpiredDMEdited: REMOVE expression on the same composite key', async () => {
+    // Rollback path — called by the qurl.expired handler when editDM
+    // reported a transient failure, so qurl-service's retry can
+    // re-enter and re-attempt the edit.
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.clearExpiredDMEdited('s1', 'rcpt');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+    expect(input.UpdateExpression).toBe('REMOVE expired_edited_at');
+    expect(input.ConditionExpression).toBeUndefined();
+  });
+
+  test('clearExpiredDMEdited: rethrows DDB errors so caller can log + downgrade to 200', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('throttle'));
+    await expect(store.clearExpiredDMEdited('s1', 'rcpt')).rejects.toThrow();
+  });
+
+  test('isSendRevoked: returns true when qurl_send_configs.revoked_at is set', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: '2026-05-19T12:00:00Z' },
+    });
+    expect(await store.isSendRevoked('s1')).toBe(true);
+  });
+
+  test('isSendRevoked: returns false when revoked_at is absent or row is missing', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender' },
+    });
+    expect(await store.isSendRevoked('s1')).toBe(false);
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({});
+    expect(await store.isSendRevoked('s1')).toBe(false);
+  });
+
+  test('isSendRevoked: returns false without querying when sendId is empty/missing', async () => {
+    for (const bad of [undefined, '', null]) {
+      expect(await store.isSendRevoked(bad)).toBe(false);
+    }
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
   });
 });
 

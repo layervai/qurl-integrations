@@ -950,23 +950,33 @@ async function getWeeklyDigestData() {
 
 async function recordQURLSend({
   sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType,
-  qurlLink, expiresIn, channelId, targetType,
+  qurlLink, qurlId, expiresIn, channelId, targetType,
 }) {
+  // qurl_id is the GSI hash key on qurl_id-index, used by the
+  // qurl.expired webhook handler to locate the recipient row for DM
+  // editing. Sparse GSI: omit the attribute when empty so the row stays
+  // out of the index (qurl-service returns "" for resources that don't
+  // surface a qurl_id, and indexing those would clutter the GSI without
+  // a lookup path that could use them).
+  const Item = {
+    send_id: sendId,
+    recipient_discord_id: recipientDiscordId,
+    sender_discord_id: senderDiscordId,
+    resource_id: resourceId,
+    resource_type: resourceType,
+    qurl_link: qurlLink,
+    expires_in: expiresIn,
+    channel_id: channelId,
+    target_type: targetType,
+    dm_status: 'pending',
+    created_at: nowIso(),
+  };
+  if (typeof qurlId === 'string' && qurlId.length > 0) {
+    Item.qurl_id = qurlId;
+  }
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
-    Item: {
-      send_id: sendId,
-      recipient_discord_id: recipientDiscordId,
-      sender_discord_id: senderDiscordId,
-      resource_id: resourceId,
-      resource_type: resourceType,
-      qurl_link: qurlLink,
-      expires_in: expiresIn,
-      channel_id: channelId,
-      target_type: targetType,
-      dm_status: 'pending',
-      created_at: nowIso(),
-    },
+    Item,
   }));
 }
 
@@ -996,23 +1006,28 @@ async function recordQURLSendBatch(sends) {
   for (let i = 0; i < sends.length; i += CHUNK) {
     const slice = sends.slice(i, i + CHUNK);
     let requestItems = {
-      [TABLES.qurl_sends]: slice.map(s => ({
-        PutRequest: {
-          Item: {
-            send_id: s.sendId,
-            recipient_discord_id: s.recipientDiscordId,
-            sender_discord_id: s.senderDiscordId,
-            resource_id: s.resourceId,
-            resource_type: s.resourceType,
-            qurl_link: s.qurlLink,
-            expires_in: s.expiresIn,
-            channel_id: s.channelId,
-            target_type: s.targetType,
-            dm_status: 'pending',
-            created_at: now,
-          },
-        },
-      })),
+      [TABLES.qurl_sends]: slice.map(s => {
+        // qurl_id is sparsely written so an empty/missing value (e.g.
+        // a future emit path that doesn't surface it) doesn't pollute
+        // the qurl_id-index GSI. See recordQURLSend for the same gate.
+        const Item = {
+          send_id: s.sendId,
+          recipient_discord_id: s.recipientDiscordId,
+          sender_discord_id: s.senderDiscordId,
+          resource_id: s.resourceId,
+          resource_type: s.resourceType,
+          qurl_link: s.qurlLink,
+          expires_in: s.expiresIn,
+          channel_id: s.channelId,
+          target_type: s.targetType,
+          dm_status: 'pending',
+          created_at: now,
+        };
+        if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
+          Item.qurl_id = s.qurlId;
+        }
+        return { PutRequest: { Item } };
+      }),
     };
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
@@ -1154,6 +1169,101 @@ async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messag
     UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
     ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
   }));
+}
+
+// qurl_id-index GSI lookup for the qurl.expired webhook handler.
+//
+// Uniqueness caveat: DDB does NOT enforce hash-key uniqueness on a
+// GSI, so this query returns an array. The write-path invariant is "one qurl_id per
+// recipient row" (each /qurl send mint is unique per recipient at
+// mintLinksInBatches time), so a healthy table should always return
+// length 0 or 1. The handler MUST handle length > 1 defensively
+// (log + skip) rather than blind-indexing [0].
+//
+// `Limit: 2` is a defense-in-depth cap: the handler only needs to
+// distinguish 0 / 1 / >1, so bounding the read at 2 prevents a
+// pathological duplicate-key explosion (write-path regression
+// landing N>>1 rows under one qurl_id) from blowing up RCU on the
+// hot path. The `> 1` ambiguous-recipient skip in the handler
+// already catches the duplicate case at length=2.
+//
+// Returns the rows (full attributes — GSI projection is ALL so
+// dm_channel_id / dm_message_id / expired_edited_at are present).
+async function findSendsByQurlId(qurlId) {
+  if (typeof qurlId !== 'string' || qurlId.length === 0) return [];
+  const res = await ddb.send(new QueryCommand({
+    TableName: TABLES.qurl_sends,
+    IndexName: 'qurl_id-index',
+    KeyConditionExpression: 'qurl_id = :q',
+    ExpressionAttributeValues: { ':q': qurlId },
+    Limit: 2,
+  }));
+  return res.Items || [];
+}
+
+// Idempotency marker for the qurl.expired DM-edit path. Separate from
+// dm_status, which the revoke path uses as a read precondition for
+// "is there a DM to edit." Sole idempotency layer for this path (the
+// view-counter route's eventId dedup is view-specific and doesn't
+// reach the expired handler).
+//
+// Conditional UpdateItem on attribute_not_exists: first call wins,
+// repeats throw ConditionalCheckFailedException which the caller
+// reads as "already edited, skip DM PATCH". Returns true on first-
+// edit, false if already-edited.
+async function markExpiredDMEdited(sendId, recipientDiscordId) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      UpdateExpression: 'SET expired_edited_at = :t',
+      ConditionExpression: 'attribute_not_exists(expired_edited_at)',
+      ExpressionAttributeValues: { ':t': nowIso() },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+// Rollback the idempotency marker — only called by the qurl.expired
+// handler when editDM reported a TRANSIENT failure (Discord 5xx or
+// network throw). Rolling back lets qurl-service's webhook retry
+// re-enter the handler and re-attempt the edit cleanly. On a PERMANENT
+// failure (`ok:false && expected:true` — recipient blocked the bot /
+// deleted the DM) the marker MUST stay so the retry short-circuits.
+//
+// Best-effort: a throw from this rollback isn't a separate failure
+// mode the caller can do anything about — the marker stays, the next
+// retry hits `already-edited`, and the missed edit falls back to the
+// 8-day S3 lifecycle. We surface the throw so the caller can log it,
+// not for control flow.
+async function clearExpiredDMEdited(sendId, recipientDiscordId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_sends,
+    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+    UpdateExpression: 'REMOVE expired_edited_at',
+  }));
+}
+
+// Sender-revoke check for the qurl.expired handler. A send whose
+// sender ran /qurl revoke has its DM already edited to "Alice closed
+// the door" — re-editing to "Closed N ago" would overwrite that copy
+// with a less-specific message and obscure the revoke signal.
+//
+// Reads qurl_send_configs (the table markSendRevoked writes to);
+// returns true iff revoked_at is set on the row. Falsy / missing row
+// returns false so a config-less legacy send (none exist today, but
+// the row insert in markSendRevoked is lazy) still gets the
+// expiry-edit treatment.
+async function isSendRevoked(sendId) {
+  if (typeof sendId !== 'string' || sendId.length === 0) return false;
+  const res = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+  }));
+  return Boolean(res.Item?.revoked_at);
 }
 
 async function getRecentSends(senderDiscordId, limit = 10) {
@@ -1883,8 +1993,9 @@ module.exports = {
   getWeeklyDigestData,
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
-  getRecentSends, markSendRevoked,
+  getRecentSends, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
+  findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

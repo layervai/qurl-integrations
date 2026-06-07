@@ -49,6 +49,13 @@ const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
 
 const QURL_ACCESSED = QURL_WEBHOOK_EVENTS.ACCESSED;
+const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
+
+// Wire-protocol event set every subscription this bot owns MUST carry.
+// Kept as the source of truth for create + reconcile so the two paths
+// can never drift to different event lists. Order is irrelevant here;
+// reconcile uses set comparison.
+const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
 
 // Strip secret-shaped fields anywhere in a parsed body before
 // stringifying. Error messages echo response bodies into CloudWatch;
@@ -239,7 +246,7 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
     apiKey,
     body: {
       url: bridgeUrl,
-      events: [QURL_ACCESSED],
+      events: [...TARGET_EVENTS],
       description: safeDescription,
     },
   });
@@ -307,19 +314,36 @@ async function bestEffortPersist({ persistSecret, value }) {
   }
 }
 
-// Reconcile the events list on an existing subscription so it
-// includes qurl.accessed. PATCH is idempotent so two replicas racing
-// here is harmless. Factored out because the reuse path and the
-// rotate path both need it.
+// Reconcile the events list on an existing subscription so it exactly
+// covers TARGET_EVENTS. PATCH is idempotent so two replicas racing here
+// is harmless. Factored out because the reuse path and the rotate path
+// both need it.
+//
+// Set-based comparison (not `.includes(ACCESSED)`): the pre-EXPIRED
+// version of this function would short-circuit as soon as `accessed`
+// was present, silently leaving an `accessed`-only subscription in
+// place even when the target set had grown to include `expired`. Any
+// subsequent additions to TARGET_EVENTS would suffer the same drift.
+// Symmetric-difference logic ensures the subscription's event list
+// matches TARGET_EVENTS exactly, so dropping the inclusion-check
+// short-circuit is intentional.
 async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
   // Array.isArray guard — a future contract drift returning
-  // `events: "qurl.accessed,qurl.created"` (string) would otherwise
-  // succeed `.includes('qurl.accessed')` via string-contains and
-  // skip the PATCH despite drift. Treat any non-array as missing.
-  const events = Array.isArray(existing?.events) ? existing.events : [];
-  if (events.includes(QURL_ACCESSED)) return;
-  logger.info('qURL webhook subscription events drift — PATCHing to include qurl.accessed', { webhookId: existing.webhook_id, current: events });
-  await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [QURL_ACCESSED] });
+  // `events: "qurl.accessed,qurl.expired"` (string) would otherwise
+  // pass a `.includes(...)` style check via string-contains and skip
+  // the PATCH despite drift. Treat any non-array as missing.
+  const current = Array.isArray(existing?.events) ? existing.events : [];
+  const currentSet = new Set(current);
+  const targetSet = new Set(TARGET_EVENTS);
+  const sameSize = currentSet.size === targetSet.size;
+  const sameMembers = sameSize && [...targetSet].every(e => currentSet.has(e));
+  if (sameMembers) return;
+  logger.info('qURL webhook subscription events drift — PATCHing to TARGET_EVENTS', {
+    webhookId: existing.webhook_id,
+    current,
+    target: [...TARGET_EVENTS],
+  });
+  await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [...TARGET_EVENTS] });
 }
 
 /**

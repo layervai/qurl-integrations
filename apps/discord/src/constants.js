@@ -494,6 +494,7 @@ Object.freeze(AUDIT_EVENTS);
 // silently matching nothing. Mirrors qurl-service WebhookEventType.
 const QURL_WEBHOOK_EVENTS = Object.freeze({
   ACCESSED: 'qurl.accessed',
+  EXPIRED: 'qurl.expired',
 });
 
 // Discord gateway dispatch event names (the `t` field on op=0 frames).

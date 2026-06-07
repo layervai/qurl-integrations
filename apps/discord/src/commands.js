@@ -1909,6 +1909,11 @@ async function executeSendPipeline(interaction, {
     await db.recordQURLSendBatch(qurlLinks.map(link => ({
       sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
+      // qurl_id is the GSI lookup key the qurl.expired webhook handler
+      // uses to find the recipient row for DM editing. Pulled from
+      // mintLinksInBatches return value above. Sparse on the write
+      // side — see recordQURLSendBatch.
+      qurlId: link.qurlId,
       // CONTRACT: targetType is always 'user' for new rows post-PR
       // #313 (the only caller is executeSendPipeline via the confirm
       // card on /qurl send + /qurl map, both of which DM individual
@@ -2618,7 +2623,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     for (const link of links) {
       batchSends.push({
         sendId, senderDiscordId, recipientDiscordId: rid, resourceId: link.resourceId,
-        resourceType: link.resType, qurlLink: link.qurlLink, expiresIn: sendConfig.expires_in,
+        resourceType: link.resType, qurlLink: link.qurlLink,
+        // qurl_id threads through addRecipients the same way it does
+        // through executeSendPipeline — needed for the qurl.expired
+        // webhook handler's GSI lookup. See recordQURLSendBatch.
+        qurlId: link.qurlId,
+        expiresIn: sendConfig.expires_in,
         channelId: originalInteraction.channelId, targetType: 'user',
       });
     }
