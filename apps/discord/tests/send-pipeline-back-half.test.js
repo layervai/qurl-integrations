@@ -1691,23 +1691,33 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
   });
 
-  it('surfaces "URL has expired" when re-download throws a 403/expired/network error', async () => {
+  // The addRecipients file catch ALWAYS emits (no source-side skip): every
+  // failure — CDN re-download, connector re-upload, or mint — is a "couldn't
+  // create links" event. The classifier derives the reason from err.status
+  // (absent on a bare CDN-download Error → unknown; set by throwConnectorError
+  // on a connector error → upstream_4xx/5xx). The user-message branch
+  // (isExpired) is independent and pre-existing.
+
+  it('CDN re-download failure (no err.status) emits reason=unknown + shows the expired message', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
-    mockDownloadAndUpload.mockRejectedValueOnce(new Error('403 Forbidden'));
+    mockDownloadAndUpload.mockRejectedValueOnce(new Error('403 Forbidden')); // bare Error, no status
 
     const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      'send-cdn', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
     );
 
     expect(result.msg).toMatch(/expired/i);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-cdn', kind: 'file', reason: 'unknown',
+    }));
   });
 
-  it('surfaces generic "Failed to prepare links" when re-download throws an unknown error', async () => {
+  it('a non-expiry-shaped failure shows the generic message and emits', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -1716,11 +1726,36 @@ describe('handleAddRecipients — file path failure modes', () => {
     mockDownloadAndUpload.mockRejectedValueOnce(new Error('something else broke'));
 
     const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      'send-generic', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
     );
 
     expect(result.msg).toMatch(/failed to prepare links/i);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-generic', kind: 'file', reason: 'unknown',
+    }));
+  });
+
+  it('a connector failure carrying err.status emits the classified reason (403 → upstream_4xx)', async () => {
+    // Connector 403 (revoked key / auth outage) from the re-upload step inside
+    // downloadAndUpload — the outage shape #276 must surface. Previously a
+    // message/phase-based skip mis-bucketed this as CDN-expiry and swallowed
+    // it; now there is no skip, so it emits with its real status-derived reason.
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockRejectedValueOnce(Object.assign(new Error('Connector re-upload failed (403)'), { status: 403 }));
+
+    const result = await handleAddRecipients(
+      'send-403', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-403', kind: 'file', reason: 'upstream_4xx', status_code: 403,
+    }));
   });
 
   it('reports underdelivery when mintLinks returns fewer links than recipients', async () => {
@@ -1763,6 +1798,156 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
 
     expect(result.msg).toMatch(/pool exhausted/i);
+  });
+});
+
+// =========================================================================
+// QURL_SEND_CREATE_LINK_FAILURE audit emission (#276)
+//
+// These pin the observability contract for #276: the bot's "Failed to create
+// links" surface must emit a metric-filterable audit event so a sustained
+// mint/upload outage is visible to on-call before users report it (the
+// 2026-05-13 incident ran ~4h unnoticed because this path was un-instrumented).
+//
+// The reason taxonomy (timeout / upstream_4xx / upstream_5xx / unknown) is
+// pinned separately in classify-mint-failure.test.js. Here we pin the catch
+// SITES inside handleAddRecipients: that the event fires with the correct
+// `kind`, that the quota_exceeded skip holds (a viral upload is a normal
+// product condition, not an on-call page), and that the `activeKind` fix
+// labels a mixed send's location failure as 'location', not 'file'.
+//
+// The third emission site — executeSendPipeline's initial-send catch, the
+// PRIMARY /qurl send surface from the incident — is pinned separately in the
+// 'executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (primary site)'
+// describe below (it derives kind via kindMap[resourceType], a different
+// mechanism from the activeKind tracking these addRecipients tests pin).
+describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)', () => {
+  it('inner file catch: emits with kind=file when the file re-upload + mint fails', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    // Plain Error — no status/code/name → classifyMintFailure → 'unknown'.
+    // Pin the exact category, not expect.any(String): the whole point of the
+    // classifier is the taxonomy, and any-string would pass on a broken one.
+    mockMintLinks.mockRejectedValueOnce(new Error('Connector down'));
+
+    const result = await handleAddRecipients(
+      'send-fail', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toMatch(/Failed to prepare links/i);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-fail',
+      kind: 'file',
+      reason: 'unknown',
+    }));
+  });
+
+  it('outer location catch: emits with kind=location when the location upload fails', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    mockUploadJsonToConnector.mockRejectedValueOnce(Object.assign(new Error('connector 502'), { status: 502 }));
+
+    const result = await handleAddRecipients(
+      'send-loc', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Failed to create links for new recipients.');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-loc',
+      kind: 'location',
+      reason: 'upstream_5xx',
+      status_code: 502,
+    }));
+  });
+
+  it('quota_exceeded does NOT emit (viral upload is a normal condition, not a page)', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('upstream quota'), { apiCode: 'quota_exceeded' }));
+
+    await handleAddRecipients(
+      'send-quota', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
+    expect(failureCalls).toHaveLength(0);
+  });
+
+  it('mixed send: location failure after file success emits kind=location, not file', async () => {
+    // The activeKind fix. The inner file try/catch returns on its OWN failure,
+    // so by the time the outer catch fires the failure was in the LOCATION
+    // branch. `hasFile ? 'file' : 'location'` would mis-label this as 'file'
+    // because hasFile is still truthy for a mixed sendConfig.
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', actual_url: 'https://maps.example.com/x',
+      location_name: 'Mixed', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    // File branch succeeds...
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/f-1', resource_id: 'res-file-new' }]);
+    // ...location branch fails.
+    mockUploadJsonToConnector.mockRejectedValueOnce(Object.assign(new Error('connector 502'), { status: 502 }));
+
+    await handleAddRecipients(
+      'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-mixed',
+      kind: 'location', // NOT 'file' — pins the activeKind fix
+      reason: 'upstream_5xx',
+      status_code: 502,
+    }));
+  });
+});
+
+// The PRIMARY incident surface: /qurl send itself failing at the upload+mint
+// step (executeSendPipeline's initial-send catch), as opposed to the
+// addRecipients sites above. This site derives `kind` via
+// `kindMap[resourceType] ?? null` — a different mechanism from the
+// activeKind tracking the addRecipients tests pin — so it needs its own
+// coverage. Driven directly through executeSendPipeline with valid params
+// past every entry gate; the mint rejection lands in the catch at the emit.
+describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, primary site)', () => {
+  it('file send: mint failure emits kind=file with the classified reason + status', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('upstream 503'), { status: 503 }));
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      kind: 'file', // kindMap[RESOURCE_TYPES.FILE] — pins the explicit-map (null-on-unknown) behavior
+      reason: 'upstream_5xx',
+      status_code: 503,
+    }));
+  });
+
+  it('file send: quota_exceeded does NOT emit at the primary site either', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('upstream quota'), { apiCode: 'quota_exceeded' }));
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
+    expect(failureCalls).toHaveLength(0);
   });
 });
 
