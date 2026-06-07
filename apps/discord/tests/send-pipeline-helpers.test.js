@@ -581,7 +581,7 @@ describe('qURL client', () => {
         }),
       });
 
-      const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test desc');
+      const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test label');
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
@@ -591,7 +591,9 @@ describe('qURL client', () => {
       expect(body.one_time_use).toBe(true);
       expect(body.target_url).toBe('https://example.com');
       expect(body.expires_in).toBe('24h');
-      expect(body.description).toBe('test desc');
+      // create uses `label`, not `description`
+      expect(body.label).toBe('test label');
+      expect(body.description).toBeUndefined();
 
       expect(result.resource_id).toBe('res-1');
       expect(result.qurl_link).toBe('https://q.test/abc');
