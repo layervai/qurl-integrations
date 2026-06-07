@@ -41,7 +41,7 @@ const POST_TIMEOUT_MS = 8_000;
 function envLabel() {
   const url = process.env.MINT_API_URL ?? '';
   if (!url) return '';
-  return url.includes('layerv.ai') ? 'prod' : 'sandbox';
+  return url.includes('layerv.ai') ? 'prod' : 'non-prod';
 }
 
 // Discord footer text isn't auto-linkified — return the run URL for

@@ -49,7 +49,7 @@ The following stay literal — don't "finish" the rebrand:
 - Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-discord-bot/1.0`)
 - Slash command names (`/qurl file`, `/qurl map`, `/qurl help`) and the CLI binary `qurl`
 - OAuth scope identifiers (`qurl:read`, `qurl:write`, `qurl:resolve`)
-- Domain literals (`qurl.link`, `qurl.site`, `q.layerv.ai`)
+- Domain literals (`qurl.link`, `qurl.site`)
 - Man-page section titles (`QURL(1)` — system-reference convention)
 
 When upstream qurl-service rebrands its API error strings, the test fixtures in this repo that mirror them (`"QURL not found"`, `"QURL API error (...)"`, `"token limit per QURL reached"` etc.) need to update in lockstep — `git grep TODO(upstream-rebrand)` finds the doc-comment markers.
