@@ -3,11 +3,11 @@
 Create, resolve, and manage **qURLs** — secure, time-limited access links — from
 your terminal or a script.
 
-A **qURL** (Quantum URL) wraps a protected resource behind a short-lived,
-policy-bound access link. The resource stays invisible on the network until an
-authorized caller resolves the link, which opens firewall access for that
-caller's IP for a limited window. Links expire on their own and can be revoked
-at any time.
+A **qURL** (Quantum URL) is a secure access link to a protected resource. The
+resource stays invisible on the network until an authorized caller resolves the
+link's access token, which opens firewall access for that caller's IP for a
+limited window. qURLs expire on their own and can be revoked at any time. See
+the [repo README](../../README.md) for the full concept.
 
 ## Install
 
@@ -62,8 +62,9 @@ qurl create https://api.example.com/data --expires 24h
 # List your active qURLs
 qurl list --status active
 
-# Resolve an access token (opens firewall access for your IP)
+# Resolve an access token. Pipe it in to keep the token out of shell history:
 qurl resolve at_k8xqp9h2sj9lx7r4a
+echo "$TOKEN" | qurl resolve
 
 # Revoke a qURL when you're done with it
 qurl delete r_k8xqp9h2sj9 --yes
@@ -101,7 +102,7 @@ Run `qurl <command> --help` for the full flag list. Frequently used flags:
 | `--one-time` | `create` | Single-use token, consumed after the first access |
 | `--max-sessions <n>` | `create` | Cap concurrent sessions (`0` = unlimited) |
 | `-d, --description <s>` | `create`, `update` | Human-readable description |
-| `-b, --by <dur>` | `extend` | Duration to extend by, e.g. `24h` |
+| `-b, --by <dur>` | `extend` | Duration to extend by, e.g. `24h` (required) |
 | `--status <s>` | `list` | Filter by `active`, `expired`, `revoked`, or `consumed` |
 | `-y, --yes` | `delete` | Skip the confirmation prompt |
 
@@ -109,7 +110,7 @@ Run `qurl <command> --help` for the full flag list. Frequently used flags:
 
 | Flag | Description |
 |------|-------------|
-| `--api-key <key>` | API key (prefer `QURL_API_KEY` or config to keep it out of the process list) |
+| `--api-key <key>` | API key (prefer `QURL_API_KEY` or config — see [Authentication](#authentication)) |
 | `--endpoint <url>` | API endpoint (default `https://api.layerv.ai`) |
 | `-o, --output <fmt>` | Output format: `table` (default) or `json` |
 | `-q, --quiet` | Print only the essential value |
@@ -145,6 +146,19 @@ source <(qurl completion zsh)
 ```
 
 Homebrew installs completions and the `qurl(1)` man page automatically.
+
+## Troubleshooting
+
+| Message / symptom | Likely cause | Fix |
+|---|---|---|
+| `API key required: set QURL_API_KEY…` | No API key found in flag, env, or config | `export QURL_API_KEY=lv_live_…` or `qurl config set api_key <key>` |
+| `Error: … (401)` | API key is wrong, revoked, or for another environment | Recheck the key, and confirm `--endpoint` matches where it was issued |
+| `qurl: command not found` | The binary isn't on your `PATH` | Move `qurl` onto your `PATH` (Homebrew does this for you) |
+| You can't see qURLs you created | The CLI is pointed at the wrong environment | Check `--endpoint` / `QURL_ENDPOINT` — production is `https://api.layerv.ai` |
+| `Error: resolve qURL: … (404)` | The token is expired, revoked, or already consumed | Mint a fresh link with `qurl mint <resource-id>` |
+| `Error: … (429)` with a retry hint | Rate limited | Wait the suggested interval, then retry |
+
+Add `--verbose` to any command to see the underlying HTTP request and response.
 
 ## Build from source
 
