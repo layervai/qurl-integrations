@@ -105,7 +105,12 @@ const ackWorkingOnIt = ":hourglass: Working on it…"
 // ackBusy is returned when the bounded async pool is saturated. Surfacing
 // this to the user (rather than silently dropping) makes back-pressure
 // visible and gives them an actionable next step.
-const ackBusy = ":warning: Slack bot is busy — please retry in a moment."
+const ackBusy = ":warning: Secure Access Agent is busy — please retry in a moment."
+
+// modalBusyMsg is the modal-surface counterpart to ackBusy, shown when the
+// async pool is saturated and a modal action can't be served. A single const
+// keeps the wording identical across every modal handler.
+const modalBusyMsg = "Secure Access Agent is busy. Retry in a moment."
 
 const (
 	headerSlackSignature = "X-Slack-Signature"
@@ -1114,7 +1119,7 @@ func setupVerbRest(text string) (rest string, matched bool) {
 // before AdminStore is consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEmail string) {
 	if h.oauthSetup == nil {
-		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -1340,7 +1345,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 	// command is non-empty here (normalized in handleSlashCommand); see
 	// userHelpMessage for why the ReplaceAll below needs a non-empty base.
 	// The verbs are grouped under bold section headers (Protect resources,
-	// Aliases, Manage resources, Bot admins) rather than one flat bullet list —
+	// Aliases, Manage resources, Admins) rather than one flat bullet list —
 	// the admin surface grew long enough that a flat list was hard to scan. Each
 	// section is gated on the same wiring its verbs need at runtime, so an
 	// unwired deploy never renders an empty header; in practice aliasStore and
@@ -1411,7 +1416,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		//   Manage resources — name a resource (set-/unset-display-name set the
 		//     friendly Display Name shown in `/qurl list`) or retire it (revoke
 		//     is resource-scoped via `$<id>`).
-		//   Bot admins — who's allowed to run these commands. Flat membership
+		//   Admins — who's allowed to run these commands. Flat membership
 		//     verbs (no `admin` sub-word); `admins` is the plural-noun roster,
 		//     so it doesn't collide with `/qurl list`.
 		appendSectionHeader("*Manage resources*")
@@ -1420,11 +1425,11 @@ func (h *Handler) adminHelpMessage(command string) string {
 			"• `/qurl-admin unset-display-name $<id>` — Reset a qURL Connector's Display Name to the default",
 			"• `/qurl-admin revoke $<id>` — Revoke a protected resource and all its qURLs",
 		)
-		appendSectionHeader("*Bot admins*")
+		appendSectionHeader("*Admins*")
 		lines = append(lines,
-			"• `/qurl-admin add @user` — Promote a Slack user to bot admin",
-			"• `/qurl-admin remove @user` — Demote a Slack user from bot admin",
-			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current bot admins",
+			"• `/qurl-admin add @user` — Promote a Slack user to admin",
+			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
+			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
 		)
 	}
 	// Always-present anchor: the sections above are all gated on sandbox wiring,

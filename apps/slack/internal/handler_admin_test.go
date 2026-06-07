@@ -679,7 +679,7 @@ func TestAdminHelpGroupsVerbsUnderSections(t *testing.T) {
 		"*Protect resources*",
 		"*Aliases*",
 		"*Manage resources*",
-		"*Bot admins*",
+		"*Admins*",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("admin help missing section header %q:\n%s", want, help)
@@ -700,7 +700,7 @@ func TestAdminHelpOmitsSectionHeadersWhenUnwired(t *testing.T) {
 		"*Protect resources*",
 		"*Aliases*",
 		"*Manage resources*",
-		"*Bot admins*",
+		"*Admins*",
 	} {
 		if strings.Contains(help, absent) {
 			t.Errorf("unwired admin help leaked section header %q:\n%s", absent, help)

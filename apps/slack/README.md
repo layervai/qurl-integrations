@@ -1,210 +1,159 @@
-# qURL Slack Integration
+# qURL for Slack
 
-Slack bot for creating and managing qURLs via slash commands, with per-workspace OAuth setup.
+Share internal resources from Slack as secure, one-time links — without
+leaving the channel. Admins protect a resource once; anyone in the channel
+mints a fresh, expiring link with a single slash command.
 
-User commands live under `/qurl`; admin commands live under a separate
-`/qurl-admin` slash command. Both POST to the same request endpoint and
-share the same signature verification — Slack stamps which command was
-invoked in the `command` field, and the bot dispatches on it. **Deploy
-prerequisite:** `/qurl-admin` must be registered as a slash command in the
-Slack app config pointing at the **same request URL** as `/qurl`. The admin
-verbs are inert until that registration exists. Admin enforcement is
-**in-code** — every admin verb checks the qURL admin set
-(`admin_slack_user_ids`) via `requireAdminSync`, so the AdminStore must be
-wired; the "admins only" restriction on the `/qurl-admin` registration is a
-cosmetic Slack-picker hint, not the enforcement boundary (Slack does not
-gate slash-command invocation on workspace-admin role). `setup` is
-deliberately **not** an admin verb — it
-stays on `/qurl` so the first user to connect an unbound workspace can
-reach it (qURL is first-come-claims); the overwrite guard for an
-already-bound workspace lives at the OAuth-callback bind layer.
+A **qURL** is a one-time-use access link: it works for the first person who
+opens it, then burns. Links also expire on their own, so nothing stays live
+longer than it needs to.
 
-Customer onboarding is install-first:
+## Quickstart
 
-1. Install the qURL Slack app from the install link your operator provided (`https://<SLACK_BASE_URL host>/oauth/slack/install`).
-2. Run `/qurl setup <email>` in Slack.
-3. Use `/qurl-admin protect-connector` or `/qurl get`.
+1. **Install** the qURL app into your workspace from the install link your
+   qURL operator gave you.
+2. **Connect** qURL to the workspace: run `/qurl setup you@company.com` in
+   Slack. The first person to run this becomes the workspace **owner**.
+3. **Protect a resource** (admins): run `/qurl-admin protect` and follow the
+   guided form to expose a service or an existing URL in the current channel.
+4. **Share a link**: anyone in that channel runs `/qurl get $id`
+   to mint a one-time qURL.
 
-## Features
+Run `/qurl help` (or `/qurl-admin help`) any time for the exact commands your
+workspace's Secure Access Agent supports.
 
-### User commands (`/qurl`)
+## Concepts
 
-- `/qurl setup <email>` — Connect qURL to the workspace (one-shot OAuth flow against Auth0; Auth0 starts login with that address prefilled; first-come-claims — the first user to run it becomes the workspace's qURL admin, and only they can re-run it)
-- `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a channel `$alias` (raw URLs are not supported). Channel-scoped: you can only create a qURL for a resource from a channel it's been protected in — including admins, and regardless of knowing the `$id`/`$alias`.
-- `/qurl list` — List the protected resources available **in this channel** (with their bound channel shortcuts). A resource appears only in the channel it was installed in, plus any channels an admin later protects it in via the **Edit** button.
-- `/qurl aliases` — List the qURL shortcuts configured in the current channel
-- `/qurl help` — Show the user command help
+- **Resource** — something you can mint links for. Two kinds: a **qURL
+  Connector** (fronts a service running in your own environment) or a **URL
+  resource** (an existing web URL). Admins create resources with the
+  `/qurl-admin protect…` commands.
+- **`$id`** — a resource's identifier. Pass it to `/qurl get` to mint a link.
+- **Alias** — an alternate name for a resource within a channel. Several
+  aliases can point at one resource. Use an alias anywhere you'd use a `$id`.
+- **Channel scope** — resources are available per channel. A resource shows up
+  only in the channels it's been protected in. `/qurl list`, `/qurl aliases`,
+  and `/qurl get` all agree on what's available in a given channel — including
+  for admins.
+- **Owner & admins** — the owner is whoever first connected qURL to the
+  workspace. Owners and admins can run the `/qurl-admin` commands.
 
-A resource's visibility and availability are the same channel-scoped set: `/qurl list`, `/qurl aliases`, and `/qurl get` all agree on which resources are available in a given channel. Admins manage where a resource reaches with `/qurl-admin protect-connector` (installs into the current channel) and the **Edit** button on a `/qurl list` row (a "Channels" multi-select that makes the resource available in additional channels; the channel it was installed in always keeps access).
+## Commands
 
-### Admin commands (`/qurl-admin`)
+### Everyone — `/qurl`
 
-- `/qurl-admin set-alias $<alias> $<id>` — Point a channel shortcut at a qURL Connector ID (admin-only)
-- `/qurl-admin unset-alias $<alias>` — Remove a channel shortcut binding (admin-only)
-- `/qurl-admin protect-connector` — Guided qURL Connector sidecar setup with target-environment choices (admin-only; uses the workspace bot token stored during Slack app install)
-- `/qurl-admin protect-connector <id|$id> [port:<n>] [alias:$shortcut] [env:<target>] [container:<name>]` — Provision a qURL Connector from a typed command (admin-only; default local port is 8080)
-- `/qurl-admin admin add @user` / `remove @user` / `list` — Manage the workspace's bot admins (admin-only)
-- `/qurl-admin admin revoke <qurl_id>` — Revoke a single qURL (admin-only)
-- `/qurl-admin help` — Show the admin command help
-- Link unfurling for `qurl.link` URLs (planned)
-- Channel notifications on qURL events (planned)
+| Command | What it does |
+|---------|--------------|
+| `/qurl setup <email>` | Connect qURL to your workspace. The first person to run it becomes the owner and is the only one who can re-run it. |
+| `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
+| `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
+| `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
+| `/qurl list` | List the resources available to you in this channel. |
+| `/qurl aliases` | List this channel's aliases and the resource each one points to. |
+| `/qurl feedback` | Send a bug report or feature request to the qURL team. |
+| `/qurl help` | Show the user command help. |
 
-Run `/qurl help` (or `/qurl-admin help`) in Slack for the canonical command
-modifiers enabled by the current bot deployment.
+### Admins — `/qurl-admin`
 
-## Architecture
+Admin commands live under a separate `/qurl-admin` slash command. They're
+enforced by the Secure Access Agent: only the owner and admins can run them.
 
-- **Runtime:** AWS Fargate (arm64, distroless container) behind an
-  ALB that terminates TLS and routes `/slack/*`, `/oauth/slack/*`,
-  `/oauth/qurl/*`, and `/health`.
-- **Auth:** Per-workspace qURL API key, established via `/qurl setup <email>` →
-  `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying
-  an email address on setup stores it in signed state, sends Auth0
-  `login_hint`, and requires the verified Auth0 email claim to match before any
-  workspace bind or key mint. By default the bot does not force an Auth0
-  `connection`; the Auth0 application and tenant-level Actions own the login
-  method and the cross-connection uniqueness policy. Prefer passwordless on the
-  existing database connection when available, or enforce account-linking /
-  duplicate-deny behavior before enabling a separate passwordless `email`
-  connection for the same audience. `AUTH0_EMAIL_CONNECTION` is an optional
-  recovery override when a deployment must force a specific connection. The
-  callback's security gate is the verified email claim, not the connection hint
-  by itself. If a workspace already has a qURL API key and qurl-service still
-  accepts it, setup reuses that key instead of minting another one; missing or
-  revoked stored keys mint a replacement. Rerunning setup is intentionally not
-  a healthy-key rotation or qURL-account switch command; revoke the workspace
-  key from qURL's API-key management/dashboard or operator tooling first, then
-  rerun setup to mint a replacement under the newly authenticated account. Keys
-  are field-level encrypted in the `workspace_state` DynamoDB table using KMS
-  envelope encryption with `workspace_id` bound as AAD.
-- **Slack app install:** Customer workspaces install qURL through
-  `/oauth/slack/install`, which redirects to Slack OAuth with the bot scopes
-  needed by the slash command and modal surfaces. The callback stores Slack's
-  workspace bot token in `workspace_state` using the same KMS envelope
-  encryption posture as qURL API keys. `SLACK_BOT_TOKEN` is only a legacy
-  single-workspace fallback; customers do not manually provide bot tokens, and
-  production guided setup should use the per-workspace token captured by Slack
-  install OAuth. Enterprise Grid org-level installs are also supported: the
-  enterprise-scoped bot token is stored under the Slack `enterprise_id`, while
-  qURL API keys and admin state remain scoped to each invoking workspace's
-  `team_id`.
-- **Connector onboarding:** `/qurl-admin protect-connector` opens a Slack modal with the
-  bot token for the invoking workspace, letting an admin choose the qURL Connector
-  ID, optional channel shortcut, local port, and target environment
-  (Docker, Docker Compose, ECS/Fargate, or Kubernetes). `/qurl-admin protect-connector <id>` (or
-  `$id`) remains available for CLI-style admins. Both paths use the
-  workspace API key to find-or-create a qURL Connector resource scoped to the
-  connected qURL account, bind `$<id>` or the `alias:` shortcut override in
-  the current Slack channel, and mint a one-hour bootstrap API
-  key. When `alias:` is omitted, the ID doubles as the channel shortcut.
-  Retrying the install within the modal's 25-minute validity window reuses
-  the same bootstrap-key idempotency bucket. Retrying after that window can
-  mint a new key, so operators should run the newest Slack install block and
-  discard older bootstrap-key messages.
-  The Slack response hides the internal resource id and renders output
-  tailored to the selected environment. Docker and Docker Compose receive
-  guarded pasteable shell blocks that write `qurl-proxy.yaml`, create a
-  bootstrap-key file, create/chown per-connector durable agent state, pass
-  `QURL_API_KEY_FILE`, and pass `QURL_CONNECTOR_ID=<id>` to the client.
-  ECS/Fargate and Kubernetes receive the same contract as deployment
-  snippets: co-locate the sidecar with the target container, mount durable
-  per-instance state at `/var/lib/layerv/agent`, mount or inject the
-  bootstrap key through the runtime's secret mechanism, and remove the key
-  after the logs show a successful connection. ECS/Fargate uses the
-  client's supported `QURL_API_KEY` fallback because AWS injects task secrets
-  as environment variables; Docker, Docker Compose, and Kubernetes prefer
-  `QURL_API_KEY_FILE`. Do not share one agent state volume across
-  concurrently running sidecars.
-- **Endpoints:**
-  - `POST /slack/commands` — Slash command handler (ack-then-async)
-  - `POST /slack/events` — Event subscriptions (link unfurling planned)
-  - `POST /slack/interactions` — Interactive components and modals
-  - `GET /oauth/slack/install` — Begin Slack app install; redirects to Slack OAuth
-  - `GET /oauth/slack/callback` — Slack OAuth redirect target; encrypts + persists workspace bot token
-  - `GET /oauth/qurl/start` — Begin OAuth flow (state token required)
-  - `GET /oauth/qurl/callback` — Auth0 redirect target; mints + persists key
-  - `GET /health` — ALB target-group health probe
+Most setup runs through `/qurl-admin protect`, a guided picker. The typed
+command variants below it are for power users and scripting.
 
-## Development
+**Protect resources**
 
-```bash
-# Run tests
-go test -race -count=1 ./apps/slack/...
+| Command | What it does |
+|---------|--------------|
+| `/qurl-admin protect` | Guided picker — choose **qURL Connector** or **URL**, then fill in a short form. The recommended starting point. |
+| `/qurl-admin protect-connector` | Guided setup for a qURL Connector; opens a form and returns copy-paste deploy steps. |
+| `/qurl-admin protect-connector <id> [env:…] [port:8080] [alias:$alias]` | Typed connector setup for power users. |
+| `/qurl-admin protect-url` | Guided setup to protect an existing URL resource. |
+| `/qurl-admin protect-url $<alias> [as:$channel-alias]` | Typed: protect a URL resource that **already has an alias** in this channel. |
+| `/qurl-admin protect-url url:<target-url> as:$channel-alias` | Typed: protect a URL that **has no alias yet** by its target URL. |
 
-# Run locally — requires AWS creds with read/write on the
-# workspace_state table and KMS Decrypt/GenerateDataKey on the CMK.
-WORKSPACE_STATE_TABLE=workspace-state-dev \
-WORKSPACE_STATE_KMS_KEY_ARN=arn:aws:kms:us-east-1:...:key/... \
-SLACK_SIGNING_SECRET=... \
-SLACK_CLIENT_ID=... \
-SLACK_CLIENT_SECRET=... \
-QURL_ENDPOINT=https://api.layerv.xyz \
-AUTH0_DOMAIN=layerv.us.auth0.com \
-AUTH0_CLIENT_ID=... \
-AUTH0_CLIENT_SECRET=... \
-AUTH0_AUDIENCE=https://api.layerv.xyz \
-SLACK_BASE_URL=https://slack-bot.example \
-OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
-  go run ./apps/slack/cmd/
+**Aliases**
 
-# Build the production container (linux/arm64 to match Fargate)
-docker buildx build --platform linux/arm64 \
-  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
-```
+| Command | What it does |
+|---------|--------------|
+| `/qurl-admin set-alias $<alias> $<id>` | Point an alias at a resource in this channel. |
+| `/qurl-admin unset-alias $<alias>` | Remove an alias from this channel. |
 
-## Environment Variables
+**Manage resources**
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
-| `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
-| `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
-| `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands` (the captured token is used only for `views.open`, which requires no scope); any override must still include `commands`. |
-| `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
-| `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
-| `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
-| `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |
-| `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
-| `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the bot |
-| `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
-| `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
-| `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
-| `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
-| `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
-| `QURL_CONNECTOR_IMAGE` | No | Docker image reference rendered by `/qurl-admin protect-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-connector:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
-| `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
+| Command | What it does |
+|---------|--------------|
+| `/qurl-admin set-display-name $<id> <name>` | Set the friendly name shown in `/qurl list`. |
+| `/qurl-admin unset-display-name $<id>` | Reset a resource's display name to the default. |
+| `/qurl-admin revoke $<id>` | Revoke a protected resource and all of its qURLs. |
 
-`WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
-unconditionally required at startup — the bot needs DDB+KMS for
-per-workspace key lookups even on `/qurl get`/`/qurl list`.
+**Admins**
 
-The `Slack install` group is required for low-friction customer onboarding.
-Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
-fallback, but customers cannot self-install the bot.
+| Command | What it does |
+|---------|--------------|
+| `/qurl-admin add @user` | Promote a Slack user to admin. |
+| `/qurl-admin remove @user` | Demote a Slack user from admin. |
+| `/qurl-admin admins` | List the owner and the current admins. |
+| `/qurl-admin help` | Show the admin command help. |
 
-The `OAuth` group is required only when the bot needs to serve the
-`/oauth/qurl/{start,callback}` surface. Boots without these vars still
-serve `/slack/*` and `/health`; `/qurl setup <email>` replies "OAuth is not
-configured" until the OAuth env vars are populated.
+## Protecting a resource
 
-For customer Slack installs, configure the Slack app with:
+`/qurl-admin protect` is the guided entry point. It asks whether you're
+exposing a **qURL Connector** or an existing **URL**, then walks you through a
+short form. Both make the resource available **in the current channel** — to
+reach more channels, use the **Edit** button on the resource's `/qurl list`
+row and pick additional channels.
 
-- OAuth redirect URL: `https://<SLACK_BASE_URL host>/oauth/slack/callback`
-- Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
-- Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
-- Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: `commands` (the captured token is used only for `views.open`, which requires no scope of its own)
-- Installation mode: workspace-level installs or Enterprise Grid org-level
-  installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
-  workspace setup and admin checks still use workspace `team_id`.
-- Token posture: non-rotating bot tokens. The validator accepts `xoxe.xoxb-`
-  shapes defensively, but qURL does not request or persist Slack refresh tokens
-  yet, so rotation-enabled apps need refresh support before production use.
+**qURL Connector** — for a service that runs in your own environment. The
+guided form asks for the connector ID, an optional channel alias, the local
+port, and where you'll run it (Docker, Docker Compose, ECS/Fargate, or
+Kubernetes). qURL replies with copy-paste deploy steps tailored to that
+choice, plus a short-lived bootstrap key. Remove the bootstrap key from your
+environment once the connector logs show it has connected.
 
-With per-workspace token storage in place, existing customer workspaces must
-reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
-token. New installs through `/oauth/slack/install` store that token
-automatically, and guided `/qurl-admin protect-connector` uses it for `views.open`
-(which requires no scope). If Slack tells a customer guided connector setup needs
-the latest qURL Slack app install, send them through this reinstall link.
+**URL resource** — for an existing web URL. Point an alias at it and it's
+immediately available for `/qurl get` in the channel.
+
+## Sharing a link
+
+`/qurl get $id` mints a one-time qURL link for any resource available in the
+current channel (pass a resource `$id` or a channel `$alias`). The reply
+includes how long the link stays valid. Every link is single-use: it burns on
+first open. Add `dm:true` to receive the link privately, or `reason:"…"` to
+note why you minted it in the audit log.
+
+## FAQ
+
+**"qURL isn't connected to this workspace yet."** Someone needs to run
+`/qurl setup <email>` first. The first person to do so becomes the owner.
+
+**I can't re-run `/qurl setup`.** Only the owner — the person who first
+connected qURL — can re-run setup. This stops the workspace from being
+re-pointed at a different qURL account. Ask the owner, or use the
+`/qurl-admin` commands for everyday admin tasks.
+
+**A resource I expected isn't in `/qurl list`.** Resources are channel-scoped.
+Run the command in the channel where the resource was protected, or ask an
+admin to add this channel via the **Edit** button on the resource's
+`/qurl list` row.
+
+**`/qurl-admin` says I'm not allowed.** Admin commands are limited to the
+owner and admins. Ask the owner to add you with `/qurl-admin add @you`.
+
+**Guided connector setup says it needs the latest app install.** Ask a
+workspace admin to open the qURL install link your operator provided to
+reinstall the app, then run `/qurl-admin protect-connector` again.
+
+**Some commands aren't in `/qurl help`.** Help only lists what your
+workspace's Secure Access Agent deployment has enabled. Run `/qurl help` or
+`/qurl-admin help` for the authoritative list.
+
+## Self-hosting
+
+Running the Secure Access Agent yourself? See [docs/operating.md](docs/operating.md) for
+endpoints, environment variables, Slack app configuration, and local
+development.
+
+## License
+
+[MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.

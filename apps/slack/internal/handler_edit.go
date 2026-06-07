@@ -180,7 +180,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 
 // handleTunnelEditSubmission processes the Edit modal's view_submission: it
 // validates the submitted Display Name + alias lines, re-checks that the
-// submitter is still a qURL bot admin (the real mutation gate), then applies
+// submitter is still a qURL admin (the real mutation gate), then applies
 // the changes asynchronously and posts the result to the list message's
 // response_url. Mirrors handleTunnelInstallSubmission's posture: per-field
 // validation surfaces inline (response_action:errors); structural/auth
@@ -211,7 +211,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		return
 	}
 	if h.cfg.AdminStore == nil || h.aliasStore == nil {
-		respondTunnelEditModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		respondTunnelEditModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases, desiredChannels)
 	}) {
-		respondTunnelEditModalError(w, "Slack bot is busy. Retry in a moment.")
+		respondTunnelEditModalError(w, modalBusyMsg)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})

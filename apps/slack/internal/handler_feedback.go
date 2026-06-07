@@ -141,7 +141,7 @@ func (h *Handler) handleFeedbackSubmission(w http.ResponseWriter, payload *inter
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		h.processFeedback(ctx, log, &meta, args)
 	}) {
-		respondFeedbackModalError(w, "qURL bot is busy. Try again in a moment.")
+		respondFeedbackModalError(w, modalBusyMsg)
 		return
 	}
 	// Empty 200 closes the modal; the async worker confirms receipt (or reports

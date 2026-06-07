@@ -256,7 +256,7 @@ func (h *Handler) aliasValidate(w http.ResponseWriter, values url.Values, verb s
 		// rather than silently dropping makes the bot's state
 		// debuggable from the operator side.
 		slog.Warn("alias verb invoked with no AliasStore wired — refusing", "verb", verb)
-		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Alias storage is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
 	ok = true

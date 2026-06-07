@@ -56,14 +56,14 @@ type AdminAction string
 
 // Recognized admin actions.
 const (
-	// AdminAdd promotes a Slack user to bot admin. The argument is the
+	// AdminAdd promotes a Slack user to admin. The argument is the
 	// Slack `<@U12345>` mention syntax; the parsed user ID lands on
 	// [Command.UserID].
 	AdminAdd AdminAction = "add"
-	// AdminRemove demotes a Slack user from bot admin. Same mention-
+	// AdminRemove demotes a Slack user from admin. Same mention-
 	// argument shape as [AdminAdd].
 	AdminRemove AdminAction = "remove"
-	// AdminList lists the workspace owner and current bot admins.
+	// AdminList lists the workspace owner and current admins.
 	// No positional arguments.
 	AdminList AdminAction = "list"
 )

@@ -157,7 +157,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 	return true
 }
 
-// handleAdminAdd promotes the target Slack user to bot admin on the
+// handleAdminAdd promotes the target Slack user to admin on the
 // caller's workspace. The caller must already be an admin
 // (requireAdminSync). The store call is a single conditional
 // UpdateItem on workspace_mappings; a CCFE folds into one of two
@@ -217,10 +217,10 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 		return
 	}
 	slog.Info("admin add succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
-	respondSlack(w, fmt.Sprintf("Added <@%s> as a bot admin.", target))
+	respondSlack(w, fmt.Sprintf("Added <@%s> as an admin.", target))
 }
 
-// handleAdminRemove demotes the target Slack user from bot admin on
+// handleAdminRemove demotes the target Slack user from admin on
 // the caller's workspace. Pre-flight rejects a self-remove with a
 // clear "ask another admin" copy so a fat-fingered admin doesn't
 // accidentally lock themselves out (the store-side owner check
@@ -271,7 +271,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 		return
 	}
 	slog.Info("admin remove succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
-	respondSlack(w, fmt.Sprintf("Removed <@%s> from bot admins.", target))
+	respondSlack(w, fmt.Sprintf("Removed <@%s> from admins.", target))
 }
 
 // handleAdminList renders the workspace owner + the sorted admin set

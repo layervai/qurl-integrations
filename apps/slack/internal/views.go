@@ -40,7 +40,7 @@ const listCreateQurlActionID = "list_create_qurl"
 
 // listEditTunnelActionID is the action_id on the admin-only "Edit" button
 // rendered alongside "Create qURL" on each `/qurl list` row when the caller is
-// a qURL bot admin (and the modal/alias/admin wiring is present). The
+// a qURL admin (and the modal/alias/admin wiring is present). The
 // block_actions handler matches on it to open the [TunnelEditModal]
 // pre-filled from the button's value snapshot. Like listCreateQurlActionID it
 // is reused across rows — the clicked tunnel is identified by the button's

@@ -251,11 +251,11 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		return
 	}
 	if h.cfg.AdminStore == nil {
-		respondTunnelInstallModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		respondTunnelInstallModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
 		return
 	}
 	if h.aliasStore == nil {
-		respondTunnelInstallModalError(w, "Channel alias storage is not configured on this Slack bot deployment.")
+		respondTunnelInstallModalError(w, "Channel alias storage is not configured on this Secure Access Agent deployment.")
 		return
 	}
 
@@ -288,7 +288,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		h.processTunnelInstall(ctx, log, meta.TeamID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, setupStartedAt)
 	}) {
-		respondTunnelInstallModalError(w, "Slack bot is busy. Retry in a moment.")
+		respondTunnelInstallModalError(w, modalBusyMsg)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
