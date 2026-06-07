@@ -38,6 +38,10 @@ scope: slack | teams | discord | cli | zapier | chrome-extension | shared | ci
 
 The product brand is **`qURL`** (case-sensitive: lowercase `q`, uppercase `URL`). Use `qURL` in user-visible prose, log/error messages, doc comments, README content, and anything a human reads.
 
+**Trademark:** mark the first singular mention in a human-readable document (README intro, package description, etc.) as `qURL™`, then use plain `qURL` for the rest. Don't put `™` on a heading or on the plural `qURLs`. This matches the SDKs, the MCP server, and the root README.
+
+**Never "firewall":** LayerV is not a firewall company — don't describe qURL's mechanism in firewall terms. Resolving a token's NHP knock **grants network access** to the caller's IP; use "grant network access" / "grants access", never "open(s) firewall". (Applies to prose, doc comments, and user-visible strings, not wire-protocol identifiers.)
+
 The following stay literal — don't "finish" the rebrand:
 - Go identifiers: types/structs/funcs (`QURL`, `QURLClient`, `Qurl`, `CreateQurlRequest`, `QURLLink`)
 - Env vars (`QURL_API_KEY`, `QURL_ENDPOINT`, `QURL_BASE_URL`, `QURL_TIMEOUT`)
