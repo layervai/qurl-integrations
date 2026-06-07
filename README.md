@@ -40,7 +40,7 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 
 The Slack, Discord, and CLI apps connect to the qURL API:
 
-- **Endpoint** — set via `QURL_ENDPOINT`: production `https://api.layerv.ai`, sandbox `https://api.layerv.xyz`.
+- **Endpoint** — `QURL_ENDPOINT`: production `https://api.layerv.ai`, sandbox `https://api.layerv.xyz`. Slack requires it; the CLI and Discord default to production.
 - **Authentication** — an API key in `QURL_API_KEY`: `lv_live_…` (production) or `lv_test_…` (sandbox).
 
 The Chrome extension uploads to a qURL file server instead; see its [README](apps/chrome-extension/README.md) for configuration.
