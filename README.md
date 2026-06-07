@@ -4,7 +4,7 @@
 
 Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that make protected resources invisible by default.
 
-qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
 This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries used by the Go apps. Microsoft Teams and Zapier are planned.
 
@@ -26,14 +26,15 @@ shared/              Shared Go libraries used by the Go apps
   observability/     OpenTelemetry setup
 ```
 
-## SDKs (separate repos)
+## SDKs & MCP server (separate repos)
 
-Language-specific SDKs have been extracted into standalone repositories:
+Language SDKs and the qURL MCP server live in standalone repositories:
 
-| SDK | Package | Repo |
-|-----|---------|------|
-| Python | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
-| TypeScript | `npm install @layervai/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
+| Library | Install | Repo |
+|---------|---------|------|
+| Python SDK | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
+| TypeScript SDK | `npm install @layervai/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
+| MCP server | `npx @layervai/qurl-mcp` | [layervai/qurl-mcp](https://github.com/layervai/qurl-mcp) |
 
 ## Configuration
 
