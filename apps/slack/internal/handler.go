@@ -1411,7 +1411,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		//   Manage resources — name a resource (set-/unset-display-name set the
 		//     friendly Display Name shown in `/qurl list`) or retire it (revoke
 		//     is resource-scoped via `$<id>`).
-		//   Bot admins — who's allowed to run these commands. Flat membership
+		//   Admins — who's allowed to run these commands. Flat membership
 		//     verbs (no `admin` sub-word); `admins` is the plural-noun roster,
 		//     so it doesn't collide with `/qurl list`.
 		appendSectionHeader("*Manage resources*")
