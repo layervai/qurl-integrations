@@ -25,7 +25,8 @@ The extension supports two qURL server configuration paths:
 To change the build-time default:
 
 1. Copy `.env.example` to `.env`.
-2. Set `QURL_API_BASE=https://your-qurl-server.com`.
+2. Set `QURL_API_BASE=https://your-qurl-server.com` (the value must start with
+   `https://`).
 3. Rebuild with `npm run release` or `npm run package:release`.
 
 `QURL_API_BASE` is applied only by the build scripts. The extension runtime does not read `.env` directly.
