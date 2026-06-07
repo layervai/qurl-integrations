@@ -1083,7 +1083,7 @@ type ResolveOutput struct {
 	AccessGrant *AccessGrant `json:"access_grant,omitempty"`
 }
 
-// AccessGrant describes the firewall access that was granted.
+// AccessGrant describes the network access that was granted.
 type AccessGrant struct {
 	ExpiresIn int    `json:"expires_in"`
 	GrantedAt string `json:"granted_at"`
@@ -1091,7 +1091,7 @@ type AccessGrant struct {
 }
 
 // Resolve resolves a qURL access token, triggering a network access request
-// to open the firewall for the caller's IP.
+// to grant access for the caller's IP.
 func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
 	body, err := json.Marshal(input)
 	if err != nil {

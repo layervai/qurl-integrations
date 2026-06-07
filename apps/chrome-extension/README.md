@@ -2,7 +2,7 @@
 
 Upload files straight from Gmail's compose window and drop secure, expiring
 links into your draft — no need to attach them to the email itself. Your
-files go to qURL, and only a short link travels in the message.
+files go to qURL™, and only a short link travels in the message.
 
 A **qURL** is a secure access link to an uploaded file. Links carry an
 expiry, so a file you share today won't stay reachable forever.
