@@ -105,7 +105,7 @@ const ackWorkingOnIt = ":hourglass: Working on it…"
 // ackBusy is returned when the bounded async pool is saturated. Surfacing
 // this to the user (rather than silently dropping) makes back-pressure
 // visible and gives them an actionable next step.
-const ackBusy = ":warning: Slack bot is busy — please retry in a moment."
+const ackBusy = ":warning: Secure Access Agent is busy — please retry in a moment."
 
 const (
 	headerSlackSignature = "X-Slack-Signature"
@@ -1114,7 +1114,7 @@ func setupVerbRest(text string) (rest string, matched bool) {
 // before AdminStore is consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEmail string) {
 	if h.oauthSetup == nil {
-		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -1420,11 +1420,11 @@ func (h *Handler) adminHelpMessage(command string) string {
 			"• `/qurl-admin unset-display-name $<id>` — Reset a qURL Connector's Display Name to the default",
 			"• `/qurl-admin revoke $<id>` — Revoke a protected resource and all its qURLs",
 		)
-		appendSectionHeader("*Bot admins*")
+		appendSectionHeader("*Admins*")
 		lines = append(lines,
-			"• `/qurl-admin add @user` — Promote a Slack user to bot admin",
-			"• `/qurl-admin remove @user` — Demote a Slack user from bot admin",
-			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current bot admins",
+			"• `/qurl-admin add @user` — Promote a Slack user to admin",
+			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
+			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
 		)
 	}
 	// Always-present anchor: the sections above are all gated on sandbox wiring,

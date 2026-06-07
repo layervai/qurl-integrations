@@ -217,7 +217,7 @@ func (h *Handler) handleAdminAdd(w http.ResponseWriter, teamID, callerUserID str
 		return
 	}
 	slog.Info("admin add succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
-	respondSlack(w, fmt.Sprintf("Added <@%s> as a bot admin.", target))
+	respondSlack(w, fmt.Sprintf("Added <@%s> as an admin.", target))
 }
 
 // handleAdminRemove demotes the target Slack user from bot admin on
@@ -271,7 +271,7 @@ func (h *Handler) handleAdminRemove(w http.ResponseWriter, teamID, callerUserID 
 		return
 	}
 	slog.Info("admin remove succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
-	respondSlack(w, fmt.Sprintf("Removed <@%s> from bot admins.", target))
+	respondSlack(w, fmt.Sprintf("Removed <@%s> from admins.", target))
 }
 
 // handleAdminList renders the workspace owner + the sorted admin set

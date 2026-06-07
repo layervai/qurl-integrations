@@ -1,6 +1,6 @@
-# Operating the qURL Slack bot
+# Operating the qURL Secure Access Agent for Slack
 
-This guide is for operators **running the bot themselves** — endpoints,
+This guide is for operators **running the Secure Access Agent themselves** — endpoints,
 environment variables, Slack app configuration, and local development. If
 you're a Slack user or workspace admin, you want the
 [README](../README.md) instead.
@@ -10,7 +10,7 @@ you're a Slack user or workspace admin, you want the
 User commands live under `/qurl`; admin commands live under a separate
 `/qurl-admin` slash command. Both POST to the same request endpoint and share
 the same signature verification — Slack stamps which command was invoked in
-the `command` field, and the bot dispatches on it.
+the `command` field, and the Secure Access Agent dispatches on it.
 
 **Deploy prerequisite:** `/qurl-admin` must be registered as a slash command
 in the Slack app config pointing at the **same request URL** as `/qurl`. The
@@ -36,7 +36,7 @@ at the OAuth-callback bind layer.
   → `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying an email
   address on setup stores it in signed state, sends Auth0 `login_hint`, and
   requires the verified Auth0 email claim to match before any workspace bind
-  or key mint. By default the bot does not force an Auth0 `connection`; the
+  or key mint. By default the Secure Access Agent does not force an Auth0 `connection`; the
   Auth0 application and tenant-level Actions own the login method and the
   cross-connection uniqueness policy. Prefer passwordless on the existing
   database connection when available, or enforce account-linking /
@@ -149,25 +149,25 @@ docker buildx build --platform linux/arm64 \
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
-| `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the bot |
+| `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the Secure Access Agent |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
-| `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the bot, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
+| `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_CONNECTOR_IMAGE` | No | Container image reference rendered by `/qurl-admin protect-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-connector:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
-| `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
+| `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are unconditionally
-required at startup — the bot needs DynamoDB + KMS for per-workspace key
+required at startup — the Secure Access Agent needs DynamoDB + KMS for per-workspace key
 lookups even on `/qurl get` / `/qurl list`.
 
 The `Slack install` group is required for low-friction customer onboarding.
 Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
-fallback, but customers cannot self-install the bot.
+fallback, but customers cannot self-install the Secure Access Agent.
 
 The `OAuth` group is required only to serve the
-`/oauth/qurl/{start,callback}` surface. Without it the bot still serves
+`/oauth/qurl/{start,callback}` surface. Without it the Secure Access Agent still serves
 `/slack/*` and `/health`; `/qurl setup <email>` replies "OAuth is not
 configured" until the OAuth env vars are set.
 

@@ -20,7 +20,7 @@ longer than it needs to.
    to mint a one-time qURL.
 
 Run `/qurl help` (or `/qurl-admin help`) any time for the exact commands your
-workspace's bot supports.
+workspace's Secure Access Agent supports.
 
 ## Concepts
 
@@ -36,7 +36,7 @@ workspace's bot supports.
   and `/qurl get` all agree on what's available in a given channel — including
   for admins.
 - **Owner & admins** — the owner is whoever first connected qURL to the
-  workspace. Owners and bot admins can run the `/qurl-admin` commands.
+  workspace. Owners and admins can run the `/qurl-admin` commands.
 
 ## Commands
 
@@ -56,7 +56,7 @@ workspace's bot supports.
 ### Admins — `/qurl-admin`
 
 Admin commands live under a separate `/qurl-admin` slash command. They're
-enforced by the bot: only the owner and bot admins can run them.
+enforced by the Secure Access Agent: only the owner and admins can run them.
 
 Most setup runs through `/qurl-admin protect`, a guided picker. The typed
 command variants below it are for power users and scripting.
@@ -87,13 +87,13 @@ command variants below it are for power users and scripting.
 | `/qurl-admin unset-display-name $<id>` | Reset a resource's display name to the default. |
 | `/qurl-admin revoke $<id>` | Revoke a protected resource and all of its qURLs. |
 
-**Bot admins**
+**Admins**
 
 | Command | What it does |
 |---------|--------------|
-| `/qurl-admin add @user` | Promote a Slack user to bot admin. |
-| `/qurl-admin remove @user` | Demote a Slack user from bot admin. |
-| `/qurl-admin admins` | List the owner and the current bot admins. |
+| `/qurl-admin add @user` | Promote a Slack user to admin. |
+| `/qurl-admin remove @user` | Demote a Slack user from admin. |
+| `/qurl-admin admins` | List the owner and the current admins. |
 | `/qurl-admin help` | Show the admin command help. |
 
 ## Protecting a resource
@@ -138,19 +138,19 @@ admin to add this channel via the **Edit** button on the resource's
 `/qurl list` row.
 
 **`/qurl-admin` says I'm not allowed.** Admin commands are limited to the
-owner and bot admins. Ask the owner to add you with `/qurl-admin add @you`.
+owner and admins. Ask the owner to add you with `/qurl-admin add @you`.
 
 **Guided connector setup says it needs the latest app install.** Ask a
 workspace admin to open the qURL install link your operator provided to
 reinstall the app, then run `/qurl-admin protect-connector` again.
 
 **Some commands aren't in `/qurl help`.** Help only lists what your
-workspace's bot deployment has enabled. Run `/qurl help` or
+workspace's Secure Access Agent deployment has enabled. Run `/qurl help` or
 `/qurl-admin help` for the authoritative list.
 
 ## Self-hosting
 
-Running the bot yourself? See [docs/operating.md](docs/operating.md) for
+Running the Secure Access Agent yourself? See [docs/operating.md](docs/operating.md) for
 endpoints, environment variables, Slack app configuration, and local
 development.
 

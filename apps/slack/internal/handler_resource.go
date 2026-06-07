@@ -137,11 +137,11 @@ func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values
 		return
 	}
 	if h.aliasStore == nil {
-		respondSlack(w, "Channel alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Channel alias storage is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin protect-url $<alias>` instead.")
+		respondSlack(w, "Guided setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-url $<alias>` instead.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))

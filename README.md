@@ -12,7 +12,7 @@ This monorepo contains Go-based platform integrations (Slack, Teams, Discord), a
 
 ```
 apps/           Per-integration applications (independent release tracks)
-  slack/        Slack bot — slash commands, link unfurling, notifications
+  slack/        Slack Secure Access Agent — slash commands, link unfurling, notifications
   cli/          CLI tool for qURL
   teams/        Microsoft Teams (planned)
   discord/      Discord bot (planned)
@@ -46,7 +46,7 @@ anyone runs `/qurl get` to mint a one-time link.
 
 See [apps/slack/README.md](apps/slack/README.md) for the full command reference
 and onboarding walkthrough, and [apps/slack/docs/operating.md](apps/slack/docs/operating.md)
-for deploying and operating the bot.
+for deploying and operating the Secure Access Agent.
 
 ## Development
 

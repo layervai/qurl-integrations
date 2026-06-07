@@ -306,7 +306,7 @@ func run() error {
 		close(shutdownDone)
 	}()
 
-	slog.Info("starting Slack bot HTTP server", "addr", listenAddr)
+	slog.Info("starting Secure Access Agent HTTP server", "addr", listenAddr)
 	serveErr := srv.Serve(ln)
 
 	// Always release the signal handler and wait for the drain goroutine

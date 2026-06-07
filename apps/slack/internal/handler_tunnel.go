@@ -238,7 +238,7 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 		return
 	}
 	if h.aliasStore == nil {
-		respondSlack(w, "Channel alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Channel alias storage is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -274,11 +274,11 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 		return
 	}
 	if h.aliasStore == nil {
-		respondSlack(w, "Channel alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		respondSlack(w, "Channel alias storage is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided qURL Connector setup is not configured on this Slack bot deployment. Use `/qurl-admin protect-connector <id> [port:8080]` instead.")
+		respondSlack(w, "Guided qURL Connector setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-connector <id> [port:8080]` instead.")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))

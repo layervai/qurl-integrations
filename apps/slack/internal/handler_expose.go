@@ -33,7 +33,7 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if h.cfg.OpenView == nil {
-		respondSlack(w, "Guided setup is not configured on this Slack bot deployment. Use `/qurl-admin protect-connector <id>` or `/qurl-admin protect-url $<alias>` instead.")
+		respondSlack(w, "Guided setup is not configured on this Secure Access Agent deployment. Use `/qurl-admin protect-connector <id>` or `/qurl-admin protect-url $<alias>` instead.")
 		return
 	}
 	if !h.requireAliasAdminGate(w, teamID, values, AdminActionExpose) {
@@ -277,7 +277,7 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *inte
 		return
 	}
 	if h.cfg.AdminStore == nil || h.aliasStore == nil {
-		respondExposeURLModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		respondExposeURLModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
 		return
 	}
 
@@ -315,7 +315,7 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *inte
 		msg := h.bindURLResourceToChannel(ctx, log, meta.TeamID, meta.ChannelID, channelAlias, resourceID)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
-		respondExposeURLModalError(w, "Slack bot is busy. Retry in a moment.")
+		respondExposeURLModalError(w, "Secure Access Agent is busy. Retry in a moment.")
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
@@ -380,7 +380,7 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 		return
 	}
 	if h.cfg.AdminStore == nil || h.aliasStore == nil {
-		respondExposeURLModalError(w, "Admin features are not configured on this Slack bot deployment.")
+		respondExposeURLModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
 		return
 	}
 
@@ -415,7 +415,7 @@ func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload
 		msg := h.createAndExposeURLResource(ctx, log, meta.TeamID, meta.ChannelID, args)
 		_ = h.postResponse(log, meta.ResponseURL, msg)
 	}) {
-		respondExposeURLModalError(w, "Slack bot is busy. Retry in a moment.")
+		respondExposeURLModalError(w, "Secure Access Agent is busy. Retry in a moment.")
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})
