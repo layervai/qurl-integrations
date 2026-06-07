@@ -18,7 +18,7 @@ apps/                Per-integration apps (independent release tracks)
   cli/               CLI — create & manage qURLs from the terminal (Go)
   teams/             Microsoft Teams (planned)
   zapier/            Zapier integration (planned)
-shared/              Shared Go libraries used by the Go apps (slack, cli)
+shared/              Shared Go libraries used by the Go apps
   client/            qURL API client
   auth/              API key helpers
   events/            Webhook event parsing
@@ -37,7 +37,7 @@ Language-specific SDKs have been extracted into standalone repositories:
 
 ## Configuration
 
-The Slack, Discord, and CLI apps connect to the qURL API. The endpoint is set via the `QURL_ENDPOINT` environment variable — the production host is `https://api.layerv.ai` (`https://api.layerv.xyz` is the sandbox) — and authentication uses an API key (`lv_live_…`) supplied via `QURL_API_KEY`. The Chrome extension uploads to a qURL file server instead; see its [README](apps/chrome-extension/README.md) for configuration.
+The Slack, Discord, and CLI apps connect to the qURL API. The endpoint is set via `QURL_ENDPOINT` (production `https://api.layerv.ai`, sandbox `https://api.layerv.xyz`), and authentication uses an API key in `QURL_API_KEY` (`lv_live_…` for production, `lv_test_…` for sandbox). The Chrome extension uploads to a qURL file server instead; see its [README](apps/chrome-extension/README.md) for configuration.
 
 ## Slack Connector Onboarding
 
