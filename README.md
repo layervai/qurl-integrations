@@ -4,39 +4,46 @@
 
 Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that make protected resources invisible by default.
 
-qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains Go-based platform integrations (Slack, Teams, Discord), a CLI tool, and shared libraries for creating and managing qURLs.
+This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. Microsoft Teams and Zapier are planned.
 
 ## Structure
 
 ```
-apps/           Per-integration applications (independent release tracks)
-  slack/        Slack Secure Access Agent — slash commands, link unfurling, notifications
-  cli/          CLI tool for qURL
-  teams/        Microsoft Teams (planned)
-  discord/      Discord bot (planned)
-  zapier/       Zapier integration (planned)
-shared/         Shared libraries used by all integrations
-  client/       qURL API client
-  auth/         API key helpers
-  events/       Webhook event parsing
-  formatting/   Chat message templates
-  observability/ OpenTelemetry setup
+apps/                Per-integration apps (independent release tracks)
+  slack/             Slack Secure Access Agent — /qurl slash commands (Go)
+  discord/           Discord app — one-time qURL links for files & locations (Node.js)
+  chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
+  cli/               CLI — create & manage qURLs from the terminal (Go)
+  teams/             Microsoft Teams (planned)
+  zapier/            Zapier integration (planned)
+shared/              Shared Go libraries used by the Go apps
+  client/            qURL API client
+  auth/              API key helpers
+  events/            Webhook event parsing
+  formatting/        Chat message templates
+  observability/     OpenTelemetry setup
 ```
 
-## SDKs (separate repos)
+## SDKs & MCP server (separate repos)
 
-Language-specific SDKs have been extracted into standalone repositories:
+Language SDKs and the qURL MCP server live in standalone repositories:
 
-| SDK | Package | Repo |
-|-----|---------|------|
-| Python | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
-| TypeScript | `npm install @layerv/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
+| Library | Install | Repo |
+|---------|---------|------|
+| Python SDK | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
+| TypeScript SDK | `npm install @layervai/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
+| MCP server | `npx @layervai/qurl-mcp` | [layervai/qurl-mcp](https://github.com/layervai/qurl-mcp) |
 
 ## Configuration
 
-All integrations connect to the qURL API. The endpoint is configurable via the `QURL_ENDPOINT` environment variable (defaults to `https://api.layerv.xyz`). Authentication is handled via API keys set in the `QURL_API_KEY` environment variable.
+The Slack, Discord, and CLI apps connect to the qURL API:
+
+- **Endpoint** — `QURL_ENDPOINT`: production `https://api.layerv.ai`, sandbox `https://api.layerv.xyz`. Required for Slack; the CLI and Discord fall back to a default.
+- **Authentication** — an API key in `QURL_API_KEY`: `lv_live_…` (production) or `lv_test_…` (sandbox).
+
+The Chrome extension uploads to a qURL file server instead; see its [README](apps/chrome-extension/README.md) for configuration.
 
 ## Slack Connector Onboarding
 
