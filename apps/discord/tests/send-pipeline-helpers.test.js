@@ -606,7 +606,7 @@ describe('qURL client', () => {
         text: async () => 'Internal Server Error',
       });
 
-      await expect(qurl.createOneTimeLink('https://example.com', '1h', 'desc'))
+      await expect(qurl.createOneTimeLink('https://example.com', '1h', 'label'))
         .rejects.toThrow(/qURL API POST.*failed.*500/);
     });
 
@@ -617,7 +617,7 @@ describe('qURL client', () => {
         json: async () => ({ data: { resource_id: 'r1', qurl_link: 'l1' } }),
       });
 
-      await qurl.createOneTimeLink('https://example.com', '1h', 'd');
+      await qurl.createOneTimeLink('https://example.com', '1h', 'label');
 
       const headers = globalThis.fetch.mock.calls[0][1].headers;
       expect(headers.Authorization).toBe('Bearer test-api-key');
