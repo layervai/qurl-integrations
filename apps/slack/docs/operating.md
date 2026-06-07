@@ -121,11 +121,11 @@ WORKSPACE_STATE_KMS_KEY_ARN=arn:aws:kms:us-east-1:...:key/... \
 SLACK_SIGNING_SECRET=... \
 SLACK_CLIENT_ID=... \
 SLACK_CLIENT_SECRET=... \
-QURL_ENDPOINT=https://api.layerv.xyz \
+QURL_ENDPOINT=https://api.layerv.ai \
 AUTH0_DOMAIN=layerv.us.auth0.com \
 AUTH0_CLIENT_ID=... \
 AUTH0_CLIENT_SECRET=... \
-AUTH0_AUDIENCE=https://api.layerv.xyz \
+AUTH0_AUDIENCE=https://api.layerv.ai \
 SLACK_BASE_URL=https://slack-bot.example \
 OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
   go run ./apps/slack/cmd/
@@ -145,7 +145,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
 | `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands` (the captured token is used only for `views.open`, which requires no scope); any override must still include `commands`. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
-| `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
+| `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |

@@ -51,7 +51,7 @@ qurl config set api_key lv_live_xxx
 
 The API endpoint defaults to the production host `https://api.layerv.ai`.
 Override it with `--endpoint`, the `QURL_ENDPOINT` environment variable, or
-`qurl config set endpoint <url>` (for example, to point at a sandbox).
+`qurl config set endpoint <url>` (for example, to point at a self-hosted qURL instance).
 
 ## Quickstart
 
@@ -130,13 +130,13 @@ qurl list --status active --output json | jq -r '.qurls[].resource_id'
 
 ## Configuration profiles
 
-Keep separate credentials and endpoints (for example, production and sandbox) in
-named profiles:
+Keep separate credentials and endpoints (for example, per account, or for a
+self-hosted qURL instance) in named profiles:
 
 ```bash
 qurl config set api_key lv_live_xxx --profile prod
-qurl config set endpoint https://api.layerv.xyz --profile sandbox
-qurl --profile sandbox list
+qurl config set endpoint https://qurl.example.com --profile self-hosted
+qurl --profile self-hosted list
 ```
 
 `qurl config profiles` lists what you have, and `qurl config path` prints the

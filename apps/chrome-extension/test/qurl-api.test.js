@@ -213,7 +213,7 @@ test('getQurlHostPermissionPattern drops the port and isDefaultQurlOrigin uses n
   );
 
   assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.ai/custom/path'), true);
-  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.layerv.xyz'), false);
+  assert.equal(qurlApi.isDefaultQurlOrigin('https://getqurllink.example.com'), false);
   assert.equal(qurlApi.isDefaultQurlOrigin('https://example.com'), false);
 });
 

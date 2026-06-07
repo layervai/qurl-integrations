@@ -57,8 +57,8 @@
 //
 // Input shape (set in Terraform invocation) — all 6 fields are required:
 //   {
-//     apiEndpoint:         string,  // qurl-service base URL (e.g. https://api.qurl.layerv.xyz)
-//     bridgeUrl:           string,  // public bot URL (e.g. https://discord-bot.sandbox.qurl.layerv.xyz/webhooks/qurl)
+//     apiEndpoint:         string,  // qurl-service base URL (e.g. https://api.layerv.ai)
+//     bridgeUrl:           string,  // public bot URL (e.g. https://discord-bot.example.com/webhooks/qurl)
 //     description:         string,  // human-readable, surfaces in qurl-service UI
 //     ssmParamName:        string,  // SSM SecureString parameter to write the rotated webhook secret to
 //     ssmRegion:           string,  // AWS region for SSM (typically matches Lambda region)

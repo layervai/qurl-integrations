@@ -39,7 +39,13 @@ describe('Negative: Invalid Mint Requests', () => {
 
 describe('Negative: Invalid Access', () => {
   test('access non-existent qURL path returns SPA (fragment-based)', async () => {
-    const res = await qurl.accessLink('https://qurl.link.layerv.xyz/#at_nonexistent_token_xxx');
+    // Derive the resolution origin from a real minted link so this test
+    // carries no hardcoded environment host.
+    const minted = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
+      target_url: 'https://example.com/negative-access',
+    });
+    const origin = new URL(minted.qurl_link).origin;
+    const res = await qurl.accessLink(`${origin}/#at_nonexistent_token_xxx`);
     // SPA always loads; client-side handles invalid tokens
     expect(res.status).toBe(200);
   });
