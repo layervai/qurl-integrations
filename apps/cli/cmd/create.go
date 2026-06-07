@@ -10,7 +10,8 @@ import (
 
 func createCmd(opts *globalOpts) *cobra.Command {
 	var (
-		description string
+		label       string
+		labelCompat string // deprecated --description alias
 		expiresIn   string
 		oneTimeUse  bool
 		maxSessions int
@@ -21,7 +22,7 @@ func createCmd(opts *globalOpts) *cobra.Command {
 		Short: "Create a qURL for a target URL",
 		Example: `  qurl create https://api.example.com/data
   qurl create https://internal.example.com --expires 1h --one-time
-  qurl create https://dashboard.example.com -d "Admin access" -e 7d`,
+  qurl create https://dashboard.example.com --label "Admin access" -e 7d`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateURL(args[0]); err != nil {
@@ -31,6 +32,11 @@ func createCmd(opts *globalOpts) *cobra.Command {
 				return err
 			}
 
+			// --description is a deprecated alias for --label.
+			if label == "" {
+				label = labelCompat
+			}
+
 			c, err := opts.newClient()
 			if err != nil {
 				return err
@@ -38,7 +44,7 @@ func createCmd(opts *globalOpts) *cobra.Command {
 
 			input := client.CreateInput{
 				TargetURL:   args[0],
-				Description: description,
+				Label:       label,
 				ExpiresIn:   expiresIn,
 				OneTimeUse:  oneTimeUse,
 				MaxSessions: maxSessions,
@@ -58,7 +64,9 @@ func createCmd(opts *globalOpts) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&description, "description", "d", "", "Description")
+	cmd.Flags().StringVar(&label, "label", "", "Human-readable label identifying who this qURL is for")
+	cmd.Flags().StringVarP(&labelCompat, "description", "d", "", "Deprecated alias for --label")
+	_ = cmd.Flags().MarkDeprecated("description", "use --label instead")
 	cmd.Flags().StringVarP(&expiresIn, "expires", "e", "", "Expiration duration (e.g., 1h, 24h, 7d)")
 	cmd.Flags().BoolVar(&oneTimeUse, "one-time", false, "Single-use token (consumed after first access)")
 	cmd.Flags().IntVar(&maxSessions, "max-sessions", 0, "Maximum concurrent sessions (0 = unlimited)")

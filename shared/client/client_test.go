@@ -1063,6 +1063,46 @@ func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestCreateLabelOnWire pins that CreateInput.Label serializes as `label`
+// (not `description`) on both create wire shapes. The qURL service's
+// CreateQurlRequest / CreateQurlForResourceRequest use `label`; the
+// resource-level `description` belongs only to Update / Resource bodies and
+// the GET response. Regression guard for sending the wrong create field.
+// TODO(upstream-rebrand): keep aligned with qurl-service's openapi.
+func TestCreateLabelOnWire(t *testing.T) {
+	const wantLabel = "Alice from Acme"
+	for _, tc := range []struct {
+		name  string
+		input CreateInput
+	}{
+		{"target_url form", CreateInput{TargetURL: "https://example.com", Label: wantLabel}},
+		{"resource_id form", CreateInput{ResourceID: "r_tunnel", Label: wantLabel}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+			}))
+			defer srv.Close()
+			c := testClient(srv.URL, "test-key")
+			if _, err := c.Create(context.Background(), tc.input); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(gotBody, &raw); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if got, _ := raw["label"].(string); got != wantLabel {
+				t.Errorf("label = %v, want %q; body=%s", raw["label"], wantLabel, gotBody)
+			}
+			if _, ok := raw["description"]; ok {
+				t.Errorf("create body must not send `description` (use `label`); body=%s", gotBody)
+			}
+		})
+	}
+}
+
 // TestCreateTargetURLAndResourceIDMutuallyExclusive pins the client-side
 // fail-fast for the both-populated case. Mirror of the symmetric guard in
 // UpdateResource for (Alias, ClearAlias). Closes the third leg of the
