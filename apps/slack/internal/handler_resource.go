@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	resourceExposeUsage       = "Usage:\n• `/qurl-admin protect-url` for guided URL creation\n• `/qurl-admin protect-url $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin protect-url url:<target-url> as:$channel-alias`"
+	resourceExposeUsage       = "Usage:\n• `/qurl-admin protect-url` for the guided URL picker\n• `/qurl-admin protect-url $<resource-alias> [as:$channel-alias]`\n• `/qurl-admin protect-url url:<target-url> as:$channel-alias`"
 	resourceExposeSchemeHTTP  = "http"
 	resourceExposeSchemeHTTPS = "https"
 	// exposeURLResourceFailedMsg is the generic failure reply shared by the
@@ -26,6 +26,7 @@ const (
 )
 
 type resourceExposeArgs struct {
+	ResourceID    string
 	ResourceAlias string
 	TargetURL     string
 	ChannelAlias  string
@@ -80,8 +81,7 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 			return nil, "Missing URL after `url:`.\n\n" + resourceExposeUsage
 		}
 		// This typed path exposes an existing no-alias URL resource by exact
-		// target lookup. New guided URL creation is handled by
-		// ExposeURLCreateModal and is intentionally HTTPS-only.
+		// target lookup.
 		parsed, err := url.Parse(targetURL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != resourceExposeSchemeHTTP && parsed.Scheme != resourceExposeSchemeHTTPS) {
 			return nil, "URL target must be an absolute http or https URL.\n\n" + resourceExposeUsage
@@ -124,7 +124,7 @@ func unwrapSlackURLArg(s string) string {
 }
 
 // handleExposeURL routes the URL verb `/qurl-admin protect-url`: bare (no
-// arguments) opens the guided create-and-protect URL modal; `protect-url
+// arguments) opens the guided URL picker; `protect-url
 // <target> [as:$channel-alias]` is the typed power-user form that skips the
 // modal. This is the single-word URL protection verb.
 //
@@ -135,7 +135,7 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	_, rest := slashVerb(text, adminVerbProtectURL)
 	if strings.TrimSpace(rest) == "" {
-		// Bare verb → guided create modal (the no-arguments path).
+		// Bare verb → guided picker (the no-arguments path).
 		h.handleExposeURLWizard(w, values)
 		return
 	}
@@ -160,7 +160,7 @@ func (h *Handler) handleExposeURL(w http.ResponseWriter, values url.Values) {
 	})
 }
 
-// handleExposeURLWizard opens the guided URL create-and-protect form for a bare
+// handleExposeURLWizard opens the guided URL picker for a bare
 // `/qurl-admin protect-url`. Like the connector wizard (handleTunnelInstallWizard)
 // it acks fast and does the admin re-check + views.open on the async worker
 // inside Slack's short trigger window. The button-driven sibling (the `protect`
@@ -215,8 +215,9 @@ func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values
 }
 
 // openExposeURLWizard is the async worker for handleExposeURLWizard: admin
-// re-check, then open the HTTPS URL create-and-protect modal, all bounded to fit
-// Slack's trigger window. Mirrors openTunnelInstallWizard's gate/budget posture.
+// re-check, fetch eligible URL resources, then open the URL picker. If no URL
+// resources are available, it replies before opening a modal. Mirrors
+// openTunnelInstallWizard's gate/budget posture.
 func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
 	openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 	if openBudget <= 0 {
@@ -238,28 +239,41 @@ func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, tea
 		return
 	}
 
-	view, err := ExposeURLCreateModal(ExposeURLModalMetadata{
+	meta := ExposeURLModalMetadata{
 		TeamID:      teamID,
 		ChannelID:   channelID,
 		UserID:      userID,
 		ResponseURL: responseURL,
-	})
+	}
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, adminGateBudget)
+	options, userMsg := h.urlResourceSelectOptions(fetchCtx, log, teamID)
+	fetchCancel()
+	if userMsg != "" {
+		_ = h.postErrorResponse(log, responseURL, userMsg, true)
+		return
+	}
+	if len(options) == 0 {
+		log.Info("protect-url wizard: no URL resources available")
+		_ = h.postErrorResponse(log, responseURL, noProtectedURLResourcesMessage, true)
+		return
+	}
+	view, err := ExposeURLModal(meta, options)
 	if err != nil {
-		log.Error("protect-url wizard create modal render failed", "error", err)
+		log.Error("protect-url wizard modal render failed", "error", err)
 		_ = h.postErrorResponse(log, responseURL, "Could not open the guided URL form. Please retry or contact support.", true)
 		return
 	}
 
 	openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 	if openBudget <= 0 {
-		log.Warn("protect-url wizard trigger expired before create modal views.open")
+		log.Warn("protect-url wizard trigger expired before views.open")
 		_ = h.postErrorResponse(log, responseURL, "Slack's setup window expired before the modal opened. Run `/qurl-admin protect-url` again.", true)
 		return
 	}
 	openCtx, openCancel := context.WithTimeout(ctx, openBudget)
 	defer openCancel()
 	if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-		log.Warn("protect-url wizard create modal views.open failed", "error", err,
+		log.Warn("protect-url wizard views.open failed", "error", err,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
 			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
 		)
@@ -321,7 +335,11 @@ func (h *Handler) resolveURLResourceForExpose(ctx context.Context, log *slog.Log
 	var matches []client.Resource
 	for i := range page.Resources {
 		resource := page.Resources[i]
-		if resource.Status == client.StatusRevoked || !isURLResource(&resource) {
+		if !isActiveURLResource(&resource) {
+			continue
+		}
+		if args.ResourceID != "" && resource.ResourceID == args.ResourceID {
+			matches = append(matches, resource)
 			continue
 		}
 		if args.ResourceAlias != "" && resource.Alias == args.ResourceAlias {
@@ -336,6 +354,9 @@ func (h *Handler) resolveURLResourceForExpose(ctx context.Context, log *slog.Log
 		log.Debug("resource protect: scanned first resource page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
 	}
 	if len(matches) == 0 {
+		if args.ResourceID != "" {
+			return nil, &userError{msg: "That URL resource is no longer available in the picker. Run `/qurl-admin protect` and choose *Protect URL* again."}
+		}
 		if args.ResourceAlias != "" {
 			return nil, &userError{msg: fmt.Sprintf("No active URL resource `$%s` was found. Check the protected resource alias in the dashboard, then retry.", args.ResourceAlias)}
 		}
