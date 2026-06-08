@@ -70,6 +70,16 @@ func TestParseResourceExposeArgs(t *testing.T) {
 			wantChannelAlias: testResourceExposeChannelAlias,
 		},
 		{
+			// No angle-bracket wrapping, but Slack still HTML-escapes & in
+			// command text. The unescape must run unconditionally so this
+			// decodes too — locks in that the unescape isn't gated on the
+			// bracket check (a refactor moving it back inside would fail here).
+			name:             "unwrapped escaped url is unescaped",
+			text:             "url:https://docs.example.com/p?a=1&amp;b=2 as:$handbook",
+			wantTargetURL:    "https://docs.example.com/p?a=1&b=2",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
 			name:    "empty slack-wrapped url is missing-url",
 			text:    "url:<> as:$handbook",
 			wantMsg: "Missing URL",

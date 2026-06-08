@@ -71,11 +71,10 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 
 	if strings.HasPrefix(target, "url:") {
 		targetURL := strings.TrimSpace(strings.TrimPrefix(target, "url:"))
-		// Slack auto-links bare URLs in slash-command text and HTML-escapes
-		// &/</> there, so the token arrives wrapped as <https://host> (or
-		// <https://host|display>) with &amp; in any query string. Decode before
-		// validating — the leading "<" makes url.Parse yield no scheme, and a
-		// literal &amp; would break the exact-target lookup against the resource.
+		// Decode Slack's auto-link wrapping/escaping before validating: the
+		// leading "<" makes url.Parse yield no scheme, and a literal &amp; would
+		// break the exact-target lookup against the stored resource. See
+		// unwrapSlackURLArg for the mechanism.
 		targetURL = unwrapSlackURLArg(targetURL)
 		if targetURL == "" {
 			return nil, "Missing URL after `url:`.\n\n" + resourceExposeUsage
@@ -102,7 +101,13 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 // HTML-escapes &, <, > in the command text, so a multi-param URL arrives as
 // <https://host?a=1&amp;b=2>. Strip the angle-bracket wrapping (taking the href
 // before any "|"), then HTML-unescape so the value matches the stored target.
-// Un-wrapped, un-escaped input is returned unchanged.
+// The unescape runs unconditionally, so a value Slack escaped but didn't wrap is
+// still decoded; un-wrapped, un-escaped input is returned unchanged.
+//
+// The caller has already split the command on whitespace, so this assumes a
+// single space-free token. That holds because Slack only auto-links a bare URL
+// (its display text is the URL itself, never free text with spaces); a
+// hypothetical <href|display with spaces> would have been split upstream.
 func unwrapSlackURLArg(s string) string {
 	if strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">") {
 		s = s[1 : len(s)-1]
