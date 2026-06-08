@@ -78,9 +78,10 @@ release note:
   workspace list to every member regardless of channel. Release notes from that
   window describe the wider disclosure.
 - Channel scoping was **re-introduced** in #589 and is the behavior described
-  above. List, aliases, and mint now share one channel-scoped allow-set. (The
-  code comments cite #590 — a later paging-completeness fix within the #589
-  channel-scope work, not a separate disclosure change.)
+  above. List, aliases, and mint now share one channel-scoped allow-set. (A
+  later paging-completeness fix — issue #590, fixed by #596 — pages `/qurl
+  list` until the channel allow-set is satisfied. It is a completeness fix
+  within the #589 channel-scope work, not a separate disclosure change.)
 
 If you are reading a release note that says `/qurl list` shows the full
 workspace list to every member, it refers to the #459 window and no longer
