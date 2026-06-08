@@ -62,6 +62,15 @@ func TestParseResourceExposeArgs(t *testing.T) {
 			wantChannelAlias: testResourceExposeChannelAlias,
 		},
 		{
+			// The typed path accepts http as well as https (the guided modal is
+			// https-only). Assert http survives the unwrap so that distinction
+			// doesn't silently regress.
+			name:             "slack-wrapped http url is accepted",
+			text:             "url:<http://docs.example.com/handbook> as:$handbook",
+			wantTargetURL:    "http://docs.example.com/handbook",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
 			// Slack HTML-escapes & in command text, so a multi-param URL arrives
 			// as ...?a=1&amp;b=2; it must decode to match the stored target.
 			name:             "slack-wrapped multi-param url is unescaped",

@@ -103,6 +103,9 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 // before any "|"), then HTML-unescape so the value matches the stored target.
 // The unescape runs unconditionally, so a value Slack escaped but didn't wrap is
 // still decoded; un-wrapped, un-escaped input is returned unchanged.
+// html.UnescapeString decodes all HTML entities, not just &amp;/&lt;/&gt; — safe
+// only because Slack escapes every "&" in delivered text, so a raw "&entity;"
+// can't reach here without its leading "&" already arriving as "&amp;".
 //
 // The caller has already split the command on whitespace, so this assumes a
 // single space-free token, and the first "|" is taken as the wrap separator.
