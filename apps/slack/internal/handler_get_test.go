@@ -575,7 +575,9 @@ func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
 	// resolves the listed alias, and rejects it because its resource_id is
 	// not in the allow-set.
 	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
+	var listHits atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{{
 			testKeyResourceID: testListResIDURLDocs,
 			testKeyType:       client.ResourceTypeURL,
@@ -595,6 +597,14 @@ func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, noResourceForAliasMessage(testListAliasDocs)) {
 		t.Errorf("async reply should use not-configured copy for unallowed resource alias: %q", async)
+	}
+	// The message above is BYTE-IDENTICAL to the cold-channel short-circuit's
+	// (#534), so it alone can't tell whether the resolve-then-reject branch ran
+	// or the warm seed silently broke and we fell through the short-circuit.
+	// Pin that the alias fallback actually reached upstream: a non-empty
+	// allow-set must let GET /v1/resources fire at least once.
+	if listHits.Load() == 0 {
+		t.Errorf("resource-alias fallback never hit upstream GET /v1/resources — warm-channel seed broke and the test silently regressed to the cold-channel short-circuit")
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("unallowed resource alias attempted mint (hits = %d)", mintHits.Load())
@@ -1222,7 +1232,19 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 		// returns not-configured before the slug is ever resolved, so the
 		// admin-bypass property would go unexercised.
 		ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
-		addTunnelSlugResource(t, ts)
+		// Inlined slug resource (vs addTunnelSlugResource) so listHits can pin
+		// that the slug fallback actually reached upstream — see the assertion
+		// below.
+		var listHits atomic.Int32
+		ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			listHits.Add(1)
+			writeResourceListFixture(t, w, []map[string]any{{
+				testKeyResourceID: testResourceIDFix,
+				testKeyType:       client.ResourceTypeTunnel,
+				testKeySlug:       testTunnelSlug,
+				testKeyStatus:     client.StatusActive,
+			}}, "", false)
+		})
 		var mintHits atomic.Int32
 		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 			mintHits.Add(1)
@@ -1234,6 +1256,15 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 		_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
 		if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
 			t.Errorf("admin was not channel-scoped — missing not-configured copy: %q", async)
+		}
+		// This not-configured copy is BYTE-IDENTICAL to the cold-channel
+		// short-circuit's (#534). Without the assertion below, a broken warm
+		// seed would fall through the short-circuit and still match the copy —
+		// leaving the admin-no-bypass-at-the-gate property unexercised. Pin
+		// that the slug fallback actually ran and was rejected BY THE GATE: a
+		// non-empty allow-set must let the slug lookup hit upstream.
+		if listHits.Load() == 0 {
+			t.Errorf("slug fallback never hit upstream GET /v1/resources — warm-channel seed broke and the admin-no-bypass property went unexercised (regressed to the cold-channel short-circuit)")
 		}
 		if mintHits.Load() != 0 {
 			t.Errorf("admin minted a tunnel not exposed in this channel (hits = %d) — the bypass is back", mintHits.Load())
