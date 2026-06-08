@@ -32,12 +32,10 @@ workspace's Secure Access Agent supports.
 - **Alias** — an alternate name for a resource within a channel. Several
   aliases can point at one resource. Use an alias anywhere you'd use a `$id`.
 - **Channel scope** — resources are available per channel. A resource shows up
-  only in the channels it's been protected in. `/qurl aliases` and `/qurl get`
-  agree on what's available in a given channel — including for admins.
-  `/qurl list` is the exception: it shows the full workspace tunnel list to
-  every member, regardless of channel. Seeing a tunnel there does not grant the
-  ability to mint a link for it — minting is still gated per channel. See
-  [docs/list-disclosure.md](docs/list-disclosure.md).
+  only in the channels it's been protected in. `/qurl list`, `/qurl aliases`,
+  and `/qurl get` all agree on what's available in a given channel — including
+  for admins. For why this scoping is a confidentiality boundary and how it
+  fails closed (e.g. in DMs), see [docs/list-disclosure.md](docs/list-disclosure.md).
 - **Owner & admins** — the owner is whoever first connected qURL to the
   workspace. Owners and admins can run the `/qurl-admin` commands.
 
