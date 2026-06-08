@@ -1949,6 +1949,24 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     const failureCalls = logger.audit.mock.calls.filter(c => c[0] === 'qurl_send_create_link_failure');
     expect(failureCalls).toHaveLength(0);
   });
+
+  // Pins the `?? null` (not `|| null`) choice in emitMintFailureAudit: an
+  // empty-string apiCode is a forensic dimension that `|| null` would silently
+  // collapse to null. Without this, the commented intent could drift in a
+  // future edit without any test catching it.
+  it('preserves empty-string apiCode as forensic dimension (?? null, not || null)', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('upstream 422'), { status: 422, apiCode: '' }));
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      api_code: '', // would collapse to null under `|| null`
+      reason: 'upstream_4xx',
+      status_code: 422,
+    }));
+  });
 });
 
 describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch (#352)', () => {
