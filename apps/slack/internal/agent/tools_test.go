@@ -77,7 +77,7 @@ func TestParseProposal(t *testing.T) {
 			wantAction: ActionSetAlias,
 			wantGated:  true,
 			check: func(t *testing.T, p *Proposal) {
-				if p.Alias != testChannel || p.Target != testSlug || p.Token != testChannel {
+				if p.Alias != testChannel || p.Target != testSlug {
 					t.Errorf("got %+v", p)
 				}
 			},

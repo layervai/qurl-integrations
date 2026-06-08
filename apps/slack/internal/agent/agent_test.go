@@ -128,6 +128,42 @@ func TestRun_ReadThenAnswer_GroundsOnToolResult(t *testing.T) {
 	}
 }
 
+func TestRun_ProposeAlongsideReadInSameTurn_KeepsHistoryValid(t *testing.T) {
+	// A single assistant turn carrying both a read call and a propose call.
+	// Parallel tool use is disabled in production, but the loop must still
+	// produce a well-formed transcript: the read call needs a tool_result too,
+	// not just the proposal ack.
+	readInput, _ := json.Marshal(map[string]any{})
+	propInput, _ := json.Marshal(map[string]any{fieldToken: testSlug})
+	llm := &scriptedLLM{responses: []Response{{
+		ToolCalls: []ToolCall{
+			{ID: "tu_read", Name: toolListResources, Input: readInput},
+			{ID: "tu_prop", Name: toolProposeGet, Input: propInput},
+		},
+		StopReason: "tool_use",
+	}}}
+	ctx, tc := testCtx()
+	res, history, err := New(llm, &fakeBackend{resources: "staging-dash (r_1)"}).Run(ctx, tc, nil, "list then get")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Proposal == nil {
+		t.Fatalf("expected a proposal")
+	}
+	assertWellFormed(t, history) // both tu_read and tu_prop must have tool_results
+	// The read result must be the backend output, not dropped.
+	last := history[len(history)-1]
+	var sawRead bool
+	for _, tr := range last.ToolResults {
+		if tr.ToolUseID == "tu_read" && tr.Content == "staging-dash (r_1)" {
+			sawRead = true
+		}
+	}
+	if !sawRead {
+		t.Fatalf("read tool result was dropped when proposing: %+v", last)
+	}
+}
+
 func TestRun_ProposeGet_StopsAndKeepsHistoryValid(t *testing.T) {
 	llm := &scriptedLLM{responses: []Response{
 		toolResp(toolProposeGet, map[string]any{fieldToken: testSlugSigil, fieldReason: "incident 412"}),

@@ -161,9 +161,9 @@ type Backend interface {
 // only then executes via the shared mutation core.
 type Proposal struct {
 	Action     ActionKind
-	Token      string // $slug/$alias for get/revoke/unset-alias, or the alias name for set-alias
+	Token      string // the $slug/$alias to act on, for get and revoke
 	Target     string // set-alias target slug
-	Alias      string // suggested alias for protect / set-alias
+	Alias      string // the alias name for set-alias / unset-alias; suggested alias for protect
 	URL        string // protect-url target
 	Env        string // protect-connector environment
 	Port       string // protect-connector local port
@@ -253,8 +253,14 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 				// can correct on the next iteration rather than failing the turn.
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: perr.Error(), IsError: true})
 			case isPropose:
-				// Keep history valid: the propose tool_use needs a tool_result.
-				msgs = append(msgs, Message{Role: roleUser, ToolResults: []ToolResult{{ToolUseID: call.ID, Content: proposalAckResult}}})
+				// Keep history valid: every tool_use in this assistant turn needs
+				// a matching tool_result — both any read calls already handled this
+				// turn (accumulated in results) and this proposal call. Parallel
+				// tool use is disabled, so there is normally just the one call;
+				// appending to results rather than replacing it keeps the
+				// transcript well-formed even if that ever changes.
+				results = append(results, ToolResult{ToolUseID: call.ID, Content: proposalAckResult})
+				msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
 				return Result{Proposal: prop}, msgs, nil
 			default:
 				content, isErr := a.executeRead(ctx, tc, call)

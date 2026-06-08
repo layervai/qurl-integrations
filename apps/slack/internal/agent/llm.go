@@ -59,8 +59,7 @@ func (l *anthropicLLM) Complete(ctx context.Context, req Request) (Response, err
 // toSDKTools converts domain tool specs to SDK tool params.
 func toSDKTools(specs []ToolSpec) []anthropic.ToolUnionParam {
 	tools := make([]anthropic.ToolUnionParam, 0, len(specs))
-	for i := range specs {
-		s := specs[i]
+	for _, s := range specs {
 		props := s.Schema
 		if props == nil {
 			props = map[string]any{}

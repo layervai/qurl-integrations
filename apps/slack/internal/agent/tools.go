@@ -15,12 +15,16 @@ const (
 	toolResolveToken  = "resolve_token"
 	toolGetQuota      = "get_quota"
 
-	toolProposeGet              = "propose_get"
-	toolProposeRevoke           = "propose_revoke"
-	toolProposeSetAlias         = "propose_set_alias"
-	toolProposeUnsetAlias       = "propose_unset_alias"
-	toolProposeProtectConnector = "propose_protect_connector"
-	toolProposeProtectURL       = "propose_protect_url"
+	// proposeToolPrefix marks the mutation tools — calls with this prefix stop
+	// the loop for human confirmation rather than executing.
+	proposeToolPrefix = "propose_"
+
+	toolProposeGet              = proposeToolPrefix + "get"
+	toolProposeRevoke           = proposeToolPrefix + "revoke"
+	toolProposeSetAlias         = proposeToolPrefix + "set_alias"
+	toolProposeUnsetAlias       = proposeToolPrefix + "unset_alias"
+	toolProposeProtectConnector = proposeToolPrefix + "protect_connector"
+	toolProposeProtectURL       = proposeToolPrefix + "protect_url"
 )
 
 // Tool-input field names. Shared between the JSON schemas and the input
@@ -178,7 +182,7 @@ func normalizeToken(s string) string {
 // the proposal tool was called with invalid input — the caller surfaces it back
 // to the model.
 func parseProposal(call ToolCall) (*Proposal, bool, error) {
-	if !strings.HasPrefix(call.Name, "propose_") {
+	if !strings.HasPrefix(call.Name, proposeToolPrefix) {
 		return nil, false, nil
 	}
 	fields, err := decodeFields(call.Input)
@@ -186,84 +190,92 @@ func parseProposal(call ToolCall) (*Proposal, bool, error) {
 		return nil, true, fmt.Errorf("%s: %w", call.Name, err)
 	}
 
+	// Each builder returns just (*Proposal, error); the "is a proposal" bool is
+	// true for every recognized propose_* name, so it's supplied once here.
+	var p *Proposal
 	switch call.Name {
 	case toolProposeGet:
-		return proposalGet(fields)
+		p, err = proposalGet(fields)
 	case toolProposeRevoke:
-		return proposalRevoke(fields)
+		p, err = proposalRevoke(fields)
 	case toolProposeSetAlias:
-		return proposalSetAlias(fields)
+		p, err = proposalSetAlias(fields)
 	case toolProposeUnsetAlias:
-		return proposalUnsetAlias(fields)
+		p, err = proposalUnsetAlias(fields)
 	case toolProposeProtectConnector:
-		return proposalProtectConnector(fields)
+		p, err = proposalProtectConnector(fields)
 	case toolProposeProtectURL:
-		return proposalProtectURL(fields)
+		p, err = proposalProtectURL(fields)
 	default:
-		return nil, false, nil
+		return nil, false, nil // a propose_*-prefixed name we don't recognize
 	}
+	return p, true, err
 }
 
-func proposalGet(f map[string]string) (*Proposal, bool, error) {
+func proposalGet(f map[string]string) (*Proposal, error) {
 	token := normalizeToken(f[fieldToken])
 	if token == "" {
-		return nil, true, errEmptyField(toolProposeGet, fieldToken)
+		return nil, errEmptyField(toolProposeGet, fieldToken)
 	}
 	return &Proposal{
 		Action:  ActionGet,
 		Token:   token,
 		Reason:  strings.TrimSpace(f[fieldReason]),
 		Summary: fmt.Sprintf("Mint a one-time access link for `$%s`.", token),
-	}, true, nil
+	}, nil
 }
 
-func proposalRevoke(f map[string]string) (*Proposal, bool, error) {
+func proposalRevoke(f map[string]string) (*Proposal, error) {
 	token := normalizeToken(f[fieldToken])
 	if token == "" {
-		return nil, true, errEmptyField(toolProposeRevoke, fieldToken)
+		return nil, errEmptyField(toolProposeRevoke, fieldToken)
 	}
 	return &Proposal{
 		Action:     ActionRevoke,
 		Token:      token,
 		Summary:    fmt.Sprintf("Revoke `$%s` and all its qURLs, in every channel it's protected in.", token),
 		AdminGated: true,
-	}, true, nil
+	}, nil
 }
 
-func proposalSetAlias(f map[string]string) (*Proposal, bool, error) {
+func proposalSetAlias(f map[string]string) (*Proposal, error) {
 	alias := normalizeToken(f[fieldAlias])
 	target := normalizeToken(f[fieldTarget])
 	if alias == "" {
-		return nil, true, errEmptyField(toolProposeSetAlias, fieldAlias)
+		return nil, errEmptyField(toolProposeSetAlias, fieldAlias)
 	}
 	if target == "" {
-		return nil, true, errEmptyField(toolProposeSetAlias, fieldTarget)
+		return nil, errEmptyField(toolProposeSetAlias, fieldTarget)
 	}
 	return &Proposal{
 		Action:     ActionSetAlias,
-		Token:      alias,
-		Target:     target,
 		Alias:      alias,
-		Summary:    fmt.Sprintf("Bind alias `$%s` to connector `$%s`.", alias, target),
+		Target:     target,
+		Summary:    fmt.Sprintf("Bind alias `$%s` to `$%s`.", alias, target),
 		AdminGated: true,
-	}, true, nil
+	}, nil
 }
 
-func proposalUnsetAlias(f map[string]string) (*Proposal, bool, error) {
+func proposalUnsetAlias(f map[string]string) (*Proposal, error) {
 	alias := normalizeToken(f[fieldAlias])
 	if alias == "" {
-		return nil, true, errEmptyField(toolProposeUnsetAlias, fieldAlias)
+		return nil, errEmptyField(toolProposeUnsetAlias, fieldAlias)
 	}
 	return &Proposal{
 		Action:     ActionUnsetAlias,
-		Token:      alias,
 		Alias:      alias,
 		Summary:    fmt.Sprintf("Clear alias `$%s`.", alias),
 		AdminGated: true,
-	}, true, nil
+	}, nil
 }
 
-func proposalProtectConnector(f map[string]string) (*Proposal, bool, error) {
+// proposalProtectConnector intentionally requires no fields: a connector
+// proposal can be opened before the environment/port are pinned down, and the
+// agent gathers the rest conversationally. The confirm path (the guided install
+// wizard) is the enforcement point — it re-validates and collects any missing
+// env/port before the bootstrap key is minted, so a sparse proposal here can
+// never reach a live mutation.
+func proposalProtectConnector(f map[string]string) (*Proposal, error) {
 	alias := normalizeToken(f[fieldAlias])
 	env := strings.TrimSpace(f[fieldEnv])
 	return &Proposal{
@@ -273,13 +285,13 @@ func proposalProtectConnector(f map[string]string) (*Proposal, bool, error) {
 		Port:       strings.TrimSpace(f[fieldPort]),
 		Summary:    protectConnectorSummary(alias, env),
 		AdminGated: true,
-	}, true, nil
+	}, nil
 }
 
-func proposalProtectURL(f map[string]string) (*Proposal, bool, error) {
+func proposalProtectURL(f map[string]string) (*Proposal, error) {
 	target := strings.TrimSpace(f[fieldURL])
 	if target == "" {
-		return nil, true, errEmptyField(toolProposeProtectURL, fieldURL)
+		return nil, errEmptyField(toolProposeProtectURL, fieldURL)
 	}
 	alias := normalizeToken(f[fieldAlias])
 	return &Proposal{
@@ -288,7 +300,7 @@ func proposalProtectURL(f map[string]string) (*Proposal, bool, error) {
 		Alias:      alias,
 		Summary:    protectURLSummary(target, alias),
 		AdminGated: true,
-	}, true, nil
+	}, nil
 }
 
 // errEmptyField builds the "required field empty" error for a proposal tool.
