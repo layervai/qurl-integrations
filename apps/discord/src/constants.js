@@ -479,6 +479,62 @@ const AUDIT_EVENTS = {
   // SUBSCRIPTION_REGISTER_FAILED so the REGISTER_FAILED metric
   // filter unambiguously means "the link failed for the user."
   QURL_WEBHOOK_PROPAGATE_PARTIAL: 'qurl_webhook_propagate_partial',
+
+  // Emitted once per `/qurl send` (or Add Recipients) that fails at the
+  // mint/upload step — the executeSendPipeline + handleAddRecipients
+  // catch blocks in commands.js. Surfaces the user-visible "Failed to
+  // create links" path as a metric so on-call sees a sustained spike
+  // before users do.
+  //
+  // Carries `reason` (categorized failure class), `api_code` (the
+  // upstream-error code if the connector/qurl-service surfaced
+  // RFC 7807-style), `status_code` (the upstream HTTP status), and
+  // `kind` ('file' | 'location' for normal traffic; `null` when an
+  // unrecognized resourceType reaches the initial-send catch, OR when
+  // a future refactor adds throwable work before addRecipients sets
+  // activeKind — both are discoverable in CloudWatch, not silent).
+  // Same low-cardinality value space as UPLOAD_SUCCESS — dashboard
+  // splits stay symmetric.
+  //
+  // Cardinality discipline: `reason` and `kind` are LOW cardinality
+  // (closed enums) — safe to dimension on for dashboard splits.
+  // `status_code` is bounded (HTTP status integers) but NOT a closed
+  // enum — fine as a forensic/dashboard field, but don't treat it as a
+  // fixed-cardinality metric dimension. `api_code` is HIGH cardinality
+  // (free-form upstream string) — log-side forensic field, NOT a
+  // metric dimension. Mirrors DEPENDENCY_AUTH_FAILURE's `path` guidance.
+  //
+  // Reason classes used today:
+  //   - upstream_4xx          — connector or qurl-service 4xx that
+  //                              isn't quota_exceeded (already split
+  //                              into its own user-message path)
+  //   - upstream_5xx          — connector or qurl-service 5xx
+  //   - timeout               — request timed out before status
+  //   - unknown               — fallback for unclassifiable errors
+  //
+  // CloudWatch metric filter + alarm live in qurl-integrations-infra
+  // qurl-bot-discord/terraform/monitoring.tf (qurl-integrations-infra#928,
+  // the #276 terraform half). The alarm counts EVERY emitted failure —
+  // it does NOT split on `reason`, because a systemic outage can be a 4xx
+  // (the 2026-05-13 incident was a sub-floor-session_duration 400) — and
+  // pages on a sustained spike. `reason`/`kind` are forensic + dashboard
+  // dimensions, not the alarm gate. `quota_exceeded` — the one genuinely
+  // high-volume normal condition (a viral upload hitting the per-qURL token
+  // quota) — is skipped at source below, so it can't inflate the metric.
+  //
+  // Everything else emits, by design. Other "expected, user-recoverable"
+  // conditions — an expired Discord CDN URL (Add Recipients on a >24h-old
+  // send) or per-resource pool exhaustion (429, which mintLinksInBatches
+  // auto-handles via re-upload) — are RARE at the catch, so the alarm's
+  // sustained threshold absorbs them; they are NOT skipped at source.
+  // A source-side message/phase-based skip was tried for CDN-expiry and
+  // removed: it kept mis-bucketing real connector 403/auth outages as
+  // "expiry" and silently suppressing them. Skip only what is genuinely
+  // high-volume (quota); let volume + threshold handle the rest.
+  //
+  // The sibling connector_no_resource_id alarm separately catches the
+  // "200 + missing resource_id" shape.
+  QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
