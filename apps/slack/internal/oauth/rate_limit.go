@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -55,6 +56,13 @@ const (
 	// reclamation sweep (reclaimStaleLocked) and is only shed with a 429 if
 	// that sweep can't free a slot. Known IPs keep being served because
 	// they don't grow the map.
+	//
+	// Steady state once the cap is first hit: reclamation frees exactly one
+	// slot per admitted new arrival and that arrival immediately refills it,
+	// so the map stays pinned at maxStoreSize for the life of the process
+	// even when most keys later go stale. There is no path that drains the
+	// key set BELOW the cap — that's intentional (bounded memory, no
+	// background goroutine), not a leak; don't expect the map to shrink.
 	maxStoreSize = 20000
 	// reclaimScanLimit bounds the keys examined per at-cap reclamation
 	// sweep so a single arrival can't pay an O(maxStoreSize) cost. One
@@ -67,6 +75,16 @@ const (
 	// background goroutine (an arrival that happens to sample only live keys
 	// is shed with a 429, and the next arrival re-samples).
 	reclaimScanLimit = 1024
+	// rejectLogInterval throttles the per-path rejection warnings. The whole
+	// point of this limiter is to absorb floods cheaply, so logging every
+	// rejection would let an attacker turn the control into a log-amplifier
+	// (one line per shed request, at flood volume). Instead each rejection
+	// path (over-budget, at-cap shed) emits at most one slog.Warn per
+	// interval and coalesces the rest into a suppressed-count on the next
+	// line — enough for ops to see "the limiter is firing" and its magnitude
+	// without the volume tracking the attack. One window is the natural
+	// cadence: it's the period over which the budget itself is measured.
+	rejectLogInterval = rateLimitWindow
 )
 
 // unknownIP is the client-IP sentinel used when neither X-Forwarded-For
@@ -93,6 +111,22 @@ type rateLimiter struct {
 	// now is injected for deterministic tests (mirrors Config.Now). Never
 	// call time.Now() inline — the window-expiry test advances this clock.
 	now func() time.Time
+
+	// Per-path rejection-log throttles, guarded by mu (mutated only inside
+	// allow(), which already holds the lock — no extra synchronization). Each
+	// path throttles on its own clock so a flood emits ~one line per
+	// rejectLogInterval carrying a coalesced suppressed-count rather than one
+	// line per shed request.
+	overBudgetLog logThrottle // a single IP spending its window
+	atCapLog      logThrottle // the store full, shedding new IPs
+}
+
+// logThrottle is the per-rejection-path throttle state: when this path last
+// emitted a warning and how many rejections it has swallowed since. Not safe
+// for concurrent use — every access is under rateLimiter.mu.
+type logThrottle struct {
+	lastLogged time.Time
+	suppressed int
 }
 
 // newRateLimiter returns a ready rateLimiter. now may be nil, in which
@@ -165,6 +199,25 @@ func (rl *rateLimiter) reclaimStaleLocked(windowStart time.Time) {
 	}
 }
 
+// logRejectionLocked emits a throttled slog.Warn for the given rejection
+// path. It logs at most once per rejectLogInterval, folding the count of
+// rejections suppressed since the previous line into a "suppressed_since"
+// attr so ops can gauge flood magnitude without per-request log volume.
+// Caller must hold mu.
+//
+// The attacker-influenced client IP rides as an attribute VALUE (never a
+// key), so slog's value escaping neutralizes control bytes — no G706 sink
+// here, unlike the format-string-style sites in callback.go.
+func (rl *rateLimiter) logRejectionLocked(t *logThrottle, now time.Time, msg string, attrs ...any) {
+	if !t.lastLogged.IsZero() && now.Sub(t.lastLogged) < rejectLogInterval {
+		t.suppressed++
+		return
+	}
+	slog.Warn(msg, append(attrs, "suppressed_since", t.suppressed)...)
+	t.lastLogged = now
+	t.suppressed = 0
+}
+
 // allow records an attempt from ip and reports whether it is within the
 // per-IP budget. When rejected it also returns the Retry-After seconds the
 // caller should advertise. All map mutation happens under mu; stale
@@ -190,6 +243,13 @@ func (rl *rateLimiter) allow(ip string) (ok bool, retryAfter int) {
 	if !seen && len(rl.requests) >= maxStoreSize {
 		rl.reclaimStaleLocked(windowStart)
 		if len(rl.requests) >= maxStoreSize {
+			// At-cap shed: the store is full of in-window IPs and reclamation
+			// freed nothing. This is the high-signal "under a sustained
+			// distributed flood, shedding new installs" event worth alerting
+			// on — distinct from a single IP merely exhausting its budget.
+			rl.logRejectionLocked(&rl.atCapLog, now,
+				"oauth rate limiter: store at hard cap, shedding new IP",
+				"ip", ip, "store_size", len(rl.requests))
 			return false, int(rateLimitWindow.Seconds())
 		}
 	}
@@ -205,6 +265,11 @@ func (rl *rateLimiter) allow(ip string) (ok bool, retryAfter int) {
 		// recent is sorted ascending (appended in time order), so the
 		// first entry is the oldest still in the window.
 		rl.requests[ip] = recent
+		// Over-budget: this single IP has spent its window. Throttled so a
+		// persistent attacker can't turn each rejected request into a log line.
+		rl.logRejectionLocked(&rl.overBudgetLog, now,
+			"oauth rate limiter: per-IP budget exceeded",
+			"ip", ip)
 		return false, retryAfterSeconds(recent[0], now)
 	}
 

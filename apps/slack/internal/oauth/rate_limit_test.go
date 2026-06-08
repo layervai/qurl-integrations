@@ -1,14 +1,32 @@
 package oauth
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// captureSlog redirects the package-level slog default to an in-memory text
+// handler for the duration of the test and restores it on cleanup. The OAuth
+// handlers (start.go, callback.go, rate_limit.go) all log via the slog
+// package functions rather than an injected logger, so the only seam to
+// observe their output is the default logger. Restore-on-cleanup keeps this
+// from leaking into other tests; these tests must not run t.Parallel().
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
 
 // sentinelHandler records whether next.ServeHTTP was reached and writes a
 // 200 so we can distinguish "passed the limiter" from "rejected with 429".
@@ -375,5 +393,133 @@ func TestRateLimiterRetryAfterReflectsWindowRemainder(t *testing.T) {
 	}
 	if want := int((rateLimitWindow - 15*time.Second).Seconds()); retryAfter != want {
 		t.Errorf("Retry-After = %d, want %d (whole seconds until the oldest timestamp ages out)", retryAfter, want)
+	}
+}
+
+// minimalRouterConfig returns a Config that passes Validate() with the
+// smallest viable surface — enough to call RegisterRoutes. AdminStore is
+// left nil (so BindClassifyError isn't required) and the clock is pinned so
+// the wiring test is deterministic. The handlers it builds are never driven
+// to completion here; the test only proves the limiter wrap is present.
+func minimalRouterConfig(clock *time.Time) Config {
+	return Config{
+		OAuthStateSecret: bytes.Repeat([]byte("k"), 32),
+		SlackBaseURL:     "https://slack-bot.example.test",
+		Now:              fixedClock(clock),
+	}
+}
+
+// TestRegisterRoutesWrapsBothRoutesWithLimiter fences the wiring cr flagged:
+// the limiter is only useful if RegisterRoutes actually wraps BOTH routes. A
+// regression that dropped an rl.middleware(...) wrap would leave the route
+// reachable past the budget. Driving each registered path 11× (budget+1)
+// from one IP must surface a 429 — proving the wrap is in place per route —
+// and the SHARED limiter means the second route is already over budget from
+// the first route's traffic (same IP), which the assertion tolerates by
+// checking "429 seen within budget+1 requests" rather than an exact count.
+func TestRegisterRoutesWrapsBothRoutesWithLimiter(t *testing.T) {
+	clock := time.Unix(1700000000, 0)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, minimalRouterConfig(&clock))
+
+	for _, path := range []string{StartPath, callbackPath} {
+		saw429 := false
+		for range rateLimitMaxRequests + 1 {
+			r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+			r.RemoteAddr = "203.0.113.200:5000" // one IP across both routes (shared budget)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, r)
+			if rec.Code == http.StatusTooManyRequests {
+				saw429 = true
+				break
+			}
+		}
+		if !saw429 {
+			t.Errorf("route %s: no 429 within %d requests — limiter wrap appears missing", path, rateLimitMaxRequests+1)
+		}
+	}
+}
+
+// TestRateLimiterOverBudgetLogIsThrottled fences the observability +
+// throttle contract cr pushed on: an IP that keeps hammering after exhausting
+// its budget must emit exactly ONE warning per rejectLogInterval (not one per
+// rejected request — that would make the limiter a log-amplifier), and the
+// suppressed rejections must be coalesced into the next line's count. After
+// the interval elapses the path logs again, this time reporting how many it
+// swallowed in between.
+func TestRateLimiterOverBudgetLogIsThrottled(t *testing.T) {
+	buf := captureSlog(t)
+	clock := time.Unix(1700000000, 0)
+	rl := newRateLimiter(fixedClock(&clock))
+
+	// Spend the budget (these admits don't log).
+	for range rateLimitMaxRequests {
+		if ok, _ := rl.allow("203.0.113.51"); !ok {
+			t.Fatal("warmup admit unexpectedly rejected")
+		}
+	}
+	// 20 rejections at the SAME frozen instant: the first logs, the other 19
+	// are suppressed (clock hasn't advanced past the interval).
+	for range 20 {
+		if ok, _ := rl.allow("203.0.113.51"); ok {
+			t.Fatal("over-budget request unexpectedly admitted")
+		}
+	}
+	if got := strings.Count(buf.String(), "per-IP budget exceeded"); got != 1 {
+		t.Fatalf("over-budget warnings before interval elapsed = %d, want exactly 1 (rest must be throttled)", got)
+	}
+
+	// Advance past the throttle interval. rejectLogInterval == rateLimitWindow,
+	// so the window has also rolled and the original timestamps have aged out:
+	// a sustained attacker re-saturates the budget, then the next rejection
+	// logs again — this is the real "still under attack a window later" path,
+	// not an artificial one. The 19 swallowed in phase 1 are still pending
+	// (admits don't touch the suppressed counter), so they surface now.
+	clock = clock.Add(rejectLogInterval + time.Second)
+	buf.Reset()
+	for range rateLimitMaxRequests {
+		if ok, _ := rl.allow("203.0.113.51"); !ok {
+			t.Fatal("re-saturation admit unexpectedly rejected after window rolled")
+		}
+	}
+	if ok, _ := rl.allow("203.0.113.51"); ok {
+		t.Fatal("re-saturated over-budget request unexpectedly admitted")
+	}
+	out := buf.String()
+	if got := strings.Count(out, "per-IP budget exceeded"); got != 1 {
+		t.Fatalf("over-budget warnings after interval = %d, want 1", got)
+	}
+	if !strings.Contains(out, "suppressed_since=19") {
+		t.Errorf("second warning must coalesce the 19 suppressed rejections; got: %s", out)
+	}
+}
+
+// TestRateLimiterAtCapShedLogsOnce fences the high-signal at-cap shed
+// warning — the event cr most wanted alertable. The shed path is throttled on
+// its OWN clock, independent of the over-budget path, so a distributed flood
+// of distinct IPs all shed at one frozen instant produces a single line (with
+// the store_size attr) rather than one per shed IP.
+func TestRateLimiterAtCapShedLogsOnce(t *testing.T) {
+	buf := captureSlog(t)
+	clock := time.Unix(1700000000, 0)
+	rl := newRateLimiter(fixedClock(&clock))
+	fillToCap(rl, clock) // every seeded key is in-window, so reclamation frees nothing
+
+	for i := range 5 {
+		if ok, _ := rl.allow("fresh-" + strconv.Itoa(i)); ok {
+			t.Fatalf("shed %d: a fresh IP must be shed at cap", i)
+		}
+	}
+	out := buf.String()
+	if got := strings.Count(out, "store at hard cap"); got != 1 {
+		t.Fatalf("at-cap shed warnings = %d, want exactly 1 (throttled)", got)
+	}
+	if !strings.Contains(out, "store_size=") {
+		t.Errorf("shed warning must carry store_size for ops; got: %s", out)
+	}
+	// The over-budget path must NOT have logged — the two throttles are
+	// independent, and nothing here exercised an over-budget IP.
+	if strings.Contains(out, "per-IP budget exceeded") {
+		t.Error("at-cap shed must not emit the over-budget message")
 	}
 }

@@ -343,7 +343,11 @@ func RegisterRoutes(mux *http.ServeMux, cfg Config) {
 	// the per-IP budget by alternating /start and /callback. Wrapped
 	// OUTERMOST (limiter outside TimeoutHandler) so a rejected request
 	// never enters the timeout-tracked handler.
-	rl := newRateLimiter(cfg.Now)
+	//
+	// cfg.now() (not cfg.Now) so the limiter resolves the clock the same way
+	// every other handler in the package does — newRateLimiter also nil-checks,
+	// so this is for consistency, not correctness.
+	rl := newRateLimiter(cfg.now())
 	mux.Handle(StartPath, rl.middleware(http.TimeoutHandler(
 		Start(cfg), oauthHandlerTimeout, "oauth/start timed out")))
 	mux.Handle(callbackPath, rl.middleware(http.TimeoutHandler(
