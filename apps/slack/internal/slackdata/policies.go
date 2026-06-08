@@ -40,18 +40,20 @@ const (
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
-// (teamID, channelID) channel_policies row authorizes for non-admin
-// mint via the `$r_<id>` get path (handler_get.go's
-// resourceAllowedForUser). The set is the union of two orthogonal
-// surfaces on the same row:
+// (teamID, channelID) channel_policies row authorizes in that channel —
+// the channel-scoped set that gates both `/qurl get` mint (via
+// handler_get.go's allowedResourceIDsForGet) and `/qurl list` disclosure
+// (via handler_list.go's listChannelScope). The set is the union of two
+// orthogonal surfaces on the same row:
 //
-//   - `allowed_resource_ids` SS — the legacy multi-resource gate
-//     hand-seeded or carried over from pre-pivot rows. `/qurl get
-//     $r_<id>` checks membership here.
-//   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl-admin set-alias` / `/qurl-admin unset-alias` mutate; the
-//     binding's resource_id is also accepted on the `$r_<id>` path so
-//     an aliased resource is mintable by its raw ID too.
+//   - `allowed_resource_ids` SS — resources exposed to the channel (the
+//     Edit modal / channel exposure) or carried over from pre-pivot
+//     rows. A `/qurl get` token that resolves to one of these IDs (via
+//     its `$<slug>` or a listed URL `$<alias>`) is mintable here.
+//   - `alias_bindings` Map<alias_name, resource_id> — the channel-alias
+//     surface `/qurl-admin set-alias` / `/qurl-admin unset-alias` mutate.
+//     The bound resource_id joins the union, so the resource is mintable
+//     via its `$<alias>` (the binding) or its `$<slug>`.
 //
 // Either surface allows the row to mint. As of #589 this set is also
 // the `/qurl list` disclosure scope again (not just the mint gate) —

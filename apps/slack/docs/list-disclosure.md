@@ -50,9 +50,10 @@ Channel scoping bounds what `/qurl list` *discloses*. Independently, minting is
 gated per channel at mint time, so even a token learned out-of-band cannot be
 minted from a channel where it isn't allowed:
 
-- `/qurl get $<id>` enforces the channel's allowed resource-id set for
-  non-admins. A `$<id>` pasted into `/qurl get` from a channel where it isn't
-  allowed fails closed.
+- `/qurl get $<slug>` (the listed token `/qurl list` shows for a tunnel — not
+  the raw `r_...` form, which is rejected) enforces the channel's allowed
+  resource-id set for non-admins. A slug pasted into `/qurl get` from a channel
+  where it isn't allowed fails closed.
 - `/qurl get $<alias>` requires an alias binding in the current channel. An
   alias that isn't bound in your channel fails closed.
 - `/qurl get` also requires channel context and rejects raw internal
