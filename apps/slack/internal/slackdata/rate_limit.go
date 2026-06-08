@@ -103,8 +103,6 @@ func (s *Store) mintRefillInterval() time.Duration {
 // workspaces are vanishingly unlikely. If strict per-(user,team)
 // isolation is ever wanted, key on teamID + "/" + slackUserID instead.
 func (s *Store) CheckRateLimit(_ context.Context, slackUserID, teamID string) (allowed bool, retry time.Duration, err error) {
-	_ = teamID
-
 	burst := s.mintBurst()
 	refill := s.mintRefillInterval()
 

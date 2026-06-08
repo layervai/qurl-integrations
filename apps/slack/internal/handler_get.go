@@ -369,6 +369,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// so an undeliverable privacy request consumes nothing either. (Resolution
 	// work for unknown aliases is instead bounded by Slack's own per-user
 	// slash-command throttle, not by spending the user's mint quota on typos.)
+	//
+	// A token is spent per ATTEMPT, here, BEFORE the upstream mint — by
+	// design, as an abuse backstop: (a) a transient upstream mint failure
+	// below does not become a free retry vector, and (b) duplicate/idempotent
+	// attempts (incl. Slack slash-command retries) each spend a token even
+	// though they collapse to a single mint upstream via IdempotencyKey.
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)

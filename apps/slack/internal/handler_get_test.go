@@ -1315,7 +1315,10 @@ func TestHandleGet_RateLimited(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 
 	// Drain the user's full token budget on real, successful mints.
-	const budget = 30 // mirrors slackdata mintRateBurst (30/hr).
+	// Derive the budget from the Store's source of truth rather than
+	// mirroring the literal, so this tracks the real default (30/hr) and
+	// won't break confusingly if slackdata changes it.
+	budget := h.cfg.AdminStore.MintRatePerHour
 	for i := 0; i < budget; i++ {
 		inv := newAdminSlashInvoker(t, h)
 		_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
@@ -1323,7 +1326,7 @@ func TestHandleGet_RateLimited(t *testing.T) {
 			t.Fatalf("mint %d/%d should have succeeded, got: %q", i+1, budget, async)
 		}
 	}
-	if got := mintHits.Load(); got != budget {
+	if got := mintHits.Load(); got != int32(budget) {
 		t.Fatalf("expected %d upstream mints to drain the budget, got %d", budget, got)
 	}
 
@@ -1334,7 +1337,7 @@ func TestHandleGet_RateLimited(t *testing.T) {
 	if !strings.Contains(async, "Rate limit hit") {
 		t.Errorf("over-budget reply missing rate-limit message: %q", async)
 	}
-	if got := mintHits.Load(); got != budget {
+	if got := mintHits.Load(); got != int32(budget) {
 		t.Errorf("over-budget request reached the mint (hits = %d, want %d)", got, budget)
 	}
 }
