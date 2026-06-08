@@ -437,15 +437,28 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 //
 // Cost note: this runs BEFORE the per-user rate-limit gate in getWork — the gate
 // only fires once a token resolves, so a typo never burns the user's quota (see
-// getWork). A binding miss therefore incurs its upstream resource lookups (slug,
-// then the first-page alias scan when needed) un-throttled by that gate,
-// including for plain typos. That's the deliberate "spend a read rather than burn
-// the user's quota on a fat-fingered alias" tradeoff — don't "optimize" it away
-// by short-circuiting the fallbacks on a binding miss. Each scan is bounded by
+// getWork). For a CONFIGURED channel (one with a non-empty allow-set), a binding
+// miss therefore incurs its upstream resource lookups (slug, then the first-page
+// alias scan when needed) un-throttled by that gate, including for plain typos.
+// That's the deliberate "spend a read rather than burn the user's quota on a
+// fat-fingered alias" tradeoff — don't "optimize" it away by short-circuiting the
+// fallbacks on a binding miss in a configured channel. Each scan is bounded by
 // listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
 // the request rate; if the in-bot limiter (CheckRateLimit, a stub today) ever
 // needs to shed this resolution cost too, add a cheap token-shape pre-filter
 // before the alias scan rather than moving the gate back ahead of resolution.
+//
+// One NARROW exception (closes #534): when the channel allow-set is EMPTY (a
+// "cold" channel with no protected resources), BOTH fallbacks below would be
+// gated out anyway — neither a tunnel slug nor a resource alias can match an
+// empty set — so the upstream GET /v1/resources?slug= would be pure waste. Worse,
+// it's an UNMETERED probe surface: those upstream lookups run before the per-user
+// rate-limit gate, so `/qurl get $typo1`, `$typo2`, … from a cold channel fan out
+// one upstream hop each against the workspace API key, throttled only by Slack's
+// own slash-command limit. So the cold-channel case is short-circuited on the
+// allow-set DDB read alone. This is NOT the blanket "skip the fallbacks on a
+// binding miss" the tradeoff above warns against: it suppresses the hop ONLY when
+// the downstream channel gate is guaranteed to reject every fallback result.
 //
 // Caller must have already checked AdminStore (getWork does this before
 // resolving). Returns a [*userError] on lookup failure, not-a-known-token, or
@@ -477,14 +490,34 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		return resourceID, nil
 	}
 
-	// No binding — try the token as a tunnel slug, then authorize.
+	// No binding — fetch the channel allow-set FIRST (a DDB read), BEFORE any
+	// upstream lookup. An empty set means neither the tunnel-slug fallback nor
+	// the resource-alias fallback could pass the channel gate below, so the
+	// upstream GET /v1/resources?slug= would be pure waste — and an unmetered
+	// cold-channel probe surface (#534), since these fallbacks run ahead of the
+	// per-user rate-limit gate. Short-circuit on the DDB read alone. This
+	// NARROWS the "spend a read rather than burn quota on a typo" tradeoff
+	// documented above: it still holds for a CONFIGURED channel; only a channel
+	// with no protected resources spends nothing upstream. It is NOT a blanket
+	// skip of the fallbacks on a binding miss — it suppresses the hop solely for
+	// the case the downstream channel gate is guaranteed to reject anyway.
+	allowedSet, authErr := h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
+	if authErr != nil {
+		return "", authErr
+	}
+	if len(allowedSet) == 0 {
+		log.Debug("get: channel has no protected resources — skipping slug/alias fallback", "team_id", teamID, "channel_id", channelID, "token", token)
+		return "", &userError{msg: noResourceForAliasMessage(token)}
+	}
+
+	// Try the token as a tunnel slug, then authorize against the set above.
 	slugResourceID, slugErr := h.resolveTunnelSlugAliasTarget(ctx, teamID, token)
 	if slugErr != nil {
 		if !errors.Is(slugErr, errTunnelSlugNotFound) {
 			log.Warn("get: tunnel-slug fallback lookup failed", "error", slugErr, "team_id", teamID, "slug", token)
 			return "", &userError{msg: serviceUnreachableMessage}
 		}
-		aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, nil)
+		aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet)
 		if aliasErr != nil {
 			return "", aliasErr
 		}
@@ -493,10 +526,6 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 			return "", &userError{msg: noResourceForAliasMessage(token)}
 		}
 		return aliasResourceID, nil
-	}
-	allowedSet, authErr := h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
-	if authErr != nil {
-		return "", authErr
 	}
 	if _, allowed := allowedSet[slugResourceID]; !allowed {
 		if aliasResourceID, aliasFound, aliasErr := h.resolveListedResourceAliasForGet(ctx, log, teamID, channelID, userID, token, allowedSet); aliasErr != nil {
