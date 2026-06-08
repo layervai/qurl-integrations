@@ -452,7 +452,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 // fat-fingered alias" tradeoff — don't "optimize" it away by short-circuiting the
 // fallbacks on a binding miss in a configured channel. Each scan is bounded by
 // listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
-// the request rate; if the in-bot limiter (CheckRateLimit, a stub today) ever
+// the request rate; if the in-bot limiter (CheckRateLimit) ever
 // needs to shed this resolution cost too, add a cheap token-shape pre-filter
 // before the alias scan rather than moving the gate back ahead of resolution.
 //

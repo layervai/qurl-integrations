@@ -35,6 +35,14 @@ import (
 //     fresh full bucket. Acceptable: the goal is to blunt runaway
 //     loops/abuse within a task's lifetime, not to persist a rolling
 //     hourly count across deploys.
+//   - mintBuckets only grows. Every distinct slack_user_id the task
+//     ever serves keeps a *mintBucket entry; there's no eviction, even
+//     for buckets that have refilled to full (state-equivalent to a
+//     never-seen user). It's a slow monotonic leak bounded by the
+//     task's lifetime active-user count and wiped on redeploy, so no
+//     sweeper is warranted; if a task's active-user population ever
+//     grows large enough to matter, evict on refill once tokens reach
+//     burst (a full bucket carries no state a fresh one wouldn't).
 //
 // FUTURE UPGRADE PATH: if a globally-consistent cross-task limit is
 // ever required, move the counter to DynamoDB — an atomic conditional
@@ -84,8 +92,16 @@ func (s *Store) mintRefillInterval() time.Duration {
 // CheckRateLimit reports whether slackUserID may mint another link
 // right now. On denial it returns the wall-clock time until the next
 // token is available so the caller can tell the user when to retry.
-// teamID is accepted for signature compatibility but is not part of
-// the key — the pre-pivot budget was per slack_user_id, cross-team.
+//
+// teamID is accepted for signature compatibility but is deliberately
+// NOT part of the bucket key — the budget is per slack_user_id,
+// cross-team, matching the pre-pivot HTTP gate. Slack U… IDs are unique
+// within a workspace, not globally, so two different humans in two
+// workspaces can collide on one ID and share a 30/hr bucket; the
+// failure mode is one innocent user's budget halved, never a bypass,
+// and Slack-ID collisions across the small set of qURL-installed
+// workspaces are vanishingly unlikely. If strict per-(user,team)
+// isolation is ever wanted, key on teamID + "/" + slackUserID instead.
 func (s *Store) CheckRateLimit(_ context.Context, slackUserID, teamID string) (allowed bool, retry time.Duration, err error) {
 	_ = teamID
 
