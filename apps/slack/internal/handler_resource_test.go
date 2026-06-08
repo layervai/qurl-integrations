@@ -46,6 +46,22 @@ func TestParseResourceExposeArgs(t *testing.T) {
 			wantChannelAlias: testResourceExposeChannelAlias,
 		},
 		{
+			// Slack auto-links a bare URL typed in a slash command, so the
+			// token reaches the bot wrapped in angle brackets. Regression: this
+			// previously failed url.Parse with "not an absolute URL".
+			name:             "slack-wrapped url is unwrapped",
+			text:             "url:<" + testResourceExposeURL + "> as:$handbook",
+			wantTargetURL:    testResourceExposeURL,
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// Slack's <url|display> form: the href before the pipe is the URL.
+			name:             "slack-wrapped url with display text is unwrapped",
+			text:             "url:<" + testResourceExposeURL + "|docs.example.com> as:$handbook",
+			wantTargetURL:    testResourceExposeURL,
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
 			name:    "no target (verb stripped, empty rest)",
 			text:    "",
 			wantMsg: resourceExposeUsage,
