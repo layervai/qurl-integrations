@@ -377,6 +377,9 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// though they collapse to a single mint upstream via IdempotencyKey.
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
+		// Retained intentionally for forward-compat: the in-memory token-bucket
+		// CheckRateLimit never errors today, but the documented DDB-counter
+		// upgrade path can (e.g. transient DynamoDB failures) — not dead code.
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
 		return "", &userError{msg: commonGetMintFailedMessage}
 	}
