@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -309,5 +311,69 @@ func TestRateLimiterReclamationUnwedgesAfterFlood(t *testing.T) {
 		if !ok {
 			t.Fatalf("post-flood install %d was 429'd — the map stayed wedged at cap", i)
 		}
+	}
+}
+
+// TestRateLimiterConcurrentSameIPNeverExceedsBudget fences the mutex
+// contract the whole limiter rests on: with the clock frozen (the window
+// never rolls), many goroutines hammering ONE IP must see EXACTLY
+// rateLimitMaxRequests admits in total, regardless of scheduling. The
+// evict-count-append in allow() is a read-modify-write on the per-IP
+// slice; if any of it escaped the lock, two goroutines could both observe
+// a sub-budget count and overspend. The serial tests assert correctness by
+// construction — this is the only one that exercises real contention (run
+// with -race, as CI does, to also surface the data race directly).
+func TestRateLimiterConcurrentSameIPNeverExceedsBudget(t *testing.T) {
+	clock := time.Unix(1700000000, 0)
+	rl := newRateLimiter(fixedClock(&clock))
+
+	const goroutines = 64
+	const perGoroutine = 5 // 320 attempts, far over the budget of 10.
+	var allowed atomic.Int64
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perGoroutine {
+				if ok, _ := rl.allow("203.0.113.42"); ok {
+					allowed.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := allowed.Load(); got != rateLimitMaxRequests {
+		t.Errorf("concurrent same-IP admits = %d, want exactly %d — budget breached under contention", got, rateLimitMaxRequests)
+	}
+}
+
+// TestRateLimiterRetryAfterReflectsWindowRemainder pins the Retry-After
+// arithmetic at a non-trivial clock offset. TestRateLimiterOverLimitRejects
+// fills the budget at a single frozen instant, so every timestamp coincides
+// and the advertised value is always the full window — that can't catch a
+// ceil/offset regression. Here the budget is filled at t0, the clock
+// advances partway into the window, and the rejected request must advertise
+// the whole-seconds remainder until the oldest timestamp ages out.
+func TestRateLimiterRetryAfterReflectsWindowRemainder(t *testing.T) {
+	clock := time.Unix(1700000000, 0)
+	rl := newRateLimiter(fixedClock(&clock))
+
+	// Fill the budget at t0 — all rateLimitMaxRequests timestamps are t0.
+	for range rateLimitMaxRequests {
+		if ok, _ := rl.allow("198.51.100.7"); !ok {
+			t.Fatal("warmup request unexpectedly rejected")
+		}
+	}
+	// Advance 15s into the 60s window; the oldest timestamp (t0) ages out
+	// in the remaining 45s.
+	clock = clock.Add(15 * time.Second)
+	ok, retryAfter := rl.allow("198.51.100.7")
+	if ok {
+		t.Fatal("request over budget should have been rejected")
+	}
+	if want := int((rateLimitWindow - 15*time.Second).Seconds()); retryAfter != want {
+		t.Errorf("Retry-After = %d, want %d (whole seconds until the oldest timestamp ages out)", retryAfter, want)
 	}
 }

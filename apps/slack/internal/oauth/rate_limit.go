@@ -59,9 +59,13 @@ const (
 	// reclaimScanLimit bounds the keys examined per at-cap reclamation
 	// sweep so a single arrival can't pay an O(maxStoreSize) cost. One
 	// fully-stale key freed is enough to admit the arriving IP; the cap
-	// keeps the worst-case in-lock work flat regardless of map size. Each
-	// subsequent at-cap arrival resumes the sweep, so the whole map is
-	// still reachable across requests without a background goroutine.
+	// keeps the worst-case in-lock work flat regardless of map size. There
+	// is no resumable cursor: Go randomizes map-iteration order, so each
+	// at-cap arrival independently samples up to this many keys. Stale keys
+	// are therefore reclaimed probabilistically across arrivals rather than
+	// via a stateful sweep — which still drains the map over time without a
+	// background goroutine (an arrival that happens to sample only live keys
+	// is shed with a 429, and the next arrival re-samples).
 	reclaimScanLimit = 1024
 )
 
