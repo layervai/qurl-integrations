@@ -53,10 +53,10 @@ const (
 //     binding's resource_id is also accepted on the `$r_<id>` path so
 //     an aliased resource is mintable by its raw ID too.
 //
-// Either surface allows the row to mint. The `/qurl list` consumer of
-// this set was removed in #459 (revert of #234): `/qurl list` is now
-// workspace-wide and unfiltered, so this function survives only as the
-// mint-time channel gate. Single-row GetItem; no pagination needed.
+// Either surface allows the row to mint. As of #589 this set is also
+// the `/qurl list` disclosure scope again (not just the mint gate) —
+// see the TODO below and apps/slack/docs/list-disclosure.md. Single-row
+// GetItem; no pagination needed.
 //
 // Known asymmetry vs [ResolvePolicy]: this function does NOT read the
 // legacy scalar `resource_id` attribute. ResolvePolicy falls back to
