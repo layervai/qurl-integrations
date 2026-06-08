@@ -105,9 +105,11 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 // still decoded; un-wrapped, un-escaped input is returned unchanged.
 //
 // The caller has already split the command on whitespace, so this assumes a
-// single space-free token. That holds because Slack only auto-links a bare URL
-// (its display text is the URL itself, never free text with spaces); a
-// hypothetical <href|display with spaces> would have been split upstream.
+// single space-free token, and the first "|" is taken as the wrap separator.
+// Both hold because Slack only auto-links a well-formed bare URL: its display
+// text is the URL itself (never free text with spaces), and a raw "|" is
+// invalid in a URL (normally percent-encoded), so neither a space nor a
+// literal "|" reaches this helper from Slack's auto-linking.
 func unwrapSlackURLArg(s string) string {
 	if strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">") {
 		s = s[1 : len(s)-1]
