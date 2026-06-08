@@ -39,11 +39,15 @@ const (
 	// rateLimitWindow. The issue's explicit acceptance criterion is
 	// 10 requests / minute / IP.
 	rateLimitMaxRequests = 10
-	// maxRequestsPerIP caps the timestamps retained per IP so a single
-	// abusive IP can't grow its slice unboundedly within a window. A
-	// small multiple of the budget is plenty — anything past the budget
-	// is already being rejected, the extra slack just absorbs the append
-	// that happens before the next request trims.
+	// maxRequestsPerIP caps the timestamps retained per IP, mirroring the
+	// Discord reference's MAX_REQUESTS_PER_IP (also budget × 4). Under the
+	// current mutex-serialized flow this trim is unreachable: allow()
+	// rejects at rateLimitMaxRequests WITHOUT appending (see the
+	// reject-before-append branch below), so a stored slice never exceeds
+	// the budget (10) — far under this cap (40). Retained for structural
+	// parity with the reference and as belt-and-suspenders: if a future
+	// edit ever appended past the budget (e.g. a separate count path), the
+	// slice would still stay bounded. Not load-bearing today.
 	maxRequestsPerIP = rateLimitMaxRequests * 4
 	// maxStoreSize is the hard ceiling on distinct IPs tracked at once.
 	// Under a distributed flood from many unique IPs the map can reach this
@@ -201,6 +205,11 @@ func (rl *rateLimiter) allow(ip string) (ok bool, retryAfter int) {
 	}
 
 	recent = append(recent, now)
+	// Bound the slice. Unreachable today: we reach here only when the
+	// pre-append count was < rateLimitMaxRequests (10), so post-append len
+	// is <= 10 < maxRequestsPerIP (40). Kept for parity with the Discord
+	// reference's trim and as a guard if the reject-before-append invariant
+	// above is ever relaxed. See the maxRequestsPerIP const comment.
 	if len(recent) > maxRequestsPerIP {
 		recent = recent[len(recent)-maxRequestsPerIP:]
 	}
