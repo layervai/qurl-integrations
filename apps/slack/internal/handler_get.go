@@ -545,6 +545,10 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 }
 
 func (h *Handler) resolveListedResourceAliasForGet(ctx context.Context, log *slog.Logger, teamID, channelID, userID, token string, allowedSet map[string]struct{}) (resourceID string, found bool, err error) {
+	// Both current callers pass a non-nil allowedSet: the cold-channel
+	// short-circuit in resolveTokenForGet returns early on an empty set, so a
+	// non-empty set always reaches here. This re-fetch is therefore currently
+	// unreachable and is retained only as defensive depth for any future caller.
 	if allowedSet == nil {
 		var authErr error
 		allowedSet, authErr = h.allowedResourceIDsForGet(ctx, log, teamID, channelID)
