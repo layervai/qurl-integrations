@@ -145,6 +145,12 @@ func TestHandleGet_UnknownSlugColdChannelNoUpstreamHop(t *testing.T) {
 	ts := newAdminTestServers(t)
 	// Cold channel: seed the workspace (so AdminStore is usable and the
 	// caller resolves) but NO channel policy/exposure → empty allow-set.
+	// seedNonAdmin (vs TestHandleGet_AliasNotFound's seedAdmin) is the
+	// deliberate pick: the allow-set gate is channel-scoped with no admin
+	// bypass (allowedResourceIDsForGet doc), so the more security-relevant
+	// caller to pin against the cold-channel probe surface is a non-admin.
+	// The two tests together show both an admin and a non-admin caller hit
+	// the same short-circuit.
 	ts.seedNonAdmin(t)
 	var listHits atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
