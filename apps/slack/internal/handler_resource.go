@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -70,11 +71,12 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 
 	if strings.HasPrefix(target, "url:") {
 		targetURL := strings.TrimSpace(strings.TrimPrefix(target, "url:"))
-		// Slack auto-links bare URLs in slash-command text, so the token arrives
-		// wrapped as <https://host> or <https://host|display>. Unwrap before
-		// validating — otherwise the leading "<" makes url.Parse yield no scheme
-		// and every typed url: target is rejected as "not an absolute URL".
-		targetURL = unwrapSlackLink(targetURL)
+		// Slack auto-links bare URLs in slash-command text and HTML-escapes
+		// &/</> there, so the token arrives wrapped as <https://host> (or
+		// <https://host|display>) with &amp; in any query string. Decode before
+		// validating — the leading "<" makes url.Parse yield no scheme, and a
+		// literal &amp; would break the exact-target lookup against the resource.
+		targetURL = unwrapSlackURLArg(targetURL)
 		if targetURL == "" {
 			return nil, "Missing URL after `url:`.\n\n" + resourceExposeUsage
 		}
@@ -95,20 +97,20 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 	return nil, "Target must be a resource alias like `$docs`, or `url:<target-url>` with `as:$channel-alias`.\n\n" + resourceExposeUsage
 }
 
-// unwrapSlackLink strips Slack's auto-link formatting from a slash-command
-// token. Slack rewrites a bare URL typed in a slash command as <https://host>
-// or <https://host|display text>; the real URL is the part before any "|", with
-// the surrounding angle brackets removed. Returns the input unchanged when it
-// isn't a Slack-wrapped link.
-func unwrapSlackLink(s string) string {
-	if !strings.HasPrefix(s, "<") || !strings.HasSuffix(s, ">") {
-		return s
+// unwrapSlackURLArg decodes a URL typed into a slash command. Slack rewrites a
+// recognized URL as <https://host> (or <https://host|display text>) and
+// HTML-escapes &, <, > in the command text, so a multi-param URL arrives as
+// <https://host?a=1&amp;b=2>. Strip the angle-bracket wrapping (taking the href
+// before any "|"), then HTML-unescape so the value matches the stored target.
+// Un-wrapped, un-escaped input is returned unchanged.
+func unwrapSlackURLArg(s string) string {
+	if strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">") {
+		s = s[1 : len(s)-1]
+		if pipe := strings.IndexByte(s, '|'); pipe >= 0 {
+			s = s[:pipe]
+		}
 	}
-	inner := s[1 : len(s)-1]
-	if pipe := strings.IndexByte(inner, '|'); pipe >= 0 {
-		inner = inner[:pipe]
-	}
-	return inner
+	return html.UnescapeString(s)
 }
 
 // handleExposeURL routes the URL verb `/qurl-admin protect-url`: bare (no

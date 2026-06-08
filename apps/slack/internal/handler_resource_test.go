@@ -62,6 +62,19 @@ func TestParseResourceExposeArgs(t *testing.T) {
 			wantChannelAlias: testResourceExposeChannelAlias,
 		},
 		{
+			// Slack HTML-escapes & in command text, so a multi-param URL arrives
+			// as ...?a=1&amp;b=2; it must decode to match the stored target.
+			name:             "slack-wrapped multi-param url is unescaped",
+			text:             "url:<https://docs.example.com/p?a=1&amp;b=2> as:$handbook",
+			wantTargetURL:    "https://docs.example.com/p?a=1&b=2",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			name:    "empty slack-wrapped url is missing-url",
+			text:    "url:<> as:$handbook",
+			wantMsg: "Missing URL",
+		},
+		{
 			name:    "no target (verb stripped, empty rest)",
 			text:    "",
 			wantMsg: resourceExposeUsage,
