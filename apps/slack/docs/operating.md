@@ -27,6 +27,46 @@ first user to connect an unbound workspace can reach it (qURL is
 first-come-claims). The overwrite guard for an already-bound workspace lives
 at the OAuth-callback bind layer.
 
+## Per-user mint rate limiting
+
+`/qurl get` enforces a per-Slack-user cap on link mints
+(`slackdata.CheckRateLimit`). The budget is **30 mints per
+`slack_user_id` per hour** — the value the pre-pivot HTTP gate applied.
+Only a request that resolves to a real, channel-authorized resource
+(an actual mint attempt) spends from the budget; typo'd or
+not-authorized aliases are turned away before the gate, so a fat-finger
+never burns quota. When a user is over budget, `/qurl get` replies
+"Rate limit hit. Try again in …" with the time until their next mint.
+
+**Decision: in-memory token bucket, per Fargate task.** Each user has a
+bucket that refills continuously at one token per (hour ÷ rate) and is
+held in the task's memory under a mutex. This was chosen over a
+DynamoDB-backed counter because it adds **zero per-mint I/O/latency** on
+the hot path and is sufficient for the goal — blunting runaway
+loops/abuse — without billing-grade precision.
+
+Tradeoffs, accepted deliberately:
+
+- **Per-task, not global.** Slack does not route a user's slash commands
+  to a sticky task, so with N running tasks a single user's effective
+  ceiling is ≈ N × 30/hr. This is an abuse-rate backstop; qurl-service's
+  customer-level API-key quota remains the hard cross-task ceiling
+  underneath it.
+- **Resets on redeploy/restart.** A deploy hands every user a fresh full
+  bucket. Acceptable: the intent is to bound abuse within a task's
+  lifetime, not to persist a rolling hourly count across deploys.
+
+**Future upgrade path** (only if a globally-consistent cross-task limit
+is ever required): move the counter to DynamoDB via an atomic
+conditional `UpdateItem` (token-count + last-refill attributes) keyed by
+`slack_user_id` on the `channel_policies`/workspace row. That buys
+durability and cross-task consistency at the cost of one extra DDB write
+per mint.
+
+The rate is a code-level policy (`Store.MintRatePerHour`, defaulting to
+30), **not** an environment variable — there is no operator knob to set;
+change the default in code if the policy needs to move.
+
 ## Architecture
 
 - **Runtime:** stateless HTTP service, shipped as a small container. Sits

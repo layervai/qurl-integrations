@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -99,6 +100,23 @@ type Store struct {
 	// updated_at assertions without poking a package-global.
 	// Defaults to time.Now.
 	Now func() time.Time
+
+	// MintRatePerHour is the per-Slack-user mint budget enforced by
+	// [Store.CheckRateLimit] — both the steady-state hourly rate and
+	// the burst capacity (see the strategy comment in rate_limit.go).
+	// [NewStore] defaults it to mintRatePerHour; a non-positive value
+	// falls back to that default at check time. Exposed as a field so
+	// the limit is tunable without an env knob, and so tests can grant
+	// headroom to flows whose intent is orthogonal to rate limiting.
+	MintRatePerHour int
+
+	// mintBuckets holds the per-Slack-user mint token buckets read by
+	// [Store.CheckRateLimit]. In-memory and per-Fargate-task; see the
+	// strategy/tradeoffs comment in rate_limit.go. Guarded by
+	// mintBucketsMu. Initialized by [NewStore]; CheckRateLimit
+	// lazily allocates it as a fallback for directly-built Stores.
+	mintBuckets   map[string]*mintBucket
+	mintBucketsMu sync.Mutex
 }
 
 // StoreOption configures [NewStore].
@@ -164,6 +182,8 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 		WorkspaceMappingsName: o.workspaceMappingsName,
 		ChannelPoliciesName:   o.channelPoliciesName,
 		Now:                   time.Now,
+		MintRatePerHour:       mintRatePerHour,
+		mintBuckets:           make(map[string]*mintBucket),
 	}, nil
 }
 

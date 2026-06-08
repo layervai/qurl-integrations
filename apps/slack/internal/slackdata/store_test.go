@@ -91,6 +91,7 @@ func newStore(client DynamoDBClient) *Store {
 		WorkspaceMappingsName: "ws",
 		ChannelPoliciesName:   "cp",
 		Now:                   func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		mintBuckets:           make(map[string]*mintBucket),
 	}
 }
 
