@@ -2,6 +2,8 @@ package slackdata
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -173,5 +175,74 @@ func TestCheckRateLimit_MintRatePerHourOverride(t *testing.T) {
 	}
 	if want := time.Hour / 2; retry != want {
 		t.Errorf("retry = %v, want %v (one token at 2/hr)", retry, want)
+	}
+}
+
+// TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBurst fences the
+// mutex contract: with the clock frozen (no refill), many goroutines
+// minting for ONE user must see EXACTLY burst allows in total. The
+// refill-check-consume is a read-modify-write on the user's bucket; if any
+// part escaped mintBucketsMu, two goroutines could both observe tokens >= 1
+// and overspend. The serial tests assert correctness by construction — this
+// is the only one that exercises real contention (run with -race, as CI
+// does, to also surface the data race directly).
+func TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBurst(t *testing.T) {
+	clk := time.Unix(1_700_000_000, 0).UTC()
+	s := newRateLimitStore(&clk)
+
+	const goroutines = 64
+	const perGoroutine = 4 // 256 attempts, far over the burst of 30.
+	var allowed atomic.Int64
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perGoroutine {
+				if ok, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); ok {
+					allowed.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := allowed.Load(); got != int64(burst) {
+		t.Errorf("concurrent single-user allows = %d, want exactly %d — burst breached under contention", got, burst)
+	}
+}
+
+// TestCheckRateLimit_FractionalAccrualAcrossSubIntervals pins that refill
+// is LOSSLESS across gaps shorter than one refill interval. Tokens are
+// fractional, so crediting elapsed/refill on each call must accumulate:
+// four gaps of refill/4 (each crediting 0.25 of a token — none enough on
+// its own) sum to one whole token. An integer/truncating refill would floor
+// each sub-interval credit to zero and never reopen the bucket. Quarters
+// are exact in IEEE-754, so the boundary is deterministic.
+func TestCheckRateLimit_FractionalAccrualAcrossSubIntervals(t *testing.T) {
+	clk := time.Unix(1_700_000_000, 0).UTC()
+	s := newRateLimitStore(&clk)
+
+	// Drain the full bucket at the frozen clock.
+	for i := 0; i < burst; i++ {
+		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
+			t.Fatalf("mint %d within burst denied; want allowed", i+1)
+		}
+	}
+
+	// Three sub-interval gaps accrue 0.25 + 0.25 + 0.25 = 0.75 of a token —
+	// under one whole token, so each is still denied.
+	quarter := refillInterval / 4
+	for i := 0; i < 3; i++ {
+		clk = clk.Add(quarter)
+		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); allowed {
+			t.Fatalf("sub-interval mint %d allowed at %d%% of a token; fractional credit must not mint early", i+1, (i+1)*25)
+		}
+	}
+	// The fourth quarter completes one whole token — allowed, proving the
+	// fractional credits accumulated rather than flooring away.
+	clk = clk.Add(quarter)
+	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
+		t.Error("mint after four refill/4 gaps denied; fractional accrual was lost to rounding")
 	}
 }
