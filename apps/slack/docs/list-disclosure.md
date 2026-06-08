@@ -35,8 +35,11 @@ listing refuses rather than falling back to a workspace-wide view:
 A **direct message** (`D…` channel) has no channel-policy rows of its own, so
 its allow-set is empty and `/qurl list` there returns the channel empty state —
 **no resources are listed**. Running `/qurl list` in a 1:1 does *not* show
-tunnels protected in #ops or any other channel. (If you remember a time when it
-did, see [History](#history) below — that was an earlier, since-reverted state.)
+tunnels protected in #ops or any other channel. Group / multi-person DMs
+(`mpim`) likewise have no channel-policy rows of their own, so the allow-set is
+empty and `/qurl list` there returns the channel empty state too. (If you
+remember a time when it did, see [History](#history) below — that was an
+earlier, since-reverted state.)
 
 ## The capability boundary (defense in depth)
 
