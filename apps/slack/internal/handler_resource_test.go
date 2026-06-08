@@ -46,6 +46,54 @@ func TestParseResourceExposeArgs(t *testing.T) {
 			wantChannelAlias: testResourceExposeChannelAlias,
 		},
 		{
+			// Slack auto-links a bare URL typed in a slash command, so the
+			// token reaches the bot wrapped in angle brackets. Regression: this
+			// previously failed url.Parse with "not an absolute URL".
+			name:             "slack-wrapped url is unwrapped",
+			text:             "url:<" + testResourceExposeURL + "> as:$handbook",
+			wantTargetURL:    testResourceExposeURL,
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// Slack's <url|display> form: the href before the pipe is the URL.
+			name:             "slack-wrapped url with display text is unwrapped",
+			text:             "url:<" + testResourceExposeURL + "|docs.example.com> as:$handbook",
+			wantTargetURL:    testResourceExposeURL,
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// The typed path accepts http as well as https (the guided modal is
+			// https-only). Assert http survives the unwrap so that distinction
+			// doesn't silently regress.
+			name:             "slack-wrapped http url is accepted",
+			text:             "url:<http://docs.example.com/handbook> as:$handbook",
+			wantTargetURL:    "http://docs.example.com/handbook",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// Slack HTML-escapes & in command text, so a multi-param URL arrives
+			// as ...?a=1&amp;b=2; it must decode to match the stored target.
+			name:             "slack-wrapped multi-param url is unescaped",
+			text:             "url:<https://docs.example.com/p?a=1&amp;b=2> as:$handbook",
+			wantTargetURL:    "https://docs.example.com/p?a=1&b=2",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// No angle-bracket wrapping, but Slack still HTML-escapes & in
+			// command text. The unescape must run unconditionally so this
+			// decodes too — locks in that the unescape isn't gated on the
+			// bracket check (a refactor moving it back inside would fail here).
+			name:             "unwrapped escaped url is unescaped",
+			text:             "url:https://docs.example.com/p?a=1&amp;b=2 as:$handbook",
+			wantTargetURL:    "https://docs.example.com/p?a=1&b=2",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			name:    "empty slack-wrapped url is missing-url",
+			text:    "url:<> as:$handbook",
+			wantMsg: "Missing URL",
+		},
+		{
 			name:    "no target (verb stripped, empty rest)",
 			text:    "",
 			wantMsg: resourceExposeUsage,

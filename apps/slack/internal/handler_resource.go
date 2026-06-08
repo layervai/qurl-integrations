@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -70,6 +71,11 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 
 	if strings.HasPrefix(target, "url:") {
 		targetURL := strings.TrimSpace(strings.TrimPrefix(target, "url:"))
+		// Decode Slack's auto-link wrapping/escaping before validating: the
+		// leading "<" makes url.Parse yield no scheme, and a literal &amp; would
+		// break the exact-target lookup against the stored resource. See
+		// unwrapSlackURLArg for the mechanism.
+		targetURL = unwrapSlackURLArg(targetURL)
 		if targetURL == "" {
 			return nil, "Missing URL after `url:`.\n\n" + resourceExposeUsage
 		}
@@ -88,6 +94,33 @@ func parseResourceExposeArgs(text string) (parsed *resourceExposeArgs, userMsg s
 	}
 
 	return nil, "Target must be a resource alias like `$docs`, or `url:<target-url>` with `as:$channel-alias`.\n\n" + resourceExposeUsage
+}
+
+// unwrapSlackURLArg decodes a URL typed into a slash command. Slack rewrites a
+// recognized URL as <https://host> (or <https://host|display text>) and
+// HTML-escapes &, <, > in the command text, so a multi-param URL arrives as
+// <https://host?a=1&amp;b=2>. Strip the angle-bracket wrapping (taking the href
+// before any "|"), then HTML-unescape so the value matches the stored target.
+// The unescape runs unconditionally, so a value Slack escaped but didn't wrap is
+// still decoded; un-wrapped, un-escaped input is returned unchanged.
+// html.UnescapeString decodes all HTML entities, not just &amp;/&lt;/&gt; — safe
+// only because Slack escapes every "&" in delivered text, so a raw "&entity;"
+// can't reach here without its leading "&" already arriving as "&amp;".
+//
+// The caller has already split the command on whitespace, so this assumes a
+// single space-free token, and the first "|" is taken as the wrap separator.
+// Both hold because Slack only auto-links a well-formed bare URL: its display
+// text is the URL itself (never free text with spaces), and a raw "|" is
+// invalid in a URL (normally percent-encoded), so neither a space nor a
+// literal "|" reaches this helper from Slack's auto-linking.
+func unwrapSlackURLArg(s string) string {
+	if strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">") {
+		s = s[1 : len(s)-1]
+		if pipe := strings.IndexByte(s, '|'); pipe >= 0 {
+			s = s[:pipe]
+		}
+	}
+	return html.UnescapeString(s)
 }
 
 // handleExposeURL routes the URL verb `/qurl-admin protect-url`: bare (no
