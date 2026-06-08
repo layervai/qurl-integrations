@@ -339,10 +339,15 @@ func RegisterRoutes(mux *http.ServeMux, cfg Config) {
 	if err := cfg.Validate(); err != nil {
 		panic("oauth.RegisterRoutes: " + err.Error())
 	}
-	mux.Handle(StartPath, http.TimeoutHandler(
-		Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
-	mux.Handle(callbackPath, http.TimeoutHandler(
-		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
+	// ONE shared limiter across BOTH routes so an attacker can't double
+	// the per-IP budget by alternating /start and /callback. Wrapped
+	// OUTERMOST (limiter outside TimeoutHandler) so a rejected request
+	// never enters the timeout-tracked handler.
+	rl := newRateLimiter(cfg.Now)
+	mux.Handle(StartPath, rl.middleware(http.TimeoutHandler(
+		Start(cfg), oauthHandlerTimeout, "oauth/start timed out")))
+	mux.Handle(callbackPath, rl.middleware(http.TimeoutHandler(
+		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out")))
 }
 
 // Validate checks the cross-field invariants that the callback's
