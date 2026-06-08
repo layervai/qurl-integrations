@@ -32,14 +32,17 @@ listing refuses rather than falling back to a workspace-wide view:
 - **Nothing protected in this channel** returns the channel empty state, with no
   resources listed.
 
-A **direct message** (`D…` channel) has no channel-policy rows of its own, so
-its allow-set is empty and `/qurl list` there returns the channel empty state —
-**no resources are listed**. Running `/qurl list` in a 1:1 does *not* show
-tunnels protected in #ops or any other channel. Group / multi-person DMs
-(`mpim`) likewise have no channel-policy rows of their own, so the allow-set is
-empty and `/qurl list` there returns the channel empty state too. (If you
-remember a time when it did, see [History](#history) below — that was an
-earlier, since-reverted state.)
+A **direct message** (`D…` channel) carries no channel-policy rows in practice —
+nothing in the protect flow binds resources to a DM — so its allow-set comes
+back empty and `/qurl list` there returns the channel empty state, with **no
+resources listed**. Running `/qurl list` in a 1:1 does *not* show tunnels
+protected in #ops or any other channel. Group / multi-person DMs (`mpim`)
+behave the same way for the same reason. This follows from the general
+fail-closed rule above rather than a type-specific guard: the scope is keyed on
+the channel's policy row, not on its kind, so any channel with no row yields an
+empty allow-set. (If you remember a time when a 1:1 listed tunnels from other
+channels, see [History](#history) below — that was an earlier, since-reverted
+state.)
 
 ## The capability boundary (defense in depth)
 
@@ -70,8 +73,9 @@ lets them mint it.
 
 ## History
 
-This model has changed over time; the order matters if you're reconciling an old
-release note:
+The channel-scoped model above is current as of #589 (2026-06). This disclosure
+behavior has changed over time, so the order matters if you're reconciling an
+old release note:
 
 - Per-channel scoping for `/qurl list` was added in #234.
 - It was **reverted** in #459, which widened `/qurl list` to show the full

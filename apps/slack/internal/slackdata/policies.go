@@ -71,9 +71,11 @@ const (
 //
 // TODO(#464): rename when next touched. The name dates from an era
 // where both `/qurl list` (non-admin disclosure) and `/qurl get
-// $r_<id>` (mint-time capability) consumed it; post-revert of #234 in
-// #459 only the latter survives, so a name like
-// `ChannelMintableResourceIDs` would better reflect today's role.
+// $r_<id>` (mint-time capability) consumed it. #234 made `/qurl list`
+// channel-scoped; #459 reverted that (leaving only `get` on this set);
+// #589 re-introduced the channel scope, so today BOTH disclosure and
+// capability consume it again (see apps/slack/docs/list-disclosure.md).
+// A name like `ChannelScopedResourceIDs` would reflect that shared role.
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{
