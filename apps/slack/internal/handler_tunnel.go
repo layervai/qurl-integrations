@@ -446,12 +446,36 @@ func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Dura
 	return remaining
 }
 
-func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
+// tunnelInstallBuild is the successful result of [Handler.buildTunnelInstall]:
+// the created resource, the minted bootstrap key, the rendered install
+// instructions, and the channel-alias status line. client is retained so the
+// caller can revoke key if delivery of message is never confirmed.
+type tunnelInstallBuild struct {
+	client      *client.Client
+	resource    *client.Resource
+	key         *client.APIKey
+	message     string
+	aliasStatus string
+}
+
+// buildTunnelInstall is the qURL Connector mutation core, decoupled from how the
+// result is delivered: create-or-find the tunnel resource, bind the channel
+// alias, mint + validate a short-lived bootstrap key, and render the install
+// instructions. Both the `/qurl-admin protect-connector` slash path
+// ([Handler.processTunnelInstall]) and the conversation-mode confirm path drive
+// it, so the create/mint/render logic lives in exactly one place.
+//
+// It does NOT gate admin — callers gate first (requireAdminSync on the slash
+// path; a CheckAdmin re-check on the confirm path). On failure it returns the
+// user-facing message to post plus the error, having already revoked any
+// bootstrap key it minted past the render step. On success the caller delivers
+// build.message and, if delivery is not confirmed, revokes build.key via
+// [revokeBootstrapKeyAfterInstallFailure].
+func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, setupStartedAt time.Time) (*tunnelInstallBuild, string, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
-		_ = h.postResponse(log, responseURL, authErrorMessage(err))
-		return
+		return nil, authErrorMessage(err), err
 	}
 
 	// The description doubles as the tunnel's user-facing Display Name
@@ -470,8 +494,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	})
 	if err != nil {
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
-		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"))
-		return
+		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
 
 	// Bind/verify the channel shortcut before minting the bootstrap key so an
@@ -482,15 +505,13 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resource.ResourceID)
 	if err != nil {
 		log.Error("tunnel install: channel shortcut bind failed", "error", err, "shortcut", args.Alias, "resource_id", resource.ResourceID)
-		_ = h.postResponse(log, responseURL, aliasStatus)
-		return
+		return nil, aliasStatus, err
 	}
 
 	preparedMessage, err := h.prepareTunnelInstallMessage(args)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		_ = h.postResponse(log, responseURL, "qURL Connector setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.")
-		return
+		return nil, "qURL Connector setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
@@ -503,40 +524,56 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	})
 	if err != nil {
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		_ = h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"))
-		return
+		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"), err
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "missing_plaintext")
-		_ = h.postResponse(log, responseURL, "The qURL API did not return a bootstrap key. Please retry or contact support.")
-		return
+		return nil, "The qURL API did not return a bootstrap key. Please retry or contact support.", errMissingBootstrapPlaintext
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "shell_validation_failed")
-		_ = h.postResponse(log, responseURL, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.")
-		return
+		return nil, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.", err
 	}
 
 	msg, err := preparedMessage.render(args, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
 		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
-		_ = h.postResponse(log, responseURL, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.")
+		return nil, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
+	}
+
+	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, aliasStatus: aliasStatus}, "", nil
+}
+
+// errMissingBootstrapPlaintext is returned by buildTunnelInstall when the qURL
+// API accepted the key create but omitted the plaintext key.
+var errMissingBootstrapPlaintext = errors.New("bootstrap key response missing plaintext")
+
+// processTunnelInstall is the async-worker body for `/qurl-admin
+// protect-connector`. It runs the shared mutation core and delivers the result
+// to the slash command's response_url, revoking the bootstrap key if Slack never
+// confirms delivery (so a key whose install block may never have reached the
+// admin doesn't stay live).
+func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
+	build, failMsg, err := h.buildTunnelInstall(ctx, log, teamID, channelID, userID, args, setupStartedAt)
+	if err != nil {
+		_ = h.postResponse(log, responseURL, failMsg)
 		return
 	}
-	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", resource.ResourceID)
-	if !h.postInstallInstructions(log, responseURL, msg) {
+
+	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
+	if !h.postInstallInstructions(log, responseURL, build.message) {
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
 		// revoke notice. The key is still revoked because delivery was not
 		// confirmed, and the structured logs retain the resource/key IDs for
 		// operators investigating a disappeared install attempt.
-		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "response_url_delivery_failed")
+		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
+		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
 		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
-			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
+			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 	}
 }
