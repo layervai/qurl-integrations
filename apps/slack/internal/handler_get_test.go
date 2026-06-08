@@ -567,6 +567,14 @@ func TestHandleGet_ResourceAliasDuplicateAllowedRefusesAmbiguousMint(t *testing.
 // a missing token and never attempts a mint.
 func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
 	ts := newAdminTestServers(t)
+	// Expose an UNRELATED resource so the channel is "warm" (non-empty
+	// allow-set). Without this, the cold-channel short-circuit (#534) returns
+	// the not-configured copy before the listed alias is ever resolved, so
+	// this test would pass without exercising the resolve-then-reject branch
+	// it documents. With the set non-empty, the resource-alias fallback runs,
+	// resolves the listed alias, and rejects it because its resource_id is
+	// not in the allow-set.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{{
 			testKeyResourceID: testListResIDURLDocs,
@@ -1207,6 +1215,13 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 	t.Run("blocked when not exposed in this channel", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		ts.seedAdmin(t) // the caller is a workspace admin
+		// Protect an UNRELATED resource so the channel is "warm" (non-empty
+		// allow-set): the slug fallback must actually run and be rejected by
+		// the allow-set gate, which is what proves there's no admin bypass at
+		// the gate. Without this, the cold-channel short-circuit (#534)
+		// returns not-configured before the slug is ever resolved, so the
+		// admin-bypass property would go unexercised.
+		ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
 		addTunnelSlugResource(t, ts)
 		var mintHits atomic.Int32
 		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
