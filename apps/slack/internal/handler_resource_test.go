@@ -286,6 +286,36 @@ func TestHandleResourceExpose_IgnoresTunnelAlias(t *testing.T) {
 	}
 }
 
+func TestHandleResourceExpose_BindsFileviewerAliasWhenReturnedByService(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	inv := newAdminSlashInvoker(t, h)
+
+	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: testFileviewerResource,
+			testKeyType:       client.ResourceTypeURL,
+			fAttrAlias:        testResourceExposeAlias,
+			testKeyTargetURL:  testFileviewerTargetURL,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+
+	_, _, async := inv.invokeAdminAsync("protect-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "URL resource `$docs` is now available as `$docs`") {
+		t.Fatalf("async reply = %q", async)
+	}
+	got, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testResourceExposeAlias)
+	if err != nil {
+		t.Fatalf("LookupChannelAlias: %v", err)
+	}
+	if !found || got != testFileviewerResource {
+		t.Fatalf("channel alias = (%q, %v), want (%q, true)", got, found, testFileviewerResource)
+	}
+}
+
 func TestHandleResourceExpose_TargetURLNotFoundMentionsExactMatch(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
