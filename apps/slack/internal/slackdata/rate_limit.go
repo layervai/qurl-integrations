@@ -73,6 +73,9 @@ type mintBucket struct {
 // hour's worth of budget but no more. Falls back to the package
 // default when the field is unset/non-positive (e.g. a Store built
 // field-by-field that didn't set MintRatePerHour).
+//
+// Reads MintRatePerHour outside mintBucketsMu; safe only because that
+// field is set-once before first use — see its CONCURRENCY note.
 func (s *Store) mintBurst() float64 {
 	if s.MintRatePerHour > 0 {
 		return float64(s.MintRatePerHour)

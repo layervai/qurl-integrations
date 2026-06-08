@@ -106,8 +106,16 @@ type Store struct {
 	// the burst capacity (see the strategy comment in rate_limit.go).
 	// [NewStore] defaults it to mintRatePerHour; a non-positive value
 	// falls back to that default at check time. Exposed as a field so
-	// the limit is tunable without an env knob, and so tests can grant
-	// headroom to flows whose intent is orthogonal to rate limiting.
+	// the limit is set in code rather than via an env knob, and so tests
+	// can grant headroom to flows whose intent is orthogonal to rate
+	// limiting.
+	//
+	// CONCURRENCY: set once before the Store serves any request and
+	// then treated as read-only. CheckRateLimit reads it outside
+	// mintBucketsMu (see mintBurst/mintRefillInterval), so mutating it
+	// on a live Store while checks run concurrently is a data race. The
+	// production Store sets it in NewStore; tests set it before
+	// launching goroutines. It is NOT a runtime-tunable knob.
 	MintRatePerHour int
 
 	// mintBuckets holds the per-Slack-user mint token buckets read by
