@@ -1,0 +1,141 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+)
+
+// defaultAgentMaxTokens caps the model's output. The agent emits either a short
+// reply/question or a single tool call, so a small ceiling is plenty and keeps
+// the chat surface responsive.
+const defaultAgentMaxTokens = 2048
+
+// anthropicLLM is the production [LLM], backed by the Anthropic Go SDK and
+// Claude Sonnet 4.6.
+type anthropicLLM struct {
+	client    anthropic.Client
+	model     anthropic.Model
+	maxTokens int64
+}
+
+// NewAnthropicLLM constructs an [LLM] backed by Claude Sonnet 4.6 using the
+// given API key.
+func NewAnthropicLLM(apiKey string) LLM {
+	return &anthropicLLM{
+		client:    anthropic.NewClient(option.WithAPIKey(apiKey)),
+		model:     anthropic.ModelClaudeSonnet4_6,
+		maxTokens: defaultAgentMaxTokens,
+	}
+}
+
+// Complete implements [LLM]. Parallel tool use is disabled so each turn yields at
+// most one tool call, and thinking is disabled: this is a low-latency
+// natural-language→tool-call translation layer, not a reasoning-heavy task.
+func (l *anthropicLLM) Complete(ctx context.Context, req Request) (Response, error) {
+	params := anthropic.MessageNewParams{
+		Model:     l.model,
+		MaxTokens: l.maxTokens,
+		System:    []anthropic.TextBlockParam{{Text: req.System}},
+		Messages:  toSDKMessages(req.Messages),
+		Tools:     toSDKTools(req.Tools),
+		ToolChoice: anthropic.ToolChoiceUnionParam{
+			OfAuto: &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: anthropic.Bool(true)},
+		},
+		Thinking: anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
+	}
+
+	msg, err := l.client.Messages.New(ctx, params)
+	if err != nil {
+		return Response{}, fmt.Errorf("anthropic messages.new: %w", err)
+	}
+	return fromSDKMessage(msg), nil
+}
+
+// toSDKTools converts domain tool specs to SDK tool params.
+func toSDKTools(specs []ToolSpec) []anthropic.ToolUnionParam {
+	tools := make([]anthropic.ToolUnionParam, 0, len(specs))
+	for i := range specs {
+		s := specs[i]
+		props := s.Schema
+		if props == nil {
+			props = map[string]any{}
+		}
+		tool := anthropic.ToolParam{
+			Name:        s.Name,
+			Description: anthropic.String(s.Description),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: props,
+				Required:   s.Required,
+			},
+		}
+		tools = append(tools, anthropic.ToolUnionParam{OfTool: &tool})
+	}
+	return tools
+}
+
+// toSDKMessages rebuilds the SDK message history from domain messages,
+// preserving tool_use and tool_result blocks so the model sees a valid
+// transcript across turns.
+func toSDKMessages(msgs []Message) []anthropic.MessageParam {
+	out := make([]anthropic.MessageParam, 0, len(msgs))
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Role == roleAssistant {
+			if block := assistantBlocks(m); len(block) > 0 {
+				out = append(out, anthropic.NewAssistantMessage(block...))
+			}
+			continue
+		}
+		// roleUser: either tool results or a plain text message.
+		if len(m.ToolResults) > 0 {
+			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.ToolResults))
+			for _, tr := range m.ToolResults {
+				blocks = append(blocks, anthropic.NewToolResultBlock(tr.ToolUseID, tr.Content, tr.IsError))
+			}
+			out = append(out, anthropic.NewUserMessage(blocks...))
+			continue
+		}
+		out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Text)))
+	}
+	return out
+}
+
+// assistantBlocks renders an assistant turn's text + tool_use blocks.
+func assistantBlocks(m *Message) []anthropic.ContentBlockParamUnion {
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.ToolCalls)+1)
+	if m.Text != "" {
+		blocks = append(blocks, anthropic.NewTextBlock(m.Text))
+	}
+	for _, tc := range m.ToolCalls {
+		var input any = tc.Input
+		if len(tc.Input) == 0 {
+			input = map[string]any{}
+		}
+		blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
+	}
+	return blocks
+}
+
+// fromSDKMessage flattens an SDK response into the domain [Response].
+func fromSDKMessage(msg *anthropic.Message) Response {
+	var text strings.Builder
+	var calls []ToolCall
+	for i := range msg.Content {
+		switch v := msg.Content[i].AsAny().(type) {
+		case anthropic.TextBlock:
+			text.WriteString(v.Text)
+		case anthropic.ToolUseBlock:
+			calls = append(calls, ToolCall{
+				ID:    v.ID,
+				Name:  v.Name,
+				Input: append(json.RawMessage(nil), v.Input...),
+			})
+		}
+	}
+	return Response{Text: text.String(), ToolCalls: calls, StopReason: string(msg.StopReason)}
+}
