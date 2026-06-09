@@ -593,3 +593,33 @@ func TestSetDisplayName_ChannelAliasToURLResourceRejected(t *testing.T) {
 		t.Errorf("PATCH fired against a non-connector resource (calls = %d)", capPatch.calls.Load())
 	}
 }
+
+// TestSetDisplayName_ChannelAliasToRevokedTunnelRejected is the production
+// scenario the fix most resembles: the alias is bound, but its target connector
+// has since been revoked (Status != Active). This exercises the Status clause —
+// distinct from the Type clause TestSetDisplayName_ChannelAliasToURLResourceRejected
+// covers — so no PATCH fires and the admin gets the unset-alias hint.
+func TestSetDisplayName_ChannelAliasToRevokedTunnelRejected(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameScanQURLServer(t, map[string]any{
+		testKeyResourceID: testDisplayNameTunnelRID,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       testDisplayNameSlug,
+		testKeyStatus:     client.StatusRevoked,
+	}, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "no longer points at an active qURL Connector") || !strings.Contains(async, "unset-alias") {
+		t.Errorf("async reply = %q, want the alias-not-a-connector hint", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired against a revoked connector (calls = %d)", capPatch.calls.Load())
+	}
+}
