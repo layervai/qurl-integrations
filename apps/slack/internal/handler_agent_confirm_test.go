@@ -397,6 +397,92 @@ func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
 	}
 }
 
+func TestConfirm_ProtectURLOnApprove(t *testing.T) {
+	// protect-url is admin-gated and direct-execute (mirrors revoke/alias). An admin
+	// approve validates the URL + channel alias through the slash grammar, resolves the
+	// existing URL resource by exact target, binds it as the channel alias in the
+	// click's channel, and replaces the public card with the benign result. Bind
+	// correctness lives in handler_resource_test; here we pin the confirm orchestration
+	// of the new case (claim, run the real core, replace).
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || !hc.claimed(id) {
+		t.Fatalf("admin protect-url approve should execute (claim) and replace the card; replace=%v text=%q", ro, text)
+	}
+	if text == agentConfirmUnsupportedReply || text == agentConfirmInvalidProtectURLReply || text == "" {
+		t.Fatalf("protect-url must run the resource core, not the unsupported/invalid path; got %q", text)
+	}
+	if !strings.Contains(text, "docs") { // success: "…now available as `$docs`…"
+		t.Fatalf("protect-url result should mention the channel alias; got %q", text)
+	}
+}
+
+func TestConfirm_ProtectURLRejectsInvalidInput(t *testing.T) {
+	// Public card → an LLM-distilled URL/alias out of grammar (non-http target,
+	// backtick/bidi alias, missing alias) must surface the GENERIC reply, never bind
+	// and never echo the value. Exact equality proves no part of the input leaks.
+	cases := []struct {
+		name string
+		pa   *pendingAction
+	}{
+		{"non-http url", &pendingAction{Action: agent.ActionProtectURL, URL: "file:///etc/passwd", Alias: "docs", ChannelID: "C1"}},
+		{"backtick alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "ev`il", ChannelID: "C1"}},
+		{"missing alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "", ChannelID: "C1"}},
+		{"bidi-control alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "do\u202ecs", ChannelID: "C1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			id := hc.seedPending(t, c.pa)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if !ro || text != agentConfirmInvalidProtectURLReply {
+				t.Fatalf("invalid protect-url input must replace the card with the generic reply (no echo); replace=%v text=%q", ro, text)
+			}
+		})
+	}
+}
+
+func TestConfirm_ProtectURLIsAdminGated(t *testing.T) {
+	// protect-url is admin-gated (adminGatedFor): a non-admin click is denied
+	// ephemerally and claims nothing.
+	hc := newConfirmHarness(t, "Uadmin") // admin = Uadmin; the clicker is Uother
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || !strings.Contains(strings.ToLower(text), "admin-only") {
+		t.Fatalf("non-admin protect-url must be denied ephemerally; replace=%v text=%q", ro, text)
+	}
+	if hc.claimed(id) {
+		t.Fatalf("a denied non-admin protect-url must not claim")
+	}
+}
+
+func TestPostAgentConfirm_SnapshotsProtectURLFields(t *testing.T) {
+	// The snapshot must carry URL + Alias so the click can execute protect-url (the
+	// click never reads them off the wire).
+	hc := newConfirmHarness(t, "")
+	prop := &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", Summary: "Protect the handbook URL as $docs."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
+	if err != nil || !found {
+		t.Fatalf("pending action not stored: found=%v err=%v", found, err)
+	}
+	var pa pendingAction
+	if err := json.Unmarshal(blob, &pa); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pa.Action != agent.ActionProtectURL || pa.URL != "https://docs.example.com/handbook" || pa.Alias != "docs" {
+		t.Fatalf("snapshot mismatch: %+v", pa)
+	}
+}
+
 func TestConfirm_AliasKindsAreAdminGated(t *testing.T) {
 	// set-alias and unset-alias are admin-gated (adminGatedFor): a non-admin click is
 	// denied ephemerally and claims nothing. The gate is shared with revoke's, but

@@ -31,8 +31,12 @@ func qurlBackendServer(t *testing.T) *httptest.Server {
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "ghost":
 			_, _ = w.Write([]byte(`{"data":[]}`))
 		case r.URL.Path == testResourcesPath:
+			// r_url carries a target_url so the protect-url confirm path can match it by
+			// exact URL. It's in no channel's allowed set, so channel-scoped list views
+			// still filter it out (the list/get tests below stay unaffected).
 			_, _ = w.Write([]byte(`{"data":[` +
 				`{"resource_id":"r_1","alias":"oncall","type":"url","description":"On-call dash"},` +
+				`{"resource_id":"r_url","alias":"handbook","type":"url","target_url":"https://docs.example.com/handbook","description":"Handbook"},` +
 				`{"resource_id":"r_9","slug":"secret","type":"tunnel","description":"Other channel"}]}`))
 		case r.URL.Path == "/v1/quota":
 			_, _ = w.Write([]byte(`{"data":{"plan":"pro","usage":{"active_qurls":3,"qurls_created":10}}}`))

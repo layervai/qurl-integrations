@@ -35,6 +35,9 @@ const (
 	// be echoed back into it — unlike the slash path, whose validation reply is
 	// ephemeral and can echo the bad token.
 	agentConfirmInvalidAliasReply = "I couldn't apply that — the alias or target isn't valid (lowercase letters, numbers, and dashes only). Try rephrasing your request."
+	// agentConfirmInvalidProtectURLReply is the protect-url sibling: generic for the
+	// same public-card reason — the LLM-distilled URL/alias must not be echoed back.
+	agentConfirmInvalidProtectURLReply = "I couldn't protect that — the URL or channel alias isn't valid. Use an absolute http(s) URL and an alias of lowercase letters, numbers, and dashes. Try rephrasing your request."
 )
 
 // pendingAction is the ephemeral snapshot persisted between proposing a mutation
@@ -48,8 +51,9 @@ type pendingAction struct {
 	Action    agent.ActionKind `json:"action"`
 	Token     string           `json:"token,omitempty"`  // slug/alias (sigil stripped) for get/revoke
 	Reason    string           `json:"reason,omitempty"` // audit reason, forwarded to the mint on get
-	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias
+	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias; channel alias for protect-url
 	Target    string           `json:"target,omitempty"` // target slug for set-alias
+	URL       string           `json:"url,omitempty"`    // target URL for protect-url
 	ChannelID string           `json:"channel_id"`
 }
 
@@ -79,6 +83,22 @@ func confirmValidAlias(alias string) (canon string, ok bool) {
 	return a, msg == ""
 }
 
+// confirmValidProtectURL validates the LLM-distilled protect-url URL + channel
+// alias through the SAME grammar as the slash verb (parseResourceExposeArgs),
+// reconstructing its `url:<target> as:$<alias>` form, and returns the parser's
+// CANONICAL args. As with confirmValidAliasBind, executing those canonical args —
+// not pa.URL/pa.Alias raw — closes the validate-reconstruction-execute-raw seam,
+// and a parse failure surfaces a generic reply rather than echoing the (possibly
+// injected) value onto the PUBLIC card. An empty alias fails here, which is
+// correct: exposeURLResourceInChannel must bind a channel alias.
+func confirmValidProtectURL(rawURL, rawAlias string) (args *resourceExposeArgs, ok bool) {
+	parsed, msg := parseResourceExposeArgs("url:" + rawURL + " as:$" + rawAlias)
+	if msg != "" {
+		return nil, false
+	}
+	return parsed, true
+}
+
 // confirmExecutable reports whether the confirm flow can actually EXECUTE this
 // action kind in this build. Deferred kinds (protect → PR4c) must fall back to the
 // text preview rather than render a live Approve button that can only reply "can't
@@ -86,7 +106,8 @@ func confirmValidAlias(alias string) (canon string, ok bool) {
 // by extending this set.
 func confirmExecutable(kind agent.ActionKind) bool {
 	return kind == agent.ActionGet || kind == agent.ActionRevoke ||
-		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias
+		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias ||
+		kind == agent.ActionProtectURL
 }
 
 // deliverAgentResult posts a completed turn's result: an interactive confirm card
@@ -157,6 +178,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		Reason:    prop.Reason,
 		Alias:     prop.Alias,
 		Target:    prop.Target,
+		URL:       prop.URL,
 		ChannelID: env.Event.Channel,
 	})
 	if err != nil {
@@ -400,9 +422,23 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
 		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias)}
-	case agent.ActionProtectConnector, agent.ActionProtectURL:
-		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so
-		// a non-admin can't reach here; an admin gets a clean "not supported yet".
+	case agent.ActionProtectURL:
+		// Validate the LLM-distilled URL + channel alias through the slash grammar
+		// (single source) and execute the CANONICAL args — see confirmValidProtectURL.
+		// On failure surface a generic reply rather than echo the value onto the
+		// PUBLIC card. The result echoes only the (validated) channel alias + the
+		// backend resource alias, never the raw URL, so it's safe on the card.
+		args, ok := confirmValidProtectURL(pa.URL, pa.Alias)
+		if !ok {
+			return actionResult{cardText: agentConfirmInvalidProtectURLReply}
+		}
+		// Binds the URL resource as $alias in the CLICK's channel (channel-scoped,
+		// like the slash protect-url and the alias confirm path). Benign public result.
+		return actionResult{cardText: h.exposeURLResourceInChannel(ctx, log, payload.Team.ID, payload.Channel.ID, args)}
+	case agent.ActionProtectConnector:
+		// Deferred within PR4c to the modal slice (Approve opens the tunnel-install
+		// modal via OpenView, not this response_url-only path). Admin-gated, so a
+		// non-admin can't reach here; an admin gets a clean "not supported yet".
 		log.Warn("agent confirm: action not executable in this build", "action", pa.Action)
 		return actionResult{cardText: agentConfirmUnsupportedReply}
 	default:
