@@ -42,23 +42,25 @@ const (
 )
 
 // AllowedResourceIDsForChannel returns the union of resource IDs the
-// (teamID, channelID) channel_policies row authorizes for non-admin
-// mint via the `$r_<id>` get path (handler_get.go's
-// resourceAllowedForUser). The set is the union of two orthogonal
-// surfaces on the same row:
+// (teamID, channelID) channel_policies row authorizes in that channel —
+// the channel-scoped set that gates both `/qurl get` mint (via
+// handler_get.go's allowedResourceIDsForGet) and `/qurl list` disclosure
+// (via handler_list.go's listChannelScope). The set is the union of two
+// orthogonal surfaces on the same row:
 //
-//   - `allowed_resource_ids` SS — the legacy multi-resource gate
-//     hand-seeded or carried over from pre-pivot rows. `/qurl get
-//     $r_<id>` checks membership here.
-//   - `alias_bindings` Map<alias_name, resource_id> — the alias
-//     surface `/qurl-admin set-alias` / `/qurl-admin unset-alias` mutate; the
-//     binding's resource_id is also accepted on the `$r_<id>` path so
-//     an aliased resource is mintable by its raw ID too.
+//   - `allowed_resource_ids` SS — resources exposed to the channel (the
+//     Edit modal / channel exposure) or carried over from pre-pivot
+//     rows. A `/qurl get` token that resolves to one of these IDs (via
+//     its `$<slug>` or a listed URL `$<alias>`) is mintable here.
+//   - `alias_bindings` Map<alias_name, resource_id> — the channel-alias
+//     surface `/qurl-admin set-alias` / `/qurl-admin unset-alias` mutate.
+//     The bound resource_id joins the union, so the resource is mintable
+//     via its `$<alias>` (the binding) or its `$<slug>`.
 //
-// Either surface allows the row to mint. The `/qurl list` consumer of
-// this set was removed in #459 (revert of #234): `/qurl list` is now
-// workspace-wide and unfiltered, so this function survives only as the
-// mint-time channel gate. Single-row GetItem; no pagination needed.
+// Either surface allows the row to mint. As of #589 this set is also
+// the `/qurl list` disclosure scope again (not just the mint gate) —
+// see the TODO below and apps/slack/docs/list-disclosure.md. Single-row
+// GetItem; no pagination needed.
 //
 // Known asymmetry vs [ResolvePolicy]: this function does NOT read the
 // legacy scalar `resource_id` attribute. ResolvePolicy falls back to
@@ -73,9 +75,11 @@ const (
 //
 // TODO(#464): rename when next touched. The name dates from an era
 // where both `/qurl list` (non-admin disclosure) and `/qurl get
-// $r_<id>` (mint-time capability) consumed it; post-revert of #234 in
-// #459 only the latter survives, so a name like
-// `ChannelMintableResourceIDs` would better reflect today's role.
+// $r_<id>` (mint-time capability) consumed it. #234 made `/qurl list`
+// channel-scoped; #459 reverted that (leaving only `get` on this set);
+// #589 re-introduced the channel scope, so today BOTH disclosure and
+// capability consume it again (see apps/slack/docs/list-disclosure.md).
+// A name like `ChannelScopedResourceIDs` would reflect that shared role.
 func (s *Store) AllowedResourceIDsForChannel(ctx context.Context, teamID, channelID string) (map[string]struct{}, error) {
 	if teamID == "" || channelID == "" {
 		return nil, &Error{

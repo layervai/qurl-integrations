@@ -34,7 +34,8 @@ workspace's Secure Access Agent supports.
 - **Channel scope** — resources are available per channel. A resource shows up
   only in the channels it's been protected in. `/qurl list`, `/qurl aliases`,
   and `/qurl get` all agree on what's available in a given channel — including
-  for admins.
+  for admins. For why this scoping is a confidentiality boundary and how it
+  fails closed (e.g. in DMs), see [docs/list-disclosure.md](docs/list-disclosure.md).
 - **Owner & admins** — the owner is whoever first connected qURL to the
   workspace. Owners and admins can run the `/qurl-admin` commands.
 
