@@ -392,6 +392,35 @@ func TestPostAgentConfirm_StoresPendingAndPostsCard(t *testing.T) {
 	}
 }
 
+func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
+	// confirmExecutable, adminGatedFor, and executeAgentAction's switch enumerate
+	// ActionKinds independently (all fail-safe), so a future PR4b/PR4c kind could be
+	// added to confirmExecutable (card shown) but forgotten in executeAgentAction
+	// (falls to the "unsupported" default — a live Approve that no-ops). Pin the
+	// invariant: every kind confirmExecutable green-lights is actually handled.
+	hc := newConfirmHarness(t, "Uadmin")
+	payload := confirmPayload("T1", "C1", "Uadmin", hc.respURL, "x")
+	allKinds := []agent.ActionKind{
+		agent.ActionGet, agent.ActionRevoke, agent.ActionSetAlias,
+		agent.ActionUnsetAlias, agent.ActionProtectConnector, agent.ActionProtectURL,
+	}
+	handled := 0
+	for _, kind := range allKinds {
+		if !confirmExecutable(kind) {
+			continue
+		}
+		handled++
+		got := hc.h.executeAgentAction(context.Background(), slog.Default(),
+			&pendingAction{Action: kind, Token: "staging", ChannelID: "C1"}, payload)
+		if got == agentConfirmUnsupportedReply {
+			t.Errorf("kind %q is confirmExecutable but executeAgentAction returns unsupported (half-wired)", kind)
+		}
+	}
+	if handled == 0 {
+		t.Fatal("expected at least one executable kind")
+	}
+}
+
 func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 	// The card must render ONLY for an executable proposal with the flag on; a
 	// deferred-kind proposal (or flag off, or a plain reply) falls back to the text
