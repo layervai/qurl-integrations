@@ -25,8 +25,6 @@
  * `TODO(upstream-rebrand)` marker on the qURL error-string match.
  */
 
-// TODO: Add afterAll cleanup to revoke/delete test resources
-
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
@@ -35,6 +33,40 @@ import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
+
+// Per-RUN nonce mixed into every uploaded payload so each CI run mints FRESH
+// connector resources (distinct file bytes → distinct md5 → distinct
+// fileviewer `…/view/<md5>` target_url → distinct qURL resource). Without it
+// the deterministic fixtures below re-target the SAME target_url every run;
+// once a resource exists there with a different type than the connector now
+// mints (it switched to type=transit in qurl-integrations#789), qurl-service
+// correctly rejects the re-mint with 409 "existing resource for this
+// target_url has a different type" and every Maps test fails. The nonce is an
+// unknown field the connector's `json.Unmarshal` ignores (handler.go), so it
+// changes only the md5 — never the parsed type/url/query/lat/lng the
+// assertions read from the rendered page.
+const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+// Every resource minted during this run, revoked in afterAll so they don't
+// persist across runs and strand on a future connector type change — that
+// persistence is the disease behind the 409 above, the nonce only escapes the
+// already-poisoned namespace. DELETE /v1/resources/{id} needs only
+// `qurl:write`, which the Revoke suite below proves this key has (no list /
+// `qurl:read` required).
+const createdResourceIds: string[] = [];
+
+afterAll(async () => {
+  // Best-effort: swallow failures (already revoked by the Revoke suite,
+  // transient API hiccups). Cleanup must never fail the run or mask a real
+  // test failure.
+  for (const id of createdResourceIds) {
+    try {
+      await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, id);
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+});
 
 /** Connector /upload response shape. Matches the interface in
  * file-revoke.test.ts; in the rate-limited case the fields are
@@ -66,7 +98,9 @@ async function uploadMapLocation(
   payload: Record<string, unknown>,
   filename = 'location.json',
 ): Promise<{ viewerUrl: string; qurlLink: string; resourceId: string }> {
-  const jsonStr = JSON.stringify(payload);
+  // Mix in the per-run nonce (see RUN_NONCE above) so the uploaded bytes —
+  // and therefore the md5 / target_url — are unique to this run.
+  const jsonStr = JSON.stringify({ ...payload, _e2e_nonce: RUN_NONCE });
 
   const attempt = async (): Promise<{ viewerUrl: string; qurlLink: string; resourceId: string } | { retry: true }> => {
     const formData = new FormData();
@@ -89,6 +123,9 @@ async function uploadMapLocation(
       }
       throw new Error(`Upload response missing required fields: ${JSON.stringify(data)}`);
     }
+    // Track for afterAll cleanup before returning (covers maps + non-maps +
+    // fall-through fixtures — every successful upload mints a resource).
+    createdResourceIds.push(data.resource_id);
     return {
       viewerUrl: data.resource_url,
       qurlLink: data.qurl_link,
