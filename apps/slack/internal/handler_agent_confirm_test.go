@@ -885,6 +885,14 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 		// Approve could only dead-end into "unavailable" (and the claim would burn it).
 		{"connector + OpenView wired → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, true, true},
 		{"connector + OpenView unwired → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, false, false},
+		// protect-url renders a card only when URL+alias pass the SAME grammar the
+		// execute path uses; a grammar-invalid proposal (whitespace in the URL splits
+		// the token stream; an out-of-charset alias) would dead-end on Approve, so it
+		// falls back to preview — closing the propose→approve gap the seed-pendingAction
+		// invalid-input tests don't exercise.
+		{"protect-url valid → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/h", Alias: "docs", Summary: "Protect docs."}}, true, false, true},
+		{"protect-url whitespace url → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/a b", Alias: "docs", Summary: "Protect docs."}}, true, false, false},
+		{"protect-url out-of-charset alias → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/h", Alias: "MyDocs", Summary: "Protect docs."}}, true, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

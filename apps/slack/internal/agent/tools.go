@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -329,24 +328,19 @@ func proposalProtectConnector(f map[string]string) (*Proposal, error) {
 }
 
 func proposalProtectURL(f map[string]string) (*Proposal, error) {
+	// Field-PRESENCE checks only (URL + alias must be provided), which steer the LLM
+	// to re-prompt. The full GRAMMAR (absolute http(s) URL, alias charset, no
+	// embedded whitespace) lives in parseResourceExposeArgs in the internal package,
+	// which this agent package can't import; the confirm layer enforces it before
+	// rendering a card (Handler.confirmDeliverable → confirmValidProtectURL, the same
+	// validator the execute path uses), so propose and execute can't drift and a
+	// grammar-invalid proposal never becomes a live Approve card.
 	target := strings.TrimSpace(f[fieldURL])
 	if target == "" {
 		return nil, errEmptyField(toolProposeProtectURL, fieldURL)
 	}
-	// Validate scheme/host at the propose layer, not just at execute — same
-	// no-dead-end-card reason as the alias check below: a malformed/non-http URL
-	// could only fail on Approve, after the claim consumes the card. Mirrors
-	// parseResourceExposeArgs's absolute-http(s) gate (the confirm execute
-	// re-validates through that grammar, but a bad URL never builds a live card).
-	if u, err := url.Parse(target); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return nil, fmt.Errorf("%s: %s must be an absolute http(s) URL", toolProposeProtectURL, fieldURL)
-	}
 	alias := normalizeToken(f[fieldAlias])
 	if alias == "" {
-		// Required at the propose layer: exposing a URL must bind a channel alias
-		// (exposeURLResourceInChannel + the slash `as:$alias` grammar both require
-		// it). Erroring here means an alias-less proposal — whose confirm card could
-		// only fail on Approve — is never built; the agent asks the user instead.
 		return nil, errEmptyField(toolProposeProtectURL, fieldAlias)
 	}
 	return &Proposal{

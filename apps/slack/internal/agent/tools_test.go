@@ -135,16 +135,6 @@ func TestParseProposal(t *testing.T) {
 			wantAction: ActionProtectURL,
 		},
 		{
-			// Same no-dead-end-card guarantee for a non-http(s) target: rejected at
-			// propose, never surfaced as a live Approve card that can only fail.
-			name:       "protect_url rejects non-http url",
-			tool:       toolProposeProtectURL,
-			input:      map[string]any{fieldURL: "file:///etc/passwd", fieldAlias: "dash"},
-			wantOK:     true,
-			wantErr:    true,
-			wantAction: ActionProtectURL,
-		},
-		{
 			name:       "protect_url ok",
 			tool:       toolProposeProtectURL,
 			input:      map[string]any{fieldURL: "https://staging.example.com", fieldAlias: "$dash"},

@@ -150,24 +150,35 @@ func confirmModalRouted(kind agent.ActionKind) bool {
 // fully-wired actions get an Approve button — a deferred-kind proposal stays an
 // honest "…isn't enabled yet" preview instead of a button that can't act.
 func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, threadTS string, result *agent.Result) {
-	if result.Proposal != nil && h.agentConfirmEnabled() && h.confirmDeliverable(result.Proposal.Action) {
+	if result.Proposal != nil && h.agentConfirmEnabled() && h.confirmDeliverable(result.Proposal) {
 		h.postAgentConfirm(log, env, threadTS, result.Proposal)
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
 }
 
-// confirmDeliverable reports whether a confirm card should render for this kind in
-// THIS deploy: executable AND, for a modal-routed kind, OpenView wired — otherwise
-// the card could only be approved into an "unavailable" dead-end (and the claim
-// would consume it). A non-deliverable proposal falls back to the honest text
-// preview instead of a burnable button.
-func (h *Handler) confirmDeliverable(kind agent.ActionKind) bool {
-	if !confirmExecutable(kind) {
+// confirmDeliverable reports whether a confirm card should render for this proposal
+// in THIS deploy. A non-deliverable proposal falls back to the honest text preview
+// instead of a button that could only dead-end on Approve (consuming the claim):
+//   - not executable here → preview;
+//   - modal-routed kind but OpenView unwired → would Approve into "unavailable";
+//   - protect-url whose URL/alias fails the SAME grammar the execute path uses
+//     (confirmValidProtectURL → parseResourceExposeArgs) → would Approve into the
+//     generic invalid reply. Validating here, with that one validator, closes the
+//     propose→execute drift the propose layer (in a package that can't import the
+//     grammar) can't fully cover — e.g. a whitespace-bearing URL or out-of-charset
+//     alias that url.Parse alone would accept.
+func (h *Handler) confirmDeliverable(prop *agent.Proposal) bool {
+	if !confirmExecutable(prop.Action) {
 		return false
 	}
-	if confirmModalRouted(kind) && h.cfg.OpenView == nil {
+	if confirmModalRouted(prop.Action) && h.cfg.OpenView == nil {
 		return false
+	}
+	if prop.Action == agent.ActionProtectURL {
+		if _, ok := confirmValidProtectURL(prop.URL, prop.Alias); !ok {
+			return false
+		}
 	}
 	return true
 }
