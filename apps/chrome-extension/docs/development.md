@@ -36,7 +36,7 @@ follow [local-unpacked-testing.md](./local-unpacked-testing.md).
 
 The built-in default server is centralized in `lib/qurl-config.js` (see the
 [DESIGN.md configuration table](./DESIGN.md#configuration)). To point a
-packaged build at a non-production server (e.g. a sandbox), set `QURL_API_BASE`
+packaged build at a non-production or self-hosted server, set `QURL_API_BASE`
 before building; the build regenerates `lib/qurl-config.js` and the manifest
 host permission together. See
 [installation.md](./installation.md#build-time-default-server-override) for the

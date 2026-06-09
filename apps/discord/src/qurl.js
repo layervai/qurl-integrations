@@ -5,7 +5,7 @@ const dns = require('dns').promises;
 
 /**
  * Lightweight qURL API client using fetch.
- * Avoids ESM/CJS compatibility issues with the @layerv/qurl SDK.
+ * Avoids ESM/CJS compatibility issues with the @layervai/qurl SDK.
  */
 
 // Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
@@ -185,7 +185,7 @@ async function assertNotPrivateAfterResolve(hostname) {
   }
 }
 
-async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
+async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   try {
     const parsed = new URL(targetUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) {
@@ -204,7 +204,9 @@ async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
     target_url: targetUrl,
     one_time_use: true,
     expires_in: expiresIn,
-    description,
+    // The create endpoint uses `label`, not `description` (qurl-service
+    // CreateQurlRequest); a `description` sent here is silently dropped.
+    label,
   }, apiKey);
 
   logger.info('Created one-time qURL', { resource_id: result.resource_id, expires_in: expiresIn });

@@ -1365,10 +1365,10 @@ func (h *Handler) adminHelpMessage(command string) string {
 		appendSectionHeader("*Protect resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl-admin protect` — Guided chooser: protect a connector service or create an HTTPS URL resource (recommended)",
+				"• `/qurl-admin protect` — Guided chooser: protect a connector service or an existing URL resource (recommended)",
 				"• `/qurl-admin protect-connector` — Guided connector setup (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
 				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup; creates a bootstrap key and binds `$<id>` in this channel",
-				"• `/qurl-admin protect-url` — Guided URL creation; enter an `https://` URL and channel alias",
+				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
 				"• Typed connector options: `env:docker|docker-compose|ecs-fargate|kubernetes`; Docker accepts `container:<name>` or `web_container:<name>`; Compose accepts `service:<name>`; `env:compose` also works",

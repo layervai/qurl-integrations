@@ -14,9 +14,9 @@ export interface E2EEnv {
 
 export interface E2EOptionalEnv {
   // Public HTTPS host for the bot's Express server (e.g.
-  // https://discord-bot-sandbox.layerv.ai). Used by the qURL-OAuth smoke
+  // https://discord-bot.example.com). Used by the qURL-OAuth smoke
   // test to hit /oauth/qurl/start. Optional — tests gracefully skip when
-  // unset. Production sandbox/prod values come from the same SSM source
+  // unset. Per-environment values come from the same SSM source
   // as the bot's BASE_URL config.
   BOT_HTTP_URL?: string;
 }

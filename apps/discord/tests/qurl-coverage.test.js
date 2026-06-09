@@ -255,7 +255,7 @@ describe('qURL client — createOneTimeLink happy path', () => {
       ok: true, status: 200,
       json: async () => ({ data: { resource_id: 'r1', qurl_link: 'https://q.link/abc' } }),
     });
-    const result = await qurl.createOneTimeLink('https://example.com/file', '1h', 'desc');
+    const result = await qurl.createOneTimeLink('https://example.com/file', '1h', 'label');
     expect(result.resource_id).toBe('r1');
   });
 
@@ -267,7 +267,7 @@ describe('qURL client — createOneTimeLink happy path', () => {
       promises: { lookup: jest.fn().mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })) },
     }));
     const q = require('../src/qurl');
-    await expect(q.createOneTimeLink('https://nowhere.example/file', '1h', 'd'))
+    await expect(q.createOneTimeLink('https://nowhere.example/file', '1h', 'label'))
       .rejects.toThrow(/resolved/);
   });
 });

@@ -121,11 +121,11 @@ WORKSPACE_STATE_KMS_KEY_ARN=arn:aws:kms:us-east-1:...:key/... \
 SLACK_SIGNING_SECRET=... \
 SLACK_CLIENT_ID=... \
 SLACK_CLIENT_SECRET=... \
-QURL_ENDPOINT=https://api.layerv.xyz \
+QURL_ENDPOINT=https://api.layerv.ai \
 AUTH0_DOMAIN=layerv.us.auth0.com \
 AUTH0_CLIENT_ID=... \
 AUTH0_CLIENT_SECRET=... \
-AUTH0_AUDIENCE=https://api.layerv.xyz \
+AUTH0_AUDIENCE=https://api.layerv.ai \
 SLACK_BASE_URL=https://slack-bot.example \
 OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
   go run ./apps/slack/cmd/
@@ -145,7 +145,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
 | `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands` (the captured token is used only for `views.open`, which requires no scope); any override must still include `commands`. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
-| `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.xyz`) |
+| `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
@@ -155,7 +155,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
-| `QURL_CONNECTOR_IMAGE` | No | Container image reference rendered by `/qurl-admin protect-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-connector:latest` as a dev/sandbox fallback. Values with whitespace or control characters fail startup validation. |
+| `QURL_CONNECTOR_IMAGE` | No | Container image reference rendered by `/qurl-admin protect-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-connector:latest` as a dev fallback. Values with whitespace or control characters fail startup validation. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
 
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are unconditionally

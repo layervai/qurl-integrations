@@ -199,7 +199,7 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
     return value ? String(value).trim().replace(/\/+$/, '') : null;
   };
   global.isDefaultQurlOrigin = resolvedOptions.isDefaultQurlOrigin || function (value) {
-    return value === 'https://getqurllink.layerv.xyz';
+    return value === 'https://getqurllink.layerv.ai';
   };
   global.QURLComposeFormatter = {
     buildLinkHtml() {

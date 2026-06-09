@@ -91,11 +91,13 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	respondJSON(w, http.StatusOK, map[string]any{})
 }
 
-// handleExposeURLClick opens the URL create-and-protect modal in response to
-// the "Protect URL" button. Same open posture as handleExposeConnectorClick
-// (ack fast, open on the async goroutine inside the trigger window, retry with
-// the Enterprise Grid install token when Slack includes enterprise context, fail
-// open via response_url).
+// handleExposeURLClick opens the URL-protect modal in response to the "Protect
+// URL" button. The modal lists eligible existing URL resources in a dropdown;
+// with no eligible resources it posts a friendly response instead of opening an
+// empty modal. Same open posture as handleExposeConnectorClick (ack fast, open
+// on the async goroutine inside the trigger window, retry with the Enterprise
+// Grid install token when Slack includes enterprise context, fail open via
+// response_url).
 //
 // No admin re-check before opening here, unlike the bare-verb path
 // (openExposeURLWizard re-checks because `/qurl-admin protect-url` has no prior
@@ -125,21 +127,128 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		ResponseURL: responseURL,
 	}
 	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
+	triggerReceivedAt := h.now()
 	h.Go(func() {
-		view, err := ExposeURLCreateModal(meta)
+		openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+		if openBudget <= 0 {
+			log.Warn("protect url: trigger expired before resource lookup")
+			_ = h.postResponse(log, responseURL, ":warning: Slack's setup window expired before the modal opened. Run `/qurl-admin protect` and tap the button again.")
+			return
+		}
+		fetchCtx, fetchCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		options, userMsg := h.urlResourceSelectOptions(fetchCtx, log, teamID)
+		fetchCancel()
+		if userMsg != "" {
+			_ = h.postResponse(log, responseURL, ":warning: "+userMsg)
+			return
+		}
+		if len(options) == 0 {
+			log.Info("protect url: no URL resources available")
+			_ = h.postResponse(log, responseURL, noProtectedURLResourcesFromChooserMessage)
+			return
+		}
+		view, err := ExposeURLModal(meta, options)
 		if err != nil {
-			log.Error("protect url: create modal render failed", "error", err)
+			log.Error("protect url: modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 			return
 		}
-		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+		openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+		if openBudget <= 0 {
+			log.Warn("protect url: trigger expired before views.open")
+			_ = h.postResponse(log, responseURL, ":warning: Slack's setup window expired before the modal opened. Run `/qurl-admin protect` and tap the button again.")
+			return
+		}
+		openCtx, openCancel := context.WithTimeout(h.baseCtx, openBudget)
 		defer openCancel()
 		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("protect url: create modal views.open failed", "error", err)
+			log.Warn("protect url: views.open failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
 		}
 	})
 	respondJSON(w, http.StatusOK, map[string]any{})
+}
+
+const noProtectedURLResourcesMessage = "No protected URL resources are available yet. Create a URL resource in the qURL dashboard, then run `/qurl-admin protect-url` again."
+
+const noProtectedURLResourcesFromChooserMessage = "No protected URL resources are available yet. Create a URL resource in the qURL dashboard, then run `/qurl-admin protect` and choose *Protect URL* again."
+
+// urlResourceSelectOptions fetches the workspace's URL resources (the same
+// first-page scan as /qurl list/get) and returns them as static_select option
+// objects for the URL-protect modal: each option's text is a human label (the
+// resource's alias, display name, or target URL) and its value is the
+// resource_id the submission binds the channel alias to. Revoked resources,
+// tunnel resources, and resources with overlong Slack option values are skipped.
+// Returns (nil, userMsg) on an upstream failure (userMsg is sanitized for
+// display); (empty, "") when the workspace has no eligible URL resources to
+// protect.
+func (h *Handler) urlResourceSelectOptions(ctx context.Context, log *slog.Logger, teamID string) (options []map[string]any, userMsg string) {
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		log.Error("protect url: API key lookup failed", "error", err, "team_id", teamID)
+		return nil, "Failed to look up URL resources. Please try again."
+	}
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	if err != nil {
+		log.Warn("protect url: resource lookup failed", "error", err, "team_id", teamID)
+		return nil, sanitizeAPIError(err, "Failed to look up URL resources")
+	}
+	options = make([]map[string]any, 0, len(page.Resources))
+	for i := range page.Resources {
+		r := page.Resources[i]
+		if !isActiveURLResource(&r) {
+			continue
+		}
+		if len(r.ResourceID) > slackOptionValueMaxChars {
+			log.Warn("protect url: resource_id exceeds Slack option value cap", "team_id", teamID, "resource_id_length", len(r.ResourceID))
+			continue
+		}
+		options = append(options, optionObj(exposeURLOptionLabel(&r), r.ResourceID))
+		if len(options) >= exposeURLMaxOptions {
+			break
+		}
+	}
+	if page.HasMore && len(options) < exposeURLMaxOptions {
+		log.Debug("protect url: scanned first resource page only", "scan_limit", listResourcesScanLimit, "team_id", teamID)
+	}
+	return options, ""
+}
+
+func isActiveURLResource(r *client.Resource) bool {
+	return r.Status != client.StatusRevoked && isURLResource(r)
+}
+
+// exposeURLOptionLabel renders a URL resource as a dropdown option label,
+// preferring its `$alias`, then its description, then its target URL, and finally
+// the resource_id so the label is never empty (Slack rejects an empty-text
+// option). Truncated to Slack's per-option text cap.
+func exposeURLOptionLabel(r *client.Resource) string {
+	switch {
+	case r.Alias != "":
+		return truncateRunes("$"+r.Alias, slackOptionTextMaxRunes)
+	case r.Description != "":
+		return truncateRunes(r.Description, slackOptionTextMaxRunes)
+	case r.TargetURL != "":
+		return truncateRunes(r.TargetURL, slackOptionTextMaxRunes)
+	default:
+		return truncateRunes(r.ResourceID, slackOptionTextMaxRunes)
+	}
+}
+
+// truncateRunes caps s at maxRunes runes, appending an ellipsis when it
+// truncates (so the rendered length is maxRunes). maxRunes <= 0 returns "".
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(r[:maxRunes-1]) + "…"
 }
 
 // handleExposeURLSubmission processes the URL-protect modal's view_submission. It
@@ -232,7 +341,7 @@ func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue)
 	resourceID = strings.TrimSpace(interactionStateText(values, exposeURLBlockResource, exposeURLActionResource))
 	if resourceID == "" {
 		fieldErrors[exposeURLBlockResource] = "Pick a URL resource to protect."
-	} else if !strings.HasPrefix(resourceID, "r_") || len(resourceID) > 128 {
+	} else if !strings.HasPrefix(resourceID, "r_") || len(resourceID) > slackOptionValueMaxChars {
 		fieldErrors[exposeURLBlockResource] = "Pick a URL resource from the list."
 	}
 
@@ -253,9 +362,10 @@ func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue)
 	return resourceID, channelAlias, nil
 }
 
-// handleExposeURLCreateSubmission processes the first-run URL modal. It creates
-// the protected URL resource, binds the chosen channel alias, and points the
-// admin at `/qurl get $alias` to mint links from then on.
+// handleExposeURLCreateSubmission processes the retained URL create modal for
+// forms already opened by older deployments. It creates the protected URL
+// resource, binds the chosen channel alias, and points the admin at `/qurl get
+// $alias` to mint links from then on.
 func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload *interactionPayload) {
 	var meta ExposeURLModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
@@ -389,20 +499,32 @@ func (h *Handler) createAndExposeURLResource(ctx context.Context, log *slog.Logg
 // bindURLResourceToChannel binds channelAlias → resourceID in this channel
 // (making the URL resource discoverable via /qurl list and mintable via /qurl
 // get $<channelAlias>) and returns the user-facing outcome. The resource_id
-// comes from the modal's dropdown, itself built from a fresh scan at open — so,
-// like the /qurl list Edit button which carries its resource_id in the button
-// value, this trusts that snapshot rather than re-resolving. The "already
-// bound" / failure copy matches the typed `protect-url` path.
+// comes from the modal's dropdown, but is re-checked against the same active
+// URL-resource scan used to render the picker so stale/crafted submissions can't
+// bind revoked or non-URL resources.
 func (h *Handler) bindURLResourceToChannel(ctx context.Context, log *slog.Logger, teamID, channelID, channelAlias, resourceID string) string {
-	err := h.aliasStore.BindChannelAlias(ctx, teamID, channelID, channelAlias, resourceID)
+	resource, err := h.resolveURLResourceForExpose(ctx, log, teamID, &resourceExposeArgs{ResourceID: resourceID})
+	if err != nil {
+		var userErr *userError
+		if errors.As(err, &userErr) {
+			return userErr.msg
+		}
+		log.Error("protect url modal: unexpected resource lookup error", "error", err, "team_id", teamID, "resource_id", resourceID)
+		return exposeURLResourceFailedMsg
+	}
+
+	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, channelAlias, resource.ResourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
 		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", channelAlias, channelAlias)
 	}
 	if err != nil {
-		log.Error("protect url: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", channelAlias, "resource_id", resourceID)
+		log.Error("protect url: alias bind failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", channelAlias, "resource_id", resource.ResourceID)
 		return exposeURLResourceFailedMsg
 	}
-	log.Info("URL resource protected in Slack channel via modal", "team_id", teamID, "channel_id", channelID, "channel_alias", channelAlias, "resource_id", resourceID)
+	log.Info("URL resource protected in Slack channel via modal", "team_id", teamID, "channel_id", channelID, "channel_alias", channelAlias, "resource_id", resource.ResourceID)
+	if resource.Alias != "" {
+		return fmt.Sprintf("URL resource `$%s` is now available as `$%s` in this channel. Run `/qurl get $%s` to create a qURL.", resource.Alias, channelAlias, channelAlias)
+	}
 	return fmt.Sprintf("URL resource is now available as `$%s` in this channel. Run `/qurl get $%s` to create a qURL.", channelAlias, channelAlias)
 }
 

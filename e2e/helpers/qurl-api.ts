@@ -19,26 +19,50 @@ export interface LinkAccessResult {
   body?: string;
 }
 
-/** Upload a file to the connector and get a resource_id */
+/** Upload a file to the connector and get a resource_id.
+ *
+ * `viewerTtlSeconds` forwards as `session_duration` (the field #283 pins).
+ * Handles the connector's documented 200-with-error-body convention like
+ * google-maps/file-revoke's `uploadImage`: a transient 429 (HTTP 200 +
+ * `error` string + no `resource_id`) is retried with backoff; any other
+ * missing-`resource_id` body throws WITH the connector's `error` string so a
+ * real regression is legible, not a bare "expected undefined to be truthy". */
 export async function uploadFile(
   uploadUrl: string,
   filePath: string,
   apiKey: string,
-): Promise<{ resource_id: string; hash: string }> {
+  opts?: { viewerTtlSeconds?: number },
+): Promise<{ resource_id: string }> {
   const fileBuffer = fs.readFileSync(filePath);
   const fileName = path.basename(filePath);
+  const maxAttempts = 4; // align with google-maps/file-revoke uploadImage
+  const baseDelayMs = 1500;
 
-  const formData = new FormData();
-  formData.append('file', new Blob([fileBuffer]), fileName);
+  for (let i = 0; i < maxAttempts; i++) {
+    const formData = new FormData();
+    formData.append('file', new Blob([fileBuffer]), fileName);
+    if (opts?.viewerTtlSeconds !== undefined) {
+      formData.append('viewer_ttl_seconds', String(opts.viewerTtlSeconds));
+    }
 
-  const res = await fetch(`${uploadUrl}/upload`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: formData,
-  });
+    const res = await fetch(`${uploadUrl}/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: formData,
+    });
 
-  if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<{ resource_id: string; hash: string }>;
+    if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
+    const data = (await res.json()) as { resource_id?: string; error?: string };
+    if (data.resource_id) return { resource_id: data.resource_id };
+
+    const errStr = typeof data.error === 'string' ? data.error : '';
+    if (/429|rate.limit|too many requests/i.test(errStr)) {
+      await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
+      continue;
+    }
+    throw new Error(`Upload returned no resource_id: ${JSON.stringify(data)}`);
+  }
+  throw new Error(`uploadFile: still rate-limited after ${maxAttempts} attempts`);
 }
 
 /** Mint a one-time qURL link for a resource */

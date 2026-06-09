@@ -1,6 +1,6 @@
 # qURL Discord Bot
 
-Share files and locations in Discord as **one-time, expiring qURL links** —
+Share files and locations in Discord as **one-time, expiring qURL™ links** —
 delivered privately to each recipient's DMs, never posted in the channel, and
 revocable at any time.
 
@@ -158,4 +158,4 @@ Commands** permission.
 
 ## License
 
-Apache-2.0
+[MIT](../../LICENSE) — Copyright (c) 2025-present LayerV, Inc.

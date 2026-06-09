@@ -35,14 +35,13 @@ const COLOR_YELLOW = 0xf1c40f;
 // hung connection.
 const POST_TIMEOUT_MS = 8_000;
 
-// `MINT_API_URL` host disambiguates env without a new env var.
-// Substring match is fine while domains are `layerv.ai` / `layerv.xyz`;
-// reconsider if a `staging.layerv.ai`-style host ever lands.
+// `MINT_API_URL` host disambiguates env without a new env var: the production
+// API is on `layerv.ai`; any other non-empty host is treated as non-production.
+// Reconsider if a `staging.layerv.ai`-style host ever lands.
 function envLabel() {
   const url = process.env.MINT_API_URL ?? '';
-  if (url.includes('layerv.ai')) return 'prod';
-  if (url.includes('layerv.xyz')) return 'sandbox';
-  return '';
+  if (!url) return '';
+  return url.includes('layerv.ai') ? 'prod' : 'non-prod';
 }
 
 // Discord footer text isn't auto-linkified — return the run URL for

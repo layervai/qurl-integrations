@@ -46,6 +46,54 @@ func TestParseResourceExposeArgs(t *testing.T) {
 			wantChannelAlias: testResourceExposeChannelAlias,
 		},
 		{
+			// Slack auto-links a bare URL typed in a slash command, so the
+			// token reaches the bot wrapped in angle brackets. Regression: this
+			// previously failed url.Parse with "not an absolute URL".
+			name:             "slack-wrapped url is unwrapped",
+			text:             "url:<" + testResourceExposeURL + "> as:$handbook",
+			wantTargetURL:    testResourceExposeURL,
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// Slack's <url|display> form: the href before the pipe is the URL.
+			name:             "slack-wrapped url with display text is unwrapped",
+			text:             "url:<" + testResourceExposeURL + "|docs.example.com> as:$handbook",
+			wantTargetURL:    testResourceExposeURL,
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// The typed path accepts http as well as https (the guided modal is
+			// https-only). Assert http survives the unwrap so that distinction
+			// doesn't silently regress.
+			name:             "slack-wrapped http url is accepted",
+			text:             "url:<http://docs.example.com/handbook> as:$handbook",
+			wantTargetURL:    "http://docs.example.com/handbook",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// Slack HTML-escapes & in command text, so a multi-param URL arrives
+			// as ...?a=1&amp;b=2; it must decode to match the stored target.
+			name:             "slack-wrapped multi-param url is unescaped",
+			text:             "url:<https://docs.example.com/p?a=1&amp;b=2> as:$handbook",
+			wantTargetURL:    "https://docs.example.com/p?a=1&b=2",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			// No angle-bracket wrapping, but Slack still HTML-escapes & in
+			// command text. The unescape must run unconditionally so this
+			// decodes too — locks in that the unescape isn't gated on the
+			// bracket check (a refactor moving it back inside would fail here).
+			name:             "unwrapped escaped url is unescaped",
+			text:             "url:https://docs.example.com/p?a=1&amp;b=2 as:$handbook",
+			wantTargetURL:    "https://docs.example.com/p?a=1&b=2",
+			wantChannelAlias: testResourceExposeChannelAlias,
+		},
+		{
+			name:    "empty slack-wrapped url is missing-url",
+			text:    "url:<> as:$handbook",
+			wantMsg: "Missing URL",
+		},
+		{
 			name:    "no target (verb stripped, empty rest)",
 			text:    "",
 			wantMsg: resourceExposeUsage,
@@ -235,6 +283,36 @@ func TestHandleResourceExpose_IgnoresTunnelAlias(t *testing.T) {
 		t.Fatalf("LookupChannelAlias: %v", err)
 	} else if found {
 		t.Fatalf("tunnel alias should not have been exposed as a URL resource")
+	}
+}
+
+func TestHandleResourceExpose_BindsFileviewerAliasWhenReturnedByService(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	inv := newAdminSlashInvoker(t, h)
+
+	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{{
+			testKeyResourceID: testFileviewerResource,
+			testKeyType:       client.ResourceTypeURL,
+			fAttrAlias:        testResourceExposeAlias,
+			testKeyTargetURL:  testFileviewerTargetURL,
+			testKeyStatus:     client.StatusActive,
+		}}, "", false)
+	})
+
+	_, _, async := inv.invokeAdminAsync("protect-url $"+testResourceExposeAlias, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "URL resource `$docs` is now available as `$docs`") {
+		t.Fatalf("async reply = %q", async)
+	}
+	got, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testResourceExposeAlias)
+	if err != nil {
+		t.Fatalf("LookupChannelAlias: %v", err)
+	}
+	if !found || got != testFileviewerResource {
+		t.Fatalf("channel alias = (%q, %v), want (%q, true)", got, found, testFileviewerResource)
 	}
 }
 
