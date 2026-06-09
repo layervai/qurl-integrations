@@ -992,23 +992,29 @@ func buildAgentStore(ctx context.Context) *slackdata.AgentStore {
 	return store
 }
 
-// readAgentKillSwitch reads the QURL_AGENT_DISABLED org kill switch. Absent →
-// not disabled (the agent may run if otherwise wired). A set-but-unparseable
-// value FAILS SAFE: it disables conversation mode and logs loudly, so an
-// operator typo under pressure ("QURL_AGENT_DISABLED=disable") can never leave
-// the agent live by silently falling through to enabled.
-func readAgentKillSwitch() bool {
-	raw := strings.TrimSpace(os.Getenv("QURL_AGENT_DISABLED"))
+// readBoolEnvFailSafe reads a boolean env flag. Absent → emptyDefault. A
+// set-but-unparseable value FAILS SAFE to parseErrDefault and logs loudly, so an
+// operator typo can never silently flip the flag to its unsafe pole. The two agent
+// flags differ only in which pole is safe — see the named wrappers below.
+func readBoolEnvFailSafe(name string, emptyDefault, parseErrDefault bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
-		return false
+		return emptyDefault
 	}
-	disabled, err := strconv.ParseBool(raw)
+	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		slog.Warn("QURL_AGENT_DISABLED is set to an unparseable value; failing safe and DISABLING conversation mode", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
-			"value", raw)
-		return true
+		slog.Warn("agent env flag set to an unparseable value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+			"env", name, "value", raw, "fail_safe_default", parseErrDefault)
+		return parseErrDefault
 	}
-	return disabled
+	return v
+}
+
+// readAgentKillSwitch reads the QURL_AGENT_DISABLED org kill switch. Absent → not
+// disabled (the agent may run if otherwise wired). FAILS SAFE to DISABLED, so an
+// operator typo ("QURL_AGENT_DISABLED=disable") can never leave the agent live.
+func readAgentKillSwitch() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_DISABLED", false, true)
 }
 
 // readAgentConfirmEnabled reads QURL_AGENT_CONFIRM_ENABLED — the flag that, on top
@@ -1018,17 +1024,7 @@ func readAgentKillSwitch() bool {
 // can never turn mutation execution on. The flag only takes effect once the read-only
 // surface is live and PostMessageBlocks is wired (Handler.agentConfirmEnabled).
 func readAgentConfirmEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("QURL_AGENT_CONFIRM_ENABLED"))
-	if raw == "" {
-		return false
-	}
-	enabled, err := strconv.ParseBool(raw)
-	if err != nil {
-		slog.Warn("QURL_AGENT_CONFIRM_ENABLED is set to an unparseable value; treating as DISABLED (fail-safe)", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
-			"value", raw)
-		return false
-	}
-	return enabled
+	return readBoolEnvFailSafe("QURL_AGENT_CONFIRM_ENABLED", false, false)
 }
 
 // agentSurfaceState groups the boot-time facts that decide what conversation mode
