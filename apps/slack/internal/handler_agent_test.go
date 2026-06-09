@@ -296,7 +296,10 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 		llm  fakeAgentLLM
 		want string
 	}{
-		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentErrorReply},
+		// The turn ctx is spent here, so a failed turn reads as transient (retry),
+		// not the generic error copy — see TestProcessAgentEvent_GenericErrorCopy
+		// for the live-ctx (capability) branch.
+		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentTransientReply},
 		{"turn succeeded", fakeAgentLLM{reply: "You can reach staging."}, "You can reach staging."},
 	}
 	for _, c := range cases {
@@ -326,6 +329,28 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 				t.Fatalf("spent turn ctx should still deliver %q, got %+v", c.want, posts)
 			}
 		})
+	}
+}
+
+func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
+	// A turn that fails while its ctx is still live (a model/backend error within
+	// budget, not a timeout) is a generic failure, not a transient one — the user
+	// gets agentErrorReply, not the retry-flavored agentTransientReply.
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:    fakeAgentLLM{err: errors.New("model 500")},
+		AgentStore:  store,
+		PostMessage: post,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> do it"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
+		t.Fatalf("in-budget failure should post the generic error reply, got %+v", *posts)
 	}
 }
 

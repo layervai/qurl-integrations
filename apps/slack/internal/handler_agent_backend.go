@@ -21,6 +21,14 @@ var _ agent.Backend = (*agentBackend)(nil)
 // qURL API key is workspace-wide, so the Slack layer — not the LLM — enforces
 // channel visibility via channel_policies. This is the boundary that keeps the
 // agent from leaking resource existence across channels.
+//
+// The scope is deliberately CHANNEL-level, not per-individual-user: every member
+// of a channel shares its channel_policies view, so "what the calling user can
+// access" is approximated by channel membership — matching Slack's own channel
+// visibility model (the agent never reveals more than a channel member could
+// already reach with the slash commands). A tighter per-user resource check would
+// need user-level identity beyond the workspace key; that's a deliberate v1 choice,
+// not an oversight. See Slack's agent-design data-boundary guidance.
 type agentBackend struct {
 	authClient func(ctx context.Context, teamID string) (*client.Client, error)
 	store      *slackdata.Store

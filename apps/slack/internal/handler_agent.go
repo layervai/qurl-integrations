@@ -29,6 +29,14 @@ const agentProposalPreviewPrefix = "I can set that up, but applying changes from
 // internals never reach the channel.
 const agentErrorReply = "Something went wrong handling that. Please try again, or use a `/qurl` command."
 
+// agentTransientReply is posted when a turn fails for a likely-transient reason —
+// the turn-budget deadline elapsed, or the context was canceled — as opposed to
+// agentErrorReply's generic failure. Slack's agent-design guidance is to separate
+// "temporarily unavailable, worth retrying" from a capability limit so the user
+// knows a retry is worthwhile; a done turn ctx is our reliable signal for the
+// former. Still leaks no internals.
+const agentTransientReply = "That took longer than I could handle just now — please try again, or use a `/qurl` command."
+
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
 type slackEventEnvelope struct {
@@ -207,7 +215,13 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	replyTS := agentEventRootTS(&env.Event)
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)
-		h.postAgentReply(log, env, replyTS, agentErrorReply)
+		reply := agentErrorReply
+		if ctx.Err() != nil {
+			// The turn ctx is done (agentTurnTimeout elapsed, or baseCtx canceled on
+			// shutdown): a transient timeout, not a capability limit — invite a retry.
+			reply = agentTransientReply
+		}
+		h.postAgentReply(log, env, replyTS, reply)
 		return
 	}
 
