@@ -308,3 +308,78 @@ func TestSlackPostMessageFuncDefaultsUserAgent(t *testing.T) {
 		t.Fatalf("User-Agent = %q, want default %q", gotUA, defaultSlackAPIUserAgent)
 	}
 }
+
+func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Channel  string           `json:"channel"`
+		ThreadTS string           `json:"thread_ts"`
+		Text     string           `json:"text"`
+		Blocks   []map[string]any `json:"blocks"`
+		Mrkdwn   *bool            `json:"mrkdwn"` // pointer: assert it was explicitly sent, not merely absent
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	blocks := []any{map[string]any{"type": "section", "text": map[string]any{"type": "plain_text", "text": "Revoke $x?"}}}
+	if err := post(context.Background(), "T1", "E1", "C_chan", "1700.0001", blocks, "Revoke $x? (fallback)"); err != nil {
+		t.Fatalf("postBlocks: %v", err)
+	}
+	if gotBody.Channel != "C_chan" || gotBody.ThreadTS != "1700.0001" {
+		t.Fatalf("body channel/thread = %+v", gotBody)
+	}
+	// text is the notification / non-block-client fallback; blocks carry the card.
+	if gotBody.Text != "Revoke $x? (fallback)" {
+		t.Fatalf("fallback text = %q, want the fallback", gotBody.Text)
+	}
+	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0]["type"] != "section" {
+		t.Fatalf("blocks = %+v, want one section block", gotBody.Blocks)
+	}
+	// Defense-in-depth: mrkdwn must be explicitly false so the fallback renders literally.
+	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false (literal fallback)", gotBody.Mrkdwn)
+	}
+}
+
+func TestSlackPostMessageBlocksFuncGridFallback(t *testing.T) {
+	t.Parallel()
+	var owners []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	// The blocks seam shares the poster (token lookup + Grid fallback) with the text
+	// seam — confirm it threads enterpriseID through to the org-token retry.
+	post := newSlackPostMessageBlocksFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
+		owners = append(owners, ownerID)
+		if ownerID == "T1" {
+			return "", auth.ErrSlackBotTokenNotConfigured
+		}
+		return "xoxb-enterprise", nil
+	}, "", srv.URL, nil)
+	if err := post(context.Background(), "T1", "E1", "C_chan", "", []any{}, "x"); err != nil {
+		t.Fatalf("postBlocks: %v", err)
+	}
+	if len(owners) != 2 || owners[0] != "T1" || owners[1] != "E1" {
+		t.Fatalf("Grid fallback owners = %v, want [T1 E1]", owners)
+	}
+}
+
+func TestSlackPostMessageBlocksFuncSurfacesSlackError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"channel_not_found"}`))
+	}))
+	t.Cleanup(srv.Close)
+	post := newSlackPostMessageBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	err := post(context.Background(), "T1", "", "C_gone", "", []any{}, "x")
+	if err == nil || !strings.Contains(err.Error(), "channel_not_found") {
+		t.Fatalf("error = %v, want channel_not_found", err)
+	}
+}

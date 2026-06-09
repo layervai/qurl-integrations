@@ -146,12 +146,16 @@ func run() error {
 
 	postFeedback := buildPostFeedback(userAgent)
 
-	// Conversation-mode (read-only) seams. All default DARK: the agent only
-	// answers when AgentLLM, AgentStore and PostMessage are non-nil AND the kill
-	// switch is off (see Handler.agentEnabled). PostMessage shares the per-
-	// workspace token lookup and Grid fallback with the slash-command modals.
+	// Conversation-mode seams. All default DARK: the read-only agent only answers
+	// when AgentLLM, AgentStore and PostMessage are non-nil AND the kill switch is
+	// off (Handler.agentEnabled); the confirm/mutation flow additionally needs
+	// PostMessageBlocks wired AND AgentConfirmEnabled true (Handler.agentConfirmEnabled).
+	// Both PostMessage seams share the per-workspace token lookup + Grid fallback with
+	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	agentDisabled := readAgentKillSwitch()
+	agentConfirmEnabled := readAgentConfirmEnabled()
 	// Skip building the LLM + state store under a kill switch: it's read once at
 	// boot and forces the surface dark regardless (agentEnabled), so the store/LLM
 	// would never be used, and un-killing requires a restart anyway. This also
@@ -165,7 +169,14 @@ func run() error {
 		agentLLM = buildAgentLLM()
 		agentStore = buildAgentStore(signalCtx)
 	}
-	logAgentSurfaceState(agentLLM != nil, agentStore != nil, postMessage != nil, agentDisabled)
+	logAgentSurfaceState(agentSurfaceState{
+		llmWired:    agentLLM != nil,
+		storeWired:  agentStore != nil,
+		postWired:   postMessage != nil,
+		blocksWired: postMessageBlocks != nil,
+		confirmFlag: agentConfirmEnabled,
+		killed:      agentDisabled,
+	})
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -195,10 +206,12 @@ func run() error {
 				client.WithRetry(2),
 			)
 		},
-		AgentLLM:      agentLLM,
-		AgentStore:    agentStore,
-		PostMessage:   postMessage,
-		AgentDisabled: agentDisabled,
+		AgentLLM:            agentLLM,
+		AgentStore:          agentStore,
+		PostMessage:         postMessage,
+		AgentDisabled:       agentDisabled,
+		PostMessageBlocks:   postMessageBlocks,
+		AgentConfirmEnabled: agentConfirmEnabled,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
@@ -979,39 +992,67 @@ func buildAgentStore(ctx context.Context) *slackdata.AgentStore {
 	return store
 }
 
-// readAgentKillSwitch reads the QURL_AGENT_DISABLED org kill switch. Absent →
-// not disabled (the agent may run if otherwise wired). A set-but-unparseable
-// value FAILS SAFE: it disables conversation mode and logs loudly, so an
-// operator typo under pressure ("QURL_AGENT_DISABLED=disable") can never leave
-// the agent live by silently falling through to enabled.
-func readAgentKillSwitch() bool {
-	raw := strings.TrimSpace(os.Getenv("QURL_AGENT_DISABLED"))
+// readBoolEnvFailSafe reads a boolean env flag. Absent → emptyDefault. A
+// set-but-unparseable value FAILS SAFE to parseErrDefault and logs loudly, so an
+// operator typo can never silently flip the flag to its unsafe pole. The two agent
+// flags differ only in which pole is safe — see the named wrappers below.
+func readBoolEnvFailSafe(name string, emptyDefault, parseErrDefault bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
-		return false
+		return emptyDefault
 	}
-	disabled, err := strconv.ParseBool(raw)
+	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		slog.Warn("QURL_AGENT_DISABLED is set to an unparseable value; failing safe and DISABLING conversation mode", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
-			"value", raw)
-		return true
+		slog.Warn("agent env flag set to an unparseable value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+			"env", name, "value", raw, "fail_safe_default", parseErrDefault)
+		return parseErrDefault
 	}
-	return disabled
+	return v
 }
 
-// logAgentSurfaceState emits one startup line describing why conversation mode is
-// live or dark. The LIVE claim is gated on the SAME three seams as
-// Handler.agentEnabled (LLM + Store + PostMessage) so the line can never report
-// LIVE while the handler stays dark — even though PostMessage is wired
-// unconditionally today. The partial-config branch NAMES the missing seam: silent
-// darkness on a configured-looking deploy is the worst operator experience this
-// wiring can produce.
-func logAgentSurfaceState(llmWired, storeWired, postWired, killed bool) {
+// readAgentKillSwitch reads the QURL_AGENT_DISABLED org kill switch. Absent → not
+// disabled (the agent may run if otherwise wired). FAILS SAFE to DISABLED, so an
+// operator typo ("QURL_AGENT_DISABLED=disable") can never leave the agent live.
+func readAgentKillSwitch() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_DISABLED", false, true)
+}
+
+// readAgentConfirmEnabled reads QURL_AGENT_CONFIRM_ENABLED — the flag that, on top
+// of the read-only surface, lets the agent EXECUTE mutations via the Approve/Reject
+// confirm card. Absent → off. FAILS SAFE like the kill switch but in the opposite
+// direction: a set-but-unparseable value is treated as OFF (not enabled), so a typo
+// can never turn mutation execution on. The flag only takes effect once the read-only
+// surface is live and PostMessageBlocks is wired (Handler.agentConfirmEnabled).
+func readAgentConfirmEnabled() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_CONFIRM_ENABLED", false, false)
+}
+
+// agentSurfaceState groups the boot-time facts that decide what conversation mode
+// does — a struct so logAgentSurfaceState's growing set of seam booleans can't be
+// transposed at the call site.
+type agentSurfaceState struct {
+	llmWired    bool
+	storeWired  bool
+	postWired   bool
+	blocksWired bool
+	confirmFlag bool // QURL_AGENT_CONFIRM_ENABLED
+	killed      bool
+}
+
+// logAgentSurfaceState emits startup lines describing what conversation mode will
+// do. The read-only LIVE claim is gated on the SAME seams as Handler.agentEnabled
+// (LLM + Store + PostMessage, kill switch off); the confirm/mutation line is gated
+// on the SAME predicate as Handler.agentConfirmEnabled (read-only live AND the flag
+// AND PostMessageBlocks). Both key on EFFECTIVE state, never a raw env bool, so a
+// line can't claim LIVE/ENABLED while the handler is actually dark.
+func logAgentSurfaceState(s agentSurfaceState) {
+	readOnlyLive := !s.killed && s.llmWired && s.storeWired && s.postWired
 	switch {
-	case killed:
+	case s.killed:
 		slog.Warn("conversation mode is DISABLED by kill switch (QURL_AGENT_DISABLED); the read-only agent will not respond even if other seams are wired")
-	case llmWired && storeWired && postWired:
+	case readOnlyLive:
 		slog.Info("conversation mode (read-only) is LIVE: @mentions and DMs will be answered")
-	case !llmWired && !storeWired:
+	case !s.llmWired && !s.storeWired:
 		// LLM + Store are the operator-set agent seams; PostMessage is wired
 		// unconditionally, so "neither agent seam set" is the friendly no-agent
 		// deploy, not a partial misconfiguration.
@@ -1021,20 +1062,34 @@ func logAgentSurfaceState(llmWired, storeWired, postWired, killed bool) {
 		// Partial config — including the today-unreachable case where PostMessage
 		// is nil, so the line stays honest if PostMessage ever becomes conditional.
 		var missing []string
-		if !llmWired {
+		if !s.llmWired {
 			missing = append(missing, "ANTHROPIC_API_KEY (AgentLLM)")
 		}
-		if !storeWired {
+		if !s.storeWired {
 			// AgentStore is nil for two reasons — the table env is unset, OR it is
 			// set but construction failed (buildAgentStore logs the real cause as an
 			// error). Don't assert "unset" here, which would contradict that error.
 			missing = append(missing, "AgentStore ("+slackdata.EnvAgentStateTable+" unset, or construction failed — see the logged error)")
 		}
-		if !postWired {
+		if !s.postWired {
 			missing = append(missing, "PostMessage")
 		}
 		slog.Warn("conversation mode is DARK: partially configured; the agent stays off until every seam is set",
 			"missing", strings.Join(missing, ", "))
+	}
+
+	// Confirm/mutation mode sits ON TOP of the read-only surface. Report its EFFECTIVE
+	// state, never the raw flag — a flag set while the surface is dark must NOT read
+	// as enabled (the #670 LIVE-gate-consistency lesson, applied to the riskier flip).
+	switch {
+	case readOnlyLive && s.confirmFlag && s.blocksWired:
+		slog.Warn("conversation mode CONFIRM (mutation execution) is LIVE: an admin Approving a card EXECUTES the change. Confirm the hard pre-enablement gates (get-link authorization; R2 public-card replace_original; C1 connector key-privacy; C2 connector trigger-window) AND the DPA/data-handling review have cleared before relying on this.")
+	case !s.killed && s.confirmFlag:
+		// When killed, the kill-switch line above is the accurate cause; a confirm-DARK
+		// line here would name the seams as the blocker, not the kill switch — so let
+		// the kill-switch line stand alone (the un-kill restart re-reports confirm state).
+		slog.Warn("QURL_AGENT_CONFIRM_ENABLED is set but confirm mode is DARK; mutations will NOT execute until the read-only surface is live and PostMessageBlocks is wired",
+			"read_only_live", readOnlyLive, "blocks_wired", s.blocksWired)
 	}
 }
 

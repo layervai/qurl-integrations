@@ -125,7 +125,8 @@ func TestLogAgentSurfaceState(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := captureSlog(t)
-			logAgentSurfaceState(tc.llm, tc.store, tc.post, tc.killed)
+			// confirmFlag stays false here, so only the read-only line is emitted.
+			logAgentSurfaceState(agentSurfaceState{llmWired: tc.llm, storeWired: tc.store, postWired: tc.post, killed: tc.killed})
 			records := logs()
 			if len(records) != 1 {
 				t.Fatalf("got %d log records, want 1: %v", len(records), records)
@@ -146,4 +147,76 @@ func TestLogAgentSurfaceState(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadAgentConfirmEnabled(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "unset is off", val: "", want: false},
+		{name: "true enables", val: "true", want: true},
+		{name: "1 enables", val: "1", want: true},
+		{name: "false stays off", val: "false", want: false},
+		{name: "0 stays off", val: "0", want: false},
+		// Fail-safe: an unparseable value must stay OFF, never silently enable mutations.
+		{name: "garbage fails safe to off", val: "enable", want: false},
+		{name: "yes fails safe to off", val: "yes", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QURL_AGENT_CONFIRM_ENABLED", tc.val)
+			if got := readAgentConfirmEnabled(); got != tc.want {
+				t.Fatalf("readAgentConfirmEnabled(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLogAgentSurfaceState_ConfirmMode(t *testing.T) {
+	// The confirm/mutation line must key on the EFFECTIVE predicate
+	// (Handler.agentConfirmEnabled), never the raw flag: a flag set while the surface
+	// is dark must read "set but DARK", not "LIVE".
+	wired := agentSurfaceState{llmWired: true, storeWired: true, postWired: true, blocksWired: true}
+	cases := []struct {
+		name        string
+		state       agentSurfaceState
+		wantConfirm string // substring expected in some emitted record ("" → no confirm line)
+	}{
+		{name: "flag off → no confirm line", state: wired, wantConfirm: ""},
+		{name: "confirm live", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true }), wantConfirm: "CONFIRM (mutation execution) is LIVE"},
+		{name: "flag set but blocks unwired → dark", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.blocksWired = false }), wantConfirm: "confirm mode is DARK"},
+		{name: "flag set but read-only dark → dark", state: agentSurfaceState{storeWired: true, postWired: true, blocksWired: true, confirmFlag: true}, wantConfirm: "confirm mode is DARK"},
+		// Killed: only the kill-switch line; no separate confirm line (it would name the
+		// seams, not the kill switch, as the blocker).
+		{name: "flag set but killed → no confirm line", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.killed = true }), wantConfirm: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureSlog(t)
+			logAgentSurfaceState(tc.state)
+			var found bool
+			for _, rec := range logs() {
+				if msg, _ := rec["msg"].(string); tc.wantConfirm != "" && strings.Contains(msg, tc.wantConfirm) {
+					found = true
+				}
+				// A flag-off state must never emit ANY confirm line (LIVE or DARK).
+				if tc.wantConfirm == "" {
+					if msg, _ := rec["msg"].(string); strings.Contains(msg, "CONFIRM") || strings.Contains(msg, "QURL_AGENT_CONFIRM_ENABLED") {
+						t.Fatalf("flag off should emit no confirm line; got %q", msg)
+					}
+				}
+			}
+			if tc.wantConfirm != "" && !found {
+				t.Fatalf("expected a confirm record containing %q; records=%v", tc.wantConfirm, logs())
+			}
+		})
+	}
+}
+
+// with returns a copy of s mutated by fn — keeps the confirm-mode cases terse.
+func with(s agentSurfaceState, fn func(*agentSurfaceState)) agentSurfaceState {
+	fn(&s)
+	return s
 }
