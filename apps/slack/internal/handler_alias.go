@@ -361,11 +361,20 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 
 // resolveAndBindTunnelSlugAlias resolves a tunnel `$slug` to its
 // resource_id, binds `alias`→resource_id on (teamID, channelID), and
-// renders the admin-facing result. set-alias is the only caller and the
-// only target form is a slug, so the bind always carries an opaque
-// `r_<id>` — the success copy deliberately echoes the `$slug` the admin
-// typed (the noun `/qurl list` shows) rather than the internal
+// renders the admin-facing result. The target is always a slug, so the
+// bind carries an opaque `r_<id>` — the success copy deliberately echoes
+// the `$slug` (the noun `/qurl list` shows) rather than the internal
 // resource_id.
+//
+// CALLER CONTRACT: alias and slug MUST be pre-validated for the alias/slug
+// grammar (the /qurl-admin set-alias verb via parseAliasArgs; the
+// conversation-mode confirm flow via confirmValidAliasBind). The success/error
+// copy echoes both UNESCAPED into `$%s` code fences — deliberately, so the
+// not-found error can round-trip the exact `$slug` the admin retypes into
+// `/qurl-admin protect-connector` — and the confirm caller renders the result on a
+// PUBLIC card. So the pre-validation is the load-bearing protection here, NOT an
+// escape; do not "fix" the asymmetry with the unset path (which both validates AND
+// escapes) by dropping this caller's validation. Any future caller must validate first.
 //
 // TOCTOU note: the slug→resource_id resolve and the DDB bind are two
 // steps; if the tunnel is deleted upstream between them, the binding
@@ -477,18 +486,24 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
-	if errors.Is(err, slackdata.ErrAliasNotFound) {
-		respondSlack(w, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", args.Alias))
-		return
+	respondSlack(w, h.unbindAliasResult(ctx, teamID, channelID, args.Alias))
+}
+
+// unbindAliasResult clears the alias binding in (teamID, channelID) and renders the
+// user-facing result. Shared by the /qurl-admin unset-alias slash verb and the
+// conversation-mode confirm flow (executeAgentAction). The caller gates admin; the
+// alias is escaped since the confirm path can carry an LLM-distilled value.
+func (h *Handler) unbindAliasResult(ctx context.Context, teamID, channelID, alias string) string {
+	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, alias)
+	switch {
+	case errors.Is(err, slackdata.ErrAliasNotFound):
+		return fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", escapeMrkdwnCode(alias))
+	case err != nil:
+		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return "Failed to clear alias. Please try again."
+	default:
+		// Admin-verb audit trail: counterpart to the setalias "alias bound" line.
+		slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", escapeMrkdwnCode(alias))
 	}
-	if err != nil {
-		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
-		respondSlack(w, "Failed to clear alias. Please try again.")
-		return
-	}
-	// Admin-verb audit trail: counterpart to the setalias "alias bound"
-	// audit line. team/channel/alias are validated upstream.
-	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
-	respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
 }

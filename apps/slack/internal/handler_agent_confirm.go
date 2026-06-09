@@ -30,6 +30,11 @@ const (
 	agentConfirmUnsupportedReply    = "I can't apply that kind of change yet."
 	agentConfirmGetDeliveredReply   = "Handled — the access link was sent privately to the approver."
 	agentConfirmFailedReply         = "Something went wrong applying that. Please try again, or use a `/qurl` command."
+	// agentConfirmInvalidAliasReply is generic ON PURPOSE: the confirm card is
+	// public, so an invalid (LLM-distilled, possibly injected) alias/target must NOT
+	// be echoed back into it — unlike the slash path, whose validation reply is
+	// ephemeral and can echo the bad token.
+	agentConfirmInvalidAliasReply = "I couldn't apply that — the alias or target isn't valid (lowercase letters, numbers, and dashes only). Try rephrasing your request."
 )
 
 // pendingAction is the ephemeral snapshot persisted between proposing a mutation
@@ -41,18 +46,47 @@ const (
 // is the token re-resolution at execute.
 type pendingAction struct {
 	Action    agent.ActionKind `json:"action"`
-	Token     string           `json:"token,omitempty"`
+	Token     string           `json:"token,omitempty"`  // slug/alias (sigil stripped) for get/revoke
 	Reason    string           `json:"reason,omitempty"` // audit reason, forwarded to the mint on get
+	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias
+	Target    string           `json:"target,omitempty"` // target slug for set-alias
 	ChannelID string           `json:"channel_id"`
 }
 
+// confirmValidAliasBind validates a bare (no leading "$") alias + target — as the
+// confirm path stores them — against the slash set-alias grammar (charset, length,
+// no backticks/non-printables, tunnel-only target) and returns the parser's
+// CANONICAL forms. It reuses parseAliasArgs as the single validation source, so the
+// confirm and slash paths can't drift. Returning (and executing with) the canonical
+// values — not the raw inputs — closes the "validate a reconstruction, execute the
+// original" seam: e.g. a trailing tab validates clean (Fields trims it) but must not
+// be echoed verbatim onto the public card.
+func confirmValidAliasBind(alias, target string) (canonAlias, canonTarget string, ok bool) {
+	parsed, msg := parseAliasArgs("$"+alias+" $"+target, true)
+	if msg != "" {
+		return "", "", false
+	}
+	return parsed.Alias, strings.TrimPrefix(parsed.Target, "$"), true
+}
+
+// confirmValidAlias is the single-alias counterpart for the unset-alias confirm
+// path, returning the canonical alias. The alias charset (lowercase-alnum-dash)
+// rejects backticks AND every non-printable (bidi/zero-width) — which
+// escapeMrkdwnCode alone passes through — keeping garbled/spoofed text off the
+// public "not bound" card.
+func confirmValidAlias(alias string) (canon string, ok bool) {
+	a, msg := requireAlias("$" + alias)
+	return a, msg == ""
+}
+
 // confirmExecutable reports whether the confirm flow can actually EXECUTE this
-// action kind in this build. Deferred kinds (alias → PR4b, protect → PR4c) must
-// fall back to the text preview rather than render a live Approve button that
-// can only reply "can't apply that yet" — keep in lockstep with
-// executeAgentAction's switch. PR4b/PR4c land by extending this set.
+// action kind in this build. Deferred kinds (protect → PR4c) must fall back to the
+// text preview rather than render a live Approve button that can only reply "can't
+// apply that yet" — keep in lockstep with executeAgentAction's switch. PR4c lands
+// by extending this set.
 func confirmExecutable(kind agent.ActionKind) bool {
-	return kind == agent.ActionGet || kind == agent.ActionRevoke
+	return kind == agent.ActionGet || kind == agent.ActionRevoke ||
+		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias
 }
 
 // deliverAgentResult posts a completed turn's result: an interactive confirm card
@@ -121,6 +155,8 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		Action:    prop.Action,
 		Token:     prop.Token,
 		Reason:    prop.Reason,
+		Alias:     prop.Alias,
+		Target:    prop.Target,
 		ChannelID: env.Event.Channel,
 	})
 	if err != nil {
@@ -341,9 +377,32 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		// A revoke result ("revoked $x") is benign and useful as a public audit line.
 		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
-	case agent.ActionSetAlias, agent.ActionUnsetAlias, agent.ActionProtectConnector, agent.ActionProtectURL:
-		// Deferred to PR4b (alias) / PR4c (protect). These are admin-gated, so a
-		// non-admin can't reach here; an admin gets a clean "not supported yet".
+	case agent.ActionSetAlias:
+		// The confirm path has no parser gate (unlike the slash verb), so validate the
+		// LLM-distilled alias/target through the SAME grammar first — see
+		// confirmValidAliasBind. On failure surface a generic message rather than echo
+		// the (possibly injected) value onto the PUBLIC card. Bind/echo the CANONICAL
+		// (validated) values it returns, not the raw inputs.
+		alias, target, ok := confirmValidAliasBind(pa.Alias, pa.Target)
+		if !ok {
+			return actionResult{cardText: agentConfirmInvalidAliasReply}
+		}
+		// Binds alias → target in the CLICK's channel (channel-scoped, like the slash
+		// set-alias). Inputs are validated, so the benign result is safe on the card.
+		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, alias, target)}
+	case agent.ActionUnsetAlias:
+		// Validate the alias like set-alias before echoing it onto the public card:
+		// unbindAliasResult escapes backticks, but non-printables (bidi/zero-width)
+		// would still garble/spoof the "not bound" line — the charset gate rejects them.
+		// Clear with the CANONICAL alias it returns, not the raw input.
+		alias, ok := confirmValidAlias(pa.Alias)
+		if !ok {
+			return actionResult{cardText: agentConfirmInvalidAliasReply}
+		}
+		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias)}
+	case agent.ActionProtectConnector, agent.ActionProtectURL:
+		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so
+		// a non-admin can't reach here; an admin gets a clean "not supported yet".
 		log.Warn("agent confirm: action not executable in this build", "action", pa.Action)
 		return actionResult{cardText: agentConfirmUnsupportedReply}
 	default:
