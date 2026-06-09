@@ -190,6 +190,9 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		return
 	}
 
+	// ChannelName is intentionally left unset: the Events payload carries only the
+	// channel id (describeChannel falls back to it), and resolving the name would
+	// cost a conversations.info call per turn. Tracked in #659.
 	tc := agent.TurnContext{
 		TeamID:        env.TeamID,
 		EnterpriseID:  env.EnterpriseID,
@@ -219,6 +222,9 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		"cache_creation_tokens", result.Usage.CacheCreationInputTokens,
 	)
 
+	// Save before posting: the transcript must be durably consistent before the
+	// user can fire a follow-up turn against it. The post is the slower,
+	// user-visible step, so this trades a little reply latency for that ordering.
 	h.saveAgentHistory(log, partition, threadKey, newHistory, version)
 	h.postAgentReply(log, env, replyTS, agentReplyText(&result))
 }
