@@ -228,6 +228,27 @@ func (h *Handler) listCallerCanEdit(ctx context.Context, log *slog.Logger, teamI
 	return isAdmin
 }
 
+// listCallerIsAdmin is the fail-soft admin gate shared by the `/qurl list`
+// empty-state copy selectors. It bounds the CheckAdmin read by adminGateBudget
+// and returns false for a nil AdminStore, missing ids, or any read error
+// (logged under purpose) — so the listing degrades to the non-admin copy rather
+// than failing. It does NOT subsume [Handler.listCallerCanEdit], which fails the
+// same way but also requires the Edit-modal wiring (OpenView + aliasStore)
+// before the gate.
+func (h *Handler) listCallerIsAdmin(ctx context.Context, log *slog.Logger, teamID, userID, purpose string) bool {
+	if h.cfg.AdminStore == nil || teamID == "" || userID == "" {
+		return false
+	}
+	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+	if err != nil {
+		log.Debug("list: admin check failed — using non-admin copy", "purpose", purpose, "error", err, "team_id", teamID)
+		return false
+	}
+	return isAdmin
+}
+
 // listResourcesEmptyMessageForCaller returns the empty-state copy for /qurl
 // list. Non-admins never see the admin-only tunnel setup command. Admins get a
 // direct setup hint, but only on a successful CheckAdmin read; failures degrade
@@ -235,17 +256,7 @@ func (h *Handler) listCallerCanEdit(ctx context.Context, log *slog.Logger, teamI
 // only on the zero-resource path, where the extra hint changes the otherwise
 // empty response without adding a per-row gate.
 func (h *Handler) listResourcesEmptyMessageForCaller(ctx context.Context, log *slog.Logger, teamID, userID string) string {
-	if h.cfg.AdminStore == nil || teamID == "" || userID == "" {
-		return listResourcesEmptyMessage
-	}
-	gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
-	defer cancel()
-	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
-	if err != nil {
-		log.Debug("list: admin check for empty-state hint failed — hiding admin setup hint", "error", err, "team_id", teamID)
-		return listResourcesEmptyMessage
-	}
-	if !isAdmin {
+	if !h.listCallerIsAdmin(ctx, log, teamID, userID, "empty-state hint") {
 		return listResourcesEmptyMessage
 	}
 	return listResourcesEmptyAdminMessage
@@ -264,11 +275,11 @@ func (h *Handler) listResourcesEmptyMessageForCaller(ctx context.Context, log *s
 // with no concrete `$alias` to name, the generic copy is the better guidance.
 //
 // unset-alias is admin-only, so the actionable verb is shown only to a bot admin;
-// others get an admin handoff. The admin test is a direct CheckAdmin (mirroring
-// listResourcesEmptyMessageForCaller), NOT listCallerCanEdit — an admin on a
-// deployment without the Edit-modal wiring can still run the slash command, so
-// they should still see the fix. A nil store / missing ids / read error all
-// degrade to the handoff copy (fail-soft).
+// others get an admin handoff. The admin test is the shared [Handler.listCallerIsAdmin]
+// gate (a direct CheckAdmin), NOT listCallerCanEdit — an admin on a deployment
+// without the Edit-modal wiring can still run the slash command, so they should
+// still see the fix. A nil store / missing ids / read error all degrade to the
+// handoff copy (fail-soft).
 func (h *Handler) listResourcesStaleMessageForCaller(ctx context.Context, log *slog.Logger, teamID, channelID, userID string) string {
 	aliasesByResource := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
 	stale := make([]string, 0, len(aliasesByResource))
@@ -293,17 +304,7 @@ func (h *Handler) listResourcesStaleMessageForCaller(ctx context.Context, log *s
 		pronoun = "it"
 	}
 
-	isAdmin := false
-	if h.cfg.AdminStore != nil && teamID != "" && userID != "" {
-		gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
-		ok, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
-		cancel()
-		if err != nil {
-			log.Debug("list: admin check for stale-state hint failed — using admin handoff copy", "error", err, "team_id", teamID)
-		}
-		isAdmin = err == nil && ok
-	}
-	if isAdmin {
+	if h.listCallerIsAdmin(ctx, log, teamID, userID, "stale-state hint") {
 		return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Clear %s with `/qurl-admin unset-alias`, then protect a new resource here.",
 			noun, joined, pronoun)
 	}
