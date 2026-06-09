@@ -43,6 +43,12 @@ func TestSystemPrompt_Invariants(t *testing.T) {
 		}
 	}
 
+	// Channel-scope disclosure: the agent must be told to surface that its reads
+	// are channel-scoped rather than implying a workspace-wide answer.
+	if !strings.Contains(p, "only see what's reachable in THIS channel") {
+		t.Error("prompt must instruct the agent to disclose its channel-scoped read boundary")
+	}
+
 	// Per-turn context is injected.
 	if !strings.Contains(p, testChannel) || !strings.Contains(p, "U1") {
 		t.Error("prompt must inject the channel and user context")

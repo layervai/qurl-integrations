@@ -17,6 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -312,7 +313,39 @@ type Config struct {
 	// replies that feedback isn't enabled and userHelpMessage omits the line.
 	// Production wires it in cmd/main.go from FEEDBACK_SLACK_WEBHOOK_URL.
 	PostFeedback PostFeedbackFunc
+
+	// --- Conversation mode (Secure Access Agent over the Events API) ---
+	// The feature is OFF unless AgentLLM, AgentStore, and PostMessage are all
+	// wired AND AgentDisabled is false. Leaving any nil keeps it dark — which is
+	// how production stays during the staged rollout until the enablement wiring
+	// (LLM key, state table, manifest scopes) lands.
+
+	// AgentLLM is the language model backing conversation mode. A single
+	// instance (the Anthropic key is workspace-independent), not a per-team
+	// factory. Nil disables conversation mode.
+	AgentLLM agent.LLM
+
+	// AgentStore persists per-thread conversation history and Slack event-id
+	// dedupe. Nil disables conversation mode.
+	AgentStore *slackdata.AgentStore
+
+	// PostMessage posts a chat.postMessage reply (threaded on threadTS) using
+	// the per-workspace bot token, the same token seam as OpenView/PostDM.
+	// Nil disables conversation mode.
+	PostMessage PostMessageFunc
+
+	// AgentDisabled is the org-level kill switch. True forces conversation mode
+	// off regardless of the wiring above — the panic button independent of the
+	// per-workspace toggle. Read from Config at construction, so flipping it is a
+	// deploy-time action (redeploy/reconstruct), not a live runtime switch; a
+	// hot-reloadable flag is deferred to the enablement work (see #651).
+	AgentDisabled bool
 }
+
+// PostMessageFunc posts a Slack message via chat.postMessage on the
+// per-workspace bot token. threadTS threads the reply (empty posts top-level).
+// enterpriseID is passed for Enterprise Grid token resolution.
+type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error
 
 // Handler processes Slack events and commands.
 type Handler struct {
@@ -1218,23 +1251,23 @@ func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*clie
 }
 
 func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
-	var v struct {
-		Type      string `json:"type"`
-		Challenge string `json:"challenge"`
-	}
-	switch err := json.Unmarshal(body, &v); {
+	var env slackEventEnvelope
+	switch err := json.Unmarshal(body, &env); {
 	case err != nil:
 		// Bad JSON shouldn't 4xx (Slack retries on non-2xx). Surface
 		// the parse error at Debug so spec drift / corrupt payloads
 		// are visible to operators without breaking the contract.
 		slog.Debug("event JSON parse failed", "error", err, "body_length", len(body))
-	case v.Type == "url_verification":
-		respondJSON(w, http.StatusOK, map[string]string{"challenge": v.Challenge})
+	case env.Type == "url_verification":
+		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
+	case env.Type == "event_callback":
+		// Conversation mode. handleAgentEvent only schedules async work (or
+		// no-ops when disabled/filtered); we always ack 200 below so Slack
+		// never retries a delivery we accepted.
+		h.handleAgentEvent(&env)
 	}
 
-	// TODO: Handle link_shared events for unfurling.
-	slog.Info("event received", "body_length", len(body))
 	respondJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
