@@ -59,6 +59,8 @@ const (
 	// defaultPendingActionTTL bounds how long a proposed mutation stays clickable.
 	// Long enough for a human (often a different admin than the asker) to notice
 	// and approve, short enough that a stale confirm card can't execute much later.
+	// Enforced at read time in LoadPendingAction (not just by the lagging DynamoDB
+	// TTL reaper), so the window is a real bound.
 	defaultPendingActionTTL = 10 * time.Minute
 )
 
@@ -284,6 +286,14 @@ func (s *AgentStore) LoadPendingAction(ctx context.Context, partition, id string
 		return nil, false, ddbToError("LoadPendingAction", err)
 	}
 	if len(out.Item) == 0 {
+		return nil, false, nil
+	}
+	// Enforce the TTL at read time. DynamoDB's TTL reaper only deletes "within a
+	// few days" (commonly hours of lag), so a plain GetItem could otherwise return a
+	// long-stale pending action. Treating a past-TTL item as already gone makes the
+	// pendingActionTTL window a real bound, not just a reaper hint — the click-time
+	// admin re-check and the consume-once claim are independent backstops regardless.
+	if ttl := readNumber(out.Item, attrAgentTTL); ttl > 0 && s.now().Unix() >= ttl {
 		return nil, false, nil
 	}
 	return []byte(readString(out.Item, attrPendPayload)), true, nil

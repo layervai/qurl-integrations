@@ -240,6 +240,26 @@ func TestPendingAction_RoundTripAndTTL(t *testing.T) {
 	}
 }
 
+func TestLoadPendingAction_ReadTimeExpiry(t *testing.T) {
+	// The DynamoDB TTL reaper lags, so LoadPendingAction enforces the TTL at read
+	// time: a past-TTL item reads as gone even though the fake never reaps.
+	fake := newAgentFakeDDB()
+	now := time.Unix(1_700_000_000, 0)
+	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, PendingActionTTL: 10 * time.Minute}
+	ctx := context.Background()
+
+	if err := s.PutPendingAction(ctx, "T1", "id1", []byte("x")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if _, found, _ := s.LoadPendingAction(ctx, "T1", "id1"); !found {
+		t.Fatal("should be found within the TTL window")
+	}
+	now = now.Add(11 * time.Minute) // advance past the 10m TTL
+	if _, found, _ := s.LoadPendingAction(ctx, "T1", "id1"); found {
+		t.Fatal("a past-TTL pending action must read as expired")
+	}
+}
+
 func TestClaimPendingAction_ConsumeOnce(t *testing.T) {
 	s := newTestAgentStore(newAgentFakeDDB())
 	ctx := context.Background()

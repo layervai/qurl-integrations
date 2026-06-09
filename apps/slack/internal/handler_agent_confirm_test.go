@@ -272,6 +272,26 @@ func TestConfirm_AdminApproveExecutesAndReplaces(t *testing.T) {
 	}
 }
 
+func TestConfirm_NonAdminCanApproveGet(t *testing.T) {
+	// get is NOT admin-gated, so any channel member may Approve a pending get
+	// (privilege-parity with a typed /qurl get) — the non-admin clicker reaches
+	// execute and the card is replaced (terminal), unlike the admin-gated revoke a
+	// non-admin can't run. This drives the ActionGet branch's Command construction
+	// (SubcmdGet + token + reason flag) through executeAgentAction; that the reason
+	// then reaches the mint's Create.Reason is covered in handler_get_test.
+	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the clicker is NOT
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
+
+	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro {
+		t.Fatal("a non-admin Approve of a get must execute and replace the card (get is not admin-gated)")
+	}
+	if !hc.claimed(id) {
+		t.Fatal("an executed get approve must claim the pending action")
+	}
+}
+
 func TestConfirm_ConsumeOnceNoDoubleExecute(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, revokePending())
