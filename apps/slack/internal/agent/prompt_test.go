@@ -15,10 +15,15 @@ func TestSystemPrompt_Invariants(t *testing.T) {
 	if !strings.Contains(p, "Secure Access Agent") {
 		t.Error("prompt must identify as the Secure Access Agent")
 	}
-	if strings.Contains(strings.ToLower(p), "firewall") {
-		// We may say "never call qURL a firewall"; assert the word only appears
-		// in that negative instruction, never as a description of the product.
-		if !strings.Contains(strings.ToLower(p), "never call qurl a firewall") {
+	// "firewall" may appear EXACTLY ONCE, and only inside the negative
+	// instruction — never as a description of the product. The exact phrase
+	// "never call qURL a firewall" is load-bearing for this guard; rewording it
+	// will (correctly) trip this test.
+	if lower := strings.ToLower(p); strings.Contains(lower, "firewall") {
+		if strings.Count(lower, "firewall") != 1 {
+			t.Error("prompt mentions 'firewall' more than once; it must appear only in the negative instruction")
+		}
+		if !strings.Contains(lower, "never call qurl a firewall") {
 			t.Error("prompt must not describe qURL as a firewall")
 		}
 	}
