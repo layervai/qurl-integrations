@@ -300,19 +300,17 @@ func TestConfirm_AdminApproveExecutesAndReplaces(t *testing.T) {
 	}
 }
 
-func TestConfirm_GetApproveIsEphemeralAndUngated(t *testing.T) {
-	// get is NOT admin-gated (any member may Approve — privilege-parity with a typed
-	// /qurl get), AND its result is a one-time-use credential, so it must be
-	// delivered PRIVATELY to the clicker, never broadcast on the public card. (The
-	// residual "any member can approve + burn the link before the asker" theft
-	// vector is the get-authorization gate on #651.)
-	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the clicker is NOT
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", ChannelID: "C1"})
+func TestConfirm_GetApproveByAskerIsEphemeral(t *testing.T) {
+	// get is NOT admin-gated but IS asker-only: the requesting member (Asker) may
+	// Approve their own get, and its result is a one-time-use credential delivered
+	// PRIVATELY to the clicker (== asker), never broadcast on the public card.
+	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the asker/clicker is Uother
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", Asker: "Uother", ChannelID: "C1"})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
 
-	// A non-admin reaching execute proves get isn't gated (it claimed).
+	// The asker (a non-admin) reaching execute proves get isn't admin-gated (it claimed).
 	if !hc.claimed(id) {
-		t.Fatal("a non-admin must be able to approve+execute a get (not admin-gated)")
+		t.Fatal("the asker (non-admin) must be able to approve+execute their own get")
 	}
 	// Two posts: the result ephemerally (replace_original false) + the neutral public
 	// card (replace_original true).
@@ -334,6 +332,70 @@ func TestConfirm_GetApproveIsEphemeralAndUngated(t *testing.T) {
 	// on failure — here the empty-channel resolve error, which names the token).
 	if strings.Contains(card, "staging") || strings.Contains(card, ephemeral) {
 		t.Fatalf("public card leaked the get result: %q", card)
+	}
+}
+
+func TestConfirm_GetNonAskerDeniedThenAskerSucceeds(t *testing.T) {
+	// The asker-only gate is BEFORE the claim: a non-asker click is denied and claims
+	// NOTHING, so the asker can STILL approve. If the gate were after the claim, the
+	// non-asker click would consume the pending get and permanently burn the asker's
+	// request — a DoS. This sequential assertion is what fails if the gate ever moves
+	// below the claim.
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: "Uasker", ChannelID: "C1"})
+
+	// Non-asker Approve → denied ephemerally, nothing claimed.
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || text != agentConfirmGetNotAskerReply {
+		t.Fatalf("non-asker get Approve must be denied ephemerally; replace=%v text=%q", ro, text)
+	}
+	if hc.claimed(id) {
+		t.Fatal("a non-asker click must NOT claim the asker's get (it would burn the request)")
+	}
+
+	// The asker then approves and succeeds — proves the non-asker click didn't consume it.
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uasker", hc.respURL, id), id, true, time.Now())
+	if !hc.claimed(id) {
+		t.Fatal("the asker must still be able to approve after a non-asker was denied")
+	}
+}
+
+func TestConfirm_GetNonAskerRejectDenied(t *testing.T) {
+	// The asker-only gate covers Reject too: a non-asker can't dismiss the asker's get
+	// card out from under them (claims nothing; the asker can still act, or the 10-min
+	// TTL reaps an abandoned card).
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Asker: "Uasker", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, false, time.Now())
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || text != agentConfirmGetNotAskerReply {
+		t.Fatalf("non-asker get Reject must be denied ephemerally; replace=%v text=%q", ro, text)
+	}
+	if hc.claimed(id) {
+		t.Fatal("a non-asker Reject must not claim")
+	}
+}
+
+func TestPostAgentConfirm_SnapshotsAsker(t *testing.T) {
+	// The pending snapshot must carry the asker (env.Event.User) so the click can
+	// enforce asker-only for a get.
+	hc := newConfirmHarness(t, "")
+	prop := &agent.Proposal{Action: agent.ActionGet, Token: "staging", Reason: "r", Summary: "Get a link to $staging."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "Uasker", TS: "100.1"}}
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
+	if err != nil || !found {
+		t.Fatalf("pending not stored: found=%v err=%v", found, err)
+	}
+	var pa pendingAction
+	if err := json.Unmarshal(blob, &pa); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pa.Asker != "Uasker" {
+		t.Fatalf("snapshot Asker = %q, want Uasker", pa.Asker)
 	}
 }
 

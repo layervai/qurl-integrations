@@ -28,6 +28,7 @@ const (
 	agentConfirmExpiredReply        = "This request expired — ask me again."
 	agentConfirmAlreadyHandledReply = "That request was already handled."
 	agentConfirmAdminOnlyReply      = "That action is admin-only — ask a workspace admin to approve it."
+	agentConfirmGetNotAskerReply    = "Only the person who requested this access link can approve it. Ask me for your own link."
 	agentConfirmScopeMismatchReply  = "That request belongs to a different channel."
 	agentConfirmCanceledReply       = "Canceled — nothing was changed."
 	agentConfirmUnsupportedReply    = "I can't apply that kind of change yet."
@@ -67,6 +68,7 @@ type pendingAction struct {
 	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias; channel alias for protect-url
 	Target    string           `json:"target,omitempty"` // target slug for set-alias
 	URL       string           `json:"url,omitempty"`    // target URL for protect-url
+	Asker     string           `json:"asker,omitempty"`  // Slack user who requested the turn; get is asker-only (see processAgentConfirm)
 	ChannelID string           `json:"channel_id"`
 }
 
@@ -238,6 +240,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		Alias:     prop.Alias,
 		Target:    prop.Target,
 		URL:       prop.URL,
+		Asker:     env.Event.User, // the user who requested this turn — get is asker-only
 		ChannelID: env.Event.Channel,
 	})
 	if err != nil {
@@ -373,6 +376,21 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		if !h.requireAdminForClick(log, responseURL, teamID, payload.User.ID, agentConfirmAdminOnlyReply) {
 			return
 		}
+	}
+
+	// Asker-only gate for get. A get mints a one-time access CREDENTIAL and is
+	// delivered ephemerally to the clicker, so only the member who requested it may
+	// approve+receive it (clicker==asker makes "deliver to the asker" correct). This
+	// is BEFORE the claim and on BOTH Approve and Reject — deliberately: gating after
+	// the claim would let any member consume the asker's pending get and then get
+	// denied, permanently burning the request (a DoS worse than no gate); gating
+	// Reject too stops a non-asker dismissing the asker's card out from under them
+	// (an abandoned card is reaped by the 10-min TTL anyway). pa.Asker=="" fails
+	// closed (an asker-less get can never match a real clicker).
+	if pa.Action == agent.ActionGet && (pa.Asker == "" || payload.User.ID != pa.Asker) {
+		log.Warn("agent confirm: non-asker click on a get card", "asker", pa.Asker, "clicker", payload.User.ID)
+		_ = h.postResponse(log, responseURL, agentConfirmGetNotAskerReply)
+		return
 	}
 
 	// CLAIM (consume-once) — the LAST gate before execute. Claim-before-execute is
@@ -535,9 +553,9 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		if pa.Reason != "" {
 			// Carry the agent's distilled intent into the mint's audit log
 			// (Command.Reason → client.CreateInput.Reason), same as `/qurl get reason:…`.
-			// Audit split (get is not admin-gated, so the clicker may differ from the
-			// asker): the mint actor is the CLICKER (payload.User.ID) while the reason
-			// is the ASKER's distilled intent — same actor/reason parity as a typed get.
+			// The asker-only gate (processAgentConfirm) guarantees clicker==asker here,
+			// so the mint actor (payload.User.ID) and the reason (the asker's distilled
+			// intent) are the same person — same actor/reason parity as a typed get.
 			flags["reason"] = pa.Reason
 		}
 		cmd := &Command{Subcommand: SubcmdGet, Alias: pa.Token, Flags: flags, Raw: "get $" + pa.Token}
@@ -556,10 +574,9 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			result = mapCoreError(log, err, commonGetMintFailedMessage)
 		}
 		// A get result is a one-time-use credential — deliver it PRIVATELY to the
-		// clicker and keep the public card neutral, exactly as a typed /qurl get
-		// stays ephemeral to its requester. (Whether the right person is approving —
-		// asker vs any member — is the get-authorization gate on #651; ephemeral
-		// delivery becomes fully correct once that enforces asker-only.)
+		// clicker and keep the public card neutral, exactly as a typed /qurl get stays
+		// ephemeral to its requester. The asker-only gate (processAgentConfirm) ensures
+		// the clicker IS the asker, so ephemeral-to-clicker delivers to the right person.
 		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: result}
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
