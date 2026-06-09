@@ -172,6 +172,17 @@ func agentEventThreadKey(env *slackEventEnvelope) string {
 	return env.Event.Channel + ":" + agentEventRootTS(&env.Event)
 }
 
+// agentEventDedupeKey identifies the inbound MESSAGE — channel + the message's
+// OWN ts — so every delivery of one message (a retry, or overlapping app_mention
+// + message.im events with distinct event_ids) shares it and dedupes to one turn.
+// It is deliberately env.Event.TS, NOT agentEventRootTS: a follow-up in a thread
+// shares the thread root but has its own ts, so keying on the root would make the
+// dedupe drop every threaded follow-up. Distinct from agentEventThreadKey for
+// exactly that reason.
+func agentEventDedupeKey(env *slackEventEnvelope) string {
+	return env.Event.Channel + ":" + env.Event.TS
+}
+
 // processAgentEvent runs one conversation turn on the async pool: dedupe, load
 // history, run the agent, persist, and post the reply.
 func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
@@ -190,8 +201,9 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 
 	partition := agentEventPartition(env)
 
-	// Dedupe first. Slack delivers at least once; a single winner proceeds.
-	first, err := h.cfg.AgentStore.MarkEventSeen(ctx, partition, env.EventID)
+	// Dedupe on message identity (see agentEventDedupeKey), not the per-delivery
+	// event_id: two events for one message would otherwise both win and double-reply.
+	first, err := h.cfg.AgentStore.MarkEventSeen(ctx, partition, agentEventDedupeKey(env))
 	if err != nil {
 		// Fail closed: dropping a turn on a transient error beats a double reply.
 		log.Error("agent: dedupe check failed; dropping event", "error", err)

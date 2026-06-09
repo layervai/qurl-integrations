@@ -177,7 +177,14 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	if token == "" {
 		return "Provide a $alias or $slug to resolve.", nil
 	}
-	// Channel alias first.
+	// Channel alias first. No `allowed`-set gate here (unlike the slug branch
+	// below): LookupChannelAlias reads only THIS channel's alias_bindings, so it is
+	// inherently same-channel — no cross-channel leak — and
+	// AllowedResourceIDsForChannel unions alias_bindings into the allowed set, so a
+	// bound rid is in `allowed` by construction; a gate would be a no-op. (A binding
+	// to a since-deleted workspace resource would resolve here while list_resources
+	// omits it, but gating on `allowed` wouldn't change that — the rid is still in
+	// the union.)
 	if rid, found, err := b.store.LookupChannelAlias(ctx, tc.TeamID, tc.ChannelID, token); err != nil {
 		return b.fail("resolve token: alias lookup", err)
 	} else if found {

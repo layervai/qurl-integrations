@@ -276,6 +276,49 @@ func TestHandleEvent_DedupesRetries(t *testing.T) {
 	}
 }
 
+// agentEventBody builds an app_mention event_callback with a controllable
+// event_id, message ts, and (optional) thread_ts — for exercising the dedupe key.
+func agentEventBody(eventID, ts, threadTS string) string {
+	tt := ""
+	if threadTS != "" {
+		tt = `,"thread_ts":"` + threadTS + `"`
+	}
+	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+		`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"` + ts + `"` + tt + `,"text":"<@U12345678> hi"}}`
+}
+
+func TestHandleEvent_DedupeKeyedOnMessageIdentity(t *testing.T) {
+	// Dedupe keys on (channel, the message's own ts), so:
+	//   - one message delivered as two events (e.g. app_mention + message.im, both
+	//     subscribed) — DISTINCT event_ids, same ts → ONE reply; and
+	//   - two DIFFERENT messages in one thread (shared thread_ts, distinct own ts)
+	//     → TWO replies. The key is the message's own ts, NOT the thread root, so
+	//     threaded follow-ups aren't dropped — this row guards against keying the
+	//     dedupe on the conversation/thread id by mistake.
+	cases := []struct {
+		name     string
+		a, b     string
+		wantReps int
+	}{
+		{"one message, two event ids", agentEventBody("EvA", "200.1", ""), agentEventBody("EvB", "200.1", ""), 1},
+		{"threaded follow-ups", agentEventBody("Ev1", "300.1", "300.0"), agentEventBody("Ev2", "300.2", "300.0"), 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, posts, mu := newAgentEventHandler(t, "hi")
+			h.handleEvent(httptest.NewRecorder(), []byte(c.a))
+			h.handleEvent(httptest.NewRecorder(), []byte(c.b))
+			h.Wait()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(*posts) != c.wantReps {
+				t.Fatalf("%s: want %d replies, got %d", c.name, c.wantReps, len(*posts))
+			}
+		})
+	}
+}
+
 func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
 	// LoadConversation fails after the dedupe marker is committed: the user must
 	// get an error reply, not silence (Slack won't retry — we acked 200).
