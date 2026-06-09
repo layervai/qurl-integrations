@@ -273,26 +273,10 @@ func (h *Handler) handleListRevokeClick(w http.ResponseWriter, payload *interact
 
 	teamID, userID := payload.Team.ID, payload.User.ID
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		if h.cfg.AdminStore == nil {
-			// Unreachable in practice — the Revoke button only renders when
-			// listCallerCanEdit passes, which needs AdminStore — but fail safe.
-			_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
-			return
-		}
-		// Mutation gate. Bounded off h.baseCtx (not the request ctx) so a
-		// client abort can't cancel the deliberate fail-closed check — same
-		// posture as handleTunnelEditSubmission.
-		adminCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
-		isAdmin, _, adminErr := h.cfg.AdminStore.CheckAdmin(adminCtx, teamID, userID)
-		cancel()
-		if adminErr != nil {
-			log.Error("list revoke: admin check failed", "error", adminErr, "team_id", teamID, "user_id", userID)
-			_ = h.postResponse(log, responseURL, ":warning: failed to verify admin status (upstream error; see logs).")
-			return
-		}
-		if !isAdmin {
-			log.Warn("list revoke: non-admin click denied", "team_id", teamID, "user_id", userID)
-			_ = h.postResponse(log, responseURL, ":warning: this command is admin-only")
+		// Mutation gate, fail-closed and bounded off h.baseCtx. (AdminStore is
+		// unreachable-nil in practice — the Revoke button only renders when
+		// listCallerCanEdit passes — but requireAdminForClick fails safe anyway.)
+		if !h.requireAdminForClick(log, responseURL, teamID, userID, "this command is admin-only") {
 			return
 		}
 		_ = h.postResponse(log, responseURL, h.revokeResource(ctx, log, teamID, userID, snapshot.ResourceID, snapshot.Token))

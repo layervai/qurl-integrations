@@ -81,6 +81,16 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
+	// Conversation-mode confirm card (distinct action_ids, so order is immaterial
+	// — a click yields exactly one matching action_id).
+	if approve, ok := findActionByID(payload.Actions, agentConfirmApproveActionID); ok {
+		h.handleAgentConfirmClick(w, payload, approve, true)
+		return
+	}
+	if reject, ok := findActionByID(payload.Actions, agentConfirmRejectActionID); ok {
+		h.handleAgentConfirmClick(w, payload, reject, false)
+		return
+	}
 	// `/qurl-admin protect` chooser buttons open a guided modal; checked first
 	// (distinct action_ids) so a click routes to the opener, not a list mint.
 	if _, ok := findActionByID(payload.Actions, exposeConnectorActionID); ok {

@@ -340,12 +340,35 @@ type Config struct {
 	// deploy-time action (redeploy/reconstruct), not a live runtime switch; a
 	// hot-reloadable flag is deferred to the enablement work (see #651).
 	AgentDisabled bool
+
+	// PostMessageBlocks posts an interactive Block Kit message (chat.postMessage
+	// with blocks) on the per-workspace bot token — the seam the conversation-mode
+	// confirm flow uses to render a proposed mutation as an Approve/Reject card.
+	// PostMessage (text-only) can't carry buttons. Nil keeps the confirm flow off
+	// (see agentConfirmEnabled); production wires it in cmd/main.go.
+	PostMessageBlocks PostMessageBlocksFunc
+
+	// AgentConfirmEnabled gates the propose→confirm→execute flow on top of the
+	// read-only conversation surface. While false (the default), a proposed
+	// mutation is surfaced as today's text preview and nothing executes; while
+	// true (and PostMessageBlocks is wired), the agent posts an interactive confirm
+	// card and an Approve click executes the mutation after an independent admin
+	// re-check. Separate from AgentDisabled/AgentLLM so the read-only surface can
+	// ship enabled while the confirm flow stays staged (dark → beta).
+	AgentConfirmEnabled bool
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
 // per-workspace bot token. threadTS threads the reply (empty posts top-level).
 // enterpriseID is passed for Enterprise Grid token resolution.
 type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error
+
+// PostMessageBlocksFunc posts an interactive Block Kit message via
+// chat.postMessage on the per-workspace bot token. blocks is a slice of Block Kit
+// block objects (the map[string]any shape the views.go builders emit, same as
+// postResponseBlocks); fallbackText is the notification/accessibility text Slack
+// shows where blocks can't render. threadTS threads the reply.
+type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
 
 // Handler processes Slack events and commands.
 type Handler struct {

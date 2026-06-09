@@ -266,6 +266,13 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	// user can fire a follow-up turn against it. The post is the slower,
 	// user-visible step, so this trades a little reply latency for that ordering.
 	h.saveAgentHistory(log, partition, threadKey, newHistory, version)
+
+	// A proposed mutation renders as an interactive confirm card once the confirm
+	// flow is enabled; otherwise it stays the text preview (merged #650 behavior).
+	if result.Proposal != nil && h.agentConfirmEnabled() {
+		h.postAgentConfirm(log, env, replyTS, result.Proposal)
+		return
+	}
 	h.postAgentReply(log, env, replyTS, agentReplyText(&result))
 }
 
