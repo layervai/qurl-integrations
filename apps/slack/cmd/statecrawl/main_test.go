@@ -55,7 +55,7 @@ func TestParseFlags_MissingConfigRejected(t *testing.T) {
 }
 
 // TestParseFlags_ProdPurgeWithoutAllowRejected is the core rail: a mutating run
-// (-dry-run=false) against a prod-labelled deployment without -allow-prod-purge
+// (-dry-run=false) against a prod-labeled deployment without -allow-prod-purge
 // is refused, and the error MUST name the opt-in flag for operator triage.
 func TestParseFlags_ProdPurgeWithoutAllowRejected(t *testing.T) {
 	_, err := parse(t, baseArgs("-env", "prod", "-dry-run=false"))

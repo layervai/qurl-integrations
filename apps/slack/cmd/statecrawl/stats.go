@@ -68,7 +68,7 @@ func (s *Stats) Snapshot() Snapshot {
 }
 
 // logAttrs renders the snapshot as slog key/value pairs for the summary line.
-func (s Snapshot) logAttrs() []any {
+func (s *Snapshot) logAttrs() []any {
 	return []any{
 		"channels_scanned", s.ChannelsScanned,
 		"teams_resolved", s.TeamsResolved,

@@ -40,8 +40,8 @@ func resolveLiveness(ctx context.Context, keys auth.Provider, f *flags, teamID s
 	}
 
 	byID := make(map[string]client.Resource, len(resources))
-	for _, r := range resources {
-		byID[r.ResourceID] = r
+	for i := range resources {
+		byID[resources[i].ResourceID] = resources[i]
 	}
 	return liveness{resolved: true, byID: byID}
 }
@@ -85,7 +85,7 @@ const (
 // classifyResource reports the resourceStatus of rid plus the live resource's
 // slug (empty unless it's a live tunnel). Caller must only invoke this for a
 // resolved team.
-func classifyResource(live liveness, rid string) (resourceStatus, string) {
+func classifyResource(live liveness, rid string) (status resourceStatus, slug string) {
 	r, ok := live.byID[rid]
 	if !ok || r.Status != client.StatusActive {
 		return statusOrphan, ""
@@ -116,23 +116,23 @@ func classifyAliasBindings(row policyRow, live liveness, rep *report) {
 		if !isResourceID(rid) {
 			f.kind = findingLegacyAlias
 			f.detail = "alias points at a non-resource target (legacy raw-URL binding); set-alias to re-bind"
-			rep.add(f)
+			rep.add(&f)
 			continue
 		}
 		switch status, slug := classifyResource(live, rid); status {
 		case statusOrphan:
 			f.kind = findingOrphanAlias
 			f.detail = "alias bound to a revoked/deleted resource — #654 purge target"
-			rep.add(f)
+			rep.add(&f)
 		case statusLiveURL:
 			f.kind = findingAliasURLTarget
 			f.detail = "alias bound to a live URL resource (not display-name targetable)"
-			rep.add(f)
+			rep.add(&f)
 		case statusLiveTunnel:
 			if slug != alias {
 				f.detail = "live tunnel reachable by alias whose name differs from slug " + quote(slug) + " — #669 makes this display-name targetable"
 				f.kind = findingAliasNameMismatch
-				rep.add(f)
+				rep.add(&f)
 			}
 			// alias == slug: the healthy install-default case; nothing to report.
 		}
@@ -145,7 +145,7 @@ func classifyAliasBindings(row policyRow, live liveness, rep *report) {
 func classifyAllowedIDs(row policyRow, live liveness, rep *report) {
 	for _, rid := range row.allowedResourceIDs {
 		if status, _ := classifyResource(live, rid); status == statusOrphan {
-			rep.add(finding{
+			rep.add(&finding{
 				teamID:     row.teamID,
 				channelID:  row.channelID,
 				resourceID: rid,
@@ -160,13 +160,13 @@ func classifyAllowedIDs(row policyRow, live liveness, rep *report) {
 // verified, so the operator sees coverage gaps without any purge being proposed.
 func recordIndeterminate(row policyRow, reason string, rep *report) {
 	for alias, rid := range row.aliasBindings {
-		rep.add(finding{
+		rep.add(&finding{
 			teamID: row.teamID, channelID: row.channelID, alias: alias, resourceID: rid,
 			kind: findingIndeterminate, detail: reason,
 		})
 	}
 	for _, rid := range row.allowedResourceIDs {
-		rep.add(finding{
+		rep.add(&finding{
 			teamID: row.teamID, channelID: row.channelID, resourceID: rid,
 			kind: findingIndeterminate, detail: reason,
 		})
