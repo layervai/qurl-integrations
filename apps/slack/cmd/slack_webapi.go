@@ -247,9 +247,10 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		userAgent = defaultSlackOpenViewUserAgent
 	}
 
-	// post resolves the bot token for one owner (workspace team or, on the Grid
-	// fallback, the enterprise org) and POSTs the message.
-	post := func(ctx context.Context, ownerID, channelID, threadTS, text string) error {
+	// postBody resolves the bot token for one owner (workspace team or, on the
+	// Grid fallback, the enterprise org) and POSTs the already-marshaled body. The
+	// body is identical across both attempts, so the caller marshals it once.
+	postBody := func(ctx context.Context, ownerID string, body []byte) error {
 		token, err := lookup(ctx, ownerID)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage token lookup: %w", err)
@@ -257,14 +258,6 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		token = strings.TrimSpace(token)
 		if token == "" {
 			return errors.New("chat.postMessage token lookup: empty token")
-		}
-		body, err := json.Marshal(struct {
-			Channel  string `json:"channel"`
-			ThreadTS string `json:"thread_ts,omitempty"`
-			Text     string `json:"text"`
-		}{Channel: channelID, ThreadTS: threadTS, Text: text})
-		if err != nil {
-			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, postMessageURL, bytes.NewReader(body))
 		if err != nil {
@@ -298,7 +291,16 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	// OpenView's does) because PostMessageFunc's signature carries enterpriseID —
 	// OpenView's seam takes only teamID, so its handler must own the retry.
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error {
-		err := post(ctx, teamID, channelID, threadTS, text)
+		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
+		body, err := json.Marshal(struct {
+			Channel  string `json:"channel"`
+			ThreadTS string `json:"thread_ts,omitempty"`
+			Text     string `json:"text"`
+		}{Channel: channelID, ThreadTS: threadTS, Text: text})
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request marshal: %w", err)
+		}
+		err = postBody(ctx, teamID, body)
 		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
 			return err
 		}
@@ -311,7 +313,7 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		// seam, so use the default logger.
 		slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
 			"team_id", teamID, "enterprise_id", enterpriseID)
-		return post(ctx, enterpriseID, channelID, threadTS, text)
+		return postBody(ctx, enterpriseID, body)
 	}
 }
 

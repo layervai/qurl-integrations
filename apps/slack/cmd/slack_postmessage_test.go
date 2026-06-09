@@ -186,6 +186,16 @@ func TestSlackPostMessageFuncSurfacesRateLimit(t *testing.T) {
 				_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
 			},
 		},
+		{
+			// Slack typically only sets Retry-After on the 429 path, so a 200 +
+			// ok:false:ratelimited can arrive with no hint. The sentinel must still
+			// fire (with an empty Retry-After), not slip through as a generic error.
+			name:           "json ratelimited without retry-after",
+			wantRetryAfter: "",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

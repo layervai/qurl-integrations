@@ -939,13 +939,6 @@ func readMaxConcurrentAsync() int {
 	}
 }
 
-// buildAdminStore constructs the DDB-direct facade for
-// workspace_mappings + channel_policies. When both QURL_*_TABLE env
-// vars are set, we construct it; otherwise the /qurl-admin admin verbs
-// reply "Admin features are not configured" rather than crashing.
-// Failure during construction (AWS config load, etc.) degrades the
-// bot to no-admin mode rather than failing startup, so the OAuth +
-// create/list surface stays available.
 // buildAgentLLM constructs the conversation-mode language model from
 // ANTHROPIC_API_KEY. Returns nil (feature DARK) when the key is unset — the
 // agent surface only goes live when AgentLLM, AgentStore and PostMessage are all
@@ -1021,6 +1014,13 @@ func logAgentSurfaceState(llmWired, storeWired, killed bool) {
 	}
 }
 
+// buildAdminStore constructs the DDB-direct facade for
+// workspace_mappings + channel_policies. When both QURL_*_TABLE env
+// vars are set, we construct it; otherwise the /qurl-admin admin verbs
+// reply "Admin features are not configured" rather than crashing.
+// Failure during construction (AWS config load, etc.) degrades the
+// bot to no-admin mode rather than failing startup, so the OAuth +
+// create/list surface stays available.
 func buildAdminStore(ctx context.Context) *slackdata.Store {
 	if os.Getenv(slackdata.EnvWorkspaceMappingsTable) == "" ||
 		os.Getenv(slackdata.EnvChannelPoliciesTable) == "" {
