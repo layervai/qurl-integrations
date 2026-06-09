@@ -161,6 +161,33 @@ func TestAgentBackend_Quota(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_ChannelScopeMemoizedPerTurn(t *testing.T) {
+	// The backend is built once per turn and reused across the model's tool
+	// calls; the channel scope is invariant within a turn, so it must be read
+	// once, not on every list/resolve.
+	b, store := newBackendUnderTest(t, false)
+	fake, ok := store.Client.(*fakeDDB)
+	if !ok {
+		t.Fatalf("expected the internal fakeDDB")
+	}
+	cp := defaultTestTableNames().channelPolicy
+	var gets int
+	fake.SetGetItemHook(func(table string, _ map[string]string) {
+		if table == cp {
+			gets++
+		}
+	})
+	ctx := context.Background()
+	for range 3 {
+		if _, err := b.channelAllowed(ctx, backendTC()); err != nil {
+			t.Fatalf("channelAllowed: %v", err)
+		}
+	}
+	if gets != 1 {
+		t.Fatalf("channel scope read %d times, want 1 (memoized)", gets)
+	}
+}
+
 func TestAgentBackend_NilStoreIsGraceful(t *testing.T) {
 	b := &agentBackend{}
 	for _, fn := range []func() (string, error){

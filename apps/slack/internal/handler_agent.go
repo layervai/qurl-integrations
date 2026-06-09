@@ -109,7 +109,11 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope) bool {
 
 // botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
 // "<@U123|name>", so an @-mention's text can be reduced to the actual request.
-var botMentionPattern = regexp.MustCompile(`^\s*<@[UW][A-Z0-9]+(?:\|[^>]*)?>\s*`)
+// The [UW][A-Z0-9]{8,63} id body matches the established mention-id grammar in
+// parser.go's userMentionPattern (rejects toy ids; caps pathological pastes) —
+// this one strips a leading mention rather than validating a whole token, so the
+// anchoring differs, but the id charset is kept in sync.
+var botMentionPattern = regexp.MustCompile(`^\s*<@[UW][A-Z0-9]{8,63}(?:\|[^>]*)?>\s*`)
 
 // stripBotMention removes a leading bot mention from app_mention text.
 func stripBotMention(text string) string {

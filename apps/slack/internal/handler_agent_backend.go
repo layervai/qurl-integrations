@@ -24,6 +24,16 @@ type agentBackend struct {
 	authClient func(ctx context.Context, teamID string) (*client.Client, error)
 	store      *slackdata.Store
 	log        *slog.Logger
+
+	// Per-turn memo of the channel's reachable resource set. A backend is built
+	// once per turn (newAgentBackend in processAgentEvent) and reused across the
+	// model's tool calls, which are sequential (parallel tool use is disabled),
+	// so a plain field is safe — no mutex. The channel scope is invariant within
+	// a turn, so list_resources + every resolve_token share one GetItem instead
+	// of re-reading the same channel_policies row each call.
+	allowed     map[string]struct{}
+	allowedErr  error
+	allowedDone bool
 }
 
 // newAgentBackend builds the backend from the handler's authenticated-client
@@ -35,6 +45,16 @@ func (h *Handler) newAgentBackend(log *slog.Logger) *agentBackend {
 		log = slog.Default()
 	}
 	return &agentBackend{authClient: h.authenticatedClient, store: h.cfg.AdminStore, log: log}
+}
+
+// channelAllowed returns the channel's reachable resource-id set, fetched once
+// and memoized for the turn.
+func (b *agentBackend) channelAllowed(ctx context.Context, tc *agent.TurnContext) (map[string]struct{}, error) {
+	if !b.allowedDone {
+		b.allowed, b.allowedErr = b.store.AllowedResourceIDsForChannel(ctx, tc.TeamID, tc.ChannelID)
+		b.allowedDone = true
+	}
+	return b.allowed, b.allowedErr
 }
 
 // fail logs a backend read error for operators and returns it wrapped with op
@@ -55,7 +75,7 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 	if b.store == nil {
 		return agentBackendUnconfigured, nil
 	}
-	allowed, err := b.store.AllowedResourceIDsForChannel(ctx, tc.TeamID, tc.ChannelID)
+	allowed, err := b.channelAllowed(ctx, tc)
 	if err != nil {
 		return b.fail("list resources: channel scope", err)
 	}
@@ -149,7 +169,7 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 		return fmt.Sprintf("`$%s` is an alias in this channel for resource `%s`.", token, rid), nil
 	}
 	// Otherwise a tunnel slug, but only reveal it if it's reachable here.
-	allowed, err := b.store.AllowedResourceIDsForChannel(ctx, tc.TeamID, tc.ChannelID)
+	allowed, err := b.channelAllowed(ctx, tc)
 	if err != nil {
 		return b.fail("resolve token: channel scope", err)
 	}

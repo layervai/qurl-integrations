@@ -18,12 +18,14 @@ import (
 )
 
 func TestStripBotMention(t *testing.T) {
+	// Realistic Slack ids (8-63 id chars), matching the mention-id grammar.
 	cases := map[string]string{
-		"<@U123> protect staging":         "protect staging",
-		"<@W123ABC|qurl> hi there":        "hi there",
-		"   <@U123>   spaced  ":           "spaced",
-		"no mention here":                 "no mention here",
-		"<@U1> <@U2> only strips leading": "<@U2> only strips leading",
+		"<@U12345678> protect staging":                  "protect staging",
+		"<@W1234ABCD|qurl> hi there":                    "hi there",
+		"   <@U12345678>   spaced  ":                    "spaced",
+		"no mention here":                               "no mention here",
+		"<@U12345678> <@U87654321> only strips leading": "<@U87654321> only strips leading",
+		"<@U1> too short to be an id":                   "<@U1> too short to be an id",
 	}
 	for in, want := range cases {
 		if got := stripBotMention(in); got != want {
@@ -48,13 +50,13 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		env  *slackEventEnvelope
 		want bool
 	}{
-		{"app_mention human", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U1> hi"), true},
+		{"app_mention human", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), true},
 		{"dm human", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi"), true},
 		{"channel message (not mention) ignored", env(slackEventTypeMessage, "channel", "U2", "", "", "hi"), false},
-		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U1> hi"), false},
+		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U12345678> hi"), false},
 		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false},
-		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U1> hi"), false},
-		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U1>   "), false},
+		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false},
+		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false},
 		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false},
 	}
 	for _, tt := range tests {
@@ -191,28 +193,32 @@ type capturedReply struct {
 	channel, threadTS, text string
 }
 
+// capturingPostMessage returns a PostMessageFunc that records every reply, plus
+// the slice + mutex to read them after the async workers drain.
+func capturingPostMessage() (PostMessageFunc, *[]capturedReply, *sync.Mutex) {
+	var mu sync.Mutex
+	var posts []capturedReply
+	fn := func(_ context.Context, _, _, channel, threadTS, text string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		posts = append(posts, capturedReply{channel, threadTS, text})
+		return nil
+	}
+	return fn, &posts, &mu
+}
+
 func newAgentEventHandler(t *testing.T, reply string) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
-	var mu sync.Mutex
-	var posts []capturedReply
-	h := NewHandler(Config{
-		AgentLLM:   fakeAgentLLM{reply: reply},
-		AgentStore: store,
-		PostMessage: func(_ context.Context, _, _, channel, threadTS, text string) error {
-			mu.Lock()
-			defer mu.Unlock()
-			posts = append(posts, capturedReply{channel, threadTS, text})
-			return nil
-		},
-	})
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: reply}, AgentStore: store, PostMessage: post})
 	t.Cleanup(h.Wait)
-	return h, &posts, &mu
+	return h, posts, mu
 }
 
 func appMentionBody(eventID string) string {
 	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
-		`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"100.1","text":"<@U1> what can I reach?"}}`
+		`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"100.1","text":"<@U12345678> what can I reach?"}}`
 }
 
 func TestHandleEvent_AgentReplies(t *testing.T) {
@@ -256,26 +262,16 @@ func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
 	fake := newMemAgentDDB()
 	fake.getErr = errors.New("ddb read down") // GetItem (load) fails; PutItem (dedupe) still succeeds
 	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	var mu sync.Mutex
-	var posts []capturedReply
-	h := NewHandler(Config{
-		AgentLLM:   fakeAgentLLM{reply: "unused"},
-		AgentStore: store,
-		PostMessage: func(_ context.Context, _, _, channel, threadTS, text string) error {
-			mu.Lock()
-			defer mu.Unlock()
-			posts = append(posts, capturedReply{channel, threadTS, text})
-			return nil
-		},
-	})
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: "unused"}, AgentStore: store, PostMessage: post})
 	t.Cleanup(h.Wait)
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvLF")))
 	h.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(posts) != 1 || posts[0].text != agentErrorReply {
-		t.Fatalf("load failure should post one error reply, got %+v", posts)
+	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
+		t.Fatalf("load failure should post one error reply, got %+v", *posts)
 	}
 }
 
