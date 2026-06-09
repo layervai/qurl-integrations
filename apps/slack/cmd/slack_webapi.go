@@ -235,8 +235,10 @@ const slackChatPostMessageResponseBodyLimit = 64 * 1024
 
 // slackPostMessagePoster posts a pre-marshaled chat.postMessage body using the
 // per-workspace bot token with the Enterprise Grid fallback. The text (PostMessage)
-// and Block Kit (PostMessageBlocks) seams marshal their own body and share this
-// transport — the only difference between them is the JSON payload.
+// and Block Kit (PostMessageBlocks) seams each construct their OWN poster (so their
+// own http.Client) and reuse this transport TYPE — they differ only in the marshaled
+// JSON body. Separate clients are fine for a low-volume bot; share one poster
+// between the two seams if connection pooling ever matters.
 type slackPostMessagePoster struct {
 	lookup     slackBotTokenLookup
 	userAgent  string
