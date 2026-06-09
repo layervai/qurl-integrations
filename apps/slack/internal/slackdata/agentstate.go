@@ -3,12 +3,14 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -109,6 +111,20 @@ func NewAgentStore(client DynamoDBClient, tableName string) (*AgentStore, error)
 		ConversationTTL: defaultConversationTTL,
 		DedupeTTL:       defaultDedupeTTL,
 	}, nil
+}
+
+// NewAgentStoreFromEnv constructs an [AgentStore] with a DynamoDB client built
+// from the ambient AWS config and the table named by [EnvAgentStateTable]. The
+// aws-config plumbing lives here (mirroring [NewStore]) so the composition root
+// stays free of SDK wiring. Returns an error when config load fails or the table
+// env is unset — callers treat an unset table as "feature dark", so check
+// EnvAgentStateTable before calling rather than loading AWS config for nothing.
+func NewAgentStoreFromEnv(ctx context.Context) (*AgentStore, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NewAgentStoreFromEnv: load AWS config: %w", err)
+	}
+	return NewAgentStore(dynamodb.NewFromConfig(cfg), "")
 }
 
 func (s *AgentStore) now() time.Time {

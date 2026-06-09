@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackinstall"
@@ -145,6 +146,16 @@ func run() error {
 
 	postFeedback := buildPostFeedback(userAgent)
 
+	// Conversation-mode (read-only) seams. All default DARK: the agent only
+	// answers when AgentLLM, AgentStore and PostMessage are non-nil AND the kill
+	// switch is off (see Handler.agentEnabled). PostMessage shares the per-
+	// workspace token lookup and Grid fallback with the slash-command modals.
+	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	agentLLM := buildAgentLLM()
+	agentStore := buildAgentStore(signalCtx)
+	agentDisabled := readAgentKillSwitch()
+	logAgentSurfaceState(agentLLM != nil, agentStore != nil, agentDisabled)
+
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
 	// main goroutine (to detect SIGTERM and trigger srv.Shutdown) and
@@ -173,6 +184,10 @@ func run() error {
 				client.WithRetry(2),
 			)
 		},
+		AgentLLM:      agentLLM,
+		AgentStore:    agentStore,
+		PostMessage:   postMessage,
+		AgentDisabled: agentDisabled,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
@@ -931,6 +946,81 @@ func readMaxConcurrentAsync() int {
 // Failure during construction (AWS config load, etc.) degrades the
 // bot to no-admin mode rather than failing startup, so the OAuth +
 // create/list surface stays available.
+// buildAgentLLM constructs the conversation-mode language model from
+// ANTHROPIC_API_KEY. Returns nil (feature DARK) when the key is unset — the
+// agent surface only goes live when AgentLLM, AgentStore and PostMessage are all
+// non-nil and the kill switch is off (see Handler.agentEnabled).
+func buildAgentLLM() agent.LLM {
+	key := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	if key == "" {
+		return nil
+	}
+	return agent.NewAnthropicLLM(key)
+}
+
+// buildAgentStore constructs the DDB-backed conversation-mode state store from
+// QURL_AGENT_STATE_TABLE. Returns nil (feature DARK) when the table is unset.
+// A construction failure when the table IS set is logged and also yields nil:
+// conversation mode degrades to dark rather than failing the whole boot, exactly
+// like buildAdminStore degrades the admin surface.
+func buildAgentStore(ctx context.Context) *slackdata.AgentStore {
+	if strings.TrimSpace(os.Getenv(slackdata.EnvAgentStateTable)) == "" {
+		return nil
+	}
+	store, err := slackdata.NewAgentStoreFromEnv(ctx)
+	if err != nil {
+		slog.Error("agent state store construction failed; conversation mode stays DARK", "error", err)
+		return nil
+	}
+	return store
+}
+
+// readAgentKillSwitch reads the QURL_AGENT_DISABLED org kill switch. Absent →
+// not disabled (the agent may run if otherwise wired). A set-but-unparseable
+// value FAILS SAFE: it disables conversation mode and logs loudly, so an
+// operator typo under pressure ("QURL_AGENT_DISABLED=disable") can never leave
+// the agent live by silently falling through to enabled.
+func readAgentKillSwitch() bool {
+	raw := strings.TrimSpace(os.Getenv("QURL_AGENT_DISABLED"))
+	if raw == "" {
+		return false
+	}
+	disabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		slog.Warn("QURL_AGENT_DISABLED is set to an unparseable value; failing safe and DISABLING conversation mode", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+			"value", raw)
+		return true
+	}
+	return disabled
+}
+
+// logAgentSurfaceState emits one startup line describing why conversation mode is
+// live or dark. PostMessage is always wired, so only the gated seams (LLM, store)
+// and the kill switch decide liveness. The partial-config branch NAMES the
+// missing seam: silent darkness on a configured-looking deploy is the worst
+// operator experience this wiring can produce.
+func logAgentSurfaceState(llmWired, storeWired, killed bool) {
+	switch {
+	case killed:
+		slog.Warn("conversation mode is DISABLED by kill switch (QURL_AGENT_DISABLED); the read-only agent will not respond even if other seams are wired")
+	case llmWired && storeWired:
+		slog.Info("conversation mode (read-only) is LIVE: @mentions and DMs will be answered")
+	case !llmWired && !storeWired:
+		slog.Info("conversation mode is DARK: no agent seams configured",
+			"hint", "set ANTHROPIC_API_KEY and "+slackdata.EnvAgentStateTable+" to enable")
+	default:
+		var missing []string
+		if !llmWired {
+			missing = append(missing, "ANTHROPIC_API_KEY (AgentLLM)")
+		}
+		if !storeWired {
+			missing = append(missing, slackdata.EnvAgentStateTable+" (AgentStore)")
+		}
+		slog.Warn("conversation mode is DARK: partially configured; the agent stays off until every seam is set",
+			"missing", strings.Join(missing, ", "))
+	}
+}
+
 func buildAdminStore(ctx context.Context) *slackdata.Store {
 	if os.Getenv(slackdata.EnvWorkspaceMappingsTable) == "" ||
 		os.Getenv(slackdata.EnvChannelPoliciesTable) == "" {
