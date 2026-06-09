@@ -42,9 +42,9 @@ func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpC
 	}, userAgent, viewsOpenURL, httpClient)
 }
 
-type slackOpenViewTokenLookup func(ctx context.Context, teamID string) (string, error)
+type slackBotTokenLookup func(ctx context.Context, teamID string) (string, error)
 
-func newSlackOpenViewFuncWithTokenLookup(lookup slackOpenViewTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
@@ -127,7 +127,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 300 {
-		bodySnippet := slackOpenViewBodySnippet(raw)
+		bodySnippet := slackAPIBodySnippet(raw)
 		if bodySnippet == "" {
 			return fmt.Errorf("views.open returned HTTP %d", statusCode)
 		}
@@ -142,7 +142,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		if bodySnippet := slackOpenViewBodySnippet(raw); bodySnippet != "" {
+		if bodySnippet := slackAPIBodySnippet(raw); bodySnippet != "" {
 			return fmt.Errorf("views.open response JSON: %w: %s", err, bodySnippet)
 		}
 		return fmt.Errorf("views.open response JSON: %w", err)
@@ -150,14 +150,14 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 	if out.OK {
 		return nil
 	}
-	out.Error = slackOpenViewAPIErrorCode(out.Error)
+	out.Error = slackAPIErrorCode(out.Error)
 	if out.Error == "" {
 		out.Error = "not_ok"
 	}
 	return slackOpenViewAPIError(out.Error, header.Get("Retry-After"))
 }
 
-func slackOpenViewBodySnippet(raw []byte) string {
+func slackAPIBodySnippet(raw []byte) string {
 	bodySnippet := printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(string(raw)), "?"))
 	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
 		return bodySnippet
@@ -198,7 +198,7 @@ func printableLogSnippet(s string) string {
 	}, s)
 }
 
-func slackOpenViewAPIErrorCode(code string) string {
+func slackAPIErrorCode(code string) string {
 	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
 }
 
@@ -232,7 +232,7 @@ const slackChatPostMessageResponseBodyLimit = 64 * 1024
 // newSlackOpenViewFuncWithTokenLookup (same token lookup) and openViewWithGridFallback
 // (same Enterprise Grid retry) so conversation-mode replies resolve the workspace
 // bot token exactly like the slash-command modals do.
-func newSlackPostMessageFuncWithTokenLookup(lookup slackOpenViewTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
+func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
 	if httpClient == nil {
 		httpClient = &http.Client{
 			Timeout: slackChatPostMessageTimeout,
@@ -290,10 +290,12 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackOpenViewTokenLookup, use
 		return slackChatPostMessageResponseError(resp.StatusCode, resp.Header, raw)
 	}
 
-	// Mirror openViewWithGridFallback: try the workspace token, then retry once
-	// with the Enterprise Grid org-install token when the workspace itself has no
-	// bot token and the enterprise is a distinct owner. Every other error returns
-	// unchanged.
+	// Same Enterprise Grid retry as openViewWithGridFallback: try the workspace
+	// token, then retry once with the org-install token when the workspace itself
+	// has no bot token and the enterprise is a distinct owner. Every other error
+	// returns unchanged. The fallback lives in this seam (not the handler, where
+	// OpenView's does) because PostMessageFunc's signature carries enterpriseID —
+	// OpenView's seam takes only teamID, so its handler must own the retry.
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error {
 		err := post(ctx, teamID, channelID, threadTS, text)
 		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
@@ -316,7 +318,7 @@ func slackChatPostMessageResponseError(statusCode int, header http.Header, raw [
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 300 {
-		if snippet := slackOpenViewBodySnippet(raw); snippet != "" {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
 			return fmt.Errorf("chat.postMessage returned HTTP %d: %s", statusCode, snippet)
 		}
 		return fmt.Errorf("chat.postMessage returned HTTP %d", statusCode)
@@ -330,7 +332,7 @@ func slackChatPostMessageResponseError(statusCode int, header http.Header, raw [
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		if snippet := slackOpenViewBodySnippet(raw); snippet != "" {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
 			return fmt.Errorf("chat.postMessage response JSON: %w: %s", err, snippet)
 		}
 		return fmt.Errorf("chat.postMessage response JSON: %w", err)
@@ -338,7 +340,7 @@ func slackChatPostMessageResponseError(statusCode int, header http.Header, raw [
 	if out.OK {
 		return nil
 	}
-	code := slackOpenViewAPIErrorCode(out.Error)
+	code := slackAPIErrorCode(out.Error)
 	if code == "ratelimited" {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}

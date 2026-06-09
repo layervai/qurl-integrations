@@ -378,7 +378,7 @@ type workspaceSlackTokenLookupCache struct {
 	lastSweep      time.Time
 }
 
-func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) (lookup slackOpenViewTokenLookup, purge func(string)) {
+func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) (lookup slackBotTokenLookup, purge func(string)) {
 	if now == nil {
 		now = time.Now
 	}

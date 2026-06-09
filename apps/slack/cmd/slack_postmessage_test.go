@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
-func staticTokenLookup(token string) slackOpenViewTokenLookup {
+func staticTokenLookup(token string) slackBotTokenLookup {
 	return func(context.Context, string) (string, error) { return token, nil }
 }
 
@@ -58,9 +59,8 @@ func TestSlackPostMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 	t.Parallel()
 	var rawBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var buf [512]byte
-		n, _ := r.Body.Read(buf[:])
-		rawBody = string(buf[:n])
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	t.Cleanup(srv.Close)

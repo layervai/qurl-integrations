@@ -124,7 +124,7 @@ func NewAgentStoreFromEnv(ctx context.Context) (*AgentStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("NewAgentStoreFromEnv: load AWS config: %w", err)
 	}
-	return NewAgentStore(dynamodb.NewFromConfig(cfg), "")
+	return NewAgentStore(dynamodb.NewFromConfig(cfg), os.Getenv(EnvAgentStateTable))
 }
 
 func (s *AgentStore) now() time.Time {
