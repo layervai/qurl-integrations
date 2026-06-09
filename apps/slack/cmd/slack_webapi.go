@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -304,6 +305,12 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		if enterpriseID == "" || enterpriseID == teamID {
 			return err
 		}
+		// Parity with openViewWithGridFallback's warn: leave a breadcrumb so an
+		// operator debugging "why is the bot posting as the org install?" can see
+		// the workspace token was missing. No *slog.Logger is threaded into this
+		// seam, so use the default logger.
+		slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
+			"team_id", teamID, "enterprise_id", enterpriseID)
 		return post(ctx, enterpriseID, channelID, threadTS, text)
 	}
 }
