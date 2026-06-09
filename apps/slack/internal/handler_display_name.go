@@ -308,8 +308,18 @@ func (h *Handler) resolveAndResetTunnelDisplayName(ctx context.Context, log *slo
 // the same alias_bindings entry `/qurl get` and `/qurl-admin revoke` resolve —
 // so an admin who knows a resource only by an alias whose name differs from the
 // connector slug (e.g. an alias re-attached to a re-created connector) can still
-// target it. channelID == "" or an unwired AdminStore skips the alias fallback
-// (slug-only). On any failure it returns (nil, nil, userMsg); callers
+// target it.
+//
+// Precedence is slug-FIRST here — the reverse of `/qurl get` / `/qurl-admin
+// revoke`, which resolve the alias first. Deliberate: it preserves the `?slug=`
+// filter and the unbounded-by-listResourcesScanLimit behavior for existing slug
+// calls. The only observable difference is a token that is BOTH a live slug AND
+// a channel alias bound to a DIFFERENT resource — it resolves to the slug here
+// vs the alias in `/qurl get`. Pathological in practice: install binds
+// alias==slug→the same resource, so the orders agree for the common case.
+//
+// channelID == "" or an unwired AdminStore skips the alias fallback (slug-only).
+// On any failure it returns (nil, nil, userMsg); callers
 // `if msg != "" { return msg }`.
 func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamID, channelID, id string) (c *client.Client, resource *client.Resource, userMsg string) {
 	c, err := h.authenticatedClient(ctx, teamID)
@@ -362,9 +372,10 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 // target. qurl-service has no get-by-id, so it scans the first ListResources
 // page (the same bounded scan `/qurl list` and protect use) and matches on
 // resource_id. A binding that points at a non-tunnel (a URL resource), a
-// revoked resource, or one past the scan window yields a friendly message
-// rather than a PATCH against the wrong or dead target. Returns (resource, "")
-// on success or (nil, userMsg).
+// revoked resource, a legacy raw-URL `set-alias` row (no resource_id will match
+// it — the same rows resolveTokenForGet rejects by `r_` prefix), or one past
+// the scan window yields a friendly message rather than a PATCH against the
+// wrong or dead target. Returns (resource, "") on success or (nil, userMsg).
 func (h *Handler) resolveActiveTunnelByResourceID(ctx context.Context, log *slog.Logger, c *client.Client, teamID, id, resourceID string) (resource *client.Resource, userMsg string) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
