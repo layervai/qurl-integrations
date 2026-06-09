@@ -47,6 +47,12 @@ func (l *anthropicLLM) Complete(ctx context.Context, req *Request) (Response, er
 			OfAuto: &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: anthropic.Bool(true)},
 		},
 		Thinking: anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
+		// A second cache breakpoint, auto-placed on the last message block. The
+		// transcript replays (and grows) across the turn's round-trips and across
+		// turns in a thread, so caching it is the larger near-term win — it
+		// exceeds the model's minimum cacheable length sooner than the static
+		// tools+preamble prefix does. Harmless no-op while below that length.
+		CacheControl: anthropic.NewCacheControlEphemeralParam(),
 	}
 
 	msg, err := l.client.Messages.New(ctx, params)

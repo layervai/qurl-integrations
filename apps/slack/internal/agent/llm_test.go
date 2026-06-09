@@ -27,11 +27,37 @@ func TestSystemBlocks_CachesStablePreambleOnly(t *testing.T) {
 }
 
 func TestSystemBlocks_OmitsEmptyParts(t *testing.T) {
-	if got := len(systemBlocks(&Request{System: "only per-turn"})); got != 1 {
-		t.Fatalf("empty stable should yield 1 block, got %d", got)
+	// Per-turn only → one block, and it must NOT carry the breakpoint (caching
+	// per-turn context would defeat the cross-turn prefix cache).
+	perTurn := systemBlocks(&Request{System: "only per-turn"})
+	if len(perTurn) != 1 {
+		t.Fatalf("empty stable should yield 1 block, got %d", len(perTurn))
 	}
-	if got := len(systemBlocks(&Request{SystemStable: "only stable"})); got != 1 {
-		t.Fatalf("empty per-turn should yield 1 block, got %d", got)
+	if ptRaw, _ := json.Marshal(perTurn); strings.Contains(string(ptRaw), "cache_control") {
+		t.Fatalf("per-turn-only block must not carry cache_control: %s", ptRaw)
+	}
+	// Stable only → one block, and it MUST keep the breakpoint, so an empty
+	// per-turn context never silently drops caching.
+	stable := systemBlocks(&Request{SystemStable: "only stable"})
+	if len(stable) != 1 {
+		t.Fatalf("empty per-turn should yield 1 block, got %d", len(stable))
+	}
+	if stRaw, _ := json.Marshal(stable); !strings.Contains(string(stRaw), "cache_control") {
+		t.Fatalf("stable-only block must carry cache_control: %s", stRaw)
+	}
+}
+
+// TestSystemBlocks_ReassembleToSystemPrompt locks the two-block split to the
+// single-string systemPrompt that the prompt-invariant tests assert on, so a
+// future edit can't make the cached blocks diverge from what those tests check.
+func TestSystemBlocks_ReassembleToSystemPrompt(t *testing.T) {
+	tc := &TurnContext{ChannelName: "oncall", ChannelID: "C1", UserID: "U1", CallerIsAdmin: true}
+	var concat strings.Builder
+	for _, b := range systemBlocks(&Request{SystemStable: systemPreamble, System: turnContextLines(tc)}) {
+		concat.WriteString(b.Text)
+	}
+	if concat.String() != systemPrompt(tc) {
+		t.Fatalf("system blocks must reassemble to systemPrompt(tc)")
 	}
 }
 
