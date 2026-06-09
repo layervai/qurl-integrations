@@ -233,12 +233,18 @@ const slackChatPostMessageTimeout = 4 * time.Second
 // under this.
 const slackChatPostMessageResponseBodyLimit = 64 * 1024
 
-// newSlackPostMessageFuncWithTokenLookup builds the [internal.PostMessageFunc]
-// seam: a threaded chat.postMessage using the per-workspace bot token. It mirrors
-// newSlackOpenViewFuncWithTokenLookup (same token lookup) and openViewWithGridFallback
-// (same Enterprise Grid retry) so conversation-mode replies resolve the workspace
-// bot token exactly like the slash-command modals do.
-func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
+// slackPostMessagePoster posts a pre-marshaled chat.postMessage body using the
+// per-workspace bot token with the Enterprise Grid fallback. The text (PostMessage)
+// and Block Kit (PostMessageBlocks) seams marshal their own body and share this
+// transport — the only difference between them is the JSON payload.
+type slackPostMessagePoster struct {
+	lookup     slackBotTokenLookup
+	userAgent  string
+	url        string
+	httpClient *http.Client
+}
+
+func newSlackPostMessagePoster(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) *slackPostMessagePoster {
 	if httpClient == nil {
 		httpClient = defaultSlackPostMessageClient()
 	}
@@ -246,58 +252,78 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	if userAgent == "" {
 		userAgent = defaultSlackAPIUserAgent
 	}
+	return &slackPostMessagePoster{lookup: lookup, userAgent: userAgent, url: postMessageURL, httpClient: httpClient}
+}
 
-	// postBody resolves the bot token for one owner (workspace team or, on the
-	// Grid fallback, the enterprise org) and POSTs the already-marshaled body. The
-	// body is identical across both attempts, so the caller marshals it once.
-	postBody := func(ctx context.Context, ownerID string, body []byte) error {
-		token, err := lookup(ctx, ownerID)
-		if err != nil {
-			return fmt.Errorf("chat.postMessage token lookup: %w", err)
-		}
-		token = strings.TrimSpace(token)
-		if token == "" {
-			// A ("", nil) lookup returns a plain error, NOT the sentinel — so it
-			// does not trigger the Grid fallback. That's fine: the real
-			// workspaceTokenLookup returns ErrSlackBotTokenNotConfigured (which does
-			// fall back), never an empty-but-nil token. A future lookup that returns
-			// ("", nil) on a missing token would need to return the sentinel instead.
-			return errors.New("chat.postMessage token lookup: empty token")
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, postMessageURL, bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("chat.postMessage request build: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", userAgent)
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("chat.postMessage request: %w", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackChatPostMessageResponseBodyLimit+1))
-		if err != nil {
-			return fmt.Errorf("chat.postMessage response read: %w", err)
-		}
-		if len(raw) > slackChatPostMessageResponseBodyLimit {
-			// LimitReader already consumed limit+1 bytes; drain the rest before Close
-			// so a keep-alive transport can reuse the connection after an oversized
-			// response (mirrors the views.open drain).
-			_, _ = io.Copy(io.Discard, resp.Body)
-			return fmt.Errorf("chat.postMessage response exceeded %d bytes", slackChatPostMessageResponseBodyLimit)
-		}
-		return slackChatPostMessageResponseError(resp.StatusCode, resp.Header, raw)
+// postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
+// the enterprise org) and POSTs the already-marshaled body.
+func (p *slackPostMessagePoster) postOnce(ctx context.Context, ownerID string, body []byte) error {
+	token, err := p.lookup(ctx, ownerID)
+	if err != nil {
+		return fmt.Errorf("chat.postMessage token lookup: %w", err)
 	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		// A ("", nil) lookup returns a plain error, NOT the sentinel — so it does not
+		// trigger the Grid fallback. That's fine: the real workspaceTokenLookup returns
+		// ErrSlackBotTokenNotConfigured (which does fall back), never an empty-but-nil
+		// token. A future lookup returning ("", nil) on a miss would need the sentinel.
+		return errors.New("chat.postMessage token lookup: empty token")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("chat.postMessage request build: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
 
-	// Same Enterprise Grid retry as openViewWithGridFallback: try the workspace
-	// token, then retry once with the org-install token when the workspace itself
-	// has no bot token and the enterprise is a distinct owner. Every other error
-	// returns unchanged. The fallback lives in this seam (not the handler, where
-	// OpenView's does) because PostMessageFunc's signature carries enterpriseID —
-	// OpenView's seam takes only teamID, so its handler must own the retry.
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("chat.postMessage request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackChatPostMessageResponseBodyLimit+1))
+	if err != nil {
+		return fmt.Errorf("chat.postMessage response read: %w", err)
+	}
+	if len(raw) > slackChatPostMessageResponseBodyLimit {
+		// LimitReader already consumed limit+1 bytes; drain the rest before Close so a
+		// keep-alive transport can reuse the connection after an oversized response
+		// (mirrors the views.open drain).
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return fmt.Errorf("chat.postMessage response exceeded %d bytes", slackChatPostMessageResponseBodyLimit)
+	}
+	return slackChatPostMessageResponseError(resp.StatusCode, resp.Header, raw)
+}
+
+// post sends body with the workspace token, then retries once with the Enterprise
+// Grid org-install token when the workspace itself has no bot token and the
+// enterprise is a distinct owner. Same retry as openViewWithGridFallback; it lives
+// in this seam because PostMessage*Func carry enterpriseID (OpenView's seam takes
+// only teamID, so its handler owns the retry). body is reused across both attempts.
+func (p *slackPostMessagePoster) post(ctx context.Context, teamID, enterpriseID string, body []byte) error {
+	err := p.postOnce(ctx, teamID, body)
+	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+		return err
+	}
+	if enterpriseID == "" || enterpriseID == teamID {
+		return err
+	}
+	// Parity with openViewWithGridFallback's warn: a breadcrumb so an operator
+	// debugging "why is the bot posting as the org install?" can see the workspace
+	// token was missing. No *slog.Logger is threaded into this seam; use the default.
+	slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
+		"team_id", teamID, "enterprise_id", enterpriseID)
+	return p.postOnce(ctx, enterpriseID, body)
+}
+
+// newSlackPostMessageFuncWithTokenLookup builds the [internal.PostMessageFunc] seam:
+// a threaded text chat.postMessage using the per-workspace bot token (the same token
+// resolution as the slash-command modals).
+func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
+	poster := newSlackPostMessagePoster(lookup, userAgent, postMessageURL, httpClient)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error {
 		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
 		body, err := json.Marshal(struct {
@@ -308,20 +334,28 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
-		err = postBody(ctx, teamID, body)
-		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return err
+		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
+// newSlackPostMessageBlocksFuncWithTokenLookup builds the
+// [internal.PostMessageBlocksFunc] seam: a threaded Block Kit chat.postMessage (the
+// conversation-mode Approve/Reject confirm card). text is the notification /
+// non-block-client fallback. It shares the poster (token lookup + Grid fallback +
+// response parsing) with the text seam — only the JSON body differs.
+func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageBlocksFunc {
+	poster := newSlackPostMessagePoster(lookup, userAgent, postMessageURL, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error {
+		body, err := json.Marshal(struct {
+			Channel  string `json:"channel"`
+			ThreadTS string `json:"thread_ts,omitempty"`
+			Text     string `json:"text"`
+			Blocks   []any  `json:"blocks"`
+		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks})
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
-		if enterpriseID == "" || enterpriseID == teamID {
-			return err
-		}
-		// Parity with openViewWithGridFallback's warn: leave a breadcrumb so an
-		// operator debugging "why is the bot posting as the org install?" can see
-		// the workspace token was missing. No *slog.Logger is threaded into this
-		// seam, so use the default logger.
-		slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
-			"team_id", teamID, "enterprise_id", enterpriseID)
-		return postBody(ctx, enterpriseID, body)
+		return poster.post(ctx, teamID, enterpriseID, body)
 	}
 }
 
