@@ -192,6 +192,15 @@ func adminGatedFor(kind agent.ActionKind) bool {
 	return kind != agent.ActionGet
 }
 
+// askerOnly reports whether a kind may be approved ONLY by the member who requested
+// it (the pendingAction's Asker), not just any channel member. A get mints a
+// one-time access credential delivered ephemerally to the clicker, so only the asker
+// may approve+receive it. Named like adminGatedFor so the confirm authorization model
+// reads as one vocabulary; get is the only asker-only kind today.
+func askerOnly(kind agent.ActionKind) bool {
+	return kind == agent.ActionGet
+}
+
 // newPendingActionID returns an unguessable id — 16 crypto/rand bytes hex-encoded,
 // the repo's nonce scheme (oauth/state.go). Only this id rides in the button
 // value; the action kind, token, channel, and admin-gate stay server-side.
@@ -387,7 +396,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	// Reject too stops a non-asker dismissing the asker's card out from under them
 	// (an abandoned card is reaped by the 10-min TTL anyway). pa.Asker=="" fails
 	// closed (an asker-less get can never match a real clicker).
-	if pa.Action == agent.ActionGet && (pa.Asker == "" || payload.User.ID != pa.Asker) {
+	if askerOnly(pa.Action) && (pa.Asker == "" || payload.User.ID != pa.Asker) {
 		log.Warn("agent confirm: non-asker click on a get card", "asker", pa.Asker, "clicker", payload.User.ID)
 		_ = h.postResponse(log, responseURL, agentConfirmGetNotAskerReply)
 		return
