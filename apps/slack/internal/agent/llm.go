@@ -81,8 +81,8 @@ func systemBlocks(req *Request) []anthropic.TextBlockParam {
 			CacheControl: anthropic.NewCacheControlEphemeralParam(),
 		})
 	}
-	if req.System != "" {
-		blocks = append(blocks, anthropic.TextBlockParam{Text: req.System})
+	if req.SystemPerTurn != "" {
+		blocks = append(blocks, anthropic.TextBlockParam{Text: req.SystemPerTurn})
 	}
 	return blocks
 }
@@ -167,5 +167,15 @@ func fromSDKMessage(msg *anthropic.Message) Response {
 			})
 		}
 	}
-	return Response{Text: text.String(), ToolCalls: calls, StopReason: string(msg.StopReason)}
+	return Response{
+		Text:       text.String(),
+		ToolCalls:  calls,
+		StopReason: string(msg.StopReason),
+		Usage: Usage{
+			InputTokens:              msg.Usage.InputTokens,
+			OutputTokens:             msg.Usage.OutputTokens,
+			CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
+		},
+	}
 }

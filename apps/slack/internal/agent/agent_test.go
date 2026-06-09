@@ -237,6 +237,24 @@ func TestRun_ProposeRevoke_AdminGated(t *testing.T) {
 	}
 }
 
+func TestRun_AccumulatesUsageAcrossRoundTrips(t *testing.T) {
+	// Two round-trips (a read, then an answer); their usage must sum into the
+	// turn's Result so the Slack layer can log/observe cache effectiveness.
+	r1 := toolResp(toolListResources, map[string]any{})
+	r1.Usage = Usage{InputTokens: 100, OutputTokens: 10, CacheReadInputTokens: 80}
+	r2 := textResp("here you go")
+	r2.Usage = Usage{InputTokens: 120, OutputTokens: 20, CacheReadInputTokens: 110}
+	llm := &scriptedLLM{responses: []Response{r1, r2}}
+	ctx, tc := testCtx()
+	res, _, err := New(llm, &fakeBackend{resources: "x"}).Run(ctx, tc, nil, "list")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Usage.InputTokens != 220 || res.Usage.OutputTokens != 30 || res.Usage.CacheReadInputTokens != 190 {
+		t.Fatalf("usage not summed across round-trips: %+v", res.Usage)
+	}
+}
+
 func TestRun_EmptyModelReply_FallsBack(t *testing.T) {
 	// Model returns neither text nor tool calls — must not post an empty message.
 	llm := &scriptedLLM{responses: []Response{{StopReason: "end_turn"}}}

@@ -7,7 +7,7 @@ import (
 )
 
 func TestSystemBlocks_CachesStablePreambleOnly(t *testing.T) {
-	blocks := systemBlocks(&Request{SystemStable: "RULES PREAMBLE", System: "per-turn context"})
+	blocks := systemBlocks(&Request{SystemStable: "RULES PREAMBLE", SystemPerTurn: "per-turn context"})
 	if len(blocks) != 2 {
 		t.Fatalf("want 2 system blocks, got %d", len(blocks))
 	}
@@ -29,7 +29,7 @@ func TestSystemBlocks_CachesStablePreambleOnly(t *testing.T) {
 func TestSystemBlocks_OmitsEmptyParts(t *testing.T) {
 	// Per-turn only → one block, and it must NOT carry the breakpoint (caching
 	// per-turn context would defeat the cross-turn prefix cache).
-	perTurn := systemBlocks(&Request{System: "only per-turn"})
+	perTurn := systemBlocks(&Request{SystemPerTurn: "only per-turn"})
 	if len(perTurn) != 1 {
 		t.Fatalf("empty stable should yield 1 block, got %d", len(perTurn))
 	}
@@ -50,10 +50,10 @@ func TestSystemBlocks_OmitsEmptyParts(t *testing.T) {
 func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 	l := &anthropicLLM{} // model/maxTokens irrelevant to the cache wiring
 	params := l.buildParams(&Request{
-		SystemStable: "RULES",
-		System:       "ctx",
-		Tools:        toolSpecs(),
-		Messages:     []Message{{Role: roleUser, Text: "hi"}},
+		SystemStable:  "RULES",
+		SystemPerTurn: "ctx",
+		Tools:         toolSpecs(),
+		Messages:      []Message{{Role: roleUser, Text: "hi"}},
 	})
 	// Message-level breakpoint (auto-places on the last message block).
 	if cc, _ := json.Marshal(params.CacheControl); !strings.Contains(string(cc), "ephemeral") {
@@ -71,7 +71,7 @@ func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 func TestSystemBlocks_ReassembleToSystemPrompt(t *testing.T) {
 	tc := &TurnContext{ChannelName: "oncall", ChannelID: "C1", UserID: "U1", CallerIsAdmin: true}
 	var concat strings.Builder
-	for _, b := range systemBlocks(&Request{SystemStable: systemPreamble, System: turnContextLines(tc)}) {
+	for _, b := range systemBlocks(&Request{SystemStable: systemPreamble, SystemPerTurn: turnContextLines(tc)}) {
 		concat.WriteString(b.Text)
 	}
 	if concat.String() != systemPrompt(tc) {
