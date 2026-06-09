@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -303,6 +304,32 @@ func TestSaveAgentHistory_ByteGuard(t *testing.T) {
 	}
 	if len(stored) > maxPersistedBytes {
 		t.Fatalf("persisted blob %d bytes exceeds the %d byte cap", len(stored), maxPersistedBytes)
+	}
+}
+
+func TestSaveAgentHistory_SingleOversizedTurnDoesNotHang(t *testing.T) {
+	// A single turn whose own content exceeds the byte cap has no turn boundary
+	// to trim below, so the byte-guard loop must break (not spin forever) and
+	// save oversized. Without the no-progress break this test would hang.
+	fake := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
+	h := NewHandler(Config{AgentStore: store})
+
+	history := []agent.Message{
+		{Role: "user", Text: "do it"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "t1", Name: "list_resources"}}},
+		{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "t1", Content: strings.Repeat("y", 400*1024)}}},
+		{Role: "assistant", Text: "done"},
+	}
+	done := make(chan struct{})
+	go func() {
+		h.saveAgentHistory(context.Background(), slog.Default(), "T1", "C1:9", history, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("saveAgentHistory hung on a single oversized turn (byte-guard loop did not terminate)")
 	}
 }
 

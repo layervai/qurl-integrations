@@ -112,6 +112,12 @@ const channelResourcesMaxPages = 20
 // resource has been found. Listing is workspace-wide and paginated, so filtering
 // only the first page would silently drop channel-reachable resources that sort
 // past it in a workspace with more than one page of resources.
+//
+// The len(found) >= len(allowed) early-stop can't fire if a channel_policies row
+// references a resource id that no longer exists workspace-side (a stale policy):
+// found never reaches len(allowed), so the loop runs the full
+// channelResourcesMaxPages. Correct, just worst-case more reads until the stale
+// row is cleaned up.
 func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
 	found := make([]client.Resource, 0, len(allowed))
 	cursor := ""

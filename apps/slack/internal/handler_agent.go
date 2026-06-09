@@ -257,9 +257,18 @@ func (h *Handler) saveAgentHistory(ctx context.Context, log *slog.Logger, partit
 		return
 	}
 	// Byte guard: drop oldest turns (one per pass — trimAgentHistory cuts at a
-	// turn boundary) until the blob fits or only the latest turn remains.
+	// turn boundary) until the blob fits or only the latest turn remains. Break
+	// when a pass makes no progress: trimAgentHistory cuts only at a user-turn
+	// start, so a single turn whose own tool_result blows past the cap has no
+	// boundary below it and returns unchanged — without this guard the loop would
+	// spin forever (a tight CPU loop the turn ctx can't interrupt). In that case
+	// we save oversized and let DDB reject + log rather than hang the worker.
 	for len(blob) > maxPersistedBytes && len(trimmed) > 1 {
-		trimmed = trimAgentHistory(trimmed, len(trimmed)-1)
+		next := trimAgentHistory(trimmed, len(trimmed)-1)
+		if len(next) == len(trimmed) {
+			break
+		}
+		trimmed = next
 		if blob, err = json.Marshal(trimmed); err != nil {
 			log.Error("agent: marshal conversation failed", "error", err)
 			return
