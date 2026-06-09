@@ -155,7 +155,10 @@ func run() error {
 	// Skip building the LLM + state store under a kill switch: it's read once at
 	// boot and forces the surface dark regardless (agentEnabled), so the store/LLM
 	// would never be used, and un-killing requires a restart anyway. This also
-	// avoids the AWS config load + DDB client construction under a kill.
+	// avoids the AWS config load + DDB client construction under a kill. Trade-off:
+	// a misconfigured QURL_AGENT_STATE_TABLE isn't validated while killed — but the
+	// un-kill restart rebuilds and surfaces any construction error then, which is
+	// the moment it matters.
 	var agentLLM agent.LLM
 	var agentStore *slackdata.AgentStore
 	if !agentDisabled {

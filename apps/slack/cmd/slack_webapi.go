@@ -257,6 +257,11 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		}
 		token = strings.TrimSpace(token)
 		if token == "" {
+			// A ("", nil) lookup returns a plain error, NOT the sentinel — so it
+			// does not trigger the Grid fallback. That's fine: the real
+			// workspaceTokenLookup returns ErrSlackBotTokenNotConfigured (which does
+			// fall back), never an empty-but-nil token. A future lookup that returns
+			// ("", nil) on a missing token would need to return the sentinel instead.
 			return errors.New("chat.postMessage token lookup: empty token")
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, postMessageURL, bytes.NewReader(body))
