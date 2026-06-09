@@ -1151,3 +1151,61 @@ func TestTunnelToken(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleList_StaleAliasesEmptyState fences the honest empty-state for an
+// orphaned binding: when a channel's allow-set is non-empty (a `$alias` is bound)
+// but every bound resource has been revoked/deleted so nothing resolves, /qurl
+// list must NAME the ghost alias and point at `/qurl-admin unset-alias` — not the
+// generic "install a new resource" copy, which sends the user down the wrong path
+// (the exact confusion the revoke-cascade bug produced). Admins get the verb;
+// non-admins get an admin handoff. Both still see the alias name.
+func TestHandleList_StaleAliasesEmptyState(t *testing.T) {
+	const deadResourceID = "r_dead0001"
+	for _, tc := range []struct {
+		name    string
+		seed    func(*testing.T, *adminTestServers)
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "admin gets the unset-alias fix with the ghost named in the command",
+			seed: func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
+			// Single ghost → the command itself names it (copy-pasteable).
+			want:    []string{"`$dashboard`", "unset-alias $dashboard"},
+			notWant: []string{"protect-connector", "Ask a Slack admin"},
+		},
+		{
+			name:    "non-admin gets an admin handoff that still names the ghost",
+			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
+			want:    []string{"`$dashboard`", "unset-alias $dashboard", "Ask a Slack admin"},
+			notWant: []string{"protect-connector"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			tc.seed(t, ts)
+			// The channel has a $dashboard alias bound to a resource that no longer
+			// exists — the allow-set is non-empty, so the scope gate passes...
+			ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{"dashboard": deadResourceID})
+			// ...but the owner's live resources don't include the dead id, so it
+			// resolves to nothing and the listing comes back empty.
+			ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				writeResourceListFixture(t, w, []map[string]any{}, "", false)
+			})
+			h := newAdminTestHandler(t, ts)
+			inv := newAdminSlashInvoker(t, h)
+
+			_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
+			for _, want := range tc.want {
+				if !strings.Contains(async, want) {
+					t.Errorf("stale empty-state missing %q: %q", want, async)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(async, notWant) {
+					t.Errorf("stale empty-state should not contain %q: %q", notWant, async)
+				}
+			}
+		})
+	}
+}
