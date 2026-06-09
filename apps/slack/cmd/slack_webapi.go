@@ -352,6 +352,10 @@ func slackChatPostMessageResponseError(statusCode int, header http.Header, raw [
 		return nil
 	}
 	code := slackAPIErrorCode(out.Error)
+	// chat.postMessage-specific: unlike views.open (which surfaces rate limits via
+	// the 429 path / slackOpenViewAPIError), chat.postMessage commonly returns a
+	// 200 body with ok:false:ratelimited, so map that to the sentinel here. Do not
+	// "harmonize" this branch away to match slackOpenViewResponseError.
 	if code == "ratelimited" {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}

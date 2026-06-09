@@ -93,11 +93,14 @@ type AgentStore struct {
 }
 
 // NewAgentStore constructs an [AgentStore]. The table name falls back to
-// EnvAgentStateTable when empty; a missing name is an error (there is no safe
-// default for which environment's data to write).
+// EnvAgentStateTable (trimmed) when empty; a missing or whitespace-only name is
+// an error (there is no safe default for which environment's data to write).
 func NewAgentStore(client DynamoDBClient, tableName string) (*AgentStore, error) {
 	if tableName == "" {
-		tableName = os.Getenv(EnvAgentStateTable)
+		// Trim here too, not just in NewAgentStoreFromEnv: a whitespace-only
+		// QURL_AGENT_STATE_TABLE must be rejected as empty for every caller,
+		// otherwise a store would be built with a blank table name.
+		tableName = strings.TrimSpace(os.Getenv(EnvAgentStateTable))
 	}
 	if tableName == "" {
 		return nil, &Error{StatusCode: http.StatusInternalServerError, Title: "NewAgentStore: " + EnvAgentStateTable + " is required"}
