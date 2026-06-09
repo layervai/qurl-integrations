@@ -842,20 +842,28 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 		name      string
 		result    agent.Result
 		confirmOn bool
+		openView  bool // OpenView wired? (only matters for modal-routed kinds)
 		wantCard  bool
 	}{
-		{"executable + flag on → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, true, true},
+		{"executable + flag on → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, true, false, true},
 		// Every real kind is executable as of PR4c; a synthetic unknown kind exercises
 		// the non-executable → preview gate (fail-closed: no live button for a kind the
 		// click can't act on).
-		{"non-executable + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionKind("bogus"), Summary: "Mystery."}}, true, false},
-		{"executable + flag off → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, false, false},
-		{"plain reply → preview", agent.Result{Reply: "hello"}, true, false},
+		{"non-executable + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionKind("bogus"), Summary: "Mystery."}}, true, false, false},
+		{"executable + flag off → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, false, false, false},
+		{"plain reply → preview", agent.Result{Reply: "hello"}, true, false, false},
+		// Modal-routed connector renders a card ONLY when OpenView is wired, else the
+		// Approve could only dead-end into "unavailable" (and the claim would burn it).
+		{"connector + OpenView wired → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, true, true},
+		{"connector + OpenView unwired → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			hc := newConfirmHarness(t, "")
 			hc.h.cfg.AgentConfirmEnabled = c.confirmOn
+			if c.openView {
+				hc.h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+			}
 			res := c.result
 			hc.h.deliverAgentResult(slog.Default(), env, "100.1", &res)
 

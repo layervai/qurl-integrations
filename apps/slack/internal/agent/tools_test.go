@@ -124,6 +124,17 @@ func TestParseProposal(t *testing.T) {
 			wantAction: ActionProtectURL,
 		},
 		{
+			// alias is required: exposing a URL must bind a channel alias, so an
+			// alias-less proposal (whose confirm card could only fail on Approve) is
+			// rejected at the propose layer rather than surfaced as a dead-end card.
+			name:       "protect_url requires alias",
+			tool:       toolProposeProtectURL,
+			input:      map[string]any{fieldURL: "https://staging.example.com"},
+			wantOK:     true,
+			wantErr:    true,
+			wantAction: ActionProtectURL,
+		},
+		{
 			name:       "protect_url ok",
 			tool:       toolProposeProtectURL,
 			input:      map[string]any{fieldURL: "https://staging.example.com", fieldAlias: "$dash"},

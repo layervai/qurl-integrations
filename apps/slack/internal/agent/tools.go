@@ -118,9 +118,11 @@ func toolSpecs() []ToolSpec {
 			Description: "Propose protecting an existing URL (a reachable HTTP endpoint). Admin-gated. Does NOT execute — the user must confirm.",
 			Schema: map[string]any{
 				fieldURL:   stringProp("The target URL to protect."),
-				fieldAlias: stringProp("Suggested channel alias for the protected URL."),
+				fieldAlias: stringProp("Channel alias to bind the protected URL to (required — Slack users need a friendly name). Ask the user if not given."),
 			},
-			Required: []string{fieldURL},
+			// alias is REQUIRED: exposing a URL must bind a channel alias, so an
+			// alias-less proposal could only fail at execute — don't let one be made.
+			Required: []string{fieldURL, fieldAlias},
 		},
 	}
 }
@@ -331,6 +333,13 @@ func proposalProtectURL(f map[string]string) (*Proposal, error) {
 		return nil, errEmptyField(toolProposeProtectURL, fieldURL)
 	}
 	alias := normalizeToken(f[fieldAlias])
+	if alias == "" {
+		// Required at the propose layer: exposing a URL must bind a channel alias
+		// (exposeURLResourceInChannel + the slash `as:$alias` grammar both require
+		// it). Erroring here means an alias-less proposal — whose confirm card could
+		// only fail on Approve — is never built; the agent asks the user instead.
+		return nil, errEmptyField(toolProposeProtectURL, fieldAlias)
+	}
 	return &Proposal{
 		Action:     ActionProtectURL,
 		URL:        target,
