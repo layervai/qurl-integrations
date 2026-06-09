@@ -784,3 +784,32 @@ func TestSetDisplayName_ChannelAliasLookupErrorFallsThrough(t *testing.T) {
 		t.Errorf("PATCH fired despite the alias-lookup error (calls = %d)", capPatch.calls.Load())
 	}
 }
+
+// TestSetDisplayName_LegacyURLBindingRefused mirrors /qurl get's legacy guard: a
+// channel alias bound to a raw URL (a pre-resource set-alias row, not an `r_`
+// id) is refused with the re-bind hint before any resource scan — never a PATCH,
+// and never the misleading scan-window copy.
+func TestSetDisplayName_LegacyURLBindingRefused(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	// knownSlug differs from the alias so the slug-first lookup misses; the alias
+	// then resolves to a legacy raw-URL binding.
+	h := newTestHandler(t, displayNameQURLServer(t, "some-other-slug", capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, "https://legacy.example.com"); err != nil {
+		t.Fatalf("seed legacy URL binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "no longer supported") || !strings.Contains(async, "set-alias") {
+		t.Errorf("async reply = %q, want the legacy re-bind hint", async)
+	}
+	if strings.Contains(async, "lookup limit") {
+		t.Errorf("async reply = %q, legacy binding must not surface the scan-window copy", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired for a legacy URL binding (calls = %d)", capPatch.calls.Load())
+	}
+}

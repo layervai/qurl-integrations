@@ -355,6 +355,15 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 			// failure here is unlikely.
 			log.Warn("display-name: channel alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "id", id)
 		} else if found {
+			// Legacy guard, mirroring resolveTokenForGet: a pre-resource set-alias
+			// row stored a raw URL, not an `r_` id. It can't resolve to a tunnel, so
+			// refuse with the same re-bind hint `/qurl get` gives — and skip the
+			// resource scan it could never match (which, in a >first-page workspace,
+			// would otherwise misreport it as a lookup limit).
+			if !strings.HasPrefix(boundID, "r_") {
+				log.Warn("display-name: channel alias bound to a non-resource-id target", "team_id", teamID, "channel_id", channelID, "id", id)
+				return nil, nil, legacyAliasBindingMessage(id)
+			}
 			r, msg := h.resolveActiveTunnelByResourceID(ctx, log, c, teamID, id, boundID)
 			if msg != "" {
 				return nil, nil, msg
@@ -377,10 +386,9 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 // is definitively stale and gets the unset-alias hint, as does a complete scan
 // (no more pages) that didn't find it; only a resourceID NOT seen while more
 // pages remain (HasMore) gets a non-destructive lookup-limit message — it must
-// NOT nudge unbinding a possibly-live alias on a later page. A legacy raw-URL
-// `set-alias` row matches no resource_id (the same rows resolveTokenForGet
-// rejects by `r_` prefix), so it degrades to one of these messages. Returns
-// (resource, "") on success or (nil, userMsg).
+// NOT nudge unbinding a possibly-live alias on a later page. Callers pre-filter
+// non-`r_` bindings (legacy raw-URL rows), so resourceID is always a real
+// resource id here. Returns (resource, "") on success or (nil, userMsg).
 func (h *Handler) resolveActiveTunnelByResourceID(ctx context.Context, log *slog.Logger, c *client.Client, teamID, id, resourceID string) (resource *client.Resource, userMsg string) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
