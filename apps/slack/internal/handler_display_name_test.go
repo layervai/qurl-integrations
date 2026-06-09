@@ -754,12 +754,12 @@ func TestSetDisplayName_NoChannelResolvesBySlug(t *testing.T) {
 	}
 }
 
-// TestSetDisplayName_ChannelAliasLookupErrorFallsThrough pins the soft-fail: when
-// the channel-alias GetItem errors, the resolver logs and falls through to the
-// not-found copy rather than surfacing a store error or PATCHing. The admin gate
-// reads workspace_mappings (a different table), so it still succeeds — only the
-// channel_policies read the alias fallback issues is failed.
-func TestSetDisplayName_ChannelAliasLookupErrorFallsThrough(t *testing.T) {
+// TestSetDisplayName_ChannelAliasLookupErrorSurfacesServiceUnavailable pins the
+// outage signal: when the channel_policies GetItem errors, the resolver surfaces
+// the service-unavailable copy (matching /qurl get), NOT a misleading "no such
+// id", and never PATCHes. The admin gate reads workspace_mappings (a different
+// table), so it still passes — only the alias-lookup read is failed.
+func TestSetDisplayName_ChannelAliasLookupErrorSurfacesServiceUnavailable(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	capPatch := &capturedPatch{}
 	// knownSlug differs from the alias, so the slug-first lookup returns empty and
@@ -777,8 +777,11 @@ func TestSetDisplayName_ChannelAliasLookupErrorFallsThrough(t *testing.T) {
 	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
 
-	if !strings.Contains(async, "No qURL Connector with id") {
-		t.Errorf("async reply = %q, want the not-found copy after the alias-lookup error", async)
+	if !strings.Contains(async, "Could not reach qURL") {
+		t.Errorf("async reply = %q, want the service-unavailable copy after the alias-lookup error", async)
+	}
+	if strings.Contains(async, "No qURL Connector with id") {
+		t.Errorf("async reply = %q, must not misdiagnose a channel_policies outage as a missing id", async)
 	}
 	if capPatch.calls.Load() != 0 {
 		t.Errorf("PATCH fired despite the alias-lookup error (calls = %d)", capPatch.calls.Load())
