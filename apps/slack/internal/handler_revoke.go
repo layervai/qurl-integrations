@@ -175,6 +175,12 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 				// route it through escapeMrkdwnCode anyway — cheap insurance
 				// against a code-span break-out if the charset ever widens.
 				log.Info("revoke: resource not found (already revoked or typo'd)", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+				// Confirmed gone upstream — the out-of-band-delete case where an
+				// orphaned `$alias` is MOST likely (some other surface deleted the
+				// resource without sweeping the bot's channel policies). Sweep here
+				// too, not only on the live-delete path. Idempotent and safe: for a
+				// genuinely typo'd id that references no channel, it's a no-op.
+				h.purgeResourceBindings(ctx, log, teamID, resourceID)
 				return fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken))
 			case http.StatusUnauthorized, http.StatusForbidden:
 				// API key rejected — point at /qurl setup so the admin has

@@ -336,6 +336,14 @@ func (s *Store) RevokeResourceFromChannel(ctx context.Context, teamID, channelID
 // (clearable via `/qurl-admin unset-alias`), never data loss or a live-resource
 // leak (resource IDs are unique and never reused, so a dangling id can't later
 // point at a different resource).
+//
+// The map REMOVE is UNCONDITIONAL — DynamoDB can't express a per-key
+// `alias_bindings.#a = :rid` guard across N keys in one expression. Alias NAMES,
+// unlike resource IDs, are reusable, so in the sub-second window between this
+// read and the write an admin who unbound then rebound the same name to a LIVE
+// resource would have that fresh binding clobbered. The purge runs synchronously
+// right after the upstream delete, so the window is tiny; the race is accepted
+// rather than guarded.
 func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) ([]string, error) {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return nil, &Error{

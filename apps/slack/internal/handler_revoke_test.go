@@ -483,3 +483,27 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 		t.Errorf("revoked id still in %s allow-set — team-wide sweep missed it: %v", otherChannelID, cOther)
 	}
 }
+
+// TestRevokeResource_PurgesOnAlreadyGone fences the out-of-band-delete case: when
+// the upstream DELETE returns 404/Gone (the resource was already removed by some
+// other surface — API/SDK/MCP/CLI/expiry — without sweeping the bot's policies),
+// the orphaned `$alias` is MOST likely to exist. The cascade must still run on
+// that path, not only on the live-delete path.
+func TestRevokeResource_PurgesOnAlreadyGone(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{testRevokeAlias: testRevokeResourceID})
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`))
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "not found") {
+		t.Fatalf("revoke message = %q, want the already-revoked surface", msg)
+	}
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, "C_test", testRevokeAlias); err != nil || found {
+		t.Errorf("alias %q still bound after revoking an already-gone resource (found=%v, err=%v) — the orphan must be swept on the 404 path too", testRevokeAlias, found, err)
+	}
+}

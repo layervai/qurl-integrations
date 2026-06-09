@@ -299,17 +299,22 @@ func (h *Handler) listResourcesStaleMessageForCaller(ctx context.Context, log *s
 	// ("a stale alias … Clear it") and many ("stale aliases … Clear them").
 	noun := "stale " + aliasNoun(len(stale))
 	pronoun := "them"
+	// With a single ghost, name it in the command so it's copy-pasteable (the
+	// exact friction this empty-state fixes); with several, the bare verb avoids
+	// an unwieldy command — the names are already listed above.
+	unsetCmd := "`/qurl-admin unset-alias`"
 	if len(stale) == 1 {
 		noun = "a " + noun
 		pronoun = "it"
+		unsetCmd = "`/qurl-admin unset-alias $" + escapeMrkdwnCode(stale[0]) + "`"
 	}
 
 	if h.listCallerIsAdmin(ctx, log, teamID, userID, "stale-state hint") {
-		return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Clear %s with `/qurl-admin unset-alias`, then protect a new resource here.",
-			noun, joined, pronoun)
+		return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Clear %s with %s, then protect a new resource here.",
+			noun, joined, pronoun, unsetCmd)
 	}
-	return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Ask a Slack admin to clear %s with `/qurl-admin unset-alias`.",
-		noun, joined, pronoun)
+	return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Ask a Slack admin to clear %s with %s.",
+		noun, joined, pronoun, unsetCmd)
 }
 
 // listFooterText is the guidance line under /qurl list when rendered as

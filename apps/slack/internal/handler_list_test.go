@@ -1168,15 +1168,16 @@ func TestHandleList_StaleAliasesEmptyState(t *testing.T) {
 		notWant []string
 	}{
 		{
-			name:    "admin gets the unset-alias fix",
-			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
-			want:    []string{"`$dashboard`", "unset-alias"},
+			name: "admin gets the unset-alias fix with the ghost named in the command",
+			seed: func(t *testing.T, ts *adminTestServers) { ts.seedAdmin(t) },
+			// Single ghost → the command itself names it (copy-pasteable).
+			want:    []string{"`$dashboard`", "unset-alias $dashboard"},
 			notWant: []string{"protect-connector", "Ask a Slack admin"},
 		},
 		{
 			name:    "non-admin gets an admin handoff that still names the ghost",
 			seed:    func(t *testing.T, ts *adminTestServers) { ts.seedNonAdmin(t) },
-			want:    []string{"`$dashboard`", "unset-alias", "Ask a Slack admin"},
+			want:    []string{"`$dashboard`", "unset-alias $dashboard", "Ask a Slack admin"},
 			notWant: []string{"protect-connector"},
 		},
 	} {
