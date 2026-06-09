@@ -164,6 +164,35 @@ func TestRun_ProposeAlongsideReadInSameTurn_KeepsHistoryValid(t *testing.T) {
 	}
 }
 
+func TestRun_CallAfterProposeIsDrained(t *testing.T) {
+	// A turn where the propose comes FIRST and a read follows it. The loop stops
+	// at the proposal, but the trailing read still needs a tool_result (a
+	// synthetic ack) — and it must NOT be executed against the backend.
+	propInput, _ := json.Marshal(map[string]any{fieldToken: testSlug})
+	readInput, _ := json.Marshal(map[string]any{})
+	llm := &scriptedLLM{responses: []Response{{
+		ToolCalls: []ToolCall{
+			{ID: "tu_prop", Name: toolProposeGet, Input: propInput},
+			{ID: "tu_read", Name: toolListResources, Input: readInput},
+		},
+		StopReason: "tool_use",
+	}}}
+	backend := &fakeBackend{resources: "should-not-be-read"}
+	ctx, tc := testCtx()
+	res, history, err := New(llm, backend).Run(ctx, tc, nil, "go")
+	if err != nil || res.Proposal == nil {
+		t.Fatalf("expected a proposal: %v / %+v", err, res)
+	}
+	assertWellFormed(t, history) // tu_prop AND tu_read both need results
+	// The trailing read must be drained as an ack, never executed.
+	last := history[len(history)-1]
+	for _, tr := range last.ToolResults {
+		if tr.ToolUseID == "tu_read" && tr.Content != proposalAckResult {
+			t.Fatalf("trailing read should be a synthetic ack, got %q", tr.Content)
+		}
+	}
+}
+
 func TestRun_ProposeGet_StopsAndKeepsHistoryValid(t *testing.T) {
 	llm := &scriptedLLM{responses: []Response{
 		toolResp(toolProposeGet, map[string]any{fieldToken: testSlugSigil, fieldReason: "incident 412"}),

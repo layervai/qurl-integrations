@@ -252,7 +252,8 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		// Parallel tool use is disabled, so there is normally one call; handle
 		// a slice defensively. A propose_* call ends the turn immediately.
 		results := make([]ToolResult, 0, len(resp.ToolCalls))
-		for _, call := range resp.ToolCalls {
+		for i := range resp.ToolCalls {
+			call := resp.ToolCalls[i]
 			prop, isPropose, perr := parseProposal(call)
 			switch {
 			case isPropose && perr != nil:
@@ -260,13 +261,15 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 				// can correct on the next iteration rather than failing the turn.
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: perr.Error(), IsError: true})
 			case isPropose:
-				// Keep history valid: every tool_use in this assistant turn needs
-				// a matching tool_result — both any read calls already handled this
-				// turn (accumulated in results) and this proposal call. Parallel
-				// tool use is disabled, so there is normally just the one call;
-				// appending to results rather than replacing it keeps the
-				// transcript well-formed even if that ever changes.
+				// Stop the turn here. Every tool_use in this assistant turn still
+				// needs a matching tool_result: the reads already handled (in
+				// results), this proposal call, and any calls after it this turn —
+				// drained as acks so the transcript stays well-formed even if
+				// parallel tool use is ever enabled.
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: proposalAckResult})
+				for _, rest := range resp.ToolCalls[i+1:] {
+					results = append(results, ToolResult{ToolUseID: rest.ID, Content: proposalAckResult})
+				}
 				msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
 				return Result{Proposal: prop}, msgs, nil
 			default:
