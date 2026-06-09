@@ -272,23 +272,55 @@ func TestConfirm_AdminApproveExecutesAndReplaces(t *testing.T) {
 	}
 }
 
-func TestConfirm_NonAdminCanApproveGet(t *testing.T) {
-	// get is NOT admin-gated, so any channel member may Approve a pending get
-	// (privilege-parity with a typed /qurl get) — the non-admin clicker reaches
-	// execute and the card is replaced (terminal), unlike the admin-gated revoke a
-	// non-admin can't run. This drives the ActionGet branch's Command construction
-	// (SubcmdGet + token + reason flag) through executeAgentAction; that the reason
-	// then reaches the mint's Create.Reason is covered in handler_get_test.
+func TestConfirm_GetApproveIsEphemeralAndUngated(t *testing.T) {
+	// get is NOT admin-gated (any member may Approve — privilege-parity with a typed
+	// /qurl get), AND its result is a one-time-use credential, so it must be
+	// delivered PRIVATELY to the clicker, never broadcast on the public card. (The
+	// residual "any member can approve + burn the link before the asker" theft
+	// vector is the get-authorization gate on #651.)
 	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the clicker is NOT
 	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", ChannelID: "C1"})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
 
-	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-	if !ro {
-		t.Fatal("a non-admin Approve of a get must execute and replace the card (get is not admin-gated)")
-	}
+	// A non-admin reaching execute proves get isn't gated (it claimed).
 	if !hc.claimed(id) {
-		t.Fatal("an executed get approve must claim the pending action")
+		t.Fatal("a non-admin must be able to approve+execute a get (not admin-gated)")
+	}
+	// Two posts: the result ephemerally (replace_original false) + the neutral public
+	// card (replace_original true).
+	var ephemeral, card string
+	for _, b := range hc.waitForN(t, 2) {
+		if ro, text := parseResponse(t, b); ro {
+			card = text
+		} else {
+			ephemeral = text
+		}
+	}
+	if ephemeral == "" {
+		t.Fatal("the get result must be delivered ephemerally to the clicker")
+	}
+	if !strings.Contains(card, "privately") {
+		t.Fatalf("public card must be the neutral 'sent privately' message, got %q", card)
+	}
+	// The public card must not leak the get result (a link on success, token details
+	// on failure — here the empty-channel resolve error, which names the token).
+	if strings.Contains(card, "staging") || strings.Contains(card, ephemeral) {
+		t.Fatalf("public card leaked the get result: %q", card)
+	}
+}
+
+func TestConfirm_FlagOffClickDoesNotExecute(t *testing.T) {
+	// A card clicked after the deploy-time kill switch flips off (cards live ~10m)
+	// must not execute or claim — the click-time re-check makes "flag off ⇒ nothing
+	// executes" unconditional.
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.cfg.AgentConfirmEnabled = false
+	id := hc.seedPending(t, revokePending())
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+
+	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || hc.claimed(id) {
+		t.Fatal("a click with the confirm flag off must not execute or claim")
 	}
 }
 
@@ -412,7 +444,7 @@ func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
 		handled++
 		got := hc.h.executeAgentAction(context.Background(), slog.Default(),
 			&pendingAction{Action: kind, Token: "staging", ChannelID: "C1"}, payload)
-		if got == agentConfirmUnsupportedReply {
+		if got.cardText == agentConfirmUnsupportedReply {
 			t.Errorf("kind %q is confirmExecutable but executeAgentAction returns unsupported (half-wired)", kind)
 		}
 	}

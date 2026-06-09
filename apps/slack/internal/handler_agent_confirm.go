@@ -28,6 +28,7 @@ const (
 	agentConfirmScopeMismatchReply  = "That request belongs to a different channel."
 	agentConfirmCanceledReply       = "Canceled — nothing was changed."
 	agentConfirmUnsupportedReply    = "I can't apply that kind of change yet."
+	agentConfirmGetDeliveredReply   = "Handled — the access link was sent privately to the approver."
 	agentConfirmFailedReply         = "Something went wrong applying that. Please try again, or use a `/qurl` command."
 )
 
@@ -207,6 +208,15 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	teamID := payload.Team.ID
 	responseURL := payload.ResponseURL
 
+	// Re-check the kill switch at click time. AgentConfirmEnabled is a deploy-time
+	// flag and cards live ~10 min, so a card posted just before a redeploy-to-off
+	// could otherwise still execute within that window. This makes "flag off ⇒
+	// nothing executes" hold unconditionally.
+	if !h.agentConfirmEnabled() {
+		_ = h.postResponse(log, responseURL, agentConfirmExpiredReply)
+		return
+	}
+
 	blob, found, err := h.cfg.AgentStore.LoadPendingAction(ctx, teamID, id)
 	if err != nil {
 		log.Error("agent confirm: load pending action failed", "error", err)
@@ -267,14 +277,31 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmCanceledReply)
 		return
 	}
-	_ = h.replaceOriginalResponse(log, responseURL, h.executeAgentAction(ctx, log, &pa, payload))
+	res := h.executeAgentAction(ctx, log, &pa, payload)
+	if res.ephemeralText != "" {
+		// Sensitive output (a one-time link) goes PRIVATELY to the clicker — an
+		// ephemeral on the same response_url — never on the public card.
+		_ = h.postResponse(log, responseURL, res.ephemeralText)
+	}
+	_ = h.replaceOriginalResponse(log, responseURL, res.cardText)
 }
 
 // executeAgentAction runs the mapped mutation core for a claimed action and
 // returns the user-facing result string (delivered by the caller as the terminal
 // card). Every core re-resolves its token against the CLICK's channel, so channel
 // scope is enforced at execute exactly as a typed command would be.
-func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload) string {
+// actionResult is the terminal outcome of a claimed action. cardText replaces the
+// PUBLIC confirm card. ephemeralText, when non-empty, is delivered PRIVATELY to the
+// clicker (response_url ephemeral) — used for sensitive output that must not be
+// broadcast to the channel (a get's one-time-use link). Routing is by action KIND,
+// not outcome: the whole get result (link OR error) goes ephemeral, so nothing
+// get-specific ever lands on the public card.
+type actionResult struct {
+	cardText      string
+	ephemeralText string
+}
+
+func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload) actionResult {
 	switch pa.Action {
 	case agent.ActionGet:
 		flags := map[string]string{}
@@ -297,23 +324,30 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			// async path (the consume-once claim is the real double-execute guard).
 			triggerID: payload.TriggerID,
 		})
+		result := text
 		if err != nil {
-			return mapCoreError(log, err, commonGetMintFailedMessage)
+			result = mapCoreError(log, err, commonGetMintFailedMessage)
 		}
-		return text
+		// A get result is a one-time-use credential — deliver it PRIVATELY to the
+		// clicker and keep the public card neutral, exactly as a typed /qurl get
+		// stays ephemeral to its requester. (Whether the right person is approving —
+		// asker vs any member — is the get-authorization gate on #651; ephemeral
+		// delivery becomes fully correct once that enforces asker-only.)
+		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: result}
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {
-			return mapCoreError(log, err, commonRevokeFailedMessage)
+			return actionResult{cardText: mapCoreError(log, err, commonRevokeFailedMessage)}
 		}
-		return h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)
+		// A revoke result ("revoked $x") is benign and useful as a public audit line.
+		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
 	case agent.ActionSetAlias, agent.ActionUnsetAlias, agent.ActionProtectConnector, agent.ActionProtectURL:
 		// Deferred to PR4b (alias) / PR4c (protect). These are admin-gated, so a
 		// non-admin can't reach here; an admin gets a clean "not supported yet".
 		log.Warn("agent confirm: action not executable in this build", "action", pa.Action)
-		return agentConfirmUnsupportedReply
+		return actionResult{cardText: agentConfirmUnsupportedReply}
 	default:
 		log.Warn("agent confirm: unknown action kind", "action", pa.Action)
-		return agentConfirmUnsupportedReply
+		return actionResult{cardText: agentConfirmUnsupportedReply}
 	}
 }
