@@ -34,38 +34,79 @@ type policyRow struct {
 	allowedResourceIDs []string
 }
 
-// scanPolicyRows pages the entire channel_policies table (or a single team when
-// onlyTeam is set, via a server-side FilterExpression) and returns the parsed
-// rows. A Scan is the right tool here: the reconciler is a full sweep, run
-// rarely and out-of-band, not a hot path. Rows missing the team/channel keys
-// are skipped — they can't be acted on and shouldn't abort the crawl. The
-// scanner is the SDK's ScanAPIClient interface (satisfied by *dynamodb.Client)
-// so tests can inject a fake without localstack.
-func scanPolicyRows(ctx context.Context, scanner dynamodb.ScanAPIClient, table, onlyTeam string) ([]policyRow, error) {
-	in := &dynamodb.ScanInput{TableName: aws.String(table)}
-	if onlyTeam != "" {
-		in.FilterExpression = aws.String("#tid = :tid")
-		in.ExpressionAttributeNames = map[string]string{"#tid": attrSlackTeamID}
-		in.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-			":tid": &ddbtypes.AttributeValueMemberS{Value: onlyTeam},
-		}
-	}
+// policyTableReader is the read surface scanPolicyRows needs: a Scan for the
+// full sweep and a Query for the single-team fast path. Both are SDK interfaces
+// satisfied by *dynamodb.Client, so tests can inject a fake without localstack.
+type policyTableReader interface {
+	dynamodb.ScanAPIClient
+	dynamodb.QueryAPIClient
+}
 
+// scanPolicyRows returns the parsed channel_policies rows, either for one team
+// or the whole table. Rows missing the team/channel keys are skipped — they
+// can't be acted on and shouldn't abort the crawl.
+//
+// Single-team (onlyTeam set) is a Query on the partition key — channel_policies
+// is PK=slack_team_id, so this reads only that team's rows. This is the
+// documented "unblock a customer fast" path, exactly where billing/latency for
+// a full-table read would hurt most. The unscoped sweep is a Scan (the right
+// tool for a rare, out-of-band whole-table pass).
+func scanPolicyRows(ctx context.Context, reader policyTableReader, table, onlyTeam string) ([]policyRow, error) {
+	if onlyTeam != "" {
+		return queryTeamRows(ctx, reader, table, onlyTeam)
+	}
+	return scanAllRows(ctx, reader, table)
+}
+
+// queryTeamRows pages one team's rows via a partition-key Query (matching
+// slackdata.ChannelsForResource's pattern), so a scoped run never reads the
+// whole table.
+func queryTeamRows(ctx context.Context, q dynamodb.QueryAPIClient, table, teamID string) ([]policyRow, error) {
+	in := &dynamodb.QueryInput{
+		TableName:              aws.String(table),
+		KeyConditionExpression: aws.String("#tid = :tid"),
+		ExpressionAttributeNames: map[string]string{
+			"#tid": attrSlackTeamID,
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":tid": &ddbtypes.AttributeValueMemberS{Value: teamID},
+		},
+	}
 	var rows []policyRow
-	paginator := dynamodb.NewScanPaginator(scanner, in)
+	paginator := dynamodb.NewQueryPaginator(q, in)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("query page: %w", err)
+		}
+		rows = appendParsedRows(rows, page.Items)
+	}
+	return rows, nil
+}
+
+// scanAllRows pages the whole table via Scan for the unscoped full sweep.
+func scanAllRows(ctx context.Context, s dynamodb.ScanAPIClient, table string) ([]policyRow, error) {
+	var rows []policyRow
+	paginator := dynamodb.NewScanPaginator(s, &dynamodb.ScanInput{TableName: aws.String(table)})
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("scan page: %w", err)
 		}
-		for _, item := range page.Items {
-			row, ok := parsePolicyRow(item)
-			if ok {
-				rows = append(rows, row)
-			}
-		}
+		rows = appendParsedRows(rows, page.Items)
 	}
 	return rows, nil
+}
+
+// appendParsedRows parses each DDB item and appends the valid ones (keyless
+// rows skipped) to rows.
+func appendParsedRows(rows []policyRow, items []map[string]ddbtypes.AttributeValue) []policyRow {
+	for _, item := range items {
+		if row, ok := parsePolicyRow(item); ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 // parsePolicyRow flattens a DynamoDB item into a policyRow. Returns ok=false

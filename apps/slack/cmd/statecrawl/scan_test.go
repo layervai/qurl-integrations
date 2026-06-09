@@ -50,6 +50,35 @@ func TestScanPolicyRows_PaginatesAndSkipsKeylessRows(t *testing.T) {
 	}
 }
 
+// TestScanPolicyRows_SingleTeamUsesQueryNotScan confirms the -team fast path
+// reads via Query on the partition key and never falls back to a full-table
+// Scan (the perf guarantee for the "unblock a customer fast" workflow).
+func TestScanPolicyRows_SingleTeamUsesQueryNotScan(t *testing.T) {
+	fake := &fakeDDB{
+		queryPages: []*dynamodb.QueryOutput{{
+			Items: []map[string]ddbtypes.AttributeValue{
+				policyItem("T1", "C1", map[string]string{"a": "r_1"}, nil),
+			},
+		}},
+		// A non-empty Scan page proves we did NOT read it: if the code Scanned,
+		// we'd see this row instead of (or alongside) the queried one.
+		scanPages: []*dynamodb.ScanOutput{{Items: []map[string]ddbtypes.AttributeValue{
+			policyItem("T9", "C9", nil, []string{"r_9"}),
+		}}},
+	}
+
+	rows, err := scanPolicyRows(context.Background(), fake, "cp", "T1")
+	if err != nil {
+		t.Fatalf("scanPolicyRows: %v", err)
+	}
+	if fake.scanCalls != 0 {
+		t.Errorf("single-team path issued %d Scan calls, want 0 (must Query the partition key)", fake.scanCalls)
+	}
+	if len(rows) != 1 || rows[0].teamID != "T1" {
+		t.Fatalf("rows = %+v, want exactly the queried T1 row", rows)
+	}
+}
+
 // TestResolveLiveness_PaginatesAllResources proves the liveness check pages the
 // owner's resources to exhaustion (not just the first page the bot scans), so a
 // resource on a later page is never misclassified as an orphan.
