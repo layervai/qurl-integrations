@@ -41,18 +41,21 @@ const (
 // is the token re-resolution at execute.
 type pendingAction struct {
 	Action    agent.ActionKind `json:"action"`
-	Token     string           `json:"token,omitempty"`
+	Token     string           `json:"token,omitempty"`  // $slug/$alias for get/revoke
 	Reason    string           `json:"reason,omitempty"` // audit reason, forwarded to the mint on get
+	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias
+	Target    string           `json:"target,omitempty"` // target slug for set-alias
 	ChannelID string           `json:"channel_id"`
 }
 
 // confirmExecutable reports whether the confirm flow can actually EXECUTE this
-// action kind in this build. Deferred kinds (alias → PR4b, protect → PR4c) must
-// fall back to the text preview rather than render a live Approve button that
-// can only reply "can't apply that yet" — keep in lockstep with
-// executeAgentAction's switch. PR4b/PR4c land by extending this set.
+// action kind in this build. Deferred kinds (protect → PR4c) must fall back to the
+// text preview rather than render a live Approve button that can only reply "can't
+// apply that yet" — keep in lockstep with executeAgentAction's switch. PR4c lands
+// by extending this set.
 func confirmExecutable(kind agent.ActionKind) bool {
-	return kind == agent.ActionGet || kind == agent.ActionRevoke
+	return kind == agent.ActionGet || kind == agent.ActionRevoke ||
+		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias
 }
 
 // deliverAgentResult posts a completed turn's result: an interactive confirm card
@@ -121,6 +124,8 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		Action:    prop.Action,
 		Token:     prop.Token,
 		Reason:    prop.Reason,
+		Alias:     prop.Alias,
+		Target:    prop.Target,
 		ChannelID: env.Event.Channel,
 	})
 	if err != nil {
@@ -341,9 +346,15 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		// A revoke result ("revoked $x") is benign and useful as a public audit line.
 		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
-	case agent.ActionSetAlias, agent.ActionUnsetAlias, agent.ActionProtectConnector, agent.ActionProtectURL:
-		// Deferred to PR4b (alias) / PR4c (protect). These are admin-gated, so a
-		// non-admin can't reach here; an admin gets a clean "not supported yet".
+	case agent.ActionSetAlias:
+		// Binds pa.Alias → pa.Target in the CLICK's channel (channel-scoped, like
+		// the slash set-alias). Benign result → public card.
+		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, pa.Alias, pa.Target)}
+	case agent.ActionUnsetAlias:
+		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, pa.Alias)}
+	case agent.ActionProtectConnector, agent.ActionProtectURL:
+		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so
+		// a non-admin can't reach here; an admin gets a clean "not supported yet".
 		log.Warn("agent confirm: action not executable in this build", "action", pa.Action)
 		return actionResult{cardText: agentConfirmUnsupportedReply}
 	default:

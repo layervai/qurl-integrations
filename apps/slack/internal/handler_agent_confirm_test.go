@@ -16,6 +16,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -136,16 +137,25 @@ func newConfirmHarness(t *testing.T, adminUserID string) *confirmHarness {
 	}
 	adminStore := newStoreFromFake(t, newFakeDDB(t, names, seed), names, nil)
 
+	// qURL client + alias store, so the alias/get cores can execute (the get/revoke
+	// tests use an empty channel and short-circuit before the client; set-alias
+	// resolves a slug through it). qurlBackendServer returns r_2 for slug "staging".
+	t.Setenv("QURL_API_KEY", "test-key")
+	qurlSrv := qurlBackendServer(t)
+
 	postText, posts, _ := capturingPostMessage()
 	blocks := &blocksRecorder{}
 	h := NewHandler(Config{
 		AgentLLM:            fakeAgentLLM{reply: "x"},
 		AgentStore:          store,
 		AdminStore:          adminStore,
+		AuthProvider:        &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		NewClient:           func(apiKey string) *client.Client { return client.New(qurlSrv.URL, apiKey, client.WithRetry(0)) },
 		PostMessage:         postText,
 		PostMessageBlocks:   blocks.fn(),
 		AgentConfirmEnabled: true,
 	})
+	h.SetAliasStore(adminStore)
 	h.validateResponseURLFn = url.Parse
 	t.Cleanup(h.Wait)
 
@@ -184,6 +194,23 @@ const (
 func (hc *confirmHarness) claimed(id string) bool {
 	_, ok := hc.mem.items["T1|"+testPendClaimSKPrefix+id]
 	return ok
+}
+
+// pendingID returns the id of the single pending action stored for teamID — for
+// tests that need to load the snapshot postAgentConfirm generated internally.
+func (hc *confirmHarness) pendingID(t *testing.T, teamID string) string {
+	t.Helper()
+	prefix := teamID + "|" + testPendSKPrefix
+	var ids []string
+	for k := range hc.mem.items {
+		if strings.HasPrefix(k, prefix) {
+			ids = append(ids, strings.TrimPrefix(k, prefix))
+		}
+	}
+	if len(ids) != 1 {
+		t.Fatalf("want exactly one pending action for %s, got %d", teamID, len(ids))
+	}
+	return ids[0]
 }
 
 func confirmPayload(teamID, channelID, userID, responseURL, id string) *interactionPayload {
@@ -307,6 +334,60 @@ func TestConfirm_GetApproveIsEphemeralAndUngated(t *testing.T) {
 	// on failure — here the empty-channel resolve error, which names the token).
 	if strings.Contains(card, "staging") || strings.Contains(card, ephemeral) {
 		t.Fatalf("public card leaked the get result: %q", card)
+	}
+}
+
+func TestConfirm_SetAliasOnApprove(t *testing.T) {
+	// set-alias is admin-gated and direct-execute (mirrors revoke). An admin approve
+	// runs the alias core in the click's channel and replaces the public card with
+	// the (benign) result. The binding/resolution correctness is covered in
+	// handler_alias_test; here we pin the confirm orchestration of the new case —
+	// it claims, executes the real core (not the unsupported default), and replaces.
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || !hc.claimed(id) {
+		t.Fatalf("admin set-alias approve should execute (claim) and replace the card; replace=%v text=%q", ro, text)
+	}
+	if text == agentConfirmUnsupportedReply || text == "" {
+		t.Fatalf("set-alias must run the alias core, not the unsupported default; got %q", text)
+	}
+}
+
+func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionUnsetAlias, Alias: "ghost", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || !hc.claimed(id) {
+		t.Fatalf("admin unset-alias approve should execute and replace the card; replace=%v text=%q", ro, text)
+	}
+	if !strings.Contains(text, "ghost") { // unbound alias → "…`$ghost` is not bound…"
+		t.Fatalf("unset-alias result should mention the alias, got %q", text)
+	}
+}
+
+func TestPostAgentConfirm_SnapshotsAliasFields(t *testing.T) {
+	// The pending snapshot must carry Alias+Target so the click can execute a
+	// set-alias (the click never reads them off the wire).
+	hc := newConfirmHarness(t, "")
+	prop := &agent.Proposal{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", Summary: "Bind $oncall → $staging."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
+	if err != nil || !found {
+		t.Fatalf("pending action not stored: found=%v err=%v", found, err)
+	}
+	var pa pendingAction
+	if err := json.Unmarshal(blob, &pa); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pa.Alias != "oncall" || pa.Target != "staging" {
+		t.Fatalf("set-alias snapshot must carry Alias+Target, got %+v", pa)
 	}
 }
 
@@ -444,7 +525,7 @@ func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
 		}
 		handled++
 		got := hc.h.executeAgentAction(context.Background(), slog.Default(),
-			&pendingAction{Action: kind, Token: "staging", ChannelID: "C1"}, payload)
+			&pendingAction{Action: kind, Token: "staging", Alias: "oncall", Target: "staging", ChannelID: "C1"}, payload)
 		if got.cardText == agentConfirmUnsupportedReply {
 			t.Errorf("kind %q is confirmExecutable but executeAgentAction returns unsupported (half-wired)", kind)
 		}
@@ -466,7 +547,7 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 		wantCard  bool
 	}{
 		{"executable + flag on → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, true, true},
-		{"deferred + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionSetAlias, Summary: "Bind $x."}}, true, false},
+		{"deferred + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect $x."}}, true, false},
 		{"executable + flag off → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, false, false},
 		{"plain reply → preview", agent.Result{Reply: "hello"}, true, false},
 	}

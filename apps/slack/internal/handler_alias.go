@@ -477,18 +477,24 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, args.Alias)
-	if errors.Is(err, slackdata.ErrAliasNotFound) {
-		respondSlack(w, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", args.Alias))
-		return
+	respondSlack(w, h.unbindAliasResult(ctx, teamID, channelID, args.Alias))
+}
+
+// unbindAliasResult clears the alias binding in (teamID, channelID) and renders the
+// user-facing result. Shared by the /qurl-admin unset-alias slash verb and the
+// conversation-mode confirm flow (executeAgentAction). The caller gates admin; the
+// alias is escaped since the confirm path can carry an LLM-distilled value.
+func (h *Handler) unbindAliasResult(ctx context.Context, teamID, channelID, alias string) string {
+	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, alias)
+	switch {
+	case errors.Is(err, slackdata.ErrAliasNotFound):
+		return fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", escapeMrkdwnCode(alias))
+	case err != nil:
+		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return "Failed to clear alias. Please try again."
+	default:
+		// Admin-verb audit trail: counterpart to the setalias "alias bound" line.
+		slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", alias)
+		return fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", escapeMrkdwnCode(alias))
 	}
-	if err != nil {
-		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
-		respondSlack(w, "Failed to clear alias. Please try again.")
-		return
-	}
-	// Admin-verb audit trail: counterpart to the setalias "alias bound"
-	// audit line. team/channel/alias are validated upstream.
-	slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
-	respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
 }
