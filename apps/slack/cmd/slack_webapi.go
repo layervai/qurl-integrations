@@ -222,9 +222,10 @@ const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 // OUTER envelope spanning the transcript save plus the post, so the 4s timeout
 // fires first on a stuck request. Unlike views.open there is no short trigger
 // window to race, so 4s leaves comfortable headroom for one round-trip while
-// still freeing the worker well inside its budget. On the Grid fallback the seam
-// makes two sequential requests, so the worst case is ~2x this (≈8s) — still
-// inside agentDeliveryBudget.
+// still freeing the worker well inside its budget. The Grid fallback does NOT add
+// a second round-trip: it retries only on ErrSlackBotTokenNotConfigured, which
+// postBody surfaces solely from the token *lookup* (before any HTTP request is
+// built), so the org-token attempt is the first and only HTTP call.
 const slackChatPostMessageTimeout = 4 * time.Second
 
 // Slack echoes the posted message back in successful chat.postMessage responses.
