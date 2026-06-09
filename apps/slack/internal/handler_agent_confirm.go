@@ -45,6 +45,29 @@ type pendingAction struct {
 	ChannelID string           `json:"channel_id"`
 }
 
+// confirmExecutable reports whether the confirm flow can actually EXECUTE this
+// action kind in this build. Deferred kinds (alias → PR4b, protect → PR4c) must
+// fall back to the text preview rather than render a live Approve button that
+// can only reply "can't apply that yet" — keep in lockstep with
+// executeAgentAction's switch. PR4b/PR4c land by extending this set.
+func confirmExecutable(kind agent.ActionKind) bool {
+	return kind == agent.ActionGet || kind == agent.ActionRevoke
+}
+
+// deliverAgentResult posts a completed turn's result: an interactive confirm card
+// only when the confirm flow is enabled AND the proposed action is actually
+// executable here; otherwise the text reply/preview (the merged-#650 behavior).
+// Gating the card on confirmExecutable keeps the dark-launch promise that only
+// fully-wired actions get an Approve button — a deferred-kind proposal stays an
+// honest "…isn't enabled yet" preview instead of a button that can't act.
+func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, threadTS string, result *agent.Result) {
+	if result.Proposal != nil && h.agentConfirmEnabled() && confirmExecutable(result.Proposal.Action) {
+		h.postAgentConfirm(log, env, threadTS, result.Proposal)
+		return
+	}
+	h.postAgentReply(log, env, threadTS, agentReplyText(result))
+}
+
 // adminGatedFor is the SINGLE source of truth for whether an action needs an
 // admin re-check at confirm time, used both when snapshotting a proposal and at
 // click time. An unrecognized kind fails closed (gated).
@@ -247,6 +270,9 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		if pa.Reason != "" {
 			// Carry the agent's distilled intent into the mint's audit log
 			// (Command.Reason → client.CreateInput.Reason), same as `/qurl get reason:…`.
+			// Audit split (get is not admin-gated, so the clicker may differ from the
+			// asker): the mint actor is the CLICKER (payload.User.ID) while the reason
+			// is the ASKER's distilled intent — same actor/reason parity as a typed get.
 			flags["reason"] = pa.Reason
 		}
 		cmd := &Command{Subcommand: SubcmdGet, Alias: pa.Token, Flags: flags, Raw: "get $" + pa.Token}

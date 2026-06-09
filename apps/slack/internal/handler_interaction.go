@@ -83,12 +83,12 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
 	// Conversation-mode confirm card (distinct action_ids, so order is immaterial
 	// — a click yields exactly one matching action_id).
-	if approve, ok := findActionByID(payload.Actions, agentConfirmApproveActionID); ok {
-		h.handleAgentConfirmClick(w, payload, approve, true)
+	if act, ok := findActionByID(payload.Actions, agentConfirmApproveActionID); ok {
+		h.handleAgentConfirmClick(w, payload, act, true)
 		return
 	}
-	if reject, ok := findActionByID(payload.Actions, agentConfirmRejectActionID); ok {
-		h.handleAgentConfirmClick(w, payload, reject, false)
+	if act, ok := findActionByID(payload.Actions, agentConfirmRejectActionID); ok {
+		h.handleAgentConfirmClick(w, payload, act, false)
 		return
 	}
 	// `/qurl-admin protect` chooser buttons open a guided modal; checked first

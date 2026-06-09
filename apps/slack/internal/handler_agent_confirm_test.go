@@ -367,6 +367,41 @@ func TestPostAgentConfirm_StoresPendingAndPostsCard(t *testing.T) {
 	}
 }
 
+func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
+	// The card must render ONLY for an executable proposal with the flag on; a
+	// deferred-kind proposal (or flag off, or a plain reply) falls back to the text
+	// preview — so a not-yet-wired action never shows a misleading Approve button.
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+	cases := []struct {
+		name      string
+		result    agent.Result
+		confirmOn bool
+		wantCard  bool
+	}{
+		{"executable + flag on → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, true, true},
+		{"deferred + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionSetAlias, Summary: "Bind $x."}}, true, false},
+		{"executable + flag off → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, false, false},
+		{"plain reply → preview", agent.Result{Reply: "hello"}, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "")
+			hc.h.cfg.AgentConfirmEnabled = c.confirmOn
+			res := c.result
+			hc.h.deliverAgentResult(slog.Default(), env, "100.1", &res)
+
+			gotCard := len(hc.blocks.calls) == 1
+			gotPreview := len(*hc.posts) == 1
+			if gotCard != c.wantCard {
+				t.Fatalf("card posted = %v, want %v", gotCard, c.wantCard)
+			}
+			if gotPreview == c.wantCard { // exactly one of card/preview must fire
+				t.Fatalf("expected exactly one of card(%v)/preview(%v)", gotCard, gotPreview)
+			}
+		})
+	}
+}
+
 func TestPostAgentConfirm_BlankSummaryFallsBack(t *testing.T) {
 	hc := newConfirmHarness(t, "")
 	prop := &agent.Proposal{Action: agent.ActionRevoke, Token: "staging", Summary: "   "}
