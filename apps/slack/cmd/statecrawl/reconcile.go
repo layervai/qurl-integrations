@@ -24,7 +24,7 @@ type liveness struct {
 // not bounded by the bot's first-page scan), and indexes them by resource id.
 // A missing key (ErrWorkspaceNotConfigured) or any read error degrades the team
 // to unresolved with a human reason rather than aborting the whole crawl.
-func resolveLiveness(ctx context.Context, keys auth.Provider, cfg config, teamID string) liveness {
+func resolveLiveness(ctx context.Context, keys auth.Provider, f *flags, teamID string) liveness {
 	apiKey, err := keys.APIKey(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
@@ -33,8 +33,8 @@ func resolveLiveness(ctx context.Context, keys auth.Provider, cfg config, teamID
 		return liveness{reason: "API key lookup failed: " + err.Error()}
 	}
 
-	c := newClient(cfg.qurlEndpoint, apiKey)
-	resources, err := listAllResources(ctx, c, pageLimitOrDefault(cfg.pageLimit))
+	c := newClient(f.qurlEndpoint, apiKey)
+	resources, err := listAllResources(ctx, c, pageLimitOrDefault(f.pageLimit))
 	if err != nil {
 		return liveness{reason: "resource list failed: " + err.Error()}
 	}
@@ -179,3 +179,6 @@ func recordIndeterminate(row policyRow, reason string, rep *report) {
 func isResourceID(s string) bool {
 	return len(s) > 2 && s[0] == 'r' && s[1] == '_'
 }
+
+// quote wraps a value in double quotes for a finding detail string.
+func quote(s string) string { return "\"" + s + "\"" }

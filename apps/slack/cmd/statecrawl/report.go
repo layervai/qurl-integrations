@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"slices"
+	"log/slog"
 	"sort"
-	"strings"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
@@ -34,127 +32,95 @@ type finding struct {
 	detail     string
 }
 
-// isPurgeTarget reports whether this finding is a confirmed orphan that -apply
-// should clear via the bot's PurgeResourceFromChannel verb.
+// isPurgeTarget reports whether this finding is a confirmed orphan that a
+// mutating run should clear via the bot's PurgeResourceFromChannel verb.
 func (f finding) isPurgeTarget() bool {
 	return f.kind == findingOrphanAlias || f.kind == findingOrphanAllowedID
 }
 
-// report accumulates findings and renders them.
+// logAttrs renders the finding as slog key/value pairs, omitting the empty ones
+// (an allowed_resource_ids finding carries no alias).
+func (f finding) logAttrs() []any {
+	attrs := []any{"kind", string(f.kind), "team_id", f.teamID, "channel_id", f.channelID}
+	if f.alias != "" {
+		attrs = append(attrs, "alias", "$"+f.alias)
+	}
+	if f.resourceID != "" {
+		attrs = append(attrs, "resource_id", f.resourceID)
+	}
+	return append(attrs, "detail", f.detail)
+}
+
+// report accumulates findings and the running counter set.
 type report struct {
-	cfg      config
+	f        *flags
 	findings []finding
+	stats    *Stats
 }
 
-func newReport(cfg config) *report { return &report{cfg: cfg} }
+func newReport(f *flags) *report { return &report{f: f, stats: &Stats{}} }
 
-func (r *report) add(f finding) { r.findings = append(r.findings, f) }
-
-// printSummary renders the per-finding detail (sorted for stable output) and a
-// tally by kind, with a header naming the crawled deployment.
-func (r *report) printSummary() {
-	fmt.Println("=== qURL Slack bot channel_policies state crawl ===")
-	fmt.Println("deployment: " + r.cfg.envLabel)
-	fmt.Println("channel_policies table: " + r.cfg.channelPoliciesTable)
-	fmt.Println("mode: " + r.mode())
-	fmt.Println()
-
-	if len(r.findings) == 0 {
-		fmt.Println("No findings: every channel_policies reference resolves to a live resource.")
-		return
+// add records a finding and bumps the counter for its kind in one place, so the
+// summary totals can't drift from what was emitted.
+func (r *report) add(f finding) {
+	r.findings = append(r.findings, f)
+	switch f.kind {
+	case findingOrphanAlias:
+		r.stats.OrphanAliases.Add(1)
+	case findingOrphanAllowedID:
+		r.stats.OrphanAllowedIDs.Add(1)
+	case findingAliasNameMismatch:
+		r.stats.AliasNameMismatch.Add(1)
+	case findingAliasURLTarget:
+		r.stats.AliasURLTargets.Add(1)
+	case findingLegacyAlias:
+		r.stats.LegacyAliases.Add(1)
+	case findingIndeterminate:
+		r.stats.Indeterminate.Add(1)
 	}
-
-	sorted := slices.Clone(r.findings)
-	sort.Slice(sorted, func(i, j int) bool { return lessFinding(sorted[i], sorted[j]) })
-	for _, f := range sorted {
-		fmt.Println(formatFinding(f))
-	}
-
-	fmt.Println()
-	r.printTally()
 }
 
-func (r *report) mode() string {
-	if r.cfg.apply {
-		return "APPLY (will purge confirmed orphans)"
-	}
-	return "dry-run (read-only)"
-}
-
-// printTally prints a count per finding kind in a fixed order so the operator
-// sees the purge-target totals first.
-func (r *report) printTally() {
-	counts := make(map[findingKind]int)
+// emitFindings logs every finding as a structured record, sorted (purge targets
+// first) so two runs over unchanged data produce a diffable log.
+func (r *report) emitFindings(logger *slog.Logger) {
+	sort.Slice(r.findings, func(i, j int) bool { return lessFinding(r.findings[i], r.findings[j]) })
 	for _, f := range r.findings {
-		counts[f.kind]++
-	}
-	fmt.Println("summary by kind:")
-	for _, k := range []findingKind{
-		findingOrphanAlias, findingOrphanAllowedID,
-		findingAliasNameMismatch, findingAliasURLTarget,
-		findingLegacyAlias, findingIndeterminate,
-	} {
-		if counts[k] > 0 {
-			fmt.Println("  " + string(k) + ": " + itoa(counts[k]))
-		}
+		logger.Info("finding", f.logAttrs()...)
 	}
 }
 
-// printDryRunFooter tells the operator how to act on what the dry run found.
-func (r *report) printDryRunFooter() {
-	purgeable := r.purgeTargetCount()
-	fmt.Println()
-	if purgeable == 0 {
-		fmt.Println("Dry run complete. No orphans to purge.")
-		return
-	}
-	fmt.Println("Dry run complete. " + itoa(purgeable) +
-		" orphaned reference(s) would be purged. Re-run with -apply to clear them.")
-}
-
-func (r *report) purgeTargetCount() int {
-	n := 0
-	for _, f := range r.findings {
-		if f.isPurgeTarget() {
-			n++
+// settle is the terminal step: in a dry run it records and logs the purge PLAN
+// (what would be cleared) without mutating; otherwise it applies the purge.
+func (r *report) settle(ctx context.Context, store *slackdata.Store, logger *slog.Logger) error {
+	targets := r.purgeTargets()
+	if r.f.dryRun {
+		r.stats.DryRunWouldPurge.Store(int64(len(targets)))
+		for _, t := range targets {
+			logger.Info("would purge orphan (dry-run)", "team_id", t.teamID, "channel_id", t.channelID, "resource_id", t.resourceID)
 		}
+		return nil
 	}
-	return n
+	return r.applyPurge(ctx, store, logger)
 }
 
 // applyPurge clears every confirmed orphan via slackdata.Store.PurgeResourceFromChannel —
 // the exact verb the bot's revoke cascade runs — so the manual backfill is
-// behaviorally identical to the live #654 path. It dedups by (team, channel,
-// resource id): one Purge call removes the id from allowed_resource_ids AND
-// every alias key pointing at it, so calling it once per orphaned id is
-// sufficient even when several aliases share that id.
-func (r *report) applyPurge(ctx context.Context, store *slackdata.Store) error {
+// behaviorally identical to the live #654 path. Each purge is an auditable log
+// record; a failure is counted (ALERTABLE) and logged but does not abort the
+// sweep, since the purge is idempotent and a re-run retries cleanly.
+func (r *report) applyPurge(ctx context.Context, store *slackdata.Store, logger *slog.Logger) error {
 	targets := r.purgeTargets()
-	if len(targets) == 0 {
-		fmt.Println("\nAPPLY: nothing to purge.")
-		return nil
-	}
-
-	fmt.Println("\n!!! APPLY MODE — mutating " + r.cfg.envLabel + " channel_policies (" +
-		itoa(len(targets)) + " orphaned id(s)) !!!")
-	var failures int
 	for _, t := range targets {
 		unbound, err := store.PurgeResourceFromChannel(ctx, t.teamID, t.channelID, t.resourceID)
 		if err != nil {
-			failures++
-			fmt.Println("  FAILED " + t.label() + ": " + err.Error())
+			r.stats.PurgeErrors.Add(1)
+			logger.Error("purge failed; an orphan may remain", "team_id", t.teamID, "channel_id", t.channelID, "resource_id", t.resourceID, "error", err)
 			continue
 		}
-		suffix := ""
-		if len(unbound) > 0 {
-			suffix = " (unbound aliases: " + strings.Join(unbound, ", ") + ")"
-		}
-		fmt.Println("  purged " + t.label() + suffix)
+		r.stats.Purged.Add(1)
+		r.stats.AliasesUnbound.Add(int64(len(unbound)))
+		logger.Info("purged orphan", "team_id", t.teamID, "channel_id", t.channelID, "resource_id", t.resourceID, "unbound_aliases", unbound)
 	}
-	if failures > 0 {
-		return fmt.Errorf("apply finished with %d purge failure(s); re-run to retry (purge is idempotent)", failures)
-	}
-	fmt.Println("APPLY complete: " + itoa(len(targets)) + " orphaned id(s) purged.")
 	return nil
 }
 
@@ -165,11 +131,10 @@ type purgeTarget struct {
 	resourceID string
 }
 
-func (t purgeTarget) label() string {
-	return "team=" + t.teamID + " channel=" + t.channelID + " resource=" + t.resourceID
-}
-
 // purgeTargets returns the de-duplicated, sorted set of orphaned ids to purge.
+// One PurgeResourceFromChannel call clears the id from allowed_resource_ids AND
+// every alias key pointing at it, so one target per (team, channel, id) suffices
+// even when several aliases share that dead id.
 func (r *report) purgeTargets() []purgeTarget {
 	seen := make(map[purgeTarget]struct{})
 	out := make([]purgeTarget, 0, len(r.findings))
@@ -194,20 +159,6 @@ func (r *report) purgeTargets() []purgeTarget {
 		return out[i].resourceID < out[j].resourceID
 	})
 	return out
-}
-
-// formatFinding renders one finding as a single grep-friendly line.
-func formatFinding(f finding) string {
-	var b strings.Builder
-	b.WriteString("[" + string(f.kind) + "] team=" + f.teamID + " channel=" + f.channelID)
-	if f.alias != "" {
-		b.WriteString(" alias=$" + f.alias)
-	}
-	if f.resourceID != "" {
-		b.WriteString(" resource=" + f.resourceID)
-	}
-	b.WriteString(" — " + f.detail)
-	return b.String()
 }
 
 // lessFinding orders findings for stable output: purge targets first (kind
@@ -247,6 +198,3 @@ func kindRank(k findingKind) int {
 		return 6
 	}
 }
-
-// quote wraps a value in double quotes for report copy.
-func quote(s string) string { return "\"" + s + "\"" }

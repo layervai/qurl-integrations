@@ -72,7 +72,7 @@ func TestClassifyRow_Resolved(t *testing.T) {
 		},
 		allowedResourceIDs: []string{"r_tunnel", "r_dead"}, // r_dead -> orphan SS member
 	}
-	rep := newReport(config{})
+	rep := newReport(&flags{})
 	classifyRow(row, live, rep)
 
 	got := countByKind(rep.findings)
@@ -102,7 +102,7 @@ func TestClassifyRow_Unresolved(t *testing.T) {
 		aliasBindings:      map[string]string{"dashboard": "r_tunnel"},
 		allowedResourceIDs: []string{"r_other"},
 	}
-	rep := newReport(config{})
+	rep := newReport(&flags{})
 	classifyRow(row, liveness{reason: "no key"}, rep)
 
 	if len(rep.findings) != 2 {
@@ -122,7 +122,7 @@ func TestClassifyRow_Unresolved(t *testing.T) {
 // (team, channel, resource) triple appears once even if multiple aliases share
 // the dead id.
 func TestPurgeTargets_DedupsAndFilters(t *testing.T) {
-	rep := newReport(config{})
+	rep := newReport(&flags{})
 	rep.add(finding{teamID: "T1", channelID: "C1", alias: "a", resourceID: "r_dead", kind: findingOrphanAlias})
 	rep.add(finding{teamID: "T1", channelID: "C1", alias: "b", resourceID: "r_dead", kind: findingOrphanAlias})
 	rep.add(finding{teamID: "T1", channelID: "C1", resourceID: "r_dead", kind: findingOrphanAllowedID})
