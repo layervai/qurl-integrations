@@ -41,8 +41,8 @@ behave the same way for the same reason. This follows from the general
 fail-closed rule above rather than a type-specific guard: the scope is keyed on
 the channel's policy row, not on its kind, so any channel with no row yields an
 empty allow-set. (If you remember a time when a 1:1 listed tunnels from other
-channels, see [History](#history) below — that was an earlier, since-reverted
-state.)
+channels, see [Past behavior](#past-behavior) below — that was an earlier,
+since-reverted state.)
 
 ## The capability boundary (defense in depth)
 
@@ -50,14 +50,14 @@ Channel scoping bounds what `/qurl list` *discloses*. Independently, minting is
 gated per channel at mint time, so even a token learned out-of-band cannot be
 minted from a channel where it isn't allowed:
 
-- `/qurl get $<slug>` (the listed token `/qurl list` shows for a tunnel — not
-  the raw `r_...` form, which is rejected) enforces the channel's allowed
-  resource-id set for non-admins. A slug pasted into `/qurl get` from a channel
-  where it isn't allowed fails closed.
-- `/qurl get $<alias>` requires an alias binding in the current channel. An
-  alias that isn't bound in your channel fails closed.
-- `/qurl get` also requires channel context and rejects raw internal
-  `r_...` identifiers.
+- Minting a token that `/qurl list` showed enforces the channel's allow-set for
+  non-admins. A token pasted into `/qurl get` from a channel where it isn't
+  allowed fails closed.
+- Minting through a channel alias requires that alias to be bound in the current
+  channel. An alias that isn't bound in your channel fails closed.
+- `/qurl get` requires channel context and accepts only the tokens and aliases
+  that `/qurl list` and `/qurl aliases` surface — never an internal resource
+  identifier.
 
 So disclosure (what `/qurl list` reveals) and capability (what `/qurl get` will
 mint) are governed by the *same* per-channel allow-set, and capability is
@@ -69,25 +69,18 @@ Because `/qurl list` is channel-scoped, the set of resource names, descriptions,
 and tokens a member can see in a channel is bounded by that channel's allow-set.
 Treat membership in a channel as the disclosure boundary for the resources
 protected there: adding a resource to a channel (or binding a channel alias)
-discloses its slug/description/token to that channel's members, and is also what
-lets them mint it.
+discloses its name, description, and token to that channel's members, and is
+also what lets them mint it.
 
-## History
+## Past behavior
 
-The channel-scoped model above is current as of #589 (2026-06). This disclosure
-behavior has changed over time, so the order matters if you're reconciling an
-old release note:
+`/qurl list` has not always been channel-scoped. An earlier version briefly
+listed every resource in the workspace to any member, regardless of channel,
+and release notes from that period describe that wider disclosure. That widening
+has since been reverted: the channel-scoped, fail-closed model described above
+is the current behavior, and list, aliases, and mint now share one
+channel-scoped allow-set.
 
-- Per-channel scoping for `/qurl list` was added in #234.
-- It was **reverted** in #459, which widened `/qurl list` to show the full
-  workspace list to every member regardless of channel. Release notes from that
-  window describe the wider disclosure.
-- Channel scoping was **re-introduced** in #589 and is the behavior described
-  above. List, aliases, and mint now share one channel-scoped allow-set. (A
-  later paging-completeness fix — issue #590, fixed by #596 — pages `/qurl
-  list` until the channel allow-set is satisfied. It is a completeness fix
-  within the #589 channel-scope work, not a separate disclosure change.)
-
-If you are reading a release note that says `/qurl list` shows the full
-workspace list to every member, it refers to the #459 window and no longer
-matches current behavior.
+So if you are reading a release note that says `/qurl list` shows the full
+workspace list to every member, it predates the revert and no longer matches how
+the bot behaves today.
