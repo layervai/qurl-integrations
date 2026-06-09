@@ -14,10 +14,10 @@ import (
 type scriptedLLM struct {
 	responses []Response
 	calls     int
-	captured  []Request
+	captured  []*Request
 }
 
-func (s *scriptedLLM) Complete(_ context.Context, req Request) (Response, error) {
+func (s *scriptedLLM) Complete(_ context.Context, req *Request) (Response, error) {
 	s.captured = append(s.captured, req)
 	if s.calls >= len(s.responses) {
 		return Response{}, errors.New("scriptedLLM: no more responses")
@@ -234,6 +234,24 @@ func TestRun_ProposeRevoke_AdminGated(t *testing.T) {
 	}
 	if res.Proposal == nil || res.Proposal.Action != ActionRevoke || !res.Proposal.AdminGated {
 		t.Fatalf("expected an admin-gated revoke proposal, got %+v", res.Proposal)
+	}
+}
+
+func TestRun_AccumulatesUsageAcrossRoundTrips(t *testing.T) {
+	// Two round-trips (a read, then an answer); their usage must sum into the
+	// turn's Result so the Slack layer can log/observe cache effectiveness.
+	r1 := toolResp(toolListResources, map[string]any{})
+	r1.Usage = Usage{InputTokens: 100, OutputTokens: 10, CacheReadInputTokens: 80}
+	r2 := textResp("here you go")
+	r2.Usage = Usage{InputTokens: 120, OutputTokens: 20, CacheReadInputTokens: 110}
+	llm := &scriptedLLM{responses: []Response{r1, r2}}
+	ctx, tc := testCtx()
+	res, _, err := New(llm, &fakeBackend{resources: "x"}).Run(ctx, tc, nil, "list")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Usage.InputTokens != 220 || res.Usage.OutputTokens != 30 || res.Usage.CacheReadInputTokens != 190 {
+		t.Fatalf("usage not summed across round-trips: %+v", res.Usage)
 	}
 }
 

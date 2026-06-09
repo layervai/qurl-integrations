@@ -118,24 +118,50 @@ type ToolSpec struct {
 
 // Request is one round-trip to the model: the system prompt, the available
 // tools, and the conversation so far.
+//
+// The system prompt is split so the constant part can be cached. SystemStable is
+// byte-identical across every turn and thread (the role + rules preamble); the
+// concrete LLM marks it (and the tool definitions, which render before it) as a
+// cache breakpoint so the agent's up-to-6 round-trips per turn don't reprocess it
+// each time. SystemPerTurn holds the per-turn context (channel/user/admin), which
+// varies and sits after the cached prefix.
 type Request struct {
-	System   string
-	Tools    []ToolSpec
-	Messages []Message
+	SystemStable  string
+	SystemPerTurn string
+	Tools         []ToolSpec
+	Messages      []Message
+}
+
+// Usage is the model's token accounting for a request, including the cache
+// counters used to confirm whether prompt caching is paying off.
+type Usage struct {
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+}
+
+// add accumulates another round-trip's usage into u.
+func (u *Usage) add(o Usage) {
+	u.InputTokens += o.InputTokens
+	u.OutputTokens += o.OutputTokens
+	u.CacheCreationInputTokens += o.CacheCreationInputTokens
+	u.CacheReadInputTokens += o.CacheReadInputTokens
 }
 
 // Response is the model's reply for one round-trip: any assistant text, any
-// requested tool calls, and the stop reason.
+// requested tool calls, the stop reason, and token usage.
 type Response struct {
 	Text       string
 	ToolCalls  []ToolCall
 	StopReason string
+	Usage      Usage
 }
 
 // LLM is the port to the language model. The concrete implementation
 // ([NewAnthropicLLM]) wraps the Anthropic Go SDK; tests inject a fake.
 type LLM interface {
-	Complete(ctx context.Context, req Request) (Response, error)
+	Complete(ctx context.Context, req *Request) (Response, error)
 }
 
 // Backend is the port to qURL read operations, each scoped by the
@@ -174,10 +200,12 @@ type Proposal struct {
 }
 
 // Result is the outcome of a turn: exactly one of Reply (text to post in-thread,
-// which may be a clarifying question) or Proposal (a mutation awaiting confirm).
+// which may be a clarifying question) or Proposal (a mutation awaiting confirm),
+// plus Usage summed across the turn's round-trips (for cost/cache observability).
 type Result struct {
 	Reply    string
 	Proposal *Proposal
+	Usage    Usage
 }
 
 // Agent runs the conversation loop over an [LLM] and a [Backend].
@@ -221,7 +249,9 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		return Result{}, history, errMissingDeps
 	}
 
-	system := systemPrompt(tc)
+	// Split the system prompt: the stable preamble + tools are the cache prefix;
+	// the per-turn context varies and sits after it.
+	perTurn := turnContextLines(tc)
 	tools := toolSpecs()
 
 	// Copy history so we never mutate the caller's slice; append the new turn.
@@ -229,11 +259,13 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	msgs = append(msgs, history...)
 	msgs = append(msgs, Message{Role: roleUser, Text: userText})
 
+	var usage Usage
 	for range a.maxIterations {
-		resp, err := a.llm.Complete(ctx, Request{System: system, Tools: tools, Messages: msgs})
+		resp, err := a.llm.Complete(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
 		if err != nil {
-			return Result{}, msgs, fmt.Errorf("agent: llm complete: %w", err)
+			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm complete: %w", err)
 		}
+		usage.add(resp.Usage)
 
 		// Record the assistant turn before acting on it, so the persisted
 		// history stays a faithful transcript.
@@ -246,7 +278,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 			if strings.TrimSpace(reply) == "" {
 				reply = iterationCapMessage
 			}
-			return Result{Reply: reply}, msgs, nil
+			return Result{Reply: reply, Usage: usage}, msgs, nil
 		}
 
 		// Parallel tool use is disabled, so there is normally one call; handle
@@ -271,7 +303,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 					results = append(results, ToolResult{ToolUseID: rest.ID, Content: proposalAckResult})
 				}
 				msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
-				return Result{Proposal: prop}, msgs, nil
+				return Result{Proposal: prop, Usage: usage}, msgs, nil
 			default:
 				content, isErr := a.executeRead(ctx, tc, call)
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: content, IsError: isErr})
@@ -280,5 +312,5 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
 	}
 
-	return Result{Reply: iterationCapMessage}, msgs, nil
+	return Result{Reply: iterationCapMessage, Usage: usage}, msgs, nil
 }
