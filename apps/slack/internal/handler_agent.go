@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -77,12 +78,19 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 		"event_id", env.EventID,
 	)
 	envCopy := *env
-	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+	if !h.startAsyncWorkerWithTimeout(log, agentTurnTimeout, func(ctx context.Context, log *slog.Logger) {
 		h.processAgentEvent(ctx, log, &envCopy)
 	}) {
 		log.Warn("agent: async pool saturated — dropping event")
 	}
 }
+
+// agentTurnTimeout bounds one conversation turn. A turn makes up to
+// defaultMaxIterations Anthropic round-trips plus channel-scoped reads, so it
+// needs more than the 25s slash-command budget — 25s could cancel a legitimate
+// multi-tool-call turn mid-flight and surface a spurious error to the user. The
+// iteration cap and (later) per-user rate limiting bound how long a slot is held.
+const agentTurnTimeout = 90 * time.Second
 
 // shouldDispatchAgentEvent filters out everything that isn't a human asking the
 // agent something: non-mention/DM events, bot and system/edited messages (the
@@ -231,14 +239,31 @@ func (h *Handler) loadAgentHistory(ctx context.Context, log *slog.Logger, partit
 // ~20 turns of context is ample; older turns are trimmed.
 const maxPersistedMessages = 40
 
-// saveAgentHistory persists the updated transcript, trimmed to a bounded length.
-// A version conflict (a concurrent turn won) is logged and dropped — the reply
-// still posts.
+// maxPersistedBytes caps the serialized transcript well under DynamoDB's 400KB
+// item limit. The message-count cap alone doesn't bound bytes — a single large
+// tool_result could still bloat the item — so we also drop oldest turns until
+// the blob fits. (Read-only tool output is compact today; this matters more once
+// mutation tool_results land.)
+const maxPersistedBytes = 350 * 1024
+
+// saveAgentHistory persists the updated transcript, trimmed to a bounded length
+// and byte size. A version conflict (a concurrent turn won) is logged and
+// dropped — the reply still posts.
 func (h *Handler) saveAgentHistory(ctx context.Context, log *slog.Logger, partition, threadKey string, history []agent.Message, version int64) {
-	blob, err := json.Marshal(trimAgentHistory(history, maxPersistedMessages))
+	trimmed := trimAgentHistory(history, maxPersistedMessages)
+	blob, err := json.Marshal(trimmed)
 	if err != nil {
 		log.Error("agent: marshal conversation failed", "error", err)
 		return
+	}
+	// Byte guard: drop oldest turns (one per pass — trimAgentHistory cuts at a
+	// turn boundary) until the blob fits or only the latest turn remains.
+	for len(blob) > maxPersistedBytes && len(trimmed) > 1 {
+		trimmed = trimAgentHistory(trimmed, len(trimmed)-1)
+		if blob, err = json.Marshal(trimmed); err != nil {
+			log.Error("agent: marshal conversation failed", "error", err)
+			return
+		}
 	}
 	switch err := h.cfg.AgentStore.SaveConversation(ctx, partition, threadKey, blob, version); {
 	case errors.Is(err, slackdata.ErrConversationConflict):

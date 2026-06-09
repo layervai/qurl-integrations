@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -272,6 +273,36 @@ func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("load failure should post one error reply, got %+v", *posts)
+	}
+}
+
+func TestSaveAgentHistory_ByteGuard(t *testing.T) {
+	fake := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
+	h := NewHandler(Config{AgentStore: store})
+
+	// 12 turns of ~50KB each (~600KB) — well past maxPersistedBytes (350KB) even
+	// though it's under the 40-message count cap.
+	big := strings.Repeat("x", 50*1024)
+	history := make([]agent.Message, 0, 24)
+	for i := range 12 {
+		history = append(history,
+			agent.Message{Role: "user", Text: fmt.Sprintf("q%d", i)},
+			agent.Message{Role: "assistant", Text: big},
+		)
+	}
+	h.saveAgentHistory(context.Background(), slog.Default(), "T1", "C1:1", history, 0)
+
+	item, ok := fake.items["T1|conv#C1:1"]
+	if !ok {
+		t.Fatalf("conversation not persisted")
+	}
+	stored := item["messages"].(*ddbtypes.AttributeValueMemberS).Value
+	if stored == "" {
+		t.Fatalf("expected the latest turn to be kept")
+	}
+	if len(stored) > maxPersistedBytes {
+		t.Fatalf("persisted blob %d bytes exceeds the %d byte cap", len(stored), maxPersistedBytes)
 	}
 }
 

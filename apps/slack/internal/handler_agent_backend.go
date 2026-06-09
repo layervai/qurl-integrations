@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -27,13 +28,14 @@ type agentBackend struct {
 
 	// Per-turn memo of the channel's reachable resource set. A backend is built
 	// once per turn (newAgentBackend in processAgentEvent) and reused across the
-	// model's tool calls, which are sequential (parallel tool use is disabled),
-	// so a plain field is safe — no mutex. The channel scope is invariant within
-	// a turn, so list_resources + every resolve_token share one GetItem instead
-	// of re-reading the same channel_policies row each call.
+	// model's tool calls; the channel scope is invariant within a turn, so
+	// list_resources + every resolve_token share one GetItem instead of
+	// re-reading the same channel_policies row each call. sync.Once keeps the
+	// memo safe even if parallel tool use is ever enabled (today it's disabled,
+	// so calls are sequential).
+	allowedOnce sync.Once
 	allowed     map[string]struct{}
 	allowedErr  error
-	allowedDone bool
 }
 
 // newAgentBackend builds the backend from the handler's authenticated-client
@@ -50,10 +52,9 @@ func (h *Handler) newAgentBackend(log *slog.Logger) *agentBackend {
 // channelAllowed returns the channel's reachable resource-id set, fetched once
 // and memoized for the turn.
 func (b *agentBackend) channelAllowed(ctx context.Context, tc *agent.TurnContext) (map[string]struct{}, error) {
-	if !b.allowedDone {
+	b.allowedOnce.Do(func() {
 		b.allowed, b.allowedErr = b.store.AllowedResourceIDsForChannel(ctx, tc.TeamID, tc.ChannelID)
-		b.allowedDone = true
-	}
+	})
 	return b.allowed, b.allowedErr
 }
 

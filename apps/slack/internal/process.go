@@ -86,8 +86,17 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 // startAsyncWorker runs async slash-command or interaction work through the
 // same bounded pool, shutdown drain, timeout, and panic recovery. The caller
 // owns the Slack ack shape because slash commands and modal submissions have
-// different response contracts.
+// different response contracts. Bounded by [asyncWorkTimeout] (slash-command
+// budget); see [Handler.startAsyncWorkerWithTimeout] for callers that need more.
 func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Context, log *slog.Logger)) bool {
+	return h.startAsyncWorkerWithTimeout(log, asyncWorkTimeout, work)
+}
+
+// startAsyncWorkerWithTimeout is startAsyncWorker with a caller-chosen per-work
+// deadline. A conversation-mode turn makes several Anthropic round-trips and so
+// needs a larger budget than the slash-command default, which was sized for a
+// couple of qURL API calls.
+func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger)) bool {
 	select {
 	case h.sem <- struct{}{}:
 	default:
@@ -117,7 +126,7 @@ func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Conte
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(h.baseCtx, asyncWorkTimeout)
+		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
 		defer cancel()
 		work(ctx, log)
 	}()
