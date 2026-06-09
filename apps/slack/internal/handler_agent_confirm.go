@@ -53,6 +53,17 @@ type pendingAction struct {
 	ChannelID string           `json:"channel_id"`
 }
 
+// validAliasBind reports whether a bare (no leading "$") alias + target — as the
+// confirm path stores them — pass the slash set-alias grammar (charset, length,
+// no backticks/non-printables, tunnel-only target). It reuses parseAliasArgs as the
+// single validation source by reconstructing its token form, so the confirm and
+// slash paths can't drift; the reconstruction stays encapsulated here rather than
+// at the call site.
+func validAliasBind(alias, target string) bool {
+	_, msg := parseAliasArgs("$"+alias+" $"+target, true)
+	return msg == ""
+}
+
 // confirmExecutable reports whether the confirm flow can actually EXECUTE this
 // action kind in this build. Deferred kinds (protect → PR4c) must fall back to the
 // text preview rather than render a live Approve button that can only reply "can't
@@ -352,14 +363,11 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// A revoke result ("revoked $x") is benign and useful as a public audit line.
 		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
 	case agent.ActionSetAlias:
-		// The confirm path has no parser gate (unlike the slash verb, where
-		// parseAliasArgs runs first), so the LLM-distilled alias/target reach here
-		// only normalizeToken-trimmed. Validate them through the SAME grammar — which
-		// rejects backticks / bad charset / non-tunnel targets — so an injected value
-		// can neither be bound (data hygiene) nor break out of the result's inline-
-		// code fence on the PUBLIC card. On failure we surface a generic message
-		// (agentConfirmInvalidAliasReply) rather than echo the value.
-		if _, msg := parseAliasArgs("$"+pa.Alias+" $"+pa.Target, true); msg != "" {
+		// The confirm path has no parser gate (unlike the slash verb), so validate the
+		// LLM-distilled alias/target through the SAME grammar first — see validAliasBind.
+		// On failure surface a generic message rather than echo the (possibly injected)
+		// value onto the PUBLIC card.
+		if !validAliasBind(pa.Alias, pa.Target) {
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
 		// Binds pa.Alias → pa.Target in the CLICK's channel (channel-scoped, like
