@@ -215,6 +215,37 @@ func TestSlackPostMessageFuncSurfacesRateLimit(t *testing.T) {
 	}
 }
 
+func TestSlackPostMessageFuncRejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Write more than the bounded-read limit so the seam trips its cap.
+		_, _ = w.Write([]byte(`{"ok":true,"padding":"`))
+		_, _ = w.Write([]byte(strings.Repeat("a", slackChatPostMessageResponseBodyLimit+1024)))
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("error = %v, want response-exceeded", err)
+	}
+}
+
+func TestSlackPostMessageFuncRejectsEmptyResponseBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // 200 with no body
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
+	if err == nil || !strings.Contains(err.Error(), "empty response body") {
+		t.Fatalf("error = %v, want empty response body", err)
+	}
+}
+
 func TestSlackPostMessageFuncSurfacesHTTPError(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
