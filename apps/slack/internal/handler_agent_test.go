@@ -131,9 +131,15 @@ func TestAgentEnabled(t *testing.T) {
 
 // --- integration: handleEvent → agent turn → reply ---
 
-type fakeAgentLLM struct{ reply string }
+type fakeAgentLLM struct {
+	reply string
+	err   error // when set, the turn fails (mimics a Complete/round-trip error)
+}
 
 func (f fakeAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+	if f.err != nil {
+		return agent.Response{}, f.err
+	}
 	return agent.Response{Text: f.reply, StopReason: "end_turn"}, nil
 }
 
@@ -277,6 +283,52 @@ func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
 	}
 }
 
+func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
+	// A turn that exhausts agentTurnTimeout leaves the turn ctx canceled by the
+	// time there's a reply to post. Delivery — the error reply, and the save +
+	// success post — must ride a fresh context off h.baseCtx, NOT the spent turn
+	// ctx: a post on a dead ctx fails instantly, and the user, whose @-mention was
+	// already dedupe-committed and acked 200, would get silence. The ctx-aware post
+	// below rejects an already-canceled ctx, so a regression to posting on the turn
+	// ctx drops the reply here and fails the count assertion.
+	cases := []struct {
+		name string
+		llm  fakeAgentLLM
+		want string
+	}{
+		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentErrorReply},
+		{"turn succeeded", fakeAgentLLM{reply: "You can reach staging."}, "You can reach staging."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			var mu sync.Mutex
+			var posts []capturedReply
+			post := func(ctx context.Context, _, _, channel, threadTS, text string) error {
+				if err := ctx.Err(); err != nil { // pre-fix: posts riding the spent turn ctx land here
+					return err
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				posts = append(posts, capturedReply{channel, threadTS, text})
+				return nil
+			}
+			h := NewHandler(Config{AgentLLM: c.llm, AgentStore: store, PostMessage: post})
+
+			// A spent turn ctx, exactly as the 90s budget elapsing would leave it.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			h.processAgentEvent(ctx, slog.Default(), env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> do it"))
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(posts) != 1 || posts[0].text != c.want {
+				t.Fatalf("spent turn ctx should still deliver %q, got %+v", c.want, posts)
+			}
+		})
+	}
+}
+
 func TestSaveAgentHistory_ByteGuard(t *testing.T) {
 	fake := newMemAgentDDB()
 	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
@@ -292,7 +344,7 @@ func TestSaveAgentHistory_ByteGuard(t *testing.T) {
 			agent.Message{Role: "assistant", Text: big},
 		)
 	}
-	h.saveAgentHistory(context.Background(), slog.Default(), "T1", "C1:1", history, 0)
+	h.saveAgentHistory(slog.Default(), "T1", "C1:1", history, 0)
 
 	item, ok := fake.items["T1|conv#C1:1"]
 	if !ok {
@@ -323,7 +375,7 @@ func TestSaveAgentHistory_SingleOversizedTurnDoesNotHang(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		h.saveAgentHistory(context.Background(), slog.Default(), "T1", "C1:9", history, 0)
+		h.saveAgentHistory(slog.Default(), "T1", "C1:9", history, 0)
 		close(done)
 	}()
 	select {

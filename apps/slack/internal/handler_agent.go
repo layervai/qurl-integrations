@@ -92,6 +92,17 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 // iteration cap and (later) per-user rate limiting bound how long a slot is held.
 const agentTurnTimeout = 90 * time.Second
 
+// agentDeliveryBudget bounds each post-turn delivery step — the transcript save
+// and the reply post each derive their own context with this budget off
+// h.baseCtx, never the turn ctx. By delivery time the turn ctx may be spent or
+// canceled (the turn hit agentTurnTimeout), and a SaveConversation / PostMessage
+// on a dead ctx fails instantly — yet the dedupe write is already committed and
+// Slack won't retry, so the user would get silence. Deriving off baseCtx (like
+// callerIsAdmin) lets delivery outlive the turn deadline; bounding it (not
+// baseCtx directly) keeps a wedged Slack/DDB call from pinning an async-pool slot
+// and lets SIGTERM still drain in-flight delivery.
+const agentDeliveryBudget = 15 * time.Second
+
 // shouldDispatchAgentEvent filters out everything that isn't a human asking the
 // agent something: non-mention/DM events, bot and system/edited messages (the
 // self-loop guard), authorless events, channel messages that aren't @-mentions,
@@ -175,7 +186,7 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		// Dedupe already committed, so Slack won't retry and we own the reply:
 		// tell the user something went wrong rather than leaving their @-mention
 		// silently unanswered (already logged in loadAgentHistory).
-		h.postAgentReply(ctx, log, env, agentEventRootTS(&env.Event), agentErrorReply)
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentErrorReply)
 		return
 	}
 
@@ -193,7 +204,7 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	replyTS := agentEventRootTS(&env.Event)
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)
-		h.postAgentReply(ctx, log, env, replyTS, agentErrorReply)
+		h.postAgentReply(log, env, replyTS, agentErrorReply)
 		return
 	}
 
@@ -208,8 +219,8 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		"cache_creation_tokens", result.Usage.CacheCreationInputTokens,
 	)
 
-	h.saveAgentHistory(ctx, log, partition, threadKey, newHistory, version)
-	h.postAgentReply(ctx, log, env, replyTS, agentReplyText(&result))
+	h.saveAgentHistory(log, partition, threadKey, newHistory, version)
+	h.postAgentReply(log, env, replyTS, agentReplyText(&result))
 }
 
 // loadAgentHistory reads and decodes a thread's transcript. A decode error is
@@ -248,8 +259,9 @@ const maxPersistedBytes = 350 * 1024
 
 // saveAgentHistory persists the updated transcript, trimmed to a bounded length
 // and byte size. A version conflict (a concurrent turn won) is logged and
-// dropped — the reply still posts.
-func (h *Handler) saveAgentHistory(ctx context.Context, log *slog.Logger, partition, threadKey string, history []agent.Message, version int64) {
+// dropped — the reply still posts. Persistence runs on its own context off
+// h.baseCtx (see agentDeliveryBudget), not the possibly-spent turn ctx.
+func (h *Handler) saveAgentHistory(log *slog.Logger, partition, threadKey string, history []agent.Message, version int64) {
 	trimmed := trimAgentHistory(history, maxPersistedMessages)
 	blob, err := json.Marshal(trimmed)
 	if err != nil {
@@ -261,8 +273,8 @@ func (h *Handler) saveAgentHistory(ctx context.Context, log *slog.Logger, partit
 	// when a pass makes no progress: trimAgentHistory cuts only at a user-turn
 	// start, so a single turn whose own tool_result blows past the cap has no
 	// boundary below it and returns unchanged — without this guard the loop would
-	// spin forever (a tight CPU loop the turn ctx can't interrupt). In that case
-	// we save oversized and let DDB reject + log rather than hang the worker.
+	// spin forever (a tight CPU loop no context can interrupt). In that case we
+	// save oversized and let DDB reject + log rather than hang the worker.
 	for len(blob) > maxPersistedBytes && len(trimmed) > 1 {
 		next := trimAgentHistory(trimmed, len(trimmed)-1)
 		if len(next) == len(trimmed) {
@@ -274,6 +286,8 @@ func (h *Handler) saveAgentHistory(ctx context.Context, log *slog.Logger, partit
 			return
 		}
 	}
+	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	defer cancel()
 	switch err := h.cfg.AgentStore.SaveConversation(ctx, partition, threadKey, blob, version); {
 	case errors.Is(err, slackdata.ErrConversationConflict):
 		log.Info("agent: conversation version conflict; concurrent turn won")
@@ -346,7 +360,11 @@ func agentReplyText(result *agent.Result) string {
 }
 
 // postAgentReply delivers the reply in-thread, logging (not surfacing) failures.
-func (h *Handler) postAgentReply(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, threadTS, text string) {
+// It derives its own context off h.baseCtx (see agentDeliveryBudget) rather than
+// the turn ctx, so a turn that spent its deadline still delivers its reply.
+func (h *Handler) postAgentReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string) {
+	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	defer cancel()
 	if err := h.cfg.PostMessage(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
 		log.Error("agent: post reply failed", "error", err)
 	}
