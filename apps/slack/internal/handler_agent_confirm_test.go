@@ -397,6 +397,29 @@ func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
 	}
 }
 
+func TestConfirm_AliasKindsAreAdminGated(t *testing.T) {
+	// set-alias and unset-alias are admin-gated (adminGatedFor): a non-admin click is
+	// denied ephemerally and claims nothing. The gate is shared with revoke's, but
+	// assert it directly for the new kinds rather than relying on inheritance.
+	for _, pa := range []*pendingAction{
+		{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1"},
+		{Action: agent.ActionUnsetAlias, Alias: "oncall", ChannelID: "C1"},
+	} {
+		t.Run(string(pa.Action), func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin") // admin = Uadmin; the clicker is not
+			id := hc.seedPending(t, pa)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
+			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if ro || !strings.Contains(strings.ToLower(text), "admin-only") {
+				t.Fatalf("non-admin %s must be denied ephemerally; replace=%v text=%q", pa.Action, ro, text)
+			}
+			if hc.claimed(id) {
+				t.Fatalf("a denied non-admin %s must not claim", pa.Action)
+			}
+		})
+	}
+}
+
 func TestPostAgentConfirm_SnapshotsAliasFields(t *testing.T) {
 	// The pending snapshot must carry Alias+Target so the click can execute a
 	// set-alias (the click never reads them off the wire).

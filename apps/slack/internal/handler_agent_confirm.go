@@ -53,24 +53,30 @@ type pendingAction struct {
 	ChannelID string           `json:"channel_id"`
 }
 
-// validAliasBind reports whether a bare (no leading "$") alias + target — as the
-// confirm path stores them — pass the slash set-alias grammar (charset, length,
-// no backticks/non-printables, tunnel-only target). It reuses parseAliasArgs as the
-// single validation source by reconstructing its token form, so the confirm and
-// slash paths can't drift; the reconstruction stays encapsulated here rather than
-// at the call site.
-func validAliasBind(alias, target string) bool {
-	_, msg := parseAliasArgs("$"+alias+" $"+target, true)
-	return msg == ""
+// confirmValidAliasBind validates a bare (no leading "$") alias + target — as the
+// confirm path stores them — against the slash set-alias grammar (charset, length,
+// no backticks/non-printables, tunnel-only target) and returns the parser's
+// CANONICAL forms. It reuses parseAliasArgs as the single validation source, so the
+// confirm and slash paths can't drift. Returning (and executing with) the canonical
+// values — not the raw inputs — closes the "validate a reconstruction, execute the
+// original" seam: e.g. a trailing tab validates clean (Fields trims it) but must not
+// be echoed verbatim onto the public card.
+func confirmValidAliasBind(alias, target string) (canonAlias, canonTarget string, ok bool) {
+	parsed, msg := parseAliasArgs("$"+alias+" $"+target, true)
+	if msg != "" {
+		return "", "", false
+	}
+	return parsed.Alias, strings.TrimPrefix(parsed.Target, "$"), true
 }
 
-// validAlias is the single-alias counterpart of validAliasBind, for the unset-alias
-// confirm path. The alias charset (lowercase-alnum-dash) rejects backticks AND every
-// non-printable (bidi/zero-width) — which escapeMrkdwnCode alone passes through —
-// keeping garbled/spoofed text off the public "not bound" card.
-func validAlias(alias string) bool {
-	_, msg := requireAlias("$" + alias)
-	return msg == ""
+// confirmValidAlias is the single-alias counterpart for the unset-alias confirm
+// path, returning the canonical alias. The alias charset (lowercase-alnum-dash)
+// rejects backticks AND every non-printable (bidi/zero-width) — which
+// escapeMrkdwnCode alone passes through — keeping garbled/spoofed text off the
+// public "not bound" card.
+func confirmValidAlias(alias string) (canon string, ok bool) {
+	a, msg := requireAlias("$" + alias)
+	return a, msg == ""
 }
 
 // confirmExecutable reports whether the confirm flow can actually EXECUTE this
@@ -373,24 +379,27 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
 	case agent.ActionSetAlias:
 		// The confirm path has no parser gate (unlike the slash verb), so validate the
-		// LLM-distilled alias/target through the SAME grammar first — see validAliasBind.
-		// On failure surface a generic message rather than echo the (possibly injected)
-		// value onto the PUBLIC card.
-		if !validAliasBind(pa.Alias, pa.Target) {
+		// LLM-distilled alias/target through the SAME grammar first — see
+		// confirmValidAliasBind. On failure surface a generic message rather than echo
+		// the (possibly injected) value onto the PUBLIC card. Bind/echo the CANONICAL
+		// (validated) values it returns, not the raw inputs.
+		alias, target, ok := confirmValidAliasBind(pa.Alias, pa.Target)
+		if !ok {
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
-		// Binds pa.Alias → pa.Target in the CLICK's channel (channel-scoped, like
-		// the slash set-alias). Inputs are now validated, so the benign result is
-		// safe on the public card.
-		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, pa.Alias, pa.Target)}
+		// Binds alias → target in the CLICK's channel (channel-scoped, like the slash
+		// set-alias). Inputs are validated, so the benign result is safe on the card.
+		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, alias, target)}
 	case agent.ActionUnsetAlias:
 		// Validate the alias like set-alias before echoing it onto the public card:
 		// unbindAliasResult escapes backticks, but non-printables (bidi/zero-width)
 		// would still garble/spoof the "not bound" line — the charset gate rejects them.
-		if !validAlias(pa.Alias) {
+		// Clear with the CANONICAL alias it returns, not the raw input.
+		alias, ok := confirmValidAlias(pa.Alias)
+		if !ok {
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
-		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, pa.Alias)}
+		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias)}
 	case agent.ActionProtectConnector, agent.ActionProtectURL:
 		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so
 		// a non-admin can't reach here; an admin gets a clean "not supported yet".

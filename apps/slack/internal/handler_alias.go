@@ -368,10 +368,13 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 //
 // CALLER CONTRACT: alias and slug MUST be pre-validated for the alias/slug
 // grammar (the /qurl-admin set-alias verb via parseAliasArgs; the
-// conversation-mode confirm flow via validAliasBind). The success/error copy
-// echoes both UNESCAPED into `$%s` code fences, and the confirm caller renders
-// the result on a PUBLIC card — so an unvalidated backtick/non-printable value
-// would break out or garble it. Any future caller must validate first.
+// conversation-mode confirm flow via confirmValidAliasBind). The success/error
+// copy echoes both UNESCAPED into `$%s` code fences — deliberately, so the
+// not-found error can round-trip the exact `$slug` the admin retypes into
+// `/qurl-admin protect-connector` — and the confirm caller renders the result on a
+// PUBLIC card. So the pre-validation is the load-bearing protection here, NOT an
+// escape; do not "fix" the asymmetry with the unset path (which both validates AND
+// escapes) by dropping this caller's validation. Any future caller must validate first.
 //
 // TOCTOU note: the slug→resource_id resolve and the DDB bind are two
 // steps; if the tunnel is deleted upstream between them, the binding
