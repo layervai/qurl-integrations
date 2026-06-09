@@ -47,6 +47,24 @@ func TestSystemBlocks_OmitsEmptyParts(t *testing.T) {
 	}
 }
 
+func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
+	l := &anthropicLLM{} // model/maxTokens irrelevant to the cache wiring
+	params := l.buildParams(&Request{
+		SystemStable: "RULES",
+		System:       "ctx",
+		Tools:        toolSpecs(),
+		Messages:     []Message{{Role: roleUser, Text: "hi"}},
+	})
+	// Message-level breakpoint (auto-places on the last message block).
+	if cc, _ := json.Marshal(params.CacheControl); !strings.Contains(string(cc), "ephemeral") {
+		t.Fatalf("message-level cache breakpoint not set: %s", cc)
+	}
+	// System breakpoint: exactly one, on the stable block.
+	if sys, _ := json.Marshal(params.System); strings.Count(string(sys), "cache_control") != 1 {
+		t.Fatalf("expected exactly one system cache breakpoint: %s", sys)
+	}
+}
+
 // TestSystemBlocks_ReassembleToSystemPrompt locks the two-block split to the
 // single-string systemPrompt that the prompt-invariant tests assert on, so a
 // future edit can't make the cached blocks diverge from what those tests check.

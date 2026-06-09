@@ -37,7 +37,17 @@ func NewAnthropicLLM(apiKey string) LLM {
 // most one tool call, and thinking is disabled: this is a low-latency
 // natural-language→tool-call translation layer, not a reasoning-heavy task.
 func (l *anthropicLLM) Complete(ctx context.Context, req *Request) (Response, error) {
-	params := anthropic.MessageNewParams{
+	msg, err := l.client.Messages.New(ctx, l.buildParams(req))
+	if err != nil {
+		return Response{}, fmt.Errorf("anthropic messages.new: %w", err)
+	}
+	return fromSDKMessage(msg), nil
+}
+
+// buildParams assembles the Messages API request. Pure (no network) so the
+// cache-breakpoint placement is unit-testable.
+func (l *anthropicLLM) buildParams(req *Request) anthropic.MessageNewParams {
+	return anthropic.MessageNewParams{
 		Model:     l.model,
 		MaxTokens: l.maxTokens,
 		System:    systemBlocks(req),
@@ -47,19 +57,14 @@ func (l *anthropicLLM) Complete(ctx context.Context, req *Request) (Response, er
 			OfAuto: &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: anthropic.Bool(true)},
 		},
 		Thinking: anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
-		// A second cache breakpoint, auto-placed on the last message block. The
-		// transcript replays (and grows) across the turn's round-trips and across
-		// turns in a thread, so caching it is the larger near-term win — it
-		// exceeds the model's minimum cacheable length sooner than the static
-		// tools+preamble prefix does. Harmless no-op while below that length.
+		// A second cache breakpoint, auto-placed on the last message block. Within
+		// a turn's up-to-6 round-trips TurnContext is fixed and the transcript
+		// only grows, so each round-trip reads the prior cache and extends it —
+		// the robust win. (Cross-turn it hits only when the same user replies,
+		// since the per-turn context block precedes the messages.) Harmless no-op
+		// while the prefix is below the model's minimum cacheable length.
 		CacheControl: anthropic.NewCacheControlEphemeralParam(),
 	}
-
-	msg, err := l.client.Messages.New(ctx, params)
-	if err != nil {
-		return Response{}, fmt.Errorf("anthropic messages.new: %w", err)
-	}
-	return fromSDKMessage(msg), nil
 }
 
 // systemBlocks renders the system prompt as SDK blocks. The stable preamble
