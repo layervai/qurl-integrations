@@ -143,9 +143,14 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 // buildAgentConfirmBlocks renders the confirm card: a summary section plus
 // Approve (primary) and Reject (danger) buttons. Both buttons carry ONLY the
 // pending-action id in their value.
+//
+// The summary renders as plain_text, NOT mrkdwn: it is LLM-distilled, so mrkdwn
+// would let a prompt-injected summary surface a masked link (`<http://evil|click>`)
+// or other markup publicly, right next to a live Approve button. plain_text shows
+// it literally.
 func buildAgentConfirmBlocks(summary, id string) []any {
 	return []any{
-		sectionBlock(summary),
+		map[string]any{"type": "section", "text": plainTextObj(summary)},
 		actionsBlock(
 			primaryButtonElement("Approve", agentConfirmApproveActionID, id),
 			dangerButtonElement("Reject", agentConfirmRejectActionID, id),

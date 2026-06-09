@@ -81,6 +81,11 @@ func TestBuildAgentConfirmBlocks(t *testing.T) {
 			t.Errorf("confirm blocks missing %q: %s", want, s)
 		}
 	}
+	// The LLM-distilled summary must render as plain_text (no mrkdwn), so an
+	// injected masked link can't surface next to the Approve button.
+	if strings.Contains(s, "mrkdwn") {
+		t.Errorf("confirm card must not render any mrkdwn (injection surface): %s", s)
+	}
 }
 
 // --- harness for propose + click orchestration ---
