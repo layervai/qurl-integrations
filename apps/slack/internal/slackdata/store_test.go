@@ -1035,3 +1035,143 @@ func TestChannelsForResource_QueryErrorSurfaces(t *testing.T) {
 		t.Error("ChannelsForResource(empty team): want bad-request error")
 	}
 }
+
+// TestPurgeResourceFromChannel fences the revoke/delete cascade verb. It must
+// clear EVERY reference to the resource from the channel_policies row — DELETE
+// the id from allowed_resource_ids AND REMOVE only the alias_bindings keys that
+// point at it (leaving unrelated aliases intact) — and must NOT materialize a
+// row for a channel that doesn't exist. This is the integrity guarantee behind
+// the orphaned-`$alias` fix: a revoked resource must not leave its slug alias
+// "bound" with nothing behind it.
+func TestPurgeResourceFromChannel(t *testing.T) {
+	const (
+		deadID     = "r_dead0001"
+		liveID     = "r_live0001"
+		staleAlias = "dashboard"
+		keepAlias  = "keepme"
+	)
+	dualRow := func() map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+			attrSlackChannelID: &ddbtypes.AttributeValueMemberS{Value: "C1"},
+			attrAliasBindings: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+				staleAlias: &ddbtypes.AttributeValueMemberS{Value: deadID},
+				keepAlias:  &ddbtypes.AttributeValueMemberS{Value: liveID},
+			}},
+			attrAllowedResourceIDs: &ddbtypes.AttributeValueMemberSS{Value: []string{deadID, liveID}},
+		}
+	}
+
+	t.Run("removes only the matching alias and the SS member", func(t *testing.T) {
+		var captured *dynamodb.UpdateItemInput
+		store := newStore(&stubDDB{
+			getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: dualRow()}, nil
+			},
+			updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+				captured = in
+				return &dynamodb.UpdateItemOutput{}, nil
+			},
+		})
+
+		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		if err != nil {
+			t.Fatalf("PurgeResourceFromChannel: %v", err)
+		}
+		if !reflect.DeepEqual(unbound, []string{staleAlias}) {
+			t.Errorf("unbound = %v, want [%q]", unbound, staleAlias)
+		}
+		if captured == nil {
+			t.Fatal("no UpdateItem issued")
+		}
+		expr := aws.ToString(captured.UpdateExpression)
+		if !strings.Contains(expr, "DELETE "+attrAllowedResourceIDs+" :rid") {
+			t.Errorf("UpdateExpression missing SS DELETE of the revoked id: %q", expr)
+		}
+		if !strings.Contains(expr, "REMOVE") {
+			t.Errorf("UpdateExpression missing alias REMOVE: %q", expr)
+		}
+		ss, ok := captured.ExpressionAttributeValues[":rid"].(*ddbtypes.AttributeValueMemberSS)
+		if !ok || !reflect.DeepEqual(ss.Value, []string{deadID}) {
+			t.Errorf(":rid = %#v, want string-set [%q]", captured.ExpressionAttributeValues[":rid"], deadID)
+		}
+		// Every name ref other than the alias_bindings attr resolves to an alias
+		// key slated for REMOVE — it must be the STALE alias, never the survivor.
+		var removed []string
+		for ref, name := range captured.ExpressionAttributeNames {
+			if ref == exprAliasBindings {
+				continue
+			}
+			removed = append(removed, name)
+		}
+		if !reflect.DeepEqual(removed, []string{staleAlias}) {
+			t.Errorf("REMOVE targets %v, want [%q] (the unrelated alias %q must survive)", removed, staleAlias, keepAlias)
+		}
+	})
+
+	t.Run("DELETE-only when no alias points at the resource", func(t *testing.T) {
+		row := dualRow()
+		// Only keepAlias→liveID remains; the revoked id lives solely in the SS.
+		row[attrAliasBindings] = &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			keepAlias: &ddbtypes.AttributeValueMemberS{Value: liveID},
+		}}
+		var captured *dynamodb.UpdateItemInput
+		store := newStore(&stubDDB{
+			getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{Item: row}, nil
+			},
+			updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+				captured = in
+				return &dynamodb.UpdateItemOutput{}, nil
+			},
+		})
+		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		if err != nil {
+			t.Fatalf("PurgeResourceFromChannel: %v", err)
+		}
+		if len(unbound) != 0 {
+			t.Errorf("unbound = %v, want empty", unbound)
+		}
+		if captured == nil {
+			t.Fatal("no UpdateItem issued (the SS member must still be cleared)")
+		}
+		if expr := aws.ToString(captured.UpdateExpression); strings.Contains(expr, "REMOVE") {
+			t.Errorf("UpdateExpression should be DELETE-only, got %q", expr)
+		}
+		if len(captured.ExpressionAttributeNames) != 0 {
+			t.Errorf("DELETE-only update should carry no name refs, got %v", captured.ExpressionAttributeNames)
+		}
+	})
+
+	t.Run("absent row issues no UpdateItem", func(t *testing.T) {
+		updateCalled := false
+		store := newStore(&stubDDB{
+			getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{}, nil // no Item → row absent
+			},
+			updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+				updateCalled = true
+				return &dynamodb.UpdateItemOutput{}, nil
+			},
+		})
+		unbound, err := store.PurgeResourceFromChannel(context.Background(), "T1", "C1", deadID)
+		if err != nil {
+			t.Fatalf("PurgeResourceFromChannel: %v", err)
+		}
+		if unbound != nil {
+			t.Errorf("unbound = %v, want nil for an absent row", unbound)
+		}
+		if updateCalled {
+			t.Error("an absent row must not issue an UpdateItem (it would materialize an empty row)")
+		}
+	})
+
+	t.Run("missing args rejected", func(t *testing.T) {
+		store := newStore(&stubDDB{})
+		for _, args := range [][3]string{{"", "C1", deadID}, {"T1", "", deadID}, {"T1", "C1", ""}} {
+			if _, err := store.PurgeResourceFromChannel(context.Background(), args[0], args[1], args[2]); err == nil {
+				t.Errorf("PurgeResourceFromChannel(%q,%q,%q): want bad-request error", args[0], args[1], args[2])
+			}
+		}
+	})
+}

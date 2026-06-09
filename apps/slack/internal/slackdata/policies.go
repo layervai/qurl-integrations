@@ -2,8 +2,10 @@ package slackdata
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -303,6 +305,109 @@ func (s *Store) RevokeResourceFromChannel(ctx context.Context, teamID, channelID
 		return ddbToError("RevokeResourceFromChannel", err)
 	}
 	return nil
+}
+
+// PurgeResourceFromChannel removes EVERY reference to resourceID from the
+// (teamID, channelID) channel_policies row: it DELETEs the id from
+// `allowed_resource_ids` AND REMOVEs each `alias_bindings` entry whose value is
+// resourceID. It returns the alias names it unbound (the caller logs them); a
+// nil/empty return means the row carried no alias pointing at resourceID.
+//
+// This is the revoke/delete cascade. [Store.RevokeResourceFromChannel] (the
+// Edit-modal "de-select a channel" verb) deliberately PRESERVES alias bindings,
+// because the resource still exists and may be reached from other channels. But
+// when the resource itself is destroyed, a surviving binding has nothing left to
+// resolve to — an orphaned `$alias` that [Store.BindChannelAlias] still rejects
+// as "already bound" while `/qurl list` shows nothing (the dead id is filtered
+// out of [allowedResourceIDsFromItem]'s union once the resource is gone). So a
+// resource delete must purge BOTH surfaces; this is the verb that does it.
+//
+// Read-then-write: DynamoDB can only REMOVE map entries by key, so it GetItems
+// the row, computes the alias keys whose value == resourceID, and issues a
+// single UpdateItem combining the SS DELETE with those map REMOVEs (the channel
+// never observes a half-purged row). A missing row short-circuits before the
+// UpdateItem so the purge never materializes an empty row; on a present row a
+// missing set member or absent map key each make their clause a harmless no-op,
+// so the call is idempotent and safe to run for a channel that turns out not to
+// reference the resource (the common case in a team-wide sweep).
+//
+// Best-effort by construction: the resource is already gone upstream when this
+// runs, so a lost race or partial failure only leaves a recoverable orphan
+// (clearable via `/qurl-admin unset-alias`), never data loss or a live-resource
+// leak (resource IDs are unique and never reused, so a dangling id can't later
+// point at a different resource).
+func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) ([]string, error) {
+	if teamID == "" || channelID == "" || resourceID == "" {
+		return nil, &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "PurgeResourceFromChannel: team_id, channel_id, and resource_id are required",
+		}
+	}
+	// Full-row GetItem (no projection): a projected read of only alias_bindings
+	// can't distinguish a missing row from a present row that carries an
+	// allowed_resource_ids grant but no aliases — and that SS-only row still needs
+	// purging. Matches the other reads on this table (small row).
+	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(channelID),
+		},
+	})
+	if err != nil {
+		return nil, ddbToError("PurgeResourceFromChannel", err)
+	}
+	// Row absent → nothing to purge. Returning here also keeps the unconditional
+	// UpdateItem below from materializing an empty row for a channel that never
+	// referenced the resource.
+	if len(out.Item) == 0 {
+		return nil, nil
+	}
+
+	var aliasKeys []string
+	for alias, rid := range readStringMap(out.Item, attrAliasBindings) {
+		if rid == resourceID {
+			aliasKeys = append(aliasKeys, alias)
+		}
+	}
+	sort.Strings(aliasKeys) // deterministic REMOVE order + return value
+
+	// One UpdateItem clears both surfaces: DELETE drops resourceID from the
+	// allowed_resource_ids SS (no-op if absent), and REMOVE deletes each
+	// alias_bindings key that pointed at it. The DELETE uses the literal attribute
+	// name (matching RevokeResourceFromChannel); only the user-controlled alias
+	// keys are name-aliased.
+	expr := "DELETE " + attrAllowedResourceIDs + " :rid"
+	var names map[string]string
+	if len(aliasKeys) > 0 {
+		names = map[string]string{exprAliasBindings: attrAliasBindings}
+		removes := make([]string, len(aliasKeys))
+		for i, alias := range aliasKeys {
+			nameRef := fmt.Sprintf("#a%d", i)
+			names[nameRef] = alias
+			removes[i] = exprAliasBindings + "." + nameRef
+		}
+		expr += " REMOVE " + strings.Join(removes, ", ")
+	}
+
+	in := &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(channelID),
+		},
+		UpdateExpression: aws.String(expr),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":rid": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+		},
+	}
+	if names != nil {
+		in.ExpressionAttributeNames = names
+	}
+	if _, err := s.Client.UpdateItem(ctx, in); err != nil {
+		return nil, ddbToError("PurgeResourceFromChannel", err)
+	}
+	return aliasKeys, nil
 }
 
 // ChannelsForResource returns the channel IDs in teamID whose channel_policies

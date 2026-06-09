@@ -417,3 +417,69 @@ func TestHandleListRevokeClick_UnparseableValue(t *testing.T) {
 		t.Errorf("DELETE fired for an unparseable value (hits = %d)", hits.Load())
 	}
 }
+
+// TestRevokeResource_PurgesChannelBindings reproduces the orphaned-`$alias` bug
+// and fences its fix: revoking a resource must sweep it out of EVERY channel
+// policy in the team — both the alias_bindings entries pointing at it and the
+// allowed_resource_ids membership — so it can't leave a ghost alias that still
+// reports "already bound" while /qurl list shows nothing. Unrelated bindings in
+// the same channel must survive, and the sweep must reach channels other than the
+// one the revoke was issued from.
+func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
+	const (
+		survivorResourceID = "r_survivor1"
+		otherChannelID     = "C_other1"
+		keepAlias          = "keepme"
+	)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	// C_test binds two aliases: testRevokeAlias → the resource we revoke, and
+	// keepAlias → an unrelated survivor that must remain bound afterwards.
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		testRevokeAlias: testRevokeResourceID,
+		keepAlias:       survivorResourceID,
+	})
+	// A SECOND channel exposes the revoked resource via allowed_resource_ids only
+	// (no alias) — proves the sweep is team-wide and clears the SS surface too.
+	ts.seedChannelExposure(t, testAdminTeamID, otherChannelID, testRevokeResourceID)
+	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	if !strings.Contains(msg, "Revoked") {
+		t.Fatalf("revoke message = %q, want a success confirmation", msg)
+	}
+
+	store := h.cfg.AdminStore
+	ctx := context.Background()
+
+	// The revoked resource's alias is gone from C_test (the orphan is purged)...
+	if _, found, err := store.LookupChannelAlias(ctx, testAdminTeamID, "C_test", testRevokeAlias); err != nil || found {
+		t.Errorf("alias %q still bound in C_test after revoke (found=%v, err=%v) — orphaned binding not purged", testRevokeAlias, found, err)
+	}
+	// ...but the unrelated alias is untouched.
+	if rid, found, err := store.LookupChannelAlias(ctx, testAdminTeamID, "C_test", keepAlias); err != nil || !found || rid != survivorResourceID {
+		t.Errorf("unrelated alias %q was wrongly removed (rid=%q, found=%v, err=%v)", keepAlias, rid, found, err)
+	}
+	// C_test's allow-set no longer carries the revoked id, but still carries the survivor.
+	cTest, err := store.AllowedResourceIDsForChannel(ctx, testAdminTeamID, "C_test")
+	if err != nil {
+		t.Fatalf("allow-set read (C_test): %v", err)
+	}
+	if _, ok := cTest[testRevokeResourceID]; ok {
+		t.Errorf("revoked id still in C_test allow-set: %v", cTest)
+	}
+	if _, ok := cTest[survivorResourceID]; !ok {
+		t.Errorf("survivor id missing from C_test allow-set: %v", cTest)
+	}
+	// The team-wide sweep reached the other channel and cleared its SS membership.
+	cOther, err := store.AllowedResourceIDsForChannel(ctx, testAdminTeamID, otherChannelID)
+	if err != nil {
+		t.Fatalf("allow-set read (%s): %v", otherChannelID, err)
+	}
+	if _, ok := cOther[testRevokeResourceID]; ok {
+		t.Errorf("revoked id still in %s allow-set — team-wide sweep missed it: %v", otherChannelID, cOther)
+	}
+}

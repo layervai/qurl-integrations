@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -250,6 +251,66 @@ func (h *Handler) listResourcesEmptyMessageForCaller(ctx context.Context, log *s
 	return listResourcesEmptyAdminMessage
 }
 
+// listResourcesStaleMessageForCaller is the empty-state for a channel whose
+// allow-set is non-empty but resolves to zero live resources: every bound
+// resource was revoked or deleted, leaving orphaned `$alias` bindings. Unlike the
+// generic [Handler.listResourcesEmptyMessageForCaller] "install one" copy — used
+// when the channel has no policy at all — this NAMES the stale aliases and points
+// at `/qurl-admin unset-alias`, so a user isn't sent to set up a new resource when
+// the real fix is unbinding a ghost.
+//
+// It falls back to the generic empty state when no alias name can be surfaced (a
+// stale exposure carried only by allowed_resource_ids, or a policy read failure):
+// with no concrete `$alias` to name, the generic copy is the better guidance.
+//
+// unset-alias is admin-only, so the actionable verb is shown only to a bot admin;
+// others get an admin handoff. The admin test is a direct CheckAdmin (mirroring
+// listResourcesEmptyMessageForCaller), NOT listCallerCanEdit — an admin on a
+// deployment without the Edit-modal wiring can still run the slash command, so
+// they should still see the fix. A nil store / missing ids / read error all
+// degrade to the handoff copy (fail-soft).
+func (h *Handler) listResourcesStaleMessageForCaller(ctx context.Context, log *slog.Logger, teamID, channelID, userID string) string {
+	aliasesByResource := h.channelAliasesByResourceID(ctx, log, teamID, channelID)
+	stale := make([]string, 0, len(aliasesByResource))
+	for _, aliases := range aliasesByResource {
+		stale = append(stale, aliases...)
+	}
+	if len(stale) == 0 {
+		return h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID)
+	}
+	sort.Strings(stale)
+	tokens := make([]string, len(stale))
+	for i, a := range stale {
+		tokens[i] = mrkdwnTokenSpan(a)
+	}
+	joined := strings.Join(tokens, ", ")
+	// Singular/plural agreement so the copy reads naturally for one ghost alias
+	// ("a stale alias … Clear it") and many ("stale aliases … Clear them").
+	noun := "stale " + aliasNoun(len(stale))
+	pronoun := "them"
+	if len(stale) == 1 {
+		noun = "a " + noun
+		pronoun = "it"
+	}
+
+	isAdmin := false
+	if h.cfg.AdminStore != nil && teamID != "" && userID != "" {
+		gateCtx, cancel := context.WithTimeout(ctx, adminGateBudget)
+		ok, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+		cancel()
+		if err != nil {
+			log.Debug("list: admin check for stale-state hint failed — using admin handoff copy", "error", err, "team_id", teamID)
+		}
+		isAdmin = err == nil && ok
+	}
+	if isAdmin {
+		return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Clear %s with `/qurl-admin unset-alias`, then protect a new resource here.",
+			noun, joined, pronoun)
+	}
+	return fmt.Sprintf(":mag: This channel has no live qURL resources — only %s (%s) left by a revoked or deleted resource. Ask a Slack admin to clear %s with `/qurl-admin unset-alias`.",
+		noun, joined, pronoun)
+}
+
 // listFooterText is the guidance line under /qurl list when rendered as
 // plain text — both the Block Kit fallback (`text`) and the visible
 // message when the tunnel set is too large for per-row buttons (see
@@ -365,7 +426,12 @@ func (h *Handler) processListResources(ctx context.Context, log *slog.Logger, va
 	}
 
 	if len(resources) == 0 {
-		_ = h.postResponse(log, responseURL, h.listResourcesEmptyMessageForCaller(ctx, log, teamID, userID))
+		// The allow-set was non-empty (listChannelScope passed) yet nothing
+		// resolved to a live resource: every referenced resource was revoked or
+		// deleted, leaving orphaned `$alias` bindings. Name them and point at the
+		// fix, rather than the generic "install one" copy that sends a user to set
+		// up a new resource when the real fix is unbinding a ghost.
+		_ = h.postResponse(log, responseURL, h.listResourcesStaleMessageForCaller(ctx, log, teamID, channelID, userID))
 		return
 	}
 

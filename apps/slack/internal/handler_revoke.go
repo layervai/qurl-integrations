@@ -187,7 +187,49 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 		return ":warning: " + sanitizeAPIError(err, fmt.Sprintf("Failed to revoke `$%s`", escapeMrkdwnCode(displayToken)))
 	}
 	log.Info("revoke succeeded", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
+	// Cascade the delete into the bot's channel policies: a destroyed resource
+	// must not leave an orphaned `$alias` behind (one that still reports "already
+	// bound" yet lists no resource). Best-effort and post-success — the resource
+	// is already gone, so a sweep failure only leaves a recoverable orphan and
+	// must not change the revoke reply.
+	h.purgeResourceBindings(ctx, log, teamID, resourceID)
 	return fmt.Sprintf("Revoked `$%s` and all its qURLs.", escapeMrkdwnCode(displayToken))
+}
+
+// purgeResourceBindings removes the just-revoked resourceID from every channel
+// policy in teamID that still references it — both the allowed_resource_ids set
+// and any alias_bindings entries (see [slackdata.Store.PurgeResourceFromChannel]).
+// Without it, revoking a resource orphans the channel `$alias` bound to it: the
+// alias stays "bound" (so set-alias refuses to reuse the name) yet resolves to a
+// deleted resource (so `/qurl list` shows nothing) — a contradictory state a user
+// can otherwise escape only by guessing the ghost alias and running
+// `/qurl-admin unset-alias`.
+//
+// Best-effort: an AdminStore-nil deployment has no channel policies to sweep, and
+// any read/write failure is logged and skipped rather than surfaced — the revoke
+// already succeeded upstream, and a missed binding is recoverable.
+func (h *Handler) purgeResourceBindings(ctx context.Context, log *slog.Logger, teamID, resourceID string) {
+	if h.cfg.AdminStore == nil {
+		return
+	}
+	channels, err := h.cfg.AdminStore.ChannelsForResource(ctx, teamID, resourceID)
+	if err != nil {
+		log.Warn("revoke: channel-binding sweep failed; an orphaned alias may remain",
+			"error", err, "team_id", teamID, "resource_id", resourceID)
+		return
+	}
+	for _, channelID := range channels {
+		unbound, err := h.cfg.AdminStore.PurgeResourceFromChannel(ctx, teamID, channelID, resourceID)
+		if err != nil {
+			log.Warn("revoke: failed to purge resource from a channel; an orphaned alias may remain",
+				"error", err, "team_id", teamID, "channel_id", channelID, "resource_id", resourceID)
+			continue
+		}
+		if len(unbound) > 0 {
+			log.Info("revoke: unbound orphaned channel aliases",
+				"team_id", teamID, "channel_id", channelID, "resource_id", resourceID, "aliases", unbound)
+		}
+	}
 }
 
 // handleListRevokeClick handles the admin-only red "Revoke" button on a
