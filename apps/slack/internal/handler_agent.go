@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -174,6 +175,19 @@ func agentEventThreadKey(env *slackEventEnvelope) string {
 // processAgentEvent runs one conversation turn on the async pool: dedupe, load
 // history, run the agent, persist, and post the reply.
 func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+	// Panic safety-net: we've already acked 200 and may have committed the dedupe
+	// marker, so Slack won't retry. If the turn panics, startAsyncWorker's recover
+	// would log+swallow but post nothing, leaving the @-mention silently
+	// unanswered. Absorb the panic here instead — log the stack (the worker recover
+	// won't see it) and post the generic reply on a fresh ctx (postAgentReply
+	// self-derives one) so the user always hears something went wrong.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("agent: panic during turn", "recover", rec, "stack", string(debug.Stack()))
+			h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentErrorReply)
+		}
+	}()
+
 	partition := agentEventPartition(env)
 
 	// Dedupe first. Slack delivers at least once; a single winner proceeds.
@@ -266,8 +280,9 @@ func (h *Handler) loadAgentHistory(ctx context.Context, log *slog.Logger, partit
 
 // maxPersistedMessages bounds the transcript persisted per thread so a long
 // thread can't grow the DynamoDB item toward the 400KB limit (at which point the
-// save fails and the thread loses continuity). The agent caps work per turn, so
-// ~20 turns of context is ample; older turns are trimmed.
+// save fails and the thread loses continuity). At ~2 messages per plain Q&A turn
+// and ~4 per tool-using turn, 40 messages is roughly the last 10–20 turns —
+// ample given the per-turn work cap; older turns are trimmed.
 const maxPersistedMessages = 40
 
 // maxPersistedBytes caps the serialized transcript well under DynamoDB's 400KB
@@ -371,6 +386,11 @@ func (h *Handler) callerIsAdmin(log *slog.Logger, teamID, userID string) bool {
 // surfaced as a preview while conversation mode is read-only.
 func agentReplyText(result *agent.Result) string {
 	if result.Proposal != nil {
+		// A blank summary would render as a dangling "• " bullet; fall back like
+		// the blank-Reply guard below rather than post an empty preview.
+		if strings.TrimSpace(result.Proposal.Summary) == "" {
+			return agentErrorReply
+		}
 		return agentProposalPreviewPrefix + result.Proposal.Summary
 	}
 	if strings.TrimSpace(result.Reply) == "" {

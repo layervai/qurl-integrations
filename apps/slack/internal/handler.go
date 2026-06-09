@@ -336,7 +336,9 @@ type Config struct {
 
 	// AgentDisabled is the org-level kill switch. True forces conversation mode
 	// off regardless of the wiring above — the panic button independent of the
-	// per-workspace toggle.
+	// per-workspace toggle. Read from Config at construction, so flipping it is a
+	// deploy-time action (redeploy/reconstruct), not a live runtime switch; a
+	// hot-reloadable flag is deferred to the enablement work (see #651).
 	AgentDisabled bool
 }
 

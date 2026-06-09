@@ -103,6 +103,11 @@ func TestAgentReplyText(t *testing.T) {
 	if got := agentReplyText(&agent.Result{Reply: "   "}); got != agentErrorReply {
 		t.Errorf("blank reply should fall back to the error reply, got %q", got)
 	}
+	// A proposal with a blank summary would render as a dangling bullet; it must
+	// fall back to the error reply like the blank-Reply case.
+	if got := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "  "}}); got != agentErrorReply {
+		t.Errorf("blank proposal summary should fall back to the error reply, got %q", got)
+	}
 }
 
 func TestAgentEnabled(t *testing.T) {
@@ -141,6 +146,13 @@ func (f fakeAgentLLM) Complete(context.Context, *agent.Request) (agent.Response,
 		return agent.Response{}, f.err
 	}
 	return agent.Response{Text: f.reply, StopReason: "end_turn"}, nil
+}
+
+// panicAgentLLM panics mid-turn to exercise processAgentEvent's panic safety-net.
+type panicAgentLLM struct{}
+
+func (panicAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+	panic("boom in the model call")
 }
 
 // memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem +
@@ -351,6 +363,24 @@ func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("in-budget failure should post the generic error reply, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_PanicPostsError(t *testing.T) {
+	// A panic mid-turn — after dedupe is committed and 200 already acked, so Slack
+	// won't retry — must not vanish: the safety-net recover posts the error reply
+	// (and the panic must not escape processAgentEvent).
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> boom"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
+		t.Fatalf("a panicking turn should still post the error reply, got %+v", *posts)
 	}
 }
 
