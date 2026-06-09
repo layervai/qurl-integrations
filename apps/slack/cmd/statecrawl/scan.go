@@ -38,8 +38,10 @@ type policyRow struct {
 // onlyTeam is set, via a server-side FilterExpression) and returns the parsed
 // rows. A Scan is the right tool here: the reconciler is a full sweep, run
 // rarely and out-of-band, not a hot path. Rows missing the team/channel keys
-// are skipped — they can't be acted on and shouldn't abort the crawl.
-func scanPolicyRows(ctx context.Context, ddbClient *dynamodb.Client, table, onlyTeam string) ([]policyRow, error) {
+// are skipped — they can't be acted on and shouldn't abort the crawl. The
+// scanner is the SDK's ScanAPIClient interface (satisfied by *dynamodb.Client)
+// so tests can inject a fake without localstack.
+func scanPolicyRows(ctx context.Context, scanner dynamodb.ScanAPIClient, table, onlyTeam string) ([]policyRow, error) {
 	in := &dynamodb.ScanInput{TableName: aws.String(table)}
 	if onlyTeam != "" {
 		in.FilterExpression = aws.String("#tid = :tid")
@@ -50,7 +52,7 @@ func scanPolicyRows(ctx context.Context, ddbClient *dynamodb.Client, table, only
 	}
 
 	var rows []policyRow
-	paginator := dynamodb.NewScanPaginator(ddbClient, in)
+	paginator := dynamodb.NewScanPaginator(scanner, in)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {

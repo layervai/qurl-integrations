@@ -202,10 +202,24 @@ func looksProd(f *flags) bool {
 	return false
 }
 
-// run wires the AWS clients and drives the crawl: scan policies, group by team,
-// reconcile each team against its live resources, emit findings, then either
-// report the dry-run plan or apply the purge.
+// run wires the live AWS clients and hands off to crawl. Kept thin so crawl —
+// the actual reconcile logic — is testable with injected fakes (no AWS).
 func run(ctx context.Context, f *flags, logger *slog.Logger) error {
+	store, keys, ddbClient, err := buildClients(ctx, f)
+	if err != nil {
+		return err
+	}
+	_, err = crawl(ctx, f, logger, store, keys, ddbClient)
+	return err
+}
+
+// crawl drives the reconcile: scan policies, group by team, reconcile each team
+// against its live resources, emit findings, then either report the dry-run
+// plan or apply the purge — ending in a structured summary line. Dependencies
+// are injected (the purge Store, the API-key provider, the Scan client) so the
+// whole flow can be exercised end-to-end against fakes. Returns the counter
+// snapshot for the caller (and tests) to inspect.
+func crawl(ctx context.Context, f *flags, logger *slog.Logger, store purger, keys auth.Provider, scanner dynamodb.ScanAPIClient) (Snapshot, error) {
 	started := time.Now()
 	logger.Info("statecrawl starting", "deployment", f.envLabel, "mode", modeString(f),
 		"channel_policies_table", f.channelPoliciesTable, "only_team", f.onlyTeam)
@@ -213,14 +227,9 @@ func run(ctx context.Context, f *flags, logger *slog.Logger) error {
 		logger.Warn("-allow-prod-purge has no effect under -dry-run (no mutations happen in a dry run)")
 	}
 
-	store, keys, ddbClient, err := buildClients(ctx, f)
+	rows, err := scanPolicyRows(ctx, scanner, f.channelPoliciesTable, f.onlyTeam)
 	if err != nil {
-		return err
-	}
-
-	rows, err := scanPolicyRows(ctx, ddbClient, f.channelPoliciesTable, f.onlyTeam)
-	if err != nil {
-		return fmt.Errorf("scan channel_policies: %w", err)
+		return Snapshot{}, fmt.Errorf("scan channel_policies: %w", err)
 	}
 
 	rep := newReport(f)
@@ -241,15 +250,16 @@ func run(ctx context.Context, f *flags, logger *slog.Logger) error {
 
 	rep.emitFindings(logger)
 	if err := rep.settle(ctx, store, logger); err != nil {
-		return err
+		return rep.stats.Snapshot(), err
 	}
+	snap := rep.stats.Snapshot()
 	logger.Info("statecrawl complete", append([]any{
 		"deployment", f.envLabel, "mode", modeString(f), "elapsed", time.Since(started).String(),
-	}, rep.stats.Snapshot().logAttrs()...)...)
-	if n := rep.stats.PurgeErrors.Load(); n > 0 {
-		return fmt.Errorf("%d purge(s) failed; re-run to retry (purge is idempotent)", n)
+	}, snap.logAttrs()...)...)
+	if snap.PurgeErrors > 0 {
+		return snap, fmt.Errorf("%d purge(s) failed; re-run to retry (purge is idempotent)", snap.PurgeErrors)
 	}
-	return nil
+	return snap, nil
 }
 
 // buildClients constructs the slackdata Store (for the purge verb), the API-key

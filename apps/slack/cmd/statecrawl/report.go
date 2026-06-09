@@ -4,9 +4,15 @@ import (
 	"context"
 	"log/slog"
 	"sort"
-
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
+
+// purger is the single mutation the apply path performs: the bot's
+// PurgeResourceFromChannel cascade. *slackdata.Store satisfies it; tests inject
+// a fake to assert the dry-run path never calls it and the apply path calls it
+// with the right (team, channel, resource) triples.
+type purger interface {
+	PurgeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) ([]string, error)
+}
 
 // findingKind discriminates the categories the crawl surfaces. The two purge
 // targets (#654 backfill) are findingOrphanAlias and findingOrphanAllowedID;
@@ -91,7 +97,7 @@ func (r *report) emitFindings(logger *slog.Logger) {
 
 // settle is the terminal step: in a dry run it records and logs the purge PLAN
 // (what would be cleared) without mutating; otherwise it applies the purge.
-func (r *report) settle(ctx context.Context, store *slackdata.Store, logger *slog.Logger) error {
+func (r *report) settle(ctx context.Context, store purger, logger *slog.Logger) error {
 	targets := r.purgeTargets()
 	if r.f.dryRun {
 		r.stats.DryRunWouldPurge.Store(int64(len(targets)))
@@ -108,7 +114,7 @@ func (r *report) settle(ctx context.Context, store *slackdata.Store, logger *slo
 // behaviorally identical to the live #654 path. Each purge is an auditable log
 // record; a failure is counted (ALERTABLE) and logged but does not abort the
 // sweep, since the purge is idempotent and a re-run retries cleanly.
-func (r *report) applyPurge(ctx context.Context, store *slackdata.Store, logger *slog.Logger) error {
+func (r *report) applyPurge(ctx context.Context, store purger, logger *slog.Logger) error {
 	targets := r.purgeTargets()
 	for _, t := range targets {
 		unbound, err := store.PurgeResourceFromChannel(ctx, t.teamID, t.channelID, t.resourceID)
