@@ -1014,7 +1014,10 @@ func logAgentSurfaceState(llmWired, storeWired, postWired, killed bool) {
 			missing = append(missing, "ANTHROPIC_API_KEY (AgentLLM)")
 		}
 		if !storeWired {
-			missing = append(missing, slackdata.EnvAgentStateTable+" (AgentStore)")
+			// AgentStore is nil for two reasons — the table env is unset, OR it is
+			// set but construction failed (buildAgentStore logs the real cause as an
+			// error). Don't assert "unset" here, which would contradict that error.
+			missing = append(missing, "AgentStore ("+slackdata.EnvAgentStateTable+" unset, or construction failed — see the logged error)")
 		}
 		if !postWired {
 			missing = append(missing, "PostMessage")

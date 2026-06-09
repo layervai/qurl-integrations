@@ -240,12 +240,7 @@ const slackChatPostMessageResponseBodyLimit = 64 * 1024
 // bot token exactly like the slash-command modals do.
 func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
 	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: slackChatPostMessageTimeout,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		httpClient = defaultSlackPostMessageClient()
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
@@ -319,6 +314,18 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
 			"team_id", teamID, "enterprise_id", enterpriseID)
 		return postBody(ctx, enterpriseID, body)
+	}
+}
+
+// defaultSlackPostMessageClient builds the seam's HTTP client. Mirrors
+// defaultSlackViewsOpenClient (CheckRedirect → ErrUseLastResponse so a redirect
+// is surfaced as a response, not followed) but with the chat.postMessage timeout.
+func defaultSlackPostMessageClient() *http.Client {
+	return &http.Client{
+		Timeout: slackChatPostMessageTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
