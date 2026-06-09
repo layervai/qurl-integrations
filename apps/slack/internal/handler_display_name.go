@@ -348,13 +348,16 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 	// the Type==Tunnel / Status==Active guard and unset's slug both still hold.
 	if channelID != "" && h.cfg.AdminStore != nil {
 		boundID, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, id)
-		if lookupErr != nil {
-			// Best-effort enhancement: log and fall through to the not-found
-			// copy rather than surfacing a store error for what may be a plain
-			// typo. The admin gate read AdminStore moments ago, so a transient
-			// failure here is unlikely.
+		switch {
+		case lookupErr != nil:
+			// channel_policies is a DIFFERENT table from the workspace_mappings the
+			// admin gate read, so it can be unavailable while the gate passes. Surface
+			// the service-unavailable signal (matching resolveTokenForGet) rather than
+			// falling through to the "no such id" copy, which would misdiagnose an
+			// outage as a typo.
 			log.Warn("display-name: channel alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "id", id)
-		} else if found {
+			return nil, nil, serviceUnreachableMessage
+		case found:
 			// Legacy guard, mirroring resolveTokenForGet: a pre-resource set-alias
 			// row stored a raw URL, not an `r_` id. It can't resolve to a tunnel, so
 			// refuse with the same re-bind hint `/qurl get` gives — and skip the
