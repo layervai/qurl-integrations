@@ -45,7 +45,7 @@ func newFeedbackWebhookPoster(webhookURL, userAgent string, httpClient *http.Cli
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		userAgent = defaultSlackOpenViewUserAgent
+		userAgent = defaultSlackAPIUserAgent
 	}
 	return func(ctx context.Context, payload []byte) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(payload))

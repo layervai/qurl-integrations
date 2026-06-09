@@ -112,6 +112,13 @@ func TestNewAgentStore(t *testing.T) {
 	if _, err := NewAgentStore(newAgentFakeDDB(), ""); err == nil {
 		t.Error("expected error when table name and env are empty")
 	}
+	// A whitespace-only env value must be rejected as empty, not used verbatim:
+	// the empty tableName triggers the env fallback, which trims before checking.
+	t.Setenv(EnvAgentStateTable, "   ")
+	if _, err := NewAgentStore(newAgentFakeDDB(), ""); err == nil {
+		t.Error("expected error when env table is whitespace-only")
+	}
+	t.Setenv(EnvAgentStateTable, "")
 	if _, err := NewAgentStore(nil, "t"); err == nil {
 		t.Error("expected error when client is nil")
 	}

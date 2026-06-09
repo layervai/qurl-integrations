@@ -3,12 +3,15 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -90,11 +93,14 @@ type AgentStore struct {
 }
 
 // NewAgentStore constructs an [AgentStore]. The table name falls back to
-// EnvAgentStateTable when empty; a missing name is an error (there is no safe
-// default for which environment's data to write).
+// EnvAgentStateTable (trimmed) when empty; a missing or whitespace-only name is
+// an error (there is no safe default for which environment's data to write).
 func NewAgentStore(client DynamoDBClient, tableName string) (*AgentStore, error) {
 	if tableName == "" {
-		tableName = os.Getenv(EnvAgentStateTable)
+		// Trim here too, not just in NewAgentStoreFromEnv: a whitespace-only
+		// QURL_AGENT_STATE_TABLE must be rejected as empty for every caller,
+		// otherwise a store would be built with a blank table name.
+		tableName = strings.TrimSpace(os.Getenv(EnvAgentStateTable))
 	}
 	if tableName == "" {
 		return nil, &Error{StatusCode: http.StatusInternalServerError, Title: "NewAgentStore: " + EnvAgentStateTable + " is required"}
@@ -109,6 +115,22 @@ func NewAgentStore(client DynamoDBClient, tableName string) (*AgentStore, error)
 		ConversationTTL: defaultConversationTTL,
 		DedupeTTL:       defaultDedupeTTL,
 	}, nil
+}
+
+// NewAgentStoreFromEnv constructs an [AgentStore] with a DynamoDB client built
+// from the ambient AWS config and the table named by [EnvAgentStateTable]. The
+// aws-config plumbing lives here (mirroring [NewStore]) so the composition root
+// stays free of SDK wiring. Returns an error when config load fails or the table
+// env is unset/blank — callers treat an unset table as "feature dark", so check
+// EnvAgentStateTable before calling rather than loading AWS config for nothing.
+// The table name is trimmed so a whitespace-only value is rejected as empty
+// (not used verbatim) even when this constructor is called directly.
+func NewAgentStoreFromEnv(ctx context.Context) (*AgentStore, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NewAgentStoreFromEnv: load AWS config: %w", err)
+	}
+	return NewAgentStore(dynamodb.NewFromConfig(cfg), strings.TrimSpace(os.Getenv(EnvAgentStateTable)))
 }
 
 func (s *AgentStore) now() time.Time {

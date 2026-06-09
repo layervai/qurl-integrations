@@ -7,16 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
-const defaultSlackOpenViewUserAgent = "qurl-slack/unknown"
+const defaultSlackAPIUserAgent = "qurl-slack/unknown"
 
 // slackViewsOpenTimeout is the HTTP-client fallback upper bound for every
 // views.open request made by this client. Callers can still pass a tighter
@@ -28,8 +30,8 @@ const slackViewsOpenTimeout = 2 * time.Second
 // Slack echoes the opened view in successful views.open responses. Keep the
 // body bounded, but leave room for modal blocks plus Slack-injected state.
 const slackViewsOpenResponseBodyLimit = 64 * 1024
-const slackOpenViewMaxErrorSnippetBytes = 200
-const slackOpenViewTruncationSuffix = "..."
+const slackAPIMaxErrorSnippetBytes = 200
+const slackAPITruncationSuffix = "..."
 
 func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
@@ -41,15 +43,15 @@ func newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL string, httpC
 	}, userAgent, viewsOpenURL, httpClient)
 }
 
-type slackOpenViewTokenLookup func(ctx context.Context, teamID string) (string, error)
+type slackBotTokenLookup func(ctx context.Context, teamID string) (string, error)
 
-func newSlackOpenViewFuncWithTokenLookup(lookup slackOpenViewTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
+func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsOpenURL string, httpClient *http.Client) func(context.Context, string, string, []byte) error {
 	if httpClient == nil {
 		httpClient = defaultSlackViewsOpenClient()
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		userAgent = defaultSlackOpenViewUserAgent
+		userAgent = defaultSlackAPIUserAgent
 	}
 	// The teamID parameter lets production select the bot token Slack issued
 	// for the workspace that invoked the slash command. Tests and single-
@@ -126,7 +128,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 300 {
-		bodySnippet := slackOpenViewBodySnippet(raw)
+		bodySnippet := slackAPIBodySnippet(raw)
 		if bodySnippet == "" {
 			return fmt.Errorf("views.open returned HTTP %d", statusCode)
 		}
@@ -141,7 +143,7 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		if bodySnippet := slackOpenViewBodySnippet(raw); bodySnippet != "" {
+		if bodySnippet := slackAPIBodySnippet(raw); bodySnippet != "" {
 			return fmt.Errorf("views.open response JSON: %w: %s", err, bodySnippet)
 		}
 		return fmt.Errorf("views.open response JSON: %w", err)
@@ -149,21 +151,21 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 	if out.OK {
 		return nil
 	}
-	out.Error = slackOpenViewAPIErrorCode(out.Error)
+	out.Error = slackAPIErrorCode(out.Error)
 	if out.Error == "" {
 		out.Error = "not_ok"
 	}
 	return slackOpenViewAPIError(out.Error, header.Get("Retry-After"))
 }
 
-func slackOpenViewBodySnippet(raw []byte) string {
+func slackAPIBodySnippet(raw []byte) string {
 	bodySnippet := printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(string(raw)), "?"))
-	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
+	if len(bodySnippet) <= slackAPIMaxErrorSnippetBytes {
 		return bodySnippet
 	}
-	budget := slackOpenViewMaxErrorSnippetBytes - len(slackOpenViewTruncationSuffix)
+	budget := slackAPIMaxErrorSnippetBytes - len(slackAPITruncationSuffix)
 	if budget <= 0 {
-		return slackOpenViewTruncationSuffix
+		return slackAPITruncationSuffix
 	}
 	cut := 0
 	// Count complete runes so the bounded log snippet uses as much of the byte
@@ -181,7 +183,7 @@ func slackOpenViewBodySnippet(raw []byte) string {
 		// if a future caller lowers the cap below a single UTF-8 rune width.
 		return "..."
 	}
-	return bodySnippet[:cut] + slackOpenViewTruncationSuffix
+	return bodySnippet[:cut] + slackAPITruncationSuffix
 }
 
 func printableLogSnippet(s string) string {
@@ -197,7 +199,7 @@ func printableLogSnippet(s string) string {
 	}, s)
 }
 
-func slackOpenViewAPIErrorCode(code string) string {
+func slackAPIErrorCode(code string) string {
 	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
 }
 
@@ -210,4 +212,173 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 	default:
 		return fmt.Errorf("views.open: %s", code)
 	}
+}
+
+const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
+
+// slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
+// single post this 4s client timeout is the BINDING deadline: the conversation-
+// mode delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
+// OUTER envelope spanning the transcript save plus the post, so the 4s timeout
+// fires first on a stuck request. Unlike views.open there is no short trigger
+// window to race, so 4s leaves comfortable headroom for one round-trip while
+// still freeing the worker well inside its budget. The Grid fallback does NOT add
+// a second round-trip: it retries only on ErrSlackBotTokenNotConfigured, which
+// postBody surfaces solely from the token *lookup* (before any HTTP request is
+// built), so the org-token attempt is the first and only HTTP call.
+const slackChatPostMessageTimeout = 4 * time.Second
+
+// Slack echoes the posted message back in successful chat.postMessage responses.
+// Keep the body bounded; an agent reply plus Slack message metadata stays well
+// under this.
+const slackChatPostMessageResponseBodyLimit = 64 * 1024
+
+// newSlackPostMessageFuncWithTokenLookup builds the [internal.PostMessageFunc]
+// seam: a threaded chat.postMessage using the per-workspace bot token. It mirrors
+// newSlackOpenViewFuncWithTokenLookup (same token lookup) and openViewWithGridFallback
+// (same Enterprise Grid retry) so conversation-mode replies resolve the workspace
+// bot token exactly like the slash-command modals do.
+func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
+	if httpClient == nil {
+		httpClient = defaultSlackPostMessageClient()
+	}
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		userAgent = defaultSlackAPIUserAgent
+	}
+
+	// postBody resolves the bot token for one owner (workspace team or, on the
+	// Grid fallback, the enterprise org) and POSTs the already-marshaled body. The
+	// body is identical across both attempts, so the caller marshals it once.
+	postBody := func(ctx context.Context, ownerID string, body []byte) error {
+		token, err := lookup(ctx, ownerID)
+		if err != nil {
+			return fmt.Errorf("chat.postMessage token lookup: %w", err)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			// A ("", nil) lookup returns a plain error, NOT the sentinel — so it
+			// does not trigger the Grid fallback. That's fine: the real
+			// workspaceTokenLookup returns ErrSlackBotTokenNotConfigured (which does
+			// fall back), never an empty-but-nil token. A future lookup that returns
+			// ("", nil) on a missing token would need to return the sentinel instead.
+			return errors.New("chat.postMessage token lookup: empty token")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, postMessageURL, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request build: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", userAgent)
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackChatPostMessageResponseBodyLimit+1))
+		if err != nil {
+			return fmt.Errorf("chat.postMessage response read: %w", err)
+		}
+		if len(raw) > slackChatPostMessageResponseBodyLimit {
+			// LimitReader already consumed limit+1 bytes; drain the rest before Close
+			// so a keep-alive transport can reuse the connection after an oversized
+			// response (mirrors the views.open drain).
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return fmt.Errorf("chat.postMessage response exceeded %d bytes", slackChatPostMessageResponseBodyLimit)
+		}
+		return slackChatPostMessageResponseError(resp.StatusCode, resp.Header, raw)
+	}
+
+	// Same Enterprise Grid retry as openViewWithGridFallback: try the workspace
+	// token, then retry once with the org-install token when the workspace itself
+	// has no bot token and the enterprise is a distinct owner. Every other error
+	// returns unchanged. The fallback lives in this seam (not the handler, where
+	// OpenView's does) because PostMessageFunc's signature carries enterpriseID —
+	// OpenView's seam takes only teamID, so its handler must own the retry.
+	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error {
+		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
+		body, err := json.Marshal(struct {
+			Channel  string `json:"channel"`
+			ThreadTS string `json:"thread_ts,omitempty"`
+			Text     string `json:"text"`
+		}{Channel: channelID, ThreadTS: threadTS, Text: text})
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request marshal: %w", err)
+		}
+		err = postBody(ctx, teamID, body)
+		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+			return err
+		}
+		if enterpriseID == "" || enterpriseID == teamID {
+			return err
+		}
+		// Parity with openViewWithGridFallback's warn: leave a breadcrumb so an
+		// operator debugging "why is the bot posting as the org install?" can see
+		// the workspace token was missing. No *slog.Logger is threaded into this
+		// seam, so use the default logger.
+		slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
+			"team_id", teamID, "enterprise_id", enterpriseID)
+		return postBody(ctx, enterpriseID, body)
+	}
+}
+
+// defaultSlackPostMessageClient builds the seam's HTTP client. Mirrors
+// defaultSlackViewsOpenClient (CheckRedirect → ErrUseLastResponse so a redirect
+// is surfaced as a response, not followed) but with the chat.postMessage timeout.
+func defaultSlackPostMessageClient() *http.Client {
+	return &http.Client{
+		Timeout: slackChatPostMessageTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// slackChatPostMessageResponseError maps a chat.postMessage HTTP response to an
+// error (or nil on success). Unlike views.open, chat.postMessage returns HTTP 200
+// with `ok:false` for most failures (channel_not_found, not_in_channel,
+// msg_too_long), so the ok field — not the status code — is the real signal. It
+// reuses the shared snippet/error-code helpers but has no trigger_id concept.
+func slackChatPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
+	if statusCode == http.StatusTooManyRequests {
+		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
+	}
+	if statusCode >= 300 {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
+			return fmt.Errorf("chat.postMessage returned HTTP %d: %s", statusCode, snippet)
+		}
+		return fmt.Errorf("chat.postMessage returned HTTP %d", statusCode)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return errors.New("chat.postMessage: empty response body")
+	}
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
+			return fmt.Errorf("chat.postMessage response JSON: %w: %s", err, snippet)
+		}
+		return fmt.Errorf("chat.postMessage response JSON: %w", err)
+	}
+	if out.OK {
+		return nil
+	}
+	code := slackAPIErrorCode(out.Error)
+	// chat.postMessage-specific: unlike views.open (which surfaces rate limits via
+	// the 429 path / slackOpenViewAPIError), chat.postMessage commonly returns a
+	// 200 body with ok:false:ratelimited, so map that to the sentinel here. Do not
+	// "harmonize" this branch away to match slackOpenViewResponseError.
+	if code == "ratelimited" {
+		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
+	}
+	if code == "" {
+		code = "not_ok"
+	}
+	return fmt.Errorf("chat.postMessage: %s", code)
 }
