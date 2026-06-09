@@ -623,3 +623,72 @@ func TestSetDisplayName_ChannelAliasToRevokedTunnelRejected(t *testing.T) {
 		t.Errorf("PATCH fired against a revoked connector (calls = %d)", capPatch.calls.Load())
 	}
 }
+
+// displayNameScanWindowQURLServer models the scan-window case: the no-slug scan
+// returns a first page that does NOT contain the looked-up resource AND signals
+// more pages (has_more=true) — i.e. the bound connector sits past
+// listResourcesScanLimit. The slug-first GET still misses (the alias isn't any
+// connector's slug). PATCH should never fire on this path.
+func displayNameScanWindowQURLServer(t *testing.T, capPatch *capturedPatch) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			if r.URL.Query().Get("slug") != "" {
+				respondQURLEnvelope(t, w, []map[string]any{})
+				return
+			}
+			// First page: an UNRELATED active tunnel + has_more=true. The bound
+			// resource_id is deliberately absent — it lives on a later page.
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{
+					testKeyResourceID: "r_some_other_connector",
+					testKeyType:       client.ResourceTypeTunnel,
+					testKeySlug:       "other-connector",
+					testKeyStatus:     client.StatusActive,
+				}},
+				"meta": map[string]any{"request_id": "req_test", "has_more": true},
+			}); err != nil {
+				t.Fatalf("encode qurl envelope: %v", err)
+			}
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
+			// Record so the no-PATCH assertion reports cleanly if this regresses.
+			capPatch.calls.Add(1)
+			respondQURLEnvelope(t, w, map[string]any{testKeyResourceID: "r_unexpected", testKeyType: client.ResourceTypeTunnel, testKeyStatus: client.StatusActive})
+		default:
+			t.Fatalf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestSetDisplayName_ChannelAliasPastScanWindow covers the case cr flagged: the
+// alias is bound to a connector that exists but sits past the first
+// ListResources page (HasMore). The lookup can't confirm the binding is stale,
+// so it must NOT claim the alias is dead or recommend unset-alias (which would
+// unbind a live alias) — it surfaces a lookup-limit message and issues no PATCH.
+func TestSetDisplayName_ChannelAliasPastScanWindow(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameScanWindowQURLServer(t, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if err := h.cfg.AdminStore.BindChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testDisplayNameAlias, testDisplayNameTunnelRID); err != nil {
+		t.Fatalf("seed channel alias binding: %v", err)
+	}
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	// Must not nudge the admin to destroy a possibly-live binding.
+	if strings.Contains(async, "unset-alias") || strings.Contains(async, "no longer points at an active") {
+		t.Errorf("async reply = %q, must not recommend unbinding a possibly-live alias", async)
+	}
+	if !strings.Contains(async, "lookup limit") {
+		t.Errorf("async reply = %q, want the non-destructive lookup-limit message", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired on an unresolved scan-window lookup (calls = %d)", capPatch.calls.Load())
+	}
+}
