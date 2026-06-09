@@ -40,13 +40,13 @@ type finding struct {
 
 // isPurgeTarget reports whether this finding is a confirmed orphan that a
 // mutating run should clear via the bot's PurgeResourceFromChannel verb.
-func (f finding) isPurgeTarget() bool {
+func (f *finding) isPurgeTarget() bool {
 	return f.kind == findingOrphanAlias || f.kind == findingOrphanAllowedID
 }
 
 // logAttrs renders the finding as slog key/value pairs, omitting the empty ones
 // (an allowed_resource_ids finding carries no alias).
-func (f finding) logAttrs() []any {
+func (f *finding) logAttrs() []any {
 	attrs := []any{"kind", string(f.kind), "team_id", f.teamID, "channel_id", f.channelID}
 	if f.alias != "" {
 		attrs = append(attrs, "alias", "$"+f.alias)
@@ -67,9 +67,10 @@ type report struct {
 func newReport(f *flags) *report { return &report{f: f, stats: &Stats{}} }
 
 // add records a finding and bumps the counter for its kind in one place, so the
-// summary totals can't drift from what was emitted.
-func (r *report) add(f finding) {
-	r.findings = append(r.findings, f)
+// summary totals can't drift from what was emitted. Takes a pointer (the
+// finding struct is heavy) but stores a copy.
+func (r *report) add(f *finding) {
+	r.findings = append(r.findings, *f)
 	switch f.kind {
 	case findingOrphanAlias:
 		r.stats.OrphanAliases.Add(1)
@@ -89,9 +90,9 @@ func (r *report) add(f finding) {
 // emitFindings logs every finding as a structured record, sorted (purge targets
 // first) so two runs over unchanged data produce a diffable log.
 func (r *report) emitFindings(logger *slog.Logger) {
-	sort.Slice(r.findings, func(i, j int) bool { return lessFinding(r.findings[i], r.findings[j]) })
-	for _, f := range r.findings {
-		logger.Info("finding", f.logAttrs()...)
+	sort.Slice(r.findings, func(i, j int) bool { return lessFinding(&r.findings[i], &r.findings[j]) })
+	for i := range r.findings {
+		logger.Info("finding", r.findings[i].logAttrs()...)
 	}
 }
 
@@ -169,7 +170,7 @@ func (r *report) purgeTargets() []purgeTarget {
 
 // lessFinding orders findings for stable output: purge targets first (kind
 // order), then by team, channel, alias, resource.
-func lessFinding(a, b finding) bool {
+func lessFinding(a, b *finding) bool {
 	if a.kind != b.kind {
 		return kindRank(a.kind) < kindRank(b.kind)
 	}

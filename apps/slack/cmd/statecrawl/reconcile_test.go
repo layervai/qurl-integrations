@@ -123,11 +123,11 @@ func TestClassifyRow_Unresolved(t *testing.T) {
 // the dead id.
 func TestPurgeTargets_DedupsAndFilters(t *testing.T) {
 	rep := newReport(&flags{})
-	rep.add(finding{teamID: "T1", channelID: "C1", alias: "a", resourceID: "r_dead", kind: findingOrphanAlias})
-	rep.add(finding{teamID: "T1", channelID: "C1", alias: "b", resourceID: "r_dead", kind: findingOrphanAlias})
-	rep.add(finding{teamID: "T1", channelID: "C1", resourceID: "r_dead", kind: findingOrphanAllowedID})
-	rep.add(finding{teamID: "T1", channelID: "C1", alias: "c", resourceID: "r_tunnel", kind: findingAliasNameMismatch})
-	rep.add(finding{teamID: "T1", channelID: "C1", alias: "d", resourceID: "r_url", kind: findingAliasURLTarget})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "a", resourceID: "r_dead", kind: findingOrphanAlias})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "b", resourceID: "r_dead", kind: findingOrphanAlias})
+	rep.add(&finding{teamID: "T1", channelID: "C1", resourceID: "r_dead", kind: findingOrphanAllowedID})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "c", resourceID: "r_tunnel", kind: findingAliasNameMismatch})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "d", resourceID: "r_url", kind: findingAliasURLTarget})
 
 	targets := rep.purgeTargets()
 	if len(targets) != 1 {

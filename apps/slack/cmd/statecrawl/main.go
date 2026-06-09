@@ -95,7 +95,11 @@ type flags struct {
 func main() {
 	f, err := parseFlags(flag.NewFlagSet("statecrawl", flag.ContinueOnError), os.Args[1:])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "statecrawl: "+err.Error())
+		// -h/-help already printed usage to stderr via the flag package.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		slog.Error("statecrawl: invalid configuration", "error", err)
 		os.Exit(2)
 	}
 	logger := newLogger(f.logFormat)
