@@ -118,10 +118,18 @@ type ToolSpec struct {
 
 // Request is one round-trip to the model: the system prompt, the available
 // tools, and the conversation so far.
+//
+// The system prompt is split so the constant part can be cached. SystemStable is
+// byte-identical across every turn and thread (the role + rules preamble); the
+// concrete LLM marks it (and the tool definitions, which render before it) as a
+// cache breakpoint so the agent's up-to-6 round-trips per turn don't reprocess it
+// each time. System holds the per-turn context (channel/user/admin), which
+// varies and sits after the cached prefix.
 type Request struct {
-	System   string
-	Tools    []ToolSpec
-	Messages []Message
+	SystemStable string
+	System       string
+	Tools        []ToolSpec
+	Messages     []Message
 }
 
 // Response is the model's reply for one round-trip: any assistant text, any
@@ -135,7 +143,7 @@ type Response struct {
 // LLM is the port to the language model. The concrete implementation
 // ([NewAnthropicLLM]) wraps the Anthropic Go SDK; tests inject a fake.
 type LLM interface {
-	Complete(ctx context.Context, req Request) (Response, error)
+	Complete(ctx context.Context, req *Request) (Response, error)
 }
 
 // Backend is the port to qURL read operations, each scoped by the
@@ -221,7 +229,9 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		return Result{}, history, errMissingDeps
 	}
 
-	system := systemPrompt(tc)
+	// Split the system prompt: the stable preamble + tools are the cache prefix;
+	// the per-turn context varies and sits after it.
+	perTurn := turnContextLines(tc)
 	tools := toolSpecs()
 
 	// Copy history so we never mutate the caller's slice; append the new turn.
@@ -230,7 +240,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	msgs = append(msgs, Message{Role: roleUser, Text: userText})
 
 	for range a.maxIterations {
-		resp, err := a.llm.Complete(ctx, Request{System: system, Tools: tools, Messages: msgs})
+		resp, err := a.llm.Complete(ctx, &Request{SystemStable: systemPreamble, System: perTurn, Tools: tools, Messages: msgs})
 		if err != nil {
 			return Result{}, msgs, fmt.Errorf("agent: llm complete: %w", err)
 		}

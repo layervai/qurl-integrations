@@ -36,11 +36,11 @@ func NewAnthropicLLM(apiKey string) LLM {
 // Complete implements [LLM]. Parallel tool use is disabled so each turn yields at
 // most one tool call, and thinking is disabled: this is a low-latency
 // natural-language→tool-call translation layer, not a reasoning-heavy task.
-func (l *anthropicLLM) Complete(ctx context.Context, req Request) (Response, error) {
+func (l *anthropicLLM) Complete(ctx context.Context, req *Request) (Response, error) {
 	params := anthropic.MessageNewParams{
 		Model:     l.model,
 		MaxTokens: l.maxTokens,
-		System:    []anthropic.TextBlockParam{{Text: req.System}},
+		System:    systemBlocks(req),
 		Messages:  toSDKMessages(req.Messages),
 		Tools:     toSDKTools(req.Tools),
 		ToolChoice: anthropic.ToolChoiceUnionParam{
@@ -54,6 +54,26 @@ func (l *anthropicLLM) Complete(ctx context.Context, req Request) (Response, err
 		return Response{}, fmt.Errorf("anthropic messages.new: %w", err)
 	}
 	return fromSDKMessage(msg), nil
+}
+
+// systemBlocks renders the system prompt as SDK blocks. The stable preamble
+// carries a cache_control breakpoint, so the prompt prefix (tools render before
+// system, so they're included) is cached across the turn's round-trips and
+// across turns in a thread; the per-turn context follows it uncached. Anthropic
+// only caches a prefix once it exceeds the model's minimum cacheable length, so
+// on a short prompt the breakpoint is a harmless no-op.
+func systemBlocks(req *Request) []anthropic.TextBlockParam {
+	blocks := make([]anthropic.TextBlockParam, 0, 2)
+	if req.SystemStable != "" {
+		blocks = append(blocks, anthropic.TextBlockParam{
+			Text:         req.SystemStable,
+			CacheControl: anthropic.NewCacheControlEphemeralParam(),
+		})
+	}
+	if req.System != "" {
+		blocks = append(blocks, anthropic.TextBlockParam{Text: req.System})
+	}
+	return blocks
 }
 
 // toSDKTools converts domain tool specs to SDK tool params.

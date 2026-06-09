@@ -14,10 +14,10 @@ import (
 type scriptedLLM struct {
 	responses []Response
 	calls     int
-	captured  []Request
+	captured  []*Request
 }
 
-func (s *scriptedLLM) Complete(_ context.Context, req Request) (Response, error) {
+func (s *scriptedLLM) Complete(_ context.Context, req *Request) (Response, error) {
 	s.captured = append(s.captured, req)
 	if s.calls >= len(s.responses) {
 		return Response{}, errors.New("scriptedLLM: no more responses")

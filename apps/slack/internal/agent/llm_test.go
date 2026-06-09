@@ -6,6 +6,35 @@ import (
 	"testing"
 )
 
+func TestSystemBlocks_CachesStablePreambleOnly(t *testing.T) {
+	blocks := systemBlocks(&Request{SystemStable: "RULES PREAMBLE", System: "per-turn context"})
+	if len(blocks) != 2 {
+		t.Fatalf("want 2 system blocks, got %d", len(blocks))
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wire := string(raw)
+	// Exactly one cache breakpoint, on the stable preamble — the per-turn block
+	// must stay uncached so it doesn't invalidate the cached prefix each turn.
+	if n := strings.Count(wire, "cache_control"); n != 1 {
+		t.Fatalf("expected exactly one cache_control (stable block), got %d: %s", n, wire)
+	}
+	if !strings.Contains(wire, "RULES PREAMBLE") || !strings.Contains(wire, "per-turn context") {
+		t.Fatalf("both blocks must be present: %s", wire)
+	}
+}
+
+func TestSystemBlocks_OmitsEmptyParts(t *testing.T) {
+	if got := len(systemBlocks(&Request{System: "only per-turn"})); got != 1 {
+		t.Fatalf("empty stable should yield 1 block, got %d", got)
+	}
+	if got := len(systemBlocks(&Request{SystemStable: "only stable"})); got != 1 {
+		t.Fatalf("empty per-turn should yield 1 block, got %d", got)
+	}
+}
+
 // TestToSDKMessages_PreservesToolUseAndResult locks down the riskiest part of
 // the SDK seam: rebuilding a valid transcript (tool_use followed by
 // tool_result) from persisted domain messages. The fake-LLM loop tests bypass
