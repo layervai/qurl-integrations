@@ -34,7 +34,7 @@ const (
 	// public, so an invalid (LLM-distilled, possibly injected) alias/target must NOT
 	// be echoed back into it — unlike the slash path, whose validation reply is
 	// ephemeral and can echo the bad token.
-	agentConfirmInvalidAliasReply = "That alias or target isn't valid — use lowercase letters, numbers, and dashes (no special characters)."
+	agentConfirmInvalidAliasReply = "I couldn't apply that — the alias or target isn't valid (lowercase letters, numbers, and dashes only). Try rephrasing your request."
 )
 
 // pendingAction is the ephemeral snapshot persisted between proposing a mutation
@@ -375,6 +375,10 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// safe on the public card.
 		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, pa.Alias, pa.Target)}
 	case agent.ActionUnsetAlias:
+		// No validAliasBind gate (unlike set-alias): UnbindChannelAlias is a
+		// conditional (attribute_exists) clear, so an out-of-grammar alias simply
+		// can't match an existing binding and degrades to the benign "not bound"
+		// line — and unbindAliasResult escapes the alias before echoing it.
 		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, pa.Alias)}
 	case agent.ActionProtectConnector, agent.ActionProtectURL:
 		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so
