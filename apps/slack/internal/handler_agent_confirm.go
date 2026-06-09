@@ -286,10 +286,6 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	_ = h.replaceOriginalResponse(log, responseURL, res.cardText)
 }
 
-// executeAgentAction runs the mapped mutation core for a claimed action and
-// returns the user-facing result string (delivered by the caller as the terminal
-// card). Every core re-resolves its token against the CLICK's channel, so channel
-// scope is enforced at execute exactly as a typed command would be.
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
 // PUBLIC confirm card. ephemeralText, when non-empty, is delivered PRIVATELY to the
 // clicker (response_url ephemeral) — used for sensitive output that must not be
@@ -301,6 +297,10 @@ type actionResult struct {
 	ephemeralText string
 }
 
+// executeAgentAction runs the mapped mutation core for a claimed action and returns
+// the terminal outcome (see actionResult). Every core re-resolves its token against
+// the CLICK's channel, so channel scope is enforced at execute exactly as a typed
+// command would be.
 func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload) actionResult {
 	switch pa.Action {
 	case agent.ActionGet:
