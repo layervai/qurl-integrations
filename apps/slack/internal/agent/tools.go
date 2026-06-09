@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -331,6 +332,14 @@ func proposalProtectURL(f map[string]string) (*Proposal, error) {
 	target := strings.TrimSpace(f[fieldURL])
 	if target == "" {
 		return nil, errEmptyField(toolProposeProtectURL, fieldURL)
+	}
+	// Validate scheme/host at the propose layer, not just at execute — same
+	// no-dead-end-card reason as the alias check below: a malformed/non-http URL
+	// could only fail on Approve, after the claim consumes the card. Mirrors
+	// parseResourceExposeArgs's absolute-http(s) gate (the confirm execute
+	// re-validates through that grammar, but a bad URL never builds a live card).
+	if u, err := url.Parse(target); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, fmt.Errorf("%s: %s must be an absolute http(s) URL", toolProposeProtectURL, fieldURL)
 	}
 	alias := normalizeToken(f[fieldAlias])
 	if alias == "" {
