@@ -439,13 +439,6 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 		return
 	}
 
-	openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
-	if openBudget <= 0 {
-		log.Warn("agent confirm: protect-connector trigger expired before render")
-		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorWindowExpiredReply)
-		return
-	}
-
 	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
 		TeamID: payload.Team.ID,
 		// The click's channel (== the proposal's, mismatch-guarded), matching the
@@ -464,7 +457,10 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 		return
 	}
 
-	openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+	// A single pre-open budget check suffices: unlike the slash wizard (which fetches
+	// resources between its two checks), the only work before views.open here is the
+	// in-memory modal render, so one check immediately before the RPC covers it.
+	openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 	if openBudget <= 0 {
 		log.Warn("agent confirm: protect-connector trigger expired before views.open")
 		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorWindowExpiredReply)

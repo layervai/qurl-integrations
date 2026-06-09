@@ -629,6 +629,35 @@ func TestConfirm_ProtectConnectorOpenFails(t *testing.T) {
 	}
 }
 
+func TestConfirm_ProtectConnectorGridFallback(t *testing.T) {
+	// The confirm path threads payload.Enterprise.ID into openViewWithGridFallback:
+	// when the workspace bot token is missing, the open retries with the Enterprise
+	// Grid org-install token. Pins that the connector branch passes enterpriseID
+	// through (the fallback mechanism itself is covered via the slash path).
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.now = func() time.Time { return fixedNow }
+	var owners []string
+	hc.h.cfg.OpenView = func(_ context.Context, teamID, _ string, _ []byte) error {
+		owners = append(owners, teamID)
+		if teamID == "T1" {
+			return auth.ErrSlackBotTokenNotConfigured // workspace token missing → retry org
+		}
+		return nil
+	}
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+	p := confirmPayload("T1", "C1", "Uadmin", hc.respURL, id)
+	p.Enterprise.ID = "E1"
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), p, id, true, fixedNow)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if len(owners) != 2 || owners[0] != "T1" || owners[1] != "E1" {
+		t.Fatalf("Grid fallback should retry views.open with the enterprise token; owners=%v", owners)
+	}
+	if !ro || text != agentConfirmConnectorOpenedReply {
+		t.Fatalf("the fallback open should succeed and post the opened reply; replace=%v text=%q", ro, text)
+	}
+}
+
 func TestConfirm_ProtectConnectorOpenViewUnconfigured(t *testing.T) {
 	// OpenView not wired: the card goes terminal with a graceful "use the slash
 	// command" reply rather than hanging.
