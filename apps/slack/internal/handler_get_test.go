@@ -77,11 +77,21 @@ func TestHandleGet_HappyPath(t *testing.T) {
 	}
 }
 
-// TestHandleGet_AliasNotFound fences the no-binding path: when the
+// TestHandleGet_AliasNotFound fences the no-binding path on a COLD
+// channel (no channel_policies row → empty allow-set): when the
 // channel's alias_bindings map has no entry for the requested alias
 // (no row, missing map, or missing key), getWork surfaces the
 // "not configured for this channel" copy that points the user at
 // their Slack admin, and never reaches the mint.
+//
+// Post-#534, an empty allow-set short-circuits the slug/alias fallback
+// BEFORE the upstream GET /v1/resources hop (see resolveTokenForGet's
+// cost note): both fallbacks would be gated out by the empty set anyway,
+// so the hop is pure waste and an unmetered probe surface. The registered
+// GET /v1/resources handler therefore asserts ZERO hits — the message is
+// produced from the DDB allow-set read alone. (The warm-channel slug
+// fallback, where the hop DOES run, is fenced by
+// TestHandleGet_DollarSlugNotAllowedNonAdmin.)
 func TestHandleGet_AliasNotFound(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -90,11 +100,9 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 		mintHits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	// On an alias-binding miss, getWork falls back to a tunnel-slug
-	// lookup (GET /v1/resources?slug=…). `$missing` is neither a binding
-	// nor a live tunnel slug, so the resources listing returns empty and
-	// the user sees the "not configured for this channel" copy.
+	var listHits atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -107,8 +115,72 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	if !strings.Contains(async, "contact your Slack admin") {
 		t.Errorf("async reply missing admin-contact fallback: %q", async)
 	}
+	if listHits.Load() != 0 {
+		t.Errorf("upstream GET /v1/resources reached on a cold channel (hits = %d) — #534 cold-channel short-circuit regressed", listHits.Load())
+	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite alias-not-found (hits = %d)", mintHits.Load())
+	}
+}
+
+// TestHandleGet_UnknownSlugColdChannelNoUpstreamHop is the direct
+// regression fence for #534: the unmetered cold-channel probe surface.
+//
+// On a cold channel (workspace seeded but NO channel_policies row, so an
+// empty allow-set), repeated unknown-slug gets — `get $typo1`, `$typo2`,
+// `$typo3` — from one user must each be answered from the DDB allow-set
+// read ALONE, firing ZERO upstream GET /v1/resources hops. Before the fix
+// each miss spent one upstream slug lookup against the workspace API key
+// AHEAD of the per-user rate-limit gate, so a fat-fingering (or hostile)
+// user could fan out unmetered probes. We assert the counter stays at 0
+// across all three, the not-configured copy is returned each time, and the
+// mint route is never hit.
+//
+// Complements TestHandleGet_AliasNotFound (single cold-channel miss) by
+// pinning the *fan-out* case the issue describes, and stands opposite
+// TestHandleGet_DollarSlugNotAllowedNonAdmin, which proves the hop DOES
+// still run for a WARM channel (non-empty allow-set) — i.e. the
+// short-circuit is scoped strictly to the empty set.
+func TestHandleGet_UnknownSlugColdChannelNoUpstreamHop(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Cold channel: seed the workspace (so AdminStore is usable and the
+	// caller resolves) but NO channel policy/exposure → empty allow-set.
+	// seedNonAdmin (vs TestHandleGet_AliasNotFound's seedAdmin) is the
+	// deliberate pick: the allow-set gate is channel-scoped with no admin
+	// bypass (allowedResourceIDsForGet doc), so the more security-relevant
+	// caller to pin against the cold-channel probe surface is a non-admin.
+	// The two tests together show both an admin and a non-admin caller hit
+	// the same short-circuit.
+	ts.seedNonAdmin(t)
+	var listHits atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	var mintHits atomic.Int32
+	ts.addCustomerPrefix("POST", "/v1/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+
+	// A fresh invoker per call: each spins its own response_url capture
+	// (waitForBody returns the FIRST recorded body, so a reused invoker
+	// would read back call #1's reply for every call). The shared handler
+	// and httptest servers keep listHits/mintHits accumulating across all
+	// three — which is exactly what the fan-out assertion below checks.
+	for _, typo := range []string{"typo1", "typo2", "typo3"} {
+		inv := newAdminSlashInvoker(t, h)
+		_, _, async := inv.invokeAdminAsync("get $"+typo, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "`$"+typo+"` is not configured for this channel") {
+			t.Errorf("get $%s: async reply missing not-configured copy: %q", typo, async)
+		}
+	}
+	if listHits.Load() != 0 {
+		t.Errorf("cold-channel unknown-slug gets hit the upstream GET /v1/resources %d time(s) — #534 unmetered probe surface regressed", listHits.Load())
+	}
+	if mintHits.Load() != 0 {
+		t.Errorf("mint reached on cold-channel unknown-slug gets (hits = %d)", mintHits.Load())
 	}
 }
 
@@ -495,7 +567,17 @@ func TestHandleGet_ResourceAliasDuplicateAllowedRefusesAmbiguousMint(t *testing.
 // a missing token and never attempts a mint.
 func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
 	ts := newAdminTestServers(t)
+	// Expose an UNRELATED resource so the channel is "warm" (non-empty
+	// allow-set). Without this, the cold-channel short-circuit (#534) returns
+	// the not-configured copy before the listed alias is ever resolved, so
+	// this test would pass without exercising the resolve-then-reject branch
+	// it documents. With the set non-empty, the resource-alias fallback runs,
+	// resolves the listed alias, and rejects it because its resource_id is
+	// not in the allow-set.
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
+	var listHits atomic.Int32
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		listHits.Add(1)
 		writeResourceListFixture(t, w, []map[string]any{{
 			testKeyResourceID: testListResIDURLDocs,
 			testKeyType:       client.ResourceTypeURL,
@@ -515,6 +597,14 @@ func TestHandleGet_ResourceAliasNotAllowedLooksNotConfigured(t *testing.T) {
 	_, _, async := inv.invokeAdminAsync("get $"+testListAliasDocs, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, noResourceForAliasMessage(testListAliasDocs)) {
 		t.Errorf("async reply should use not-configured copy for unallowed resource alias: %q", async)
+	}
+	// The message above is BYTE-IDENTICAL to the cold-channel short-circuit's
+	// (#534), so it alone can't tell whether the resolve-then-reject branch ran
+	// or the warm seed silently broke and we fell through the short-circuit.
+	// Pin that the alias fallback actually reached upstream: a non-empty
+	// allow-set must let GET /v1/resources fire at least once.
+	if listHits.Load() == 0 {
+		t.Errorf("resource-alias fallback never hit upstream GET /v1/resources — warm-channel seed broke and the test silently regressed to the cold-channel short-circuit")
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("unallowed resource alias attempted mint (hits = %d)", mintHits.Load())
@@ -1135,7 +1225,26 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 	t.Run("blocked when not exposed in this channel", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		ts.seedAdmin(t) // the caller is a workspace admin
-		addTunnelSlugResource(t, ts)
+		// Protect an UNRELATED resource so the channel is "warm" (non-empty
+		// allow-set): the slug fallback must actually run and be rejected by
+		// the allow-set gate, which is what proves there's no admin bypass at
+		// the gate. Without this, the cold-channel short-circuit (#534)
+		// returns not-configured before the slug is ever resolved, so the
+		// admin-bypass property would go unexercised.
+		ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_other_alloc")
+		// Inlined slug resource (vs addTunnelSlugResource) so listHits can pin
+		// that the slug fallback actually reached upstream — see the assertion
+		// below.
+		var listHits atomic.Int32
+		ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			listHits.Add(1)
+			writeResourceListFixture(t, w, []map[string]any{{
+				testKeyResourceID: testResourceIDFix,
+				testKeyType:       client.ResourceTypeTunnel,
+				testKeySlug:       testTunnelSlug,
+				testKeyStatus:     client.StatusActive,
+			}}, "", false)
+		})
 		var mintHits atomic.Int32
 		ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 			mintHits.Add(1)
@@ -1147,6 +1256,15 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 		_, _, async := inv.invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
 		if !strings.Contains(async, "`$"+testTunnelSlug+"` is not configured for this channel") {
 			t.Errorf("admin was not channel-scoped — missing not-configured copy: %q", async)
+		}
+		// This not-configured copy is BYTE-IDENTICAL to the cold-channel
+		// short-circuit's (#534). Without the assertion below, a broken warm
+		// seed would fall through the short-circuit and still match the copy —
+		// leaving the admin-no-bypass-at-the-gate property unexercised. Pin
+		// that the slug fallback actually ran and was rejected BY THE GATE: a
+		// non-empty allow-set must let the slug lookup hit upstream.
+		if listHits.Load() == 0 {
+			t.Errorf("slug fallback never hit upstream GET /v1/resources — warm-channel seed broke and the admin-no-bypass property went unexercised (regressed to the cold-channel short-circuit)")
 		}
 		if mintHits.Load() != 0 {
 			t.Errorf("admin minted a tunnel not exposed in this channel (hits = %d) — the bypass is back", mintHits.Load())
