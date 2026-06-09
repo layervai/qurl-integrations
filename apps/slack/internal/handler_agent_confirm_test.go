@@ -596,21 +596,36 @@ func TestConfirm_ProtectConnectorTriggerExpired(t *testing.T) {
 }
 
 func TestConfirm_ProtectConnectorOpenFails(t *testing.T) {
-	// views.open fails (e.g. trigger expired Slack-side): the card goes terminal with
-	// the window-expired reply rather than a silent miss, and the action stays claimed.
-	hc := newConfirmHarness(t, "Uadmin")
-	hc.h.now = func() time.Time { return fixedNow }
-	ov := &openViewCapture{returnErr: ErrSlackTriggerExpired}
-	hc.h.cfg.OpenView = ov.fn()
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, fixedNow)
-
-	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-	if ov.calls != 1 {
-		t.Fatalf("open-fails case should still attempt one views.open; opens=%d", ov.calls)
+	// views.open failure maps to cause-specific terminal copy: a non-expiry cause must
+	// NOT say "ask me again" (which won't fix it). The card always goes terminal (never
+	// a silent miss) and the action stays claimed.
+	cases := []struct {
+		name      string
+		openErr   error
+		wantReply string
+	}{
+		{"trigger expired → ask again", ErrSlackTriggerExpired, agentConfirmConnectorWindowExpiredReply},
+		{"deadline → ask again", context.DeadlineExceeded, agentConfirmConnectorWindowExpiredReply},
+		{"rate limited → wait", NewSlackRateLimitError("3"), agentConfirmConnectorRateLimitedReply},
+		{"no bot token → unavailable", auth.ErrSlackBotTokenNotConfigured, agentConfirmConnectorUnavailableReply},
 	}
-	if !ro || text != agentConfirmConnectorWindowExpiredReply {
-		t.Fatalf("a failed open should replace the card with the window-expired reply; replace=%v text=%q", ro, text)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			hc.h.now = func() time.Time { return fixedNow }
+			ov := &openViewCapture{returnErr: c.openErr}
+			hc.h.cfg.OpenView = ov.fn()
+			id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, fixedNow)
+
+			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if ov.calls != 1 {
+				t.Fatalf("open-fails case should still attempt one views.open; opens=%d", ov.calls)
+			}
+			if !ro || text != c.wantReply {
+				t.Fatalf("open error %v should replace the card with %q; replace=%v text=%q", c.openErr, c.wantReply, ro, text)
+			}
+		})
 	}
 }
 

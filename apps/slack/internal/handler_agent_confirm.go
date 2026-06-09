@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // Confirm-card button action_ids. Distinct from every slash-command button so a
@@ -46,6 +47,10 @@ const (
 	agentConfirmConnectorOpenedReply        = "Approved — opening guided qURL Connector setup. Complete the form in the dialog to finish."
 	agentConfirmConnectorWindowExpiredReply = "Approved, but Slack's setup window closed before the form could open. Ask me to protect that connector again."
 	agentConfirmConnectorUnavailableReply   = "I couldn't open guided qURL Connector setup on this workspace. Ask an admin to run `/qurl-admin protect-connector` instead."
+	// agentConfirmConnectorRateLimitedReply is distinct from the window-expired copy:
+	// re-asking immediately won't help (Slack is throttling views.open), so tell the
+	// admin to wait — mirrors the slash wizard distinguishing the rate-limit cause.
+	agentConfirmConnectorRateLimitedReply = "Slack is rate-limiting setup right now. Wait a moment, then ask me to protect that connector again."
 )
 
 // pendingAction is the ephemeral snapshot persisted between proposing a mutation
@@ -99,6 +104,13 @@ func confirmValidAlias(alias string) (canon string, ok bool) {
 // and a parse failure surfaces a generic reply rather than echoing the (possibly
 // injected) value onto the PUBLIC card. An empty alias fails here, which is
 // correct: exposeURLResourceInChannel must bind a channel alias.
+//
+// Reusing parseResourceExposeArgs also runs the URL through unwrapSlackURLArg,
+// whose unconditional HTML-unescape is documented as safe only for Slack-delivered
+// text. On this path the URL is LLM-distilled, so that invariant is best-effort:
+// any decoding only affects the exact-target lookup (a mismatch → benign "not
+// found"), and the value is never echoed. Keeping the single grammar source is
+// worth more than bypassing the unwrap for this caller.
 func confirmValidProtectURL(rawURL, rawAlias string) (args *resourceExposeArgs, ok bool) {
 	parsed, msg := parseResourceExposeArgs("url:" + rawURL + " as:$" + rawAlias)
 	if msg != "" {
@@ -369,7 +381,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	// consistent: the modal submit isn't idempotent across opens, so consume-once is
 	// what stops two approvers from double-opening → double-minting a connector.
 	if confirmModalRouted(pa.Action) {
-		h.openAgentConnectorModal(ctx, log, payload, &pa, triggerReceivedAt)
+		h.openAgentConnectorModal(ctx, log, payload, triggerReceivedAt)
 		return
 	}
 	res := h.executeAgentAction(ctx, log, &pa, payload)
@@ -404,7 +416,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 // On trigger expiry / open failure the card goes terminal with an "ask me again"
 // prompt: the action is already claimed (consumed), so the user re-asks the agent
 // to mint a fresh proposal + trigger — there is no retry on this card.
-func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, triggerReceivedAt time.Time) {
+func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, payload *interactionPayload, triggerReceivedAt time.Time) {
 	responseURL := payload.ResponseURL
 	if h.cfg.OpenView == nil {
 		log.Warn("agent confirm: protect-connector approved but OpenView is not configured")
@@ -420,8 +432,11 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 	}
 
 	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
-		TeamID:    payload.Team.ID,
-		ChannelID: pa.ChannelID, // == payload.Channel.ID (mismatch-guarded in processAgentConfirm)
+		TeamID: payload.Team.ID,
+		// The click's channel (== the proposal's, mismatch-guarded), matching the
+		// other execute paths. The proposal's env/port/alias hints are intentionally
+		// NOT threaded in v1 — the admin completes the blank wizard.
+		ChannelID: payload.Channel.ID,
 		// The approving admin: aligns the modal's same-user-submit gate with the
 		// ephemeral key target (see the key-delivery note above).
 		UserID:        payload.User.ID,
@@ -448,12 +463,32 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
 			"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
 			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
 		)
-		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorWindowExpiredReply)
+		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorOpenErrorReply(err))
 		return
 	}
-	log.Info("agent confirm: protect-connector modal opened", "channel_id", pa.ChannelID, "user_id", payload.User.ID)
+	log.Info("agent confirm: protect-connector modal opened", "channel_id", payload.Channel.ID, "user_id", payload.User.ID)
 	_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorOpenedReply)
+}
+
+// agentConfirmConnectorOpenErrorReply maps a views.open failure to the right
+// terminal card copy, so a non-expiry cause isn't mislabeled "ask me again" (which
+// won't help). Mirrors the slash wizard's cause distinction; the distinct kinds are
+// also logged for observability.
+func agentConfirmConnectorOpenErrorReply(err error) string {
+	switch {
+	case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
+		// The workspace has no usable bot token (and Grid fallback couldn't cover it):
+		// re-asking the agent won't help — it needs the app install / an admin.
+		return agentConfirmConnectorUnavailableReply
+	case errors.Is(err, ErrSlackRateLimited):
+		return agentConfirmConnectorRateLimitedReply
+	default:
+		// Trigger expired / deadline exceeded / transient: re-asking the agent mints a
+		// fresh proposal + trigger, which is exactly the fix.
+		return agentConfirmConnectorWindowExpiredReply
+	}
 }
 
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
