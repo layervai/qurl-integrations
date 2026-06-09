@@ -454,9 +454,9 @@ var mrkdwnTextEscaper = strings.NewReplacer(
 // plan); false for direct slash-command response bodies.
 func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 	payload := map[string]any{
-		respFieldResponseType: respTypeEphemeral,
-		"replace_original":    replaceOriginal,
-		respFieldText:         ":warning: " + message,
+		respFieldResponseType:    respTypeEphemeral,
+		respFieldReplaceOriginal: replaceOriginal,
+		respFieldText:            ":warning: " + message,
 	}
 	return json.Marshal(payload)
 }

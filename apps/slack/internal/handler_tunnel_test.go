@@ -590,10 +590,7 @@ func TestTunnelInstallBareOpensGuidedModal(t *testing.T) {
 			t.Errorf("modal missing %q:\n%s", want, body)
 		}
 	}
-	deleteBody := inv.captured.waitForBody(t, 2*time.Second)
-	if got := parseSlackReplyBool(t, deleteBody, "delete_original"); !got {
-		t.Fatalf("delete_original = %v, want true after successful modal open", got)
-	}
+	assertWizardAckReplaced(t, inv.captured.waitForBody(t, 2*time.Second), "Opened guided qURL Connector setup", "successful modal open")
 }
 
 func TestTunnelInstallBareFallsBackToEnterpriseInstallToken(t *testing.T) {
@@ -683,10 +680,7 @@ func TestTunnelInstallBareFallsBackToEnterpriseInstallToken(t *testing.T) {
 	if meta.TeamID != testAdminTeamID {
 		t.Fatalf("metadata TeamID = %q, want workspace team %q", meta.TeamID, testAdminTeamID)
 	}
-	deleteBody := inv.captured.waitForBody(t, 2*time.Second)
-	if got := parseSlackReplyBool(t, deleteBody, "delete_original"); !got {
-		t.Fatalf("delete_original = %v, want true after enterprise-token modal open", got)
-	}
+	assertWizardAckReplaced(t, inv.captured.waitForBody(t, 2*time.Second), "Opened guided qURL Connector setup", "enterprise-token modal open")
 }
 
 func TestTunnelInstallBareReportsInstallLinkWhenWorkspaceAndEnterpriseTokensMissing(t *testing.T) {

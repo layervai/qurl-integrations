@@ -1480,9 +1480,10 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 // Centralized so respondSlack and the parallel writer in postResponse
 // can't drift, and so the goconst/keyword consistency stays linter-clean.
 const (
-	respFieldResponseType = "response_type"
-	respFieldText         = "text"
-	respTypeEphemeral     = "ephemeral"
+	respFieldResponseType    = "response_type"
+	respFieldText            = "text"
+	respFieldReplaceOriginal = "replace_original"
+	respTypeEphemeral        = "ephemeral"
 	// respFieldResponseAction / respFieldView are the view_submission reply
 	// keys (response_action: "errors"|"update" + the replacement view).
 	respFieldResponseAction = "response_action"

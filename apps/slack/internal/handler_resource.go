@@ -214,6 +214,11 @@ func (h *Handler) handleExposeURLWizard(w http.ResponseWriter, values url.Values
 	respondSlack(w, ackWorkingOnIt)
 }
 
+// exposeURLWizardOpenedMsg replaces the "Working on it…" ack once the protect-url
+// modal opens. Slack can't delete a slash command's ephemeral ack, so the wizard
+// replaces it in place (see replaceOriginalResponse).
+const exposeURLWizardOpenedMsg = ":white_check_mark: Opened the URL protection form — fill it in to protect a URL in this channel."
+
 // openExposeURLWizard is the async worker for handleExposeURLWizard: admin
 // re-check, fetch eligible URL resources, then open the URL picker. If no URL
 // resources are available, it replies before opening a modal. Mirrors
@@ -287,7 +292,7 @@ func (h *Handler) openExposeURLWizard(ctx context.Context, log *slog.Logger, tea
 		}
 		return
 	}
-	_ = h.deleteOriginalResponse(log, responseURL)
+	_ = h.replaceOriginalResponse(log, responseURL, exposeURLWizardOpenedMsg)
 }
 
 func (h *Handler) exposeURLResourceInChannel(ctx context.Context, log *slog.Logger, teamID, channelID string, args *resourceExposeArgs) string {

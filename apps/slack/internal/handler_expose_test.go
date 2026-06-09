@@ -631,6 +631,7 @@ func TestHandleExposeURLBareOpensPickerModal(t *testing.T) {
 	if listCalls.Load() != 1 {
 		t.Errorf("bare protect-url fetched resource list %d times, want 1", listCalls.Load())
 	}
+	assertWizardAckReplaced(t, inv.captured.waitForBody(t, 2*time.Second), "Opened the URL protection form", "bare protect-url modal open")
 }
 
 func TestHandleExposeURLBareNoURLResourcesPostsMessage(t *testing.T) {

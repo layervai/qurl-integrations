@@ -106,7 +106,48 @@ func TestPostResponseBodyDrainsOversizedErrorBody(t *testing.T) {
 	}
 }
 
-func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) {
+// TestReplaceOriginalResponsePayload is the regression guard for the prod
+// `no_text` 500: delete_original is unsupported for slash commands, so the
+// wizard cleanup MUST replace (carry text) rather than delete. This asserts the
+// posted body shape — it fails against the old `{"delete_original": true}`
+// payload, which had no `text` and is exactly what Slack rejected.
+func TestReplaceOriginalResponsePayload(t *testing.T) {
+	t.Parallel()
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := &Handler{
+		baseCtx:               context.Background(),
+		responseURLClient:     srv.Client(),
+		validateResponseURLFn: url.Parse,
+	}
+
+	const msg = ":white_check_mark: Opened the form."
+	if !h.replaceOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL, msg) {
+		t.Fatal("replaceOriginalResponse returned false for HTTP 200")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("response_url body is not JSON: %v (body=%s)", err, gotBody)
+	}
+	if _, ok := payload["delete_original"]; ok {
+		t.Errorf("payload must not contain delete_original (unsupported for slash commands); got %v", payload)
+	}
+	if got, _ := payload["replace_original"].(bool); !got {
+		t.Errorf("replace_original = %v, want true", payload["replace_original"])
+	}
+	if got, _ := payload[respFieldText].(string); got != msg {
+		t.Errorf("%s = %q, want %q", respFieldText, payload[respFieldText], msg)
+	}
+}
+
+func TestReplaceOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	var hits atomic.Int32
@@ -125,17 +166,17 @@ func TestDeleteOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T) 
 		validateResponseURLFn: url.Parse,
 	}
 
-	ok := h.deleteOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL)
+	ok := h.replaceOriginalResponse(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL, "msg")
 
 	if ok {
-		t.Fatal("deleteOriginalResponse returned true for HTTP 500")
+		t.Fatal("replaceOriginalResponse returned true for HTTP 500")
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("response_url hits = %d, want 1 because canceled baseCtx skips retry", got)
 	}
 }
 
-func TestWaitForDeleteOriginalRetryReturnsImmediatelyWhenCanceled(t *testing.T) {
+func TestWaitForReplaceOriginalRetryReturnsImmediatelyWhenCanceled(t *testing.T) {
 	t.Parallel()
 
 	baseCtx, cancel := context.WithCancel(context.Background())
@@ -144,16 +185,16 @@ func TestWaitForDeleteOriginalRetryReturnsImmediatelyWhenCanceled(t *testing.T) 
 
 	done := make(chan bool, 1)
 	go func() {
-		done <- h.waitForDeleteOriginalRetry()
+		done <- h.waitForReplaceOriginalRetry()
 	}()
 
 	select {
 	case got := <-done:
 		if got {
-			t.Fatal("waitForDeleteOriginalRetry returned true for canceled baseCtx")
+			t.Fatal("waitForReplaceOriginalRetry returned true for canceled baseCtx")
 		}
-	case <-time.After(deleteOriginalRetryDelay / 2):
-		t.Fatal("waitForDeleteOriginalRetry slept despite canceled baseCtx")
+	case <-time.After(replaceOriginalRetryDelay / 2):
+		t.Fatal("waitForReplaceOriginalRetry slept despite canceled baseCtx")
 	}
 }
 

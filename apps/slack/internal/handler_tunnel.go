@@ -318,6 +318,11 @@ func (h *Handler) handleTunnelInstallWizard(w http.ResponseWriter, values url.Va
 	respondSlack(w, ackWorkingOnIt)
 }
 
+// tunnelInstallWizardOpenedMsg replaces the "Working on it…" ack once the guided
+// qURL Connector modal opens. Slack can't delete a slash command's ephemeral
+// ack, so the wizard replaces it in place (see replaceOriginalResponse).
+const tunnelInstallWizardOpenedMsg = ":white_check_mark: Opened guided qURL Connector setup — complete the form to finish."
+
 func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, triggerID, responseURL string, triggerReceivedAt time.Time) {
 	triggerElapsed := h.now().Sub(triggerReceivedAt)
 	if triggerElapsed < 0 {
@@ -401,7 +406,7 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		}
 		return
 	}
-	_ = h.deleteOriginalResponse(log, responseURL)
+	_ = h.replaceOriginalResponse(log, responseURL, tunnelInstallWizardOpenedMsg)
 }
 
 // openViewWithGridFallback opens a modal with the workspace bot token and, on a

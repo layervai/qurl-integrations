@@ -248,6 +248,24 @@ func parseSlackReplyBool(t *testing.T, body []byte, field string) bool {
 	return value
 }
 
+// assertWizardAckReplaced asserts a guided-wizard cleanup REPLACED its "Working
+// on it…" ack in place rather than deleting it: replace_original set,
+// delete_original NOT set (unsupported for slash commands — Slack returns
+// no_text), and the opened-copy text (wantText) present. `when` labels the open
+// path for failure messages.
+func assertWizardAckReplaced(t *testing.T, body []byte, wantText, when string) {
+	t.Helper()
+	if got := parseSlackReplyBool(t, body, "replace_original"); !got {
+		t.Fatalf("replace_original = %v, want true after %s", got, when)
+	}
+	if got := parseSlackReplyBool(t, body, "delete_original"); got {
+		t.Fatal("delete_original must not be set (unsupported for slash commands; Slack returns no_text)")
+	}
+	if text := parseSlackText(t, body); !strings.Contains(text, wantText) {
+		t.Fatalf("ack replace text = %q, want it to contain %q (after %s)", text, wantText, when)
+	}
+}
+
 // workspaceMappingHasAdmin returns true iff the workspace_mappings
 // row for `teamID` exists AND carries `slackUserID` in its
 // admin_slack_user_ids SS (set). The OAuth callback writes this row
