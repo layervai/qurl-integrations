@@ -291,16 +291,24 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 // ([Handler.processButtonGet]) so both render identical replies.
 func (h *Handler) finishGet(log *slog.Logger, responseURL, text string, err error) {
 	if err != nil {
-		var ue *userError
-		if errors.As(err, &ue) {
-			_ = h.postResponse(log, responseURL, ":warning: "+ue.msg)
-			return
-		}
-		log.Error("get: unexpected non-userError leaked through getWork", "error", err)
-		_ = h.postResponse(log, responseURL, ":warning: "+commonGetMintFailedMessage)
+		_ = h.postResponse(log, responseURL, mapCoreError(log, err, commonGetMintFailedMessage))
 		return
 	}
 	_ = h.postResponse(log, responseURL, text)
+}
+
+// mapCoreError renders a delivery-agnostic mutation core's error as a Slack-safe
+// string: a [*userError]'s message (warning-prefixed), or a generic fallback for
+// an unexpected non-userError leak (logged loud — internals never reach Slack).
+// Shared by finishGet (the /qurl get + Create-qURL button) and the conversation-
+// mode confirm flow (executeAgentAction).
+func mapCoreError(log *slog.Logger, err error, generic string) string {
+	var ue *userError
+	if errors.As(err, &ue) {
+		return ":warning: " + ue.msg
+	}
+	log.Error("unexpected non-userError leaked from a mutation core", "error", err, "fallback", generic)
+	return ":warning: " + generic
 }
 
 // getWorkArgs bundles the closure inputs for [Handler.getWork].

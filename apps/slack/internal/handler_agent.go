@@ -266,7 +266,10 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	// user can fire a follow-up turn against it. The post is the slower,
 	// user-visible step, so this trades a little reply latency for that ordering.
 	h.saveAgentHistory(log, partition, threadKey, newHistory, version)
-	h.postAgentReply(log, env, replyTS, agentReplyText(&result))
+
+	// Deliver: an interactive confirm card for an executable proposal once the
+	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
+	h.deliverAgentResult(log, env, replyTS, &result)
 }
 
 // loadAgentHistory reads and decodes a thread's transcript. A decode error is
@@ -403,7 +406,11 @@ func agentReplyText(result *agent.Result) string {
 		if strings.TrimSpace(result.Proposal.Summary) == "" {
 			return agentErrorReply
 		}
-		return agentProposalPreviewPrefix + result.Proposal.Summary
+		// The preview posts as mrkdwn, and the summary is LLM-distilled — escape it
+		// (consistent with the confirm card's fallback) so a prompt-injected masked
+		// link can't surface. The Reply branch below is deliberately NOT escaped: it
+		// is the agent's own answer, which is allowed light Slack formatting.
+		return agentProposalPreviewPrefix + escapeMrkdwnText(result.Proposal.Summary)
 	}
 	if strings.TrimSpace(result.Reply) == "" {
 		return agentErrorReply

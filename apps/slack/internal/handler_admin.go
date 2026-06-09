@@ -157,6 +157,34 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 	return true
 }
 
+// requireAdminForClick is the async (button-click) sibling of requireAdminSync:
+// it runs the fail-closed workspace-admin re-check for an async mutation and
+// posts the appropriate ephemeral denial to responseURL, returning false on any
+// non-admin / error / unconfigured outcome. The check is bounded off h.baseCtx
+// (not a request ctx) so a client abort can't cancel the deliberate gate.
+// adminOnlyMsg is the surface-specific denial copy (warning prefix added here).
+// Shared by the /qurl list Revoke button and the conversation-mode confirm card.
+func (h *Handler) requireAdminForClick(log *slog.Logger, responseURL, teamID, userID, adminOnlyMsg string) bool {
+	if h.cfg.AdminStore == nil {
+		_ = h.postResponse(log, responseURL, ":warning: Admin features are not configured for this deployment.")
+		return false
+	}
+	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	cancel()
+	if err != nil {
+		log.Error("admin click gate: check failed", "error", err, "team_id", teamID, "user_id", userID)
+		_ = h.postResponse(log, responseURL, ":warning: failed to verify admin status (upstream error; see logs).")
+		return false
+	}
+	if !isAdmin {
+		log.Warn("admin click gate: non-admin denied", "team_id", teamID, "user_id", userID)
+		_ = h.postResponse(log, responseURL, ":warning: "+adminOnlyMsg)
+		return false
+	}
+	return true
+}
+
 // handleAdminAdd promotes the target Slack user to admin on the
 // caller's workspace. The caller must already be an admin
 // (requireAdminSync). The store call is a single conditional

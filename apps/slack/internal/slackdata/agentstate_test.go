@@ -216,3 +216,99 @@ func TestConversation_TTLRefreshedOnSave(t *testing.T) {
 		t.Fatalf("conversation ttl = %q, want 1700001800", got)
 	}
 }
+
+func TestPendingAction_RoundTripAndTTL(t *testing.T) {
+	fake := newAgentFakeDDB()
+	s := newTestAgentStore(fake)
+	ctx := context.Background()
+
+	// Missing id → not found, no error (treated as "expired").
+	if payload, found, err := s.LoadPendingAction(ctx, "T1", "missing"); err != nil || found || payload != nil {
+		t.Fatalf("missing load: payload=%q found=%v err=%v", payload, found, err)
+	}
+
+	if err := s.PutPendingAction(ctx, "T1", "abc123", []byte(`{"action":"revoke"}`)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	payload, found, err := s.LoadPendingAction(ctx, "T1", "abc123")
+	if err != nil || !found || string(payload) != `{"action":"revoke"}` {
+		t.Fatalf("roundtrip: payload=%q found=%v err=%v", payload, found, err)
+	}
+	// now=1_700_000_000, pending TTL default 10m → 1_700_000_600.
+	if got := fake.lastPutAt[pendSKPrefix+"abc123"]; got != "1700000600" {
+		t.Fatalf("pending ttl = %q, want 1700000600", got)
+	}
+}
+
+func TestLoadPendingAction_ReadTimeExpiry(t *testing.T) {
+	// The DynamoDB TTL reaper lags, so LoadPendingAction enforces the TTL at read
+	// time: a past-TTL item reads as gone even though the fake never reaps.
+	fake := newAgentFakeDDB()
+	now := time.Unix(1_700_000_000, 0)
+	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, PendingActionTTL: 10 * time.Minute}
+	ctx := context.Background()
+
+	if err := s.PutPendingAction(ctx, "T1", "id1", []byte("x")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if _, found, _ := s.LoadPendingAction(ctx, "T1", "id1"); !found {
+		t.Fatal("should be found within the TTL window")
+	}
+	now = now.Add(11 * time.Minute) // advance past the 10m TTL
+	if _, found, _ := s.LoadPendingAction(ctx, "T1", "id1"); found {
+		t.Fatal("a past-TTL pending action must read as expired")
+	}
+}
+
+func TestClaimPendingAction_ConsumeOnce(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+
+	// First claim wins; every later claim (double-click / replay) loses — even
+	// without a prior PutPendingAction, since the claim marker is independent.
+	first, err := s.ClaimPendingAction(ctx, "T1", "id1")
+	if err != nil || !first {
+		t.Fatalf("first claim: claimed=%v err=%v", first, err)
+	}
+	again, err := s.ClaimPendingAction(ctx, "T1", "id1")
+	if err != nil || again {
+		t.Fatalf("second claim must lose: claimed=%v err=%v", again, err)
+	}
+	// A distinct id is independent.
+	other, err := s.ClaimPendingAction(ctx, "T1", "id2")
+	if err != nil || !other {
+		t.Fatalf("distinct id claim: claimed=%v err=%v", other, err)
+	}
+}
+
+func TestPendingAction_PartitionIsolatesTeams(t *testing.T) {
+	// Pending actions key on team id; one team's id must not resolve under another
+	// (and the claim markers are independent across teams).
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+	if err := s.PutPendingAction(ctx, "TA", "shared", []byte("a")); err != nil {
+		t.Fatalf("put TA: %v", err)
+	}
+	if _, found, _ := s.LoadPendingAction(ctx, "TB", "shared"); found {
+		t.Fatal("team TB must not see team TA's pending action")
+	}
+	claimedA, _ := s.ClaimPendingAction(ctx, "TA", "shared")
+	claimedB, _ := s.ClaimPendingAction(ctx, "TB", "shared")
+	if !claimedA || !claimedB {
+		t.Fatalf("each team claims its own id independently: A=%v B=%v", claimedA, claimedB)
+	}
+}
+
+func TestPendingAction_Validation(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+	if err := s.PutPendingAction(ctx, "", "id", nil); err == nil {
+		t.Error("PutPendingAction: expected validation error for empty partition")
+	}
+	if _, _, err := s.LoadPendingAction(ctx, "T1", ""); err == nil {
+		t.Error("LoadPendingAction: expected validation error for empty id")
+	}
+	if _, err := s.ClaimPendingAction(ctx, "", "id"); err == nil {
+		t.Error("ClaimPendingAction: expected validation error for empty partition")
+	}
+}
