@@ -1,0 +1,315 @@
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"regexp"
+	"strings"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+)
+
+// Slack Events API event types this handler reacts to.
+const (
+	slackEventTypeAppMention = "app_mention"
+	slackEventTypeMessage    = "message"
+	slackChannelTypeIM       = "im"
+)
+
+// agentProposalPreviewPrefix prefixes a proposed-mutation reply while
+// conversation mode is read-only (the confirm flow lands in a follow-up). The
+// agent only ever proposes; it never executes, so a preview is the honest reply.
+const agentProposalPreviewPrefix = "I can set that up, but applying changes from conversation mode isn't enabled yet. Here's what I'd do once it is:\n• "
+
+// agentErrorReply is posted when a turn fails unexpectedly. Deliberately vague —
+// internals never reach the channel.
+const agentErrorReply = "Something went wrong handling that. Please try again, or use a `/qurl` command."
+
+// slackEventEnvelope is the Events API outer payload. Only the fields the agent
+// surface needs are modeled.
+type slackEventEnvelope struct {
+	Type         string          `json:"type"`
+	Challenge    string          `json:"challenge"`
+	TeamID       string          `json:"team_id"`
+	EnterpriseID string          `json:"enterprise_id"`
+	APIAppID     string          `json:"api_app_id"`
+	EventID      string          `json:"event_id"`
+	Event        slackInnerEvent `json:"event"`
+}
+
+// slackInnerEvent is the inner `event` object for app_mention / message events.
+type slackInnerEvent struct {
+	Type        string `json:"type"`
+	User        string `json:"user"`
+	BotID       string `json:"bot_id"`
+	Subtype     string `json:"subtype"`
+	Text        string `json:"text"`
+	Channel     string `json:"channel"`
+	ChannelType string `json:"channel_type"`
+	TS          string `json:"ts"`
+	ThreadTS    string `json:"thread_ts"`
+}
+
+// agentEnabled reports whether conversation mode is fully wired and not killed.
+func (h *Handler) agentEnabled() bool {
+	return !h.cfg.AgentDisabled &&
+		h.cfg.AgentLLM != nil &&
+		h.cfg.AgentStore != nil &&
+		h.cfg.PostMessage != nil
+}
+
+// handleAgentEvent decides whether an event_callback should drive a
+// conversation turn and, if so, dispatches it to the async pool. The caller
+// (handleEvent) always acks 200 regardless — Slack must not retry — so this only
+// schedules work; it never writes the response.
+func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
+	if !h.agentEnabled() || !shouldDispatchAgentEvent(env) {
+		return
+	}
+	log := slog.With(
+		"surface", "agent",
+		"team_id", env.TeamID,
+		"enterprise_id", env.EnterpriseID,
+		"channel_id", env.Event.Channel,
+		"event_id", env.EventID,
+	)
+	envCopy := *env
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		h.processAgentEvent(ctx, log, &envCopy)
+	}) {
+		log.Warn("agent: async pool saturated — dropping event")
+	}
+}
+
+// shouldDispatchAgentEvent filters out everything that isn't a human asking the
+// agent something: non-mention/DM events, bot and system/edited messages (the
+// self-loop guard), authorless events, channel messages that aren't @-mentions,
+// and empty text.
+func shouldDispatchAgentEvent(env *slackEventEnvelope) bool {
+	e := &env.Event
+	if e.BotID != "" || e.Subtype != "" || e.User == "" {
+		return false
+	}
+	switch e.Type {
+	case slackEventTypeAppMention:
+		// Channel @-mention — always a deliberate address.
+	case slackEventTypeMessage:
+		// Only DMs; we don't subscribe to the channel-message firehose.
+		if e.ChannelType != slackChannelTypeIM {
+			return false
+		}
+	default:
+		return false
+	}
+	return strings.TrimSpace(stripBotMention(e.Text)) != ""
+}
+
+// botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
+// "<@U123|name>", so an @-mention's text can be reduced to the actual request.
+var botMentionPattern = regexp.MustCompile(`^\s*<@[UW][A-Z0-9]+(?:\|[^>]*)?>\s*`)
+
+// stripBotMention removes a leading bot mention from app_mention text.
+func stripBotMention(text string) string {
+	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
+}
+
+// agentEventPartition is the conversation-state partition key: the Enterprise
+// Grid org id when present (stable across the org's workspaces), else the team.
+func agentEventPartition(env *slackEventEnvelope) string {
+	if env.EnterpriseID != "" {
+		return env.EnterpriseID
+	}
+	return env.TeamID
+}
+
+// agentEventRootTS is the thread root a turn belongs to: the parent thread_ts
+// when the message is already in a thread, else the message's own ts (which the
+// reply threads under).
+func agentEventRootTS(e *slackInnerEvent) string {
+	if e.ThreadTS != "" {
+		return e.ThreadTS
+	}
+	return e.TS
+}
+
+// agentEventThreadKey identifies one conversation: channel + thread root.
+func agentEventThreadKey(env *slackEventEnvelope) string {
+	return env.Event.Channel + ":" + agentEventRootTS(&env.Event)
+}
+
+// processAgentEvent runs one conversation turn on the async pool: dedupe, load
+// history, run the agent, persist, and post the reply.
+func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+	partition := agentEventPartition(env)
+
+	// Dedupe first. Slack delivers at least once; a single winner proceeds.
+	first, err := h.cfg.AgentStore.MarkEventSeen(ctx, partition, env.EventID)
+	if err != nil {
+		// Fail closed: dropping a turn on a transient error beats a double reply.
+		log.Error("agent: dedupe check failed; dropping event", "error", err)
+		return
+	}
+	if !first {
+		log.Info("agent: duplicate event ignored")
+		return
+	}
+
+	threadKey := agentEventThreadKey(env)
+	history, version, err := h.loadAgentHistory(ctx, log, partition, threadKey)
+	if err != nil {
+		// Dedupe already committed, so Slack won't retry and we own the reply:
+		// tell the user something went wrong rather than leaving their @-mention
+		// silently unanswered (already logged in loadAgentHistory).
+		h.postAgentReply(ctx, log, env, agentEventRootTS(&env.Event), agentErrorReply)
+		return
+	}
+
+	tc := agent.TurnContext{
+		TeamID:        env.TeamID,
+		EnterpriseID:  env.EnterpriseID,
+		ChannelID:     env.Event.Channel,
+		UserID:        env.Event.User,
+		CallerIsAdmin: h.callerIsAdmin(log, env.TeamID, env.Event.User),
+	}
+
+	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log))
+	result, newHistory, err := a.Run(ctx, &tc, history, stripBotMention(env.Event.Text))
+
+	replyTS := agentEventRootTS(&env.Event)
+	if err != nil {
+		log.Error("agent: turn failed", "error", err)
+		h.postAgentReply(ctx, log, env, replyTS, agentErrorReply)
+		return
+	}
+
+	// Token usage per turn (summed across the agent's round-trips). The cache
+	// counters are the operator hook for confirming whether prompt caching is
+	// paying off once conversation mode is live (see the agent package).
+	log.Info("agent: turn complete",
+		"proposed", result.Proposal != nil,
+		"input_tokens", result.Usage.InputTokens,
+		"output_tokens", result.Usage.OutputTokens,
+		"cache_read_tokens", result.Usage.CacheReadInputTokens,
+		"cache_creation_tokens", result.Usage.CacheCreationInputTokens,
+	)
+
+	h.saveAgentHistory(ctx, log, partition, threadKey, newHistory, version)
+	h.postAgentReply(ctx, log, env, replyTS, agentReplyText(&result))
+}
+
+// loadAgentHistory reads and decodes a thread's transcript. A decode error is
+// treated as an empty thread (start fresh) rather than a hard failure; the
+// loaded version is preserved either way so the next SaveConversation still
+// passes the optimistic-concurrency check (and a corrupt blob gets overwritten).
+func (h *Handler) loadAgentHistory(ctx context.Context, log *slog.Logger, partition, threadKey string) ([]agent.Message, int64, error) {
+	blob, version, err := h.cfg.AgentStore.LoadConversation(ctx, partition, threadKey)
+	if err != nil {
+		log.Error("agent: load conversation failed", "error", err)
+		return nil, 0, err
+	}
+	if len(blob) == 0 {
+		return nil, version, nil
+	}
+	var history []agent.Message
+	if err := json.Unmarshal(blob, &history); err != nil {
+		log.Warn("agent: corrupt conversation history; starting fresh", "error", err)
+		return nil, version, nil
+	}
+	return history, version, nil
+}
+
+// maxPersistedMessages bounds the transcript persisted per thread so a long
+// thread can't grow the DynamoDB item toward the 400KB limit (at which point the
+// save fails and the thread loses continuity). The agent caps work per turn, so
+// ~20 turns of context is ample; older turns are trimmed.
+const maxPersistedMessages = 40
+
+// saveAgentHistory persists the updated transcript, trimmed to a bounded length.
+// A version conflict (a concurrent turn won) is logged and dropped — the reply
+// still posts.
+func (h *Handler) saveAgentHistory(ctx context.Context, log *slog.Logger, partition, threadKey string, history []agent.Message, version int64) {
+	blob, err := json.Marshal(trimAgentHistory(history, maxPersistedMessages))
+	if err != nil {
+		log.Error("agent: marshal conversation failed", "error", err)
+		return
+	}
+	switch err := h.cfg.AgentStore.SaveConversation(ctx, partition, threadKey, blob, version); {
+	case errors.Is(err, slackdata.ErrConversationConflict):
+		log.Info("agent: conversation version conflict; concurrent turn won")
+	case err != nil:
+		log.Error("agent: save conversation failed", "error", err)
+	}
+}
+
+// trimAgentHistory bounds the transcript to roughly the most recent maxMessages,
+// cutting only at the start of a user turn (a user message carrying text). That
+// guarantees the kept slice never begins with an orphaned tool_result or an
+// assistant tool_use whose result was trimmed away — both of which the model API
+// rejects. If the trim window holds no clean boundary (an unusually long single
+// turn), it falls back to the last turn start anywhere so the result is still
+// bounded; only a transcript with no user-text turn at all is returned as-is.
+func trimAgentHistory(msgs []agent.Message, maxMessages int) []agent.Message {
+	if len(msgs) <= maxMessages {
+		return msgs
+	}
+	for i := len(msgs) - maxMessages; i < len(msgs); i++ {
+		if isUserTurnStart(&msgs[i]) {
+			return msgs[i:]
+		}
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if isUserTurnStart(&msgs[i]) {
+			return msgs[i:]
+		}
+	}
+	return msgs
+}
+
+// isUserTurnStart reports whether m begins a user turn — a user message with
+// text, as opposed to a user message carrying tool_results. "user" is the agent
+// package's wire role value.
+func isUserTurnStart(m *agent.Message) bool {
+	return m.Role == "user" && strings.TrimSpace(m.Text) != ""
+}
+
+// callerIsAdmin resolves the caller's admin status off the base context (a
+// client abort can't cancel the fail-closed check). Missing store → not admin.
+func (h *Handler) callerIsAdmin(log *slog.Logger, teamID, userID string) bool {
+	if h.cfg.AdminStore == nil {
+		return false
+	}
+	gateCtx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	defer cancel()
+	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(gateCtx, teamID, userID)
+	if err != nil {
+		// Fail closed, but log for parity with the other CheckAdmin call sites
+		// (requireAdminSync, the owner gate) so a systematic admin-check failure
+		// — DDB throttling, a perms regression — is visible on the agent path
+		// rather than silently denying admin features.
+		log.Error("agent: admin check failed; treating caller as non-admin", "error", err, "team_id", teamID, "user_id", userID)
+		return false
+	}
+	return isAdmin
+}
+
+// agentReplyText renders the channel reply for a turn result. A proposal is
+// surfaced as a preview while conversation mode is read-only.
+func agentReplyText(result *agent.Result) string {
+	if result.Proposal != nil {
+		return agentProposalPreviewPrefix + result.Proposal.Summary
+	}
+	if strings.TrimSpace(result.Reply) == "" {
+		return agentErrorReply
+	}
+	return result.Reply
+}
+
+// postAgentReply delivers the reply in-thread, logging (not surfacing) failures.
+func (h *Handler) postAgentReply(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, threadTS, text string) {
+	if err := h.cfg.PostMessage(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
+		log.Error("agent: post reply failed", "error", err)
+	}
+}

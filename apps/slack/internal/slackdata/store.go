@@ -167,15 +167,22 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	}, nil
 }
 
+// resolveNow returns now() when set, else the wall clock. Shared by [Store]
+// and [AgentStore] so the injectable-clock fallback lives in one place; both
+// guard against a bare `&Store{}` / `&AgentStore{}` that didn't set Now.
+func resolveNow(now func() time.Time) time.Time {
+	if now != nil {
+		return now()
+	}
+	return time.Now()
+}
+
 // nowOrDefault guards against a bare `&Store{}` that didn't set
 // Now — [NewStore] always sets it, but the fallback is cheap
 // insurance against a future caller that constructs the struct
 // directly.
 func (s *Store) nowOrDefault() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
+	return resolveNow(s.Now)
 }
 
 // Error mirrors the StatusCode/Code/Title/Detail shape the old
