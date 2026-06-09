@@ -304,7 +304,7 @@ func TestSlackPostMessageFuncDefaultsUserAgent(t *testing.T) {
 	if err := post(context.Background(), "T_test", "", "C_chan", "", "hi"); err != nil {
 		t.Fatalf("chat.postMessage: %v", err)
 	}
-	if gotUA != defaultSlackOpenViewUserAgent {
-		t.Fatalf("User-Agent = %q, want default %q", gotUA, defaultSlackOpenViewUserAgent)
+	if gotUA != defaultSlackAPIUserAgent {
+		t.Fatalf("User-Agent = %q, want default %q", gotUA, defaultSlackAPIUserAgent)
 	}
 }

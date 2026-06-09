@@ -436,8 +436,8 @@ func TestSlackOpenViewFuncDefaultsUserAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("views.open: %v", err)
 	}
-	if gotUA != defaultSlackOpenViewUserAgent {
-		t.Fatalf("User-Agent = %q, want %q", gotUA, defaultSlackOpenViewUserAgent)
+	if gotUA != defaultSlackAPIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, defaultSlackAPIUserAgent)
 	}
 }
 
@@ -577,7 +577,7 @@ func TestSlackOpenViewFuncCapsHTTPErrorBodySnippet(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want HTTP 502", err)
 	}
-	maxErrLen := len("views.open returned HTTP 502: ") + slackOpenViewMaxErrorSnippetBytes + len("...")
+	maxErrLen := len("views.open returned HTTP 502: ") + slackAPIMaxErrorSnippetBytes + len("...")
 	if len(err.Error()) > maxErrLen {
 		t.Fatalf("error length = %d, want <= %d; error = %q", len(err.Error()), maxErrLen, err.Error())
 	}
@@ -611,15 +611,15 @@ func TestSlackOpenViewBodySnippetTruncatesOnUTF8Boundary(t *testing.T) {
 	if !strings.HasSuffix(got, "...") {
 		t.Fatalf("snippet = %q, want truncation suffix", got)
 	}
-	if len(got) > slackOpenViewMaxErrorSnippetBytes {
-		t.Fatalf("snippet length = %d, want <= %d", len(got), slackOpenViewMaxErrorSnippetBytes)
+	if len(got) > slackAPIMaxErrorSnippetBytes {
+		t.Fatalf("snippet length = %d, want <= %d", len(got), slackAPIMaxErrorSnippetBytes)
 	}
 }
 
 func TestSlackOpenViewBodySnippetRepairsMalformedUTF8(t *testing.T) {
 	t.Parallel()
 
-	raw := append(bytes.Repeat([]byte{0x80}, slackOpenViewMaxErrorSnippetBytes+10), []byte("tail")...)
+	raw := append(bytes.Repeat([]byte{0x80}, slackAPIMaxErrorSnippetBytes+10), []byte("tail")...)
 	got := slackAPIBodySnippet(raw)
 
 	if !utf8.ValidString(got) {

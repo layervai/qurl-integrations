@@ -18,7 +18,7 @@ import (
 )
 
 const slackViewsOpenURL = "https://slack.com/api/views.open"
-const defaultSlackOpenViewUserAgent = "qurl-slack/unknown"
+const defaultSlackAPIUserAgent = "qurl-slack/unknown"
 
 // slackViewsOpenTimeout is the HTTP-client fallback upper bound for every
 // views.open request made by this client. Callers can still pass a tighter
@@ -30,8 +30,8 @@ const slackViewsOpenTimeout = 2 * time.Second
 // Slack echoes the opened view in successful views.open responses. Keep the
 // body bounded, but leave room for modal blocks plus Slack-injected state.
 const slackViewsOpenResponseBodyLimit = 64 * 1024
-const slackOpenViewMaxErrorSnippetBytes = 200
-const slackOpenViewTruncationSuffix = "..."
+const slackAPIMaxErrorSnippetBytes = 200
+const slackAPITruncationSuffix = "..."
 
 func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
@@ -51,7 +51,7 @@ func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, 
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		userAgent = defaultSlackOpenViewUserAgent
+		userAgent = defaultSlackAPIUserAgent
 	}
 	// The teamID parameter lets production select the bot token Slack issued
 	// for the workspace that invoked the slash command. Tests and single-
@@ -160,12 +160,12 @@ func slackOpenViewResponseError(statusCode int, header http.Header, raw []byte) 
 
 func slackAPIBodySnippet(raw []byte) string {
 	bodySnippet := printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(string(raw)), "?"))
-	if len(bodySnippet) <= slackOpenViewMaxErrorSnippetBytes {
+	if len(bodySnippet) <= slackAPIMaxErrorSnippetBytes {
 		return bodySnippet
 	}
-	budget := slackOpenViewMaxErrorSnippetBytes - len(slackOpenViewTruncationSuffix)
+	budget := slackAPIMaxErrorSnippetBytes - len(slackAPITruncationSuffix)
 	if budget <= 0 {
-		return slackOpenViewTruncationSuffix
+		return slackAPITruncationSuffix
 	}
 	cut := 0
 	// Count complete runes so the bounded log snippet uses as much of the byte
@@ -183,7 +183,7 @@ func slackAPIBodySnippet(raw []byte) string {
 		// if a future caller lowers the cap below a single UTF-8 rune width.
 		return "..."
 	}
-	return bodySnippet[:cut] + slackOpenViewTruncationSuffix
+	return bodySnippet[:cut] + slackAPITruncationSuffix
 }
 
 func printableLogSnippet(s string) string {
@@ -216,11 +216,13 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 
 const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 
-// slackChatPostMessageTimeout is the HTTP-client fallback upper bound for every
-// chat.postMessage request. The conversation-mode delivery worker carries its
-// own (tighter) context deadline (agentDeliveryBudget), so the caller context is
-// the primary deadline; this is the backstop. Unlike views.open there is no
-// short trigger window to race, so it can be a touch more generous.
+// slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
+// single post this 4s client timeout is the BINDING deadline: the conversation-
+// mode delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
+// OUTER envelope spanning the transcript save plus the post, so the 4s timeout
+// fires first on a stuck request. Unlike views.open there is no short trigger
+// window to race, so 4s leaves comfortable headroom for one round-trip while
+// still freeing the worker well inside its budget.
 const slackChatPostMessageTimeout = 4 * time.Second
 
 // Slack echoes the posted message back in successful chat.postMessage responses.
@@ -244,7 +246,7 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		userAgent = defaultSlackOpenViewUserAgent
+		userAgent = defaultSlackAPIUserAgent
 	}
 
 	// postBody resolves the bot token for one owner (workspace team or, on the
