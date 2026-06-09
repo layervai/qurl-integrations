@@ -371,37 +371,50 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 // pointed at and asserts it's an active tunnel before it becomes a PATCH
 // target. qurl-service has no get-by-id, so it scans the first ListResources
 // page (the same bounded scan `/qurl list` and protect use) and matches on
-// resource_id. A first-page miss returns a friendly message, never a PATCH
-// against the wrong/dead target — and splits two cases: a target that's
-// definitively not a live tunnel (a URL resource, a revoked resource, or a
-// legacy raw-URL `set-alias` row that matches no resource_id — the same rows
-// resolveTokenForGet rejects by `r_` prefix) gets the stale-alias hint (clear it
-// with unset-alias), whereas a first-page miss with MORE pages (HasMore) gets a
-// non-destructive lookup-limit message — it must NOT nudge unbinding a
-// possibly-live alias sitting on a later page. Returns (resource, "") on success
-// or (nil, userMsg).
+// resource_id. On no active-tunnel match it returns a friendly message, never a
+// PATCH against the wrong/dead target, and distinguishes by whether resourceID
+// was SEEN on the page: a seen-but-not-active target (a revoked or URL resource)
+// is definitively stale and gets the unset-alias hint, as does a complete scan
+// (no more pages) that didn't find it; only a resourceID NOT seen while more
+// pages remain (HasMore) gets a non-destructive lookup-limit message — it must
+// NOT nudge unbinding a possibly-live alias on a later page. A legacy raw-URL
+// `set-alias` row matches no resource_id (the same rows resolveTokenForGet
+// rejects by `r_` prefix), so it degrades to one of these messages. Returns
+// (resource, "") on success or (nil, userMsg).
 func (h *Handler) resolveActiveTunnelByResourceID(ctx context.Context, log *slog.Logger, c *client.Client, teamID, id, resourceID string) (resource *client.Resource, userMsg string) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
 	if err != nil {
 		log.Error("display-name: resource lookup by id failed", "error", err, "team_id", teamID, "id", id, "resource_id", resourceID)
 		return nil, sanitizeAPIError(err, "Failed to look up the qURL Connector")
 	}
+	// Track whether resourceID was SEEN on this page, separately from whether it
+	// matched as an active tunnel. A seen-but-dead target (revoked, or a URL
+	// resource) is definitively stale even when more pages exist, so it must get
+	// the unset-alias hint — only a genuine "not seen at all + more pages remain"
+	// miss is the inconclusive scan-window case.
+	seen := false
 	for i := range page.Resources {
 		r := &page.Resources[i]
-		if r.ResourceID == resourceID && r.Type == client.ResourceTypeTunnel && r.Status == client.StatusActive {
+		if r.ResourceID != resourceID {
+			continue
+		}
+		seen = true
+		if r.Type == client.ResourceTypeTunnel && r.Status == client.StatusActive {
 			return r, ""
 		}
 	}
-	if page.HasMore {
-		// Not on the first page, but more pages exist — we CANNOT conclude the
-		// alias is stale (its connector may be on a later page). Must not
-		// recommend unset-alias here: following that hint would unbind a
-		// possibly-live alias. Same listResourcesScanLimit bound `/qurl list`
-		// carries (tracked by #590); the difference is this is a mutation verb, so
-		// the copy stays non-destructive.
+	if !seen && page.HasMore {
+		// Not found on the first page AND more pages exist — we CANNOT conclude the
+		// alias is stale (its connector may be on a later page). Must not recommend
+		// unset-alias: following that hint would unbind a possibly-live alias. Same
+		// listResourcesScanLimit bound `/qurl list` carries (tracked by #590); the
+		// difference is this is a mutation verb, so the copy stays non-destructive.
 		log.Info("display-name: channel alias target not on first resource page; more pages exist", "team_id", teamID, "id", id, "resource_id", resourceID, "scan_limit", listResourcesScanLimit)
 		return nil, fmt.Sprintf("Couldn't locate the qURL Connector bound to `%s` among the first %d resources, and your workspace has more — this is a lookup limit, not necessarily a stale alias.", id, listResourcesScanLimit)
 	}
-	log.Info("display-name: channel alias points at no active tunnel", "team_id", teamID, "id", id, "resource_id", resourceID)
+	// Either seen-but-not-an-active-tunnel (revoked / URL resource), or a complete
+	// scan (no more pages) without a match — both definitively mean the alias no
+	// longer resolves to an active connector, so the unset-alias hint is correct.
+	log.Info("display-name: channel alias points at no active tunnel", "team_id", teamID, "id", id, "resource_id", resourceID, "seen_on_first_page", seen)
 	return nil, fmt.Sprintf("`%s` is an alias in this channel but no longer points at an active qURL Connector. Run `/qurl list` to see active connectors, or `/qurl-admin unset-alias $%s` to clear the alias.", id, id)
 }
