@@ -16,6 +16,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // --- pure-unit coverage ---
@@ -485,6 +486,25 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 				t.Fatalf("expected exactly one of card(%v)/preview(%v)", gotCard, gotPreview)
 			}
 		})
+	}
+}
+
+func TestPostAgentConfirm_DoesNotExecuteAtProposeTime(t *testing.T) {
+	// The core security invariant — the LLM only proposes; execution is a human
+	// click. Proposing must invoke NO mutation core. Every core dials the qURL API
+	// through NewClient, so a NewClient that fails the test proves nothing executed
+	// at propose time (the card + pending action are written, but no mutation runs).
+	hc := newConfirmHarness(t, "")
+	hc.h.cfg.NewClient = func(string) *client.Client {
+		t.Fatal("propose must not execute a mutation core (no qURL client call at propose time)")
+		return nil
+	}
+	prop := &agent.Proposal{Action: agent.ActionRevoke, Token: "staging", Summary: "Revoke $staging."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	if len(hc.blocks.calls) != 1 {
+		t.Fatalf("propose should post exactly one card, got %d", len(hc.blocks.calls))
 	}
 }
 
