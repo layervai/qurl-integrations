@@ -356,20 +356,30 @@ func TestConfirm_SetAliasOnApprove(t *testing.T) {
 	}
 }
 
-func TestConfirm_SetAliasRejectsInvalidInput(t *testing.T) {
-	// The confirm card is public, so an LLM-distilled alias/target with a backtick
-	// (or any out-of-grammar char) must be rejected with a GENERIC message — never
-	// bound, and never echoed onto the card (which would break the code fence).
-	hc := newConfirmHarness(t, "Uadmin")
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "ev`il", Target: "staging", ChannelID: "C1"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
-
-	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-	if !ro || text != agentConfirmInvalidAliasReply {
-		t.Fatalf("invalid set-alias should replace the card with the generic reply; replace=%v text=%q", ro, text)
+func TestConfirm_AliasRejectsInvalidInput(t *testing.T) {
+	// The confirm card is public, so an LLM-distilled alias/target that's out of
+	// grammar (backtick — fence break; bidi/zero-width control — spoofing; bad
+	// charset) must be rejected with the GENERIC reply: never bound/cleared, never
+	// echoed onto the card. Asserting exact equality to the generic const proves no
+	// part of the injected value leaks (and doesn't couple to the reply wording).
+	cases := []struct {
+		name string
+		pa   *pendingAction
+	}{
+		{"set-alias backtick alias", &pendingAction{Action: agent.ActionSetAlias, Alias: "ev`il", Target: "staging", ChannelID: "C1"}},
+		{"set-alias backtick target", &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "ev`il", ChannelID: "C1"}},
+		{"unset-alias bidi-control alias", &pendingAction{Action: agent.ActionUnsetAlias, Alias: "on\u202ecall", ChannelID: "C1"}},
 	}
-	if strings.Contains(text, "`") || strings.Contains(text, "ev") {
-		t.Fatalf("the public card must not echo the injected alias: %q", text)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			id := hc.seedPending(t, c.pa)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if !ro || text != agentConfirmInvalidAliasReply {
+				t.Fatalf("invalid alias input must replace the card with the generic reply (no echo); replace=%v text=%q", ro, text)
+			}
+		})
 	}
 }
 

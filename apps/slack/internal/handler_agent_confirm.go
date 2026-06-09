@@ -46,7 +46,7 @@ const (
 // is the token re-resolution at execute.
 type pendingAction struct {
 	Action    agent.ActionKind `json:"action"`
-	Token     string           `json:"token,omitempty"`  // $slug/$alias for get/revoke
+	Token     string           `json:"token,omitempty"`  // slug/alias (sigil stripped) for get/revoke
 	Reason    string           `json:"reason,omitempty"` // audit reason, forwarded to the mint on get
 	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias
 	Target    string           `json:"target,omitempty"` // target slug for set-alias
@@ -61,6 +61,15 @@ type pendingAction struct {
 // at the call site.
 func validAliasBind(alias, target string) bool {
 	_, msg := parseAliasArgs("$"+alias+" $"+target, true)
+	return msg == ""
+}
+
+// validAlias is the single-alias counterpart of validAliasBind, for the unset-alias
+// confirm path. The alias charset (lowercase-alnum-dash) rejects backticks AND every
+// non-printable (bidi/zero-width) — which escapeMrkdwnCode alone passes through —
+// keeping garbled/spoofed text off the public "not bound" card.
+func validAlias(alias string) bool {
+	_, msg := requireAlias("$" + alias)
 	return msg == ""
 }
 
@@ -375,10 +384,12 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// safe on the public card.
 		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, pa.Alias, pa.Target)}
 	case agent.ActionUnsetAlias:
-		// No validAliasBind gate (unlike set-alias): UnbindChannelAlias is a
-		// conditional (attribute_exists) clear, so an out-of-grammar alias simply
-		// can't match an existing binding and degrades to the benign "not bound"
-		// line — and unbindAliasResult escapes the alias before echoing it.
+		// Validate the alias like set-alias before echoing it onto the public card:
+		// unbindAliasResult escapes backticks, but non-printables (bidi/zero-width)
+		// would still garble/spoof the "not bound" line — the charset gate rejects them.
+		if !validAlias(pa.Alias) {
+			return actionResult{cardText: agentConfirmInvalidAliasReply}
+		}
 		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, pa.Alias)}
 	case agent.ActionProtectConnector, agent.ActionProtectURL:
 		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so

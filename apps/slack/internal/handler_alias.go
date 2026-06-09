@@ -361,11 +361,17 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 
 // resolveAndBindTunnelSlugAlias resolves a tunnel `$slug` to its
 // resource_id, binds `alias`→resource_id on (teamID, channelID), and
-// renders the admin-facing result. set-alias is the only caller and the
-// only target form is a slug, so the bind always carries an opaque
-// `r_<id>` — the success copy deliberately echoes the `$slug` the admin
-// typed (the noun `/qurl list` shows) rather than the internal
+// renders the admin-facing result. The target is always a slug, so the
+// bind carries an opaque `r_<id>` — the success copy deliberately echoes
+// the `$slug` (the noun `/qurl list` shows) rather than the internal
 // resource_id.
+//
+// CALLER CONTRACT: alias and slug MUST be pre-validated for the alias/slug
+// grammar (the /qurl-admin set-alias verb via parseAliasArgs; the
+// conversation-mode confirm flow via validAliasBind). The success/error copy
+// echoes both UNESCAPED into `$%s` code fences, and the confirm caller renders
+// the result on a PUBLIC card — so an unvalidated backtick/non-printable value
+// would break out or garble it. Any future caller must validate first.
 //
 // TOCTOU note: the slug→resource_id resolve and the DDB bind are two
 // steps; if the tunnel is deleted upstream between them, the binding
