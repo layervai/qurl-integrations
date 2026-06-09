@@ -1084,7 +1084,10 @@ func logAgentSurfaceState(s agentSurfaceState) {
 	switch {
 	case readOnlyLive && s.confirmFlag && s.blocksWired:
 		slog.Warn("conversation mode CONFIRM (mutation execution) is LIVE: an admin Approving a card EXECUTES the change. Confirm the hard pre-enablement gates (get-link authorization; R2 public-card replace_original; C1 connector key-privacy; C2 connector trigger-window) AND the DPA/data-handling review have cleared before relying on this.")
-	case s.confirmFlag:
+	case !s.killed && s.confirmFlag:
+		// When killed, the kill-switch line above is the accurate cause; a confirm-DARK
+		// line here would name the seams as the blocker, not the kill switch — so let
+		// the kill-switch line stand alone (the un-kill restart re-reports confirm state).
 		slog.Warn("QURL_AGENT_CONFIRM_ENABLED is set but confirm mode is DARK; mutations will NOT execute until the read-only surface is live and PostMessageBlocks is wired",
 			"read_only_live", readOnlyLive, "blocks_wired", s.blocksWired)
 	}

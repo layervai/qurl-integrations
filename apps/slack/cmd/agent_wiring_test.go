@@ -188,7 +188,9 @@ func TestLogAgentSurfaceState_ConfirmMode(t *testing.T) {
 		{name: "confirm live", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true }), wantConfirm: "CONFIRM (mutation execution) is LIVE"},
 		{name: "flag set but blocks unwired → dark", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.blocksWired = false }), wantConfirm: "confirm mode is DARK"},
 		{name: "flag set but read-only dark → dark", state: agentSurfaceState{storeWired: true, postWired: true, blocksWired: true, confirmFlag: true}, wantConfirm: "confirm mode is DARK"},
-		{name: "flag set but killed → dark", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.killed = true }), wantConfirm: "confirm mode is DARK"},
+		// Killed: only the kill-switch line; no separate confirm line (it would name the
+		// seams, not the kill switch, as the blocker).
+		{name: "flag set but killed → no confirm line", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.killed = true }), wantConfirm: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
