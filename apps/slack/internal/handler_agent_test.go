@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -412,18 +413,25 @@ func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
 func TestProcessAgentEvent_PanicPostsError(t *testing.T) {
 	// A panic mid-turn — after dedupe is committed and 200 already acked, so Slack
 	// won't retry — must not vanish: the safety-net recover posts the error reply
-	// (and the panic must not escape processAgentEvent).
+	// (and the panic must not escape processAgentEvent). We assert the panic was
+	// logged as well as replied, so the test is specific to the recover path and
+	// not satisfied by an ordinary in-budget error that also posts agentErrorReply.
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post})
 
-	h.processAgentEvent(context.Background(), slog.Default(),
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	h.processAgentEvent(context.Background(), logger,
 		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> boom"))
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("a panicking turn should still post the error reply, got %+v", *posts)
+	}
+	if !strings.Contains(logBuf.String(), "agent: panic during turn") {
+		t.Fatalf("panic safety-net must log the recovered panic; log = %s", logBuf.String())
 	}
 }
 
