@@ -368,6 +368,11 @@ type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, 
 // block objects (the map[string]any shape the views.go builders emit, same as
 // postResponseBlocks); fallbackText is the notification/accessibility text Slack
 // shows where blocks can't render. threadTS threads the reply.
+//
+// Slack renders the top-level fallback text as mrkdwn by default, so a caller
+// passing untrusted (e.g. LLM-distilled) text must escape it (the conversation
+// confirm flow passes escapeMrkdwnText output); the production impl should also
+// post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
 
 // Handler processes Slack events and commands.

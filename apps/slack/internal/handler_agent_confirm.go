@@ -133,7 +133,11 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, preview)
 		return
 	}
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, id), summary); err != nil {
+	// The card section renders the summary as plain_text (safe), but the fallback is
+	// the message's top-level text — mrkdwn by default — so the same LLM-distilled
+	// summary must be escaped there too, or a prompt-injected masked link would
+	// surface in the notification/push preview and non-block clients.
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, id), escapeMrkdwnText(summary)); err != nil {
 		log.Error("agent confirm: post card failed", "error", err)
 		h.postAgentReply(log, env, threadTS, preview)
 		return

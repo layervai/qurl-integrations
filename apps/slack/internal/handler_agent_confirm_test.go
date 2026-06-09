@@ -456,6 +456,23 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 	}
 }
 
+func TestPostAgentConfirm_EscapesFallbackText(t *testing.T) {
+	// The card section is plain_text, but the fallbackText is the message's
+	// top-level mrkdwn notification text — an injected masked link must not survive
+	// there either (it would show in the push/notification preview).
+	hc := newConfirmHarness(t, "")
+	prop := &agent.Proposal{Action: agent.ActionRevoke, Token: "x", Summary: "Revoke <http://evil|click here>."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	if len(hc.blocks.calls) != 1 {
+		t.Fatalf("want one card, got %d", len(hc.blocks.calls))
+	}
+	if fb := hc.blocks.calls[0].fallback; strings.ContainsAny(fb, "<>") {
+		t.Fatalf("fallback text must be mrkdwn-escaped (no raw <>): %q", fb)
+	}
+}
+
 func TestPostAgentConfirm_BlankSummaryFallsBack(t *testing.T) {
 	hc := newConfirmHarness(t, "")
 	prop := &agent.Proposal{Action: agent.ActionRevoke, Token: "staging", Summary: "   "}
