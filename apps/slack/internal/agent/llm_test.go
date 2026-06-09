@@ -4,7 +4,26 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
+
+func TestFromSDKMessage_MapsUsage(t *testing.T) {
+	// Distinct values per counter so a transposed field (e.g. cache-creation vs
+	// cache-read) is caught.
+	resp := fromSDKMessage(&anthropic.Message{
+		Usage: anthropic.Usage{
+			InputTokens:              11,
+			OutputTokens:             22,
+			CacheCreationInputTokens: 33,
+			CacheReadInputTokens:     44,
+		},
+	})
+	want := Usage{InputTokens: 11, OutputTokens: 22, CacheCreationInputTokens: 33, CacheReadInputTokens: 44}
+	if resp.Usage != want {
+		t.Fatalf("usage mapping = %+v, want %+v", resp.Usage, want)
+	}
+}
 
 func TestSystemBlocks_CachesStablePreambleOnly(t *testing.T) {
 	blocks := systemBlocks(&Request{SystemStable: "RULES PREAMBLE", SystemPerTurn: "per-turn context"})
