@@ -108,6 +108,12 @@ Structured slog. Each finding and each mutation is one record; the run ends in a
 
 Use `-log-format text` for human-readable triage.
 
+> **Note on counts:** a single dead resource id is purged once even when it's
+> referenced by both an alias binding and an `allowed_resource_ids` member, so
+> `orphan_aliases + orphan_allowed_ids` can exceed `purged` / `dry_run_would_purge`.
+> That's expected — `purged` counts distinct `(team, channel, resource)` triples,
+> not individual references — not a lost purge.
+
 Finding kinds:
 
 | Kind                  | Meaning                                                            | mutating run purges? |

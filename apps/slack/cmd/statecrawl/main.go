@@ -220,10 +220,10 @@ func run(ctx context.Context, f *flags, logger *slog.Logger) error {
 // crawl drives the reconcile: scan policies, group by team, reconcile each team
 // against its live resources, emit findings, then either report the dry-run
 // plan or apply the purge — ending in a structured summary line. Dependencies
-// are injected (the purge Store, the API-key provider, the Scan client) so the
+// are injected (the purge Store, the API-key provider, the table reader) so the
 // whole flow can be exercised end-to-end against fakes. Returns the counter
 // snapshot for the caller (and tests) to inspect.
-func crawl(ctx context.Context, f *flags, logger *slog.Logger, store purger, keys auth.Provider, scanner dynamodb.ScanAPIClient) (Snapshot, error) {
+func crawl(ctx context.Context, f *flags, logger *slog.Logger, store purger, keys auth.Provider, reader policyTableReader) (Snapshot, error) {
 	started := time.Now()
 	logger.Info("statecrawl starting", "deployment", f.envLabel, "mode", modeString(f),
 		"channel_policies_table", f.channelPoliciesTable, "only_team", f.onlyTeam)
@@ -231,13 +231,14 @@ func crawl(ctx context.Context, f *flags, logger *slog.Logger, store purger, key
 		logger.Warn("-allow-prod-purge has no effect under -dry-run (no mutations happen in a dry run)")
 	}
 
-	rows, err := scanPolicyRows(ctx, scanner, f.channelPoliciesTable, f.onlyTeam)
+	rows, err := scanPolicyRows(ctx, reader, f.channelPoliciesTable, f.onlyTeam)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("scan channel_policies: %w", err)
 	}
 
 	rep := newReport(f)
-	for _, teamID := range teamIDs(rows) {
+	groups, teamOrder := groupByTeam(rows)
+	for _, teamID := range teamOrder {
 		live := resolveLiveness(ctx, keys, f, teamID)
 		if live.resolved {
 			rep.stats.TeamsResolved.Add(1)
@@ -246,7 +247,7 @@ func crawl(ctx context.Context, f *flags, logger *slog.Logger, store purger, key
 			logger.Warn("team liveness unverifiable; references reported indeterminate, never purged",
 				"team_id", teamID, "reason", live.reason)
 		}
-		for _, row := range rowsForTeam(rows, teamID) {
+		for _, row := range groups[teamID] {
 			rep.stats.ChannelsScanned.Add(1)
 			classifyRow(row, live, rep)
 		}
@@ -306,32 +307,22 @@ func newClient(endpoint, apiKey string) *client.Client {
 	return client.New(endpoint, apiKey, client.WithUserAgent(userAgent))
 }
 
-// teamIDs returns the de-duplicated, sorted set of team_ids across the scanned
-// rows so the crawl is deterministic regardless of DynamoDB scan order.
-func teamIDs(rows []policyRow) []string {
-	seen := make(map[string]struct{}, len(rows))
-	out := make([]string, 0, len(rows))
+// groupByTeam buckets rows by team_id (each bucket channel-sorted) and returns
+// the buckets plus the sorted team order, so the crawl is deterministic
+// regardless of DynamoDB read order — in a single pass rather than re-scanning
+// all rows per team.
+func groupByTeam(rows []policyRow) (groups map[string][]policyRow, order []string) {
+	groups = make(map[string][]policyRow)
 	for _, r := range rows {
-		if _, ok := seen[r.teamID]; ok {
-			continue
-		}
-		seen[r.teamID] = struct{}{}
-		out = append(out, r.teamID)
+		groups[r.teamID] = append(groups[r.teamID], r)
 	}
-	sort.Strings(out)
-	return out
-}
-
-// rowsForTeam returns the policy rows belonging to teamID, sorted by channel.
-func rowsForTeam(rows []policyRow, teamID string) []policyRow {
-	out := make([]policyRow, 0, len(rows))
-	for _, r := range rows {
-		if r.teamID == teamID {
-			out = append(out, r)
-		}
+	order = make([]string, 0, len(groups))
+	for teamID, bucket := range groups {
+		order = append(order, teamID)
+		sort.Slice(bucket, func(i, j int) bool { return bucket[i].channelID < bucket[j].channelID })
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].channelID < out[j].channelID })
-	return out
+	sort.Strings(order)
+	return groups, order
 }
 
 // pageLimitOrDefault clamps a non-positive page limit to the server max so a

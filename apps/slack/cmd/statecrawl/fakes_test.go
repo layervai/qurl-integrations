@@ -28,14 +28,18 @@ func discardLogger() *slog.Logger {
 // from preset pages, GetItem from a per-channel item map, and records every
 // mutation so a dry run can be proven side-effect-free.
 type fakeDDB struct {
-	scanPages []*dynamodb.ScanOutput
-	scanErr   error
+	scanPages  []*dynamodb.ScanOutput
+	scanErr    error
+	queryPages []*dynamodb.QueryOutput
+	queryErr   error
 
 	items  map[string]map[string]ddbtypes.AttributeValue // channelID -> row item
 	getErr error
 
 	mu          sync.Mutex
 	scanIdx     int
+	queryIdx    int
+	scanCalls   int
 	updateItems []*dynamodb.UpdateItemInput
 	putCalls    int
 	deleteCalls int
@@ -47,11 +51,26 @@ func (f *fakeDDB) Scan(_ context.Context, _ *dynamodb.ScanInput, _ ...func(*dyna
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.scanCalls++
 	if f.scanIdx >= len(f.scanPages) {
 		return &dynamodb.ScanOutput{}, nil
 	}
 	page := f.scanPages[f.scanIdx]
 	f.scanIdx++
+	return page, nil
+}
+
+func (f *fakeDDB) Query(_ context.Context, _ *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.queryIdx >= len(f.queryPages) {
+		return &dynamodb.QueryOutput{}, nil
+	}
+	page := f.queryPages[f.queryIdx]
+	f.queryIdx++
 	return page, nil
 }
 
@@ -85,10 +104,6 @@ func (f *fakeDDB) DeleteItem(_ context.Context, _ *dynamodb.DeleteItemInput, _ .
 	defer f.mu.Unlock()
 	f.deleteCalls++
 	return &dynamodb.DeleteItemOutput{}, nil
-}
-
-func (f *fakeDDB) Query(_ context.Context, _ *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	return &dynamodb.QueryOutput{}, nil
 }
 
 // mutationCount totals the write calls the fake observed — the dry-run guard

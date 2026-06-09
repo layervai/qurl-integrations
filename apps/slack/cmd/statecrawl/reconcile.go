@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -24,6 +25,16 @@ type liveness struct {
 // not bounded by the bot's first-page scan), and indexes them by resource id.
 // A missing key (ErrWorkspaceNotConfigured) or any read error degrades the team
 // to unresolved with a human reason rather than aborting the whole crawl.
+//
+// OWNERSHIP INVARIANT: liveness is built from THIS workspace's own API key, so
+// the purge path is safe only while every channel_policies reference is owned
+// by the same workspace whose key drives this lookup. That holds today — the
+// bot creates every resource with the workspace key. If qURL ever lets a
+// resource owned by a DIFFERENT workspace be granted into a channel, that live
+// resource would be absent from this list and the apply path would wrongly
+// classify it as an orphan and purge it. Any cross-workspace/org resource
+// sharing MUST revisit this function (e.g. resolve liveness per owning
+// workspace) before it can turn into a data-loss bug.
 func resolveLiveness(ctx context.Context, keys auth.Provider, f *flags, teamID string) liveness {
 	apiKey, err := keys.APIKey(ctx, teamID)
 	if err != nil {
@@ -46,24 +57,32 @@ func resolveLiveness(ctx context.Context, keys auth.Provider, f *flags, teamID s
 	return liveness{resolved: true, byID: byID}
 }
 
+// maxResourcePages caps the liveness pagination. The empty-cursor / HasMore
+// checks already terminate normally; this is a fail-safe so a server bug that
+// returns HasMore=true with a stable cursor errors out (→ team reported
+// indeterminate, never purged) instead of looping forever. 1000 pages ×
+// listResourcesMaxLimit (100) = 100k resources, far beyond any real workspace.
+const maxResourcePages = 1000
+
 // listAllResources pages GET /v1/resources to completion. The bot deliberately
 // scans only the first page (latency budget); a backfill reconciler must be
 // exhaustive so it never misclassifies a live resource on a later page as an
-// orphan.
+// orphan. Bounded by maxResourcePages so a misbehaving server can't wedge it.
 func listAllResources(ctx context.Context, c *client.Client, pageLimit int) ([]client.Resource, error) {
 	var all []client.Resource
 	cursor := ""
-	for {
-		page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: pageLimit, Cursor: cursor})
+	for page := 0; page < maxResourcePages; page++ {
+		out, err := c.ListResources(ctx, client.ListResourcesInput{Limit: pageLimit, Cursor: cursor})
 		if err != nil {
 			return nil, err //nolint:wrapcheck // caller annotates with the team context.
 		}
-		all = append(all, page.Resources...)
-		if !page.HasMore || page.NextCursor == "" {
+		all = append(all, out.Resources...)
+		if !out.HasMore || out.NextCursor == "" {
 			return all, nil
 		}
-		cursor = page.NextCursor
+		cursor = out.NextCursor
 	}
+	return nil, errors.New("resource list exceeded " + strconv.Itoa(maxResourcePages) + " pages; aborting (treated as unverifiable, never purged)")
 }
 
 // resourceStatus classifies a referenced resource id against the workspace's
@@ -144,6 +163,12 @@ func classifyAliasBindings(row policyRow, live liveness, rep *report) {
 // is deleted — #654 clears them too.
 func classifyAllowedIDs(row policyRow, live liveness, rep *report) {
 	for _, rid := range row.allowedResourceIDs {
+		// The SS holds resource ids by construction, but guard the same way the
+		// alias path does so a malformed non-`r_` member is never treated as an
+		// orphan (and thus never becomes a purge target). Mirrors classifyAliasBindings.
+		if !isResourceID(rid) {
+			continue
+		}
 		if status, _ := classifyResource(live, rid); status == statusOrphan {
 			rep.add(&finding{
 				teamID:     row.teamID,
