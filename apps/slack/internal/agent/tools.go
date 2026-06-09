@@ -118,9 +118,11 @@ func toolSpecs() []ToolSpec {
 			Description: "Propose protecting an existing URL (a reachable HTTP endpoint). Admin-gated. Does NOT execute — the user must confirm.",
 			Schema: map[string]any{
 				fieldURL:   stringProp("The target URL to protect."),
-				fieldAlias: stringProp("Suggested channel alias for the protected URL."),
+				fieldAlias: stringProp("Channel alias to bind the protected URL to (required — Slack users need a friendly name). Ask the user if not given."),
 			},
-			Required: []string{fieldURL},
+			// alias is REQUIRED: exposing a URL must bind a channel alias, so an
+			// alias-less proposal could only fail at execute — don't let one be made.
+			Required: []string{fieldURL, fieldAlias},
 		},
 	}
 }
@@ -326,11 +328,21 @@ func proposalProtectConnector(f map[string]string) (*Proposal, error) {
 }
 
 func proposalProtectURL(f map[string]string) (*Proposal, error) {
+	// Field-PRESENCE checks only (URL + alias must be provided), which steer the LLM
+	// to re-prompt. The full GRAMMAR (absolute http(s) URL, alias charset, no
+	// embedded whitespace) lives in parseResourceExposeArgs in the internal package,
+	// which this agent package can't import; the confirm layer enforces it before
+	// rendering a card (Handler.confirmDeliverable → confirmValidProtectURL, the same
+	// validator the execute path uses), so propose and execute can't drift and a
+	// grammar-invalid proposal never becomes a live Approve card.
 	target := strings.TrimSpace(f[fieldURL])
 	if target == "" {
 		return nil, errEmptyField(toolProposeProtectURL, fieldURL)
 	}
 	alias := normalizeToken(f[fieldAlias])
+	if alias == "" {
+		return nil, errEmptyField(toolProposeProtectURL, fieldAlias)
+	}
 	return &Proposal{
 		Action:     ActionProtectURL,
 		URL:        target,

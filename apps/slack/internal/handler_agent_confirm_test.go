@@ -245,7 +245,7 @@ func revokePending() *pendingAction {
 func TestConfirm_ExpiredIsGracefulEphemeral(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	// No pending action stored → load misses.
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, "ghost"), "ghost", true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, "ghost"), "ghost", true, time.Now())
 
 	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if ro || !strings.Contains(text, "expired") {
@@ -259,7 +259,7 @@ func TestConfirm_ExpiredIsGracefulEphemeral(t *testing.T) {
 func TestConfirm_NonAdminCannotExecuteOrClaim(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the admin; the clicker is not
 	id := hc.seedPending(t, revokePending())
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
 
 	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if ro || !strings.Contains(strings.ToLower(text), "admin-only") {
@@ -275,7 +275,7 @@ func TestConfirm_AdminCheckErrorFailsClosed(t *testing.T) {
 	// gated click must be denied (fail-closed), not executed.
 	hc := newConfirmHarness(t, "")
 	id := hc.seedPending(t, revokePending())
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 
 	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if ro {
@@ -289,7 +289,7 @@ func TestConfirm_AdminCheckErrorFailsClosed(t *testing.T) {
 func TestConfirm_AdminApproveExecutesAndReplaces(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, revokePending())
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 
 	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if !ro {
@@ -308,7 +308,7 @@ func TestConfirm_GetApproveIsEphemeralAndUngated(t *testing.T) {
 	// vector is the get-authorization gate on #651.)
 	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the clicker is NOT
 	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", ChannelID: "C1"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
 
 	// A non-admin reaching execute proves get isn't gated (it claimed).
 	if !hc.claimed(id) {
@@ -345,7 +345,7 @@ func TestConfirm_SetAliasOnApprove(t *testing.T) {
 	// it claims, executes the real core (not the unsupported default), and replaces.
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 
 	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if !ro || !hc.claimed(id) {
@@ -374,7 +374,7 @@ func TestConfirm_AliasRejectsInvalidInput(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			hc := newConfirmHarness(t, "Uadmin")
 			id := hc.seedPending(t, c.pa)
-			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 			if !ro || text != agentConfirmInvalidAliasReply {
 				t.Fatalf("invalid alias input must replace the card with the generic reply (no echo); replace=%v text=%q", ro, text)
@@ -386,7 +386,7 @@ func TestConfirm_AliasRejectsInvalidInput(t *testing.T) {
 func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, &pendingAction{Action: agent.ActionUnsetAlias, Alias: "ghost", ChannelID: "C1"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 
 	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if !ro || !hc.claimed(id) {
@@ -394,6 +394,282 @@ func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
 	}
 	if !strings.Contains(text, "ghost") { // unbound alias → "…`$ghost` is not bound…"
 		t.Fatalf("unset-alias result should mention the alias, got %q", text)
+	}
+}
+
+func TestConfirm_ProtectURLOnApprove(t *testing.T) {
+	// protect-url is admin-gated and direct-execute (mirrors revoke/alias). An admin
+	// approve validates the URL + channel alias through the slash grammar, resolves the
+	// existing URL resource by exact target, binds it as the channel alias in the
+	// click's channel, and replaces the public card with the benign result. Bind
+	// correctness lives in handler_resource_test; here we pin the confirm orchestration
+	// of the new case (claim, run the real core, replace).
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || !hc.claimed(id) {
+		t.Fatalf("admin protect-url approve should execute (claim) and replace the card; replace=%v text=%q", ro, text)
+	}
+	if text == agentConfirmUnsupportedReply || text == agentConfirmInvalidProtectURLReply || text == "" {
+		t.Fatalf("protect-url must run the resource core, not the unsupported/invalid path; got %q", text)
+	}
+	if !strings.Contains(text, "docs") { // success: "…now available as `$docs`…"
+		t.Fatalf("protect-url result should mention the channel alias; got %q", text)
+	}
+}
+
+func TestConfirm_ProtectURLRejectsInvalidInput(t *testing.T) {
+	// Public card → an LLM-distilled URL/alias out of grammar (non-http target,
+	// backtick/bidi alias, missing alias) must surface the GENERIC reply, never bind
+	// and never echo the value. Exact equality proves no part of the input leaks.
+	cases := []struct {
+		name string
+		pa   *pendingAction
+	}{
+		{"non-http url", &pendingAction{Action: agent.ActionProtectURL, URL: "file:///etc/passwd", Alias: "docs", ChannelID: "C1"}},
+		{"backtick alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "ev`il", ChannelID: "C1"}},
+		{"missing alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "", ChannelID: "C1"}},
+		{"bidi-control alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "do\u202ecs", ChannelID: "C1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			id := hc.seedPending(t, c.pa)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if !ro || text != agentConfirmInvalidProtectURLReply {
+				t.Fatalf("invalid protect-url input must replace the card with the generic reply (no echo); replace=%v text=%q", ro, text)
+			}
+		})
+	}
+}
+
+func TestConfirm_ProtectURLIsAdminGated(t *testing.T) {
+	// protect-url is admin-gated (adminGatedFor): a non-admin click is denied
+	// ephemerally and claims nothing.
+	hc := newConfirmHarness(t, "Uadmin") // admin = Uadmin; the clicker is Uother
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || !strings.Contains(strings.ToLower(text), "admin-only") {
+		t.Fatalf("non-admin protect-url must be denied ephemerally; replace=%v text=%q", ro, text)
+	}
+	if hc.claimed(id) {
+		t.Fatalf("a denied non-admin protect-url must not claim")
+	}
+}
+
+func TestPostAgentConfirm_SnapshotsProtectURLFields(t *testing.T) {
+	// The snapshot must carry URL + Alias so the click can execute protect-url (the
+	// click never reads them off the wire).
+	hc := newConfirmHarness(t, "")
+	prop := &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", Summary: "Protect the handbook URL as $docs."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
+	if err != nil || !found {
+		t.Fatalf("pending action not stored: found=%v err=%v", found, err)
+	}
+	var pa pendingAction
+	if err := json.Unmarshal(blob, &pa); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pa.Action != agent.ActionProtectURL || pa.URL != "https://docs.example.com/handbook" || pa.Alias != "docs" {
+		t.Fatalf("snapshot mismatch: %+v", pa)
+	}
+}
+
+// openViewCapture records the single views.open the connector confirm path makes.
+type openViewCapture struct {
+	calls     int
+	view      []byte
+	trigger   string
+	team      string
+	returnErr error
+}
+
+func (c *openViewCapture) fn() OpenViewFunc {
+	return func(_ context.Context, teamID, triggerID string, viewJSON []byte) error {
+		c.calls++
+		c.view = append([]byte(nil), viewJSON...)
+		c.trigger, c.team = triggerID, teamID
+		return c.returnErr
+	}
+}
+
+func modalMeta(t *testing.T, viewJSON []byte) TunnelInstallModalMetadata {
+	t.Helper()
+	var view struct {
+		PrivateMetadata string `json:"private_metadata"`
+	}
+	if err := json.Unmarshal(viewJSON, &view); err != nil {
+		t.Fatalf("view JSON: %v", err)
+	}
+	var meta TunnelInstallModalMetadata
+	if err := json.Unmarshal([]byte(view.PrivateMetadata), &meta); err != nil {
+		t.Fatalf("private_metadata: %v", err)
+	}
+	return meta
+}
+
+func TestConfirm_ProtectConnectorOpensModalOnApprove(t *testing.T) {
+	// protect-connector is admin-gated and modal-based: an admin approve claims
+	// (consume-once), then opens the guided install modal with the click's trigger_id
+	// and replaces the card with a terminal "opening setup" line. The modal SUBMIT
+	// (covered in handler_tunnel/interaction tests) is the real enforcement + key
+	// delivery; here we pin the confirm orchestration.
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.now = func() time.Time { return fixedNow }
+	ov := &openViewCapture{}
+	hc.h.cfg.OpenView = ov.fn()
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, fixedNow)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ov.calls != 1 {
+		t.Fatalf("protect-connector approve should open exactly one modal; opens=%d", ov.calls)
+	}
+	if ov.trigger != "trig" || ov.team != "T1" {
+		t.Fatalf("modal must open with the click's trigger_id + team; trigger=%q team=%q", ov.trigger, ov.team)
+	}
+	if !ro || text != agentConfirmConnectorOpenedReply {
+		t.Fatalf("card should go terminal with the opened reply; replace=%v text=%q", ro, text)
+	}
+	if !hc.claimed(id) {
+		t.Fatal("protect-connector approve must claim (consume-once before open)")
+	}
+	// Key-delivery privacy: meta.UserID must be the approving admin so the modal's
+	// same-user-submit gate aligns the ephemeral key target to the approver; the
+	// channel must be the (mismatch-guarded) proposing channel.
+	meta := modalMeta(t, ov.view)
+	if meta.UserID != "Uadmin" || meta.ChannelID != "C1" || meta.ResponseURL != hc.respURL {
+		t.Fatalf("modal metadata = %+v, want UserID=Uadmin ChannelID=C1 ResponseURL=card", meta)
+	}
+}
+
+func TestConfirm_ProtectConnectorIsAdminGated(t *testing.T) {
+	// A non-admin click is denied ephemerally, opens no modal, and claims nothing.
+	hc := newConfirmHarness(t, "Uadmin") // admin = Uadmin; the clicker is Uother
+	ov := &openViewCapture{}
+	hc.h.cfg.OpenView = ov.fn()
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, fixedNow)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || !strings.Contains(strings.ToLower(text), "admin-only") {
+		t.Fatalf("non-admin protect-connector must be denied ephemerally; replace=%v text=%q", ro, text)
+	}
+	if ov.calls != 0 {
+		t.Fatalf("a denied non-admin must not open the modal; opens=%d", ov.calls)
+	}
+	if hc.claimed(id) {
+		t.Fatal("a denied non-admin protect-connector must not claim")
+	}
+}
+
+func TestConfirm_ProtectConnectorTriggerExpired(t *testing.T) {
+	// The trigger window has already passed by the time the async body runs: no
+	// views.open is attempted (no wasted Slack RPC), and the card goes terminal with
+	// the "ask again" prompt. The action is still claimed (claim precedes the open).
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.now = func() time.Time { return fixedNow }
+	ov := &openViewCapture{}
+	hc.h.cfg.OpenView = ov.fn()
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+	expired := fixedNow.Add(-slackTriggerMaxAge - time.Second) // trigger long gone
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, expired)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || text != agentConfirmConnectorWindowExpiredReply {
+		t.Fatalf("expired trigger should replace the card with the window-expired reply; replace=%v text=%q", ro, text)
+	}
+	if ov.calls != 0 {
+		t.Fatalf("expired trigger must not attempt views.open; opens=%d", ov.calls)
+	}
+	if !hc.claimed(id) {
+		t.Fatal("protect-connector claims before the trigger-budget check")
+	}
+}
+
+func TestConfirm_ProtectConnectorOpenFails(t *testing.T) {
+	// views.open failure maps to cause-specific terminal copy: a non-expiry cause must
+	// NOT say "ask me again" (which won't fix it). The card always goes terminal (never
+	// a silent miss) and the action stays claimed.
+	cases := []struct {
+		name      string
+		openErr   error
+		wantReply string
+	}{
+		{"trigger expired → ask again", ErrSlackTriggerExpired, agentConfirmConnectorWindowExpiredReply},
+		{"deadline → ask again", context.DeadlineExceeded, agentConfirmConnectorWindowExpiredReply},
+		{"rate limited → wait", NewSlackRateLimitError("3"), agentConfirmConnectorRateLimitedReply},
+		{"no bot token → unavailable", auth.ErrSlackBotTokenNotConfigured, agentConfirmConnectorUnavailableReply},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			hc.h.now = func() time.Time { return fixedNow }
+			ov := &openViewCapture{returnErr: c.openErr}
+			hc.h.cfg.OpenView = ov.fn()
+			id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, fixedNow)
+
+			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if ov.calls != 1 {
+				t.Fatalf("open-fails case should still attempt one views.open; opens=%d", ov.calls)
+			}
+			if !ro || text != c.wantReply {
+				t.Fatalf("open error %v should replace the card with %q; replace=%v text=%q", c.openErr, c.wantReply, ro, text)
+			}
+		})
+	}
+}
+
+func TestConfirm_ProtectConnectorGridFallback(t *testing.T) {
+	// The confirm path threads payload.Enterprise.ID into openViewWithGridFallback:
+	// when the workspace bot token is missing, the open retries with the Enterprise
+	// Grid org-install token. Pins that the connector branch passes enterpriseID
+	// through (the fallback mechanism itself is covered via the slash path).
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.now = func() time.Time { return fixedNow }
+	var owners []string
+	hc.h.cfg.OpenView = func(_ context.Context, teamID, _ string, _ []byte) error {
+		owners = append(owners, teamID)
+		if teamID == "T1" {
+			return auth.ErrSlackBotTokenNotConfigured // workspace token missing → retry org
+		}
+		return nil
+	}
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+	p := confirmPayload("T1", "C1", "Uadmin", hc.respURL, id)
+	p.Enterprise.ID = "E1"
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), p, id, true, fixedNow)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if len(owners) != 2 || owners[0] != "T1" || owners[1] != "E1" {
+		t.Fatalf("Grid fallback should retry views.open with the enterprise token; owners=%v", owners)
+	}
+	if !ro || text != agentConfirmConnectorOpenedReply {
+		t.Fatalf("the fallback open should succeed and post the opened reply; replace=%v text=%q", ro, text)
+	}
+}
+
+func TestConfirm_ProtectConnectorOpenViewUnconfigured(t *testing.T) {
+	// OpenView not wired: the card goes terminal with a graceful "use the slash
+	// command" reply rather than hanging.
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.now = func() time.Time { return fixedNow }
+	hc.h.cfg.OpenView = nil
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectConnector, ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, fixedNow)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || text != agentConfirmConnectorUnavailableReply {
+		t.Fatalf("unconfigured OpenView should replace the card with the unavailable reply; replace=%v text=%q", ro, text)
 	}
 }
 
@@ -408,7 +684,7 @@ func TestConfirm_AliasKindsAreAdminGated(t *testing.T) {
 		t.Run(string(pa.Action), func(t *testing.T) {
 			hc := newConfirmHarness(t, "Uadmin") // admin = Uadmin; the clicker is not
 			id := hc.seedPending(t, pa)
-			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
 			ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 			if ro || !strings.Contains(strings.ToLower(text), "admin-only") {
 				t.Fatalf("non-admin %s must be denied ephemerally; replace=%v text=%q", pa.Action, ro, text)
@@ -448,7 +724,7 @@ func TestConfirm_FlagOffClickDoesNotExecute(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	hc.h.cfg.AgentConfirmEnabled = false
 	id := hc.seedPending(t, revokePending())
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 
 	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if ro || hc.claimed(id) {
@@ -461,10 +737,10 @@ func TestConfirm_ConsumeOnceNoDoubleExecute(t *testing.T) {
 	id := hc.seedPending(t, revokePending())
 	payload := confirmPayload("T1", "C1", "Uadmin", hc.respURL, id)
 
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), payload, id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), payload, id, true, time.Now())
 	_ = hc.bodies.waitForBody(t, 2*time.Second)
 	// Second click on the same id: already claimed → ephemeral "already handled".
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), payload, id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), payload, id, true, time.Now())
 
 	bodies := hc.waitForN(t, 2)
 	ro, text := parseResponse(t, bodies[1])
@@ -478,14 +754,14 @@ func TestConfirm_RejectIsGatedAndCancels(t *testing.T) {
 	// cancel an admin's pending action.
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, revokePending())
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, false)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, false, time.Now())
 	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if ro || hc.claimed(id) {
 		t.Fatal("a non-admin reject of a gated action must be denied ephemerally and not claim")
 	}
 
 	// An admin reject cancels (claims + replaces with Canceled).
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, false)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, false, time.Now())
 	bodies := hc.waitForN(t, 2)
 	ro, text := parseResponse(t, bodies[1])
 	if !ro || !strings.Contains(strings.ToLower(text), "canceled") {
@@ -500,7 +776,7 @@ func TestConfirm_ChannelMismatchRefused(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, revokePending()) // stored ChannelID = C1
 	// Click arrives with a different channel.
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "Cother", "Uadmin", hc.respURL, id), id, true)
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "Cother", "Uadmin", hc.respURL, id), id, true, time.Now())
 	ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
 	if ro || hc.claimed(id) {
 		t.Fatal("a channel-mismatched click must be refused ephemerally and not claim")
@@ -557,11 +833,12 @@ func TestPostAgentConfirm_StoresPendingAndPostsCard(t *testing.T) {
 }
 
 func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
-	// confirmExecutable, adminGatedFor, and executeAgentAction's switch enumerate
-	// ActionKinds independently (all fail-safe), so a future PR4b/PR4c kind could be
-	// added to confirmExecutable (card shown) but forgotten in executeAgentAction
-	// (falls to the "unsupported" default — a live Approve that no-ops). Pin the
-	// invariant: every kind confirmExecutable green-lights is actually handled.
+	// Pin the invariant: every kind confirmExecutable green-lights actually DOES
+	// something on Approve, never the no-op "unsupported" default. confirmModalRouted
+	// kinds (protect-connector) are handled by openAgentConnectorModal BEFORE
+	// executeAgentAction — their handled-ness is pinned by the dedicated modal tests
+	// (TestConfirm_ProtectConnector*) — so they're excluded here via the SAME predicate
+	// the click router uses, so the two can't drift when a modal kind is added.
 	hc := newConfirmHarness(t, "Uadmin")
 	payload := confirmPayload("T1", "C1", "Uadmin", hc.respURL, "x")
 	allKinds := []agent.ActionKind{
@@ -570,8 +847,8 @@ func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
 	}
 	handled := 0
 	for _, kind := range allKinds {
-		if !confirmExecutable(kind) {
-			continue
+		if !confirmExecutable(kind) || confirmModalRouted(kind) {
+			continue // modal-routed kinds don't flow through executeAgentAction
 		}
 		handled++
 		got := hc.h.executeAgentAction(context.Background(), slog.Default(),
@@ -594,17 +871,36 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 		name      string
 		result    agent.Result
 		confirmOn bool
+		openView  bool // OpenView wired? (only matters for modal-routed kinds)
 		wantCard  bool
 	}{
-		{"executable + flag on → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, true, true},
-		{"deferred + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect $x."}}, true, false},
-		{"executable + flag off → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, false, false},
-		{"plain reply → preview", agent.Result{Reply: "hello"}, true, false},
+		{"executable + flag on → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, true, false, true},
+		// Every real kind is executable as of PR4c; a synthetic unknown kind exercises
+		// the non-executable → preview gate (fail-closed: no live button for a kind the
+		// click can't act on).
+		{"non-executable + flag on → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionKind("bogus"), Summary: "Mystery."}}, true, false, false},
+		{"executable + flag off → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke, Summary: "Revoke $x."}}, false, false, false},
+		{"plain reply → preview", agent.Result{Reply: "hello"}, true, false, false},
+		// Modal-routed connector renders a card ONLY when OpenView is wired, else the
+		// Approve could only dead-end into "unavailable" (and the claim would burn it).
+		{"connector + OpenView wired → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, true, true},
+		{"connector + OpenView unwired → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, false, false},
+		// protect-url renders a card only when URL+alias pass the SAME grammar the
+		// execute path uses; a grammar-invalid proposal (whitespace in the URL splits
+		// the token stream; an out-of-charset alias) would dead-end on Approve, so it
+		// falls back to preview — closing the propose→approve gap the seed-pendingAction
+		// invalid-input tests don't exercise.
+		{"protect-url valid → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/h", Alias: "docs", Summary: "Protect docs."}}, true, false, true},
+		{"protect-url whitespace url → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/a b", Alias: "docs", Summary: "Protect docs."}}, true, false, false},
+		{"protect-url out-of-charset alias → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/h", Alias: "MyDocs", Summary: "Protect docs."}}, true, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			hc := newConfirmHarness(t, "")
 			hc.h.cfg.AgentConfirmEnabled = c.confirmOn
+			if c.openView {
+				hc.h.cfg.OpenView = func(context.Context, string, string, []byte) error { return nil }
+			}
 			res := c.result
 			hc.h.deliverAgentResult(slog.Default(), env, "100.1", &res)
 

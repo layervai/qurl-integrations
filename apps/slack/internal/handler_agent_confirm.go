@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // Confirm-card button action_ids. Distinct from every slash-command button so a
@@ -35,6 +38,19 @@ const (
 	// be echoed back into it — unlike the slash path, whose validation reply is
 	// ephemeral and can echo the bad token.
 	agentConfirmInvalidAliasReply = "I couldn't apply that — the alias or target isn't valid (lowercase letters, numbers, and dashes only). Try rephrasing your request."
+	// agentConfirmInvalidProtectURLReply is the protect-url sibling: generic for the
+	// same public-card reason — the LLM-distilled URL/alias must not be echoed back.
+	agentConfirmInvalidProtectURLReply = "I couldn't protect that — the URL or channel alias isn't valid. Use an absolute http(s) URL and an alias of lowercase letters, numbers, and dashes. Try rephrasing your request."
+	// protect-connector terminal card copy. The action is already claimed by the
+	// time these post, so an expired/failed open means "ask the agent again" (a new
+	// proposal mints a fresh trigger) — there's no retry on this consumed card.
+	agentConfirmConnectorOpenedReply        = "Approved — opening guided qURL Connector setup. Complete the form in the dialog to finish."
+	agentConfirmConnectorWindowExpiredReply = "Approved, but Slack's setup window closed before the form could open. Ask me to protect that connector again."
+	agentConfirmConnectorUnavailableReply   = "I couldn't open guided qURL Connector setup on this workspace. Ask an admin to run `/qurl-admin protect-connector` instead."
+	// agentConfirmConnectorRateLimitedReply is distinct from the window-expired copy:
+	// re-asking immediately won't help (Slack is throttling views.open), so tell the
+	// admin to wait — mirrors the slash wizard distinguishing the rate-limit cause.
+	agentConfirmConnectorRateLimitedReply = "Slack is rate-limiting setup right now. Wait a moment, then ask me to protect that connector again."
 )
 
 // pendingAction is the ephemeral snapshot persisted between proposing a mutation
@@ -48,8 +64,9 @@ type pendingAction struct {
 	Action    agent.ActionKind `json:"action"`
 	Token     string           `json:"token,omitempty"`  // slug/alias (sigil stripped) for get/revoke
 	Reason    string           `json:"reason,omitempty"` // audit reason, forwarded to the mint on get
-	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias
+	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias; channel alias for protect-url
 	Target    string           `json:"target,omitempty"` // target slug for set-alias
+	URL       string           `json:"url,omitempty"`    // target URL for protect-url
 	ChannelID string           `json:"channel_id"`
 }
 
@@ -79,14 +96,51 @@ func confirmValidAlias(alias string) (canon string, ok bool) {
 	return a, msg == ""
 }
 
+// confirmValidProtectURL validates the LLM-distilled protect-url URL + channel
+// alias through the SAME grammar as the slash verb (parseResourceExposeArgs),
+// reconstructing its `url:<target> as:$<alias>` form, and returns the parser's
+// CANONICAL args. As with confirmValidAliasBind, executing those canonical args —
+// not pa.URL/pa.Alias raw — closes the validate-reconstruction-execute-raw seam,
+// and a parse failure surfaces a generic reply rather than echoing the (possibly
+// injected) value onto the PUBLIC card. An empty alias fails here, which is
+// correct: exposeURLResourceInChannel must bind a channel alias.
+//
+// Reusing parseResourceExposeArgs also runs the URL through unwrapSlackURLArg,
+// whose unconditional HTML-unescape is documented as safe only for Slack-delivered
+// text. On this path the URL is LLM-distilled, so that invariant is best-effort:
+// any decoding only affects the exact-target lookup (a mismatch → benign "not
+// found"), and the value is never echoed. Keeping the single grammar source is
+// worth more than bypassing the unwrap for this caller.
+func confirmValidProtectURL(rawURL, rawAlias string) (args *resourceExposeArgs, ok bool) {
+	parsed, msg := parseResourceExposeArgs("url:" + rawURL + " as:$" + rawAlias)
+	if msg != "" {
+		return nil, false
+	}
+	return parsed, true
+}
+
 // confirmExecutable reports whether the confirm flow can actually EXECUTE this
-// action kind in this build. Deferred kinds (protect → PR4c) must fall back to the
-// text preview rather than render a live Approve button that can only reply "can't
-// apply that yet" — keep in lockstep with executeAgentAction's switch. PR4c lands
-// by extending this set.
+// action kind in this build — gating the live Approve card vs the text preview, so
+// a not-yet-wired kind never renders a button that can only reply "can't apply that
+// yet". As of PR4c every mutation kind is executable: get/revoke/alias/protect-url
+// via executeAgentAction, protect-connector via openAgentConnectorModal (the modal
+// path). Keep in lockstep with both of those.
 func confirmExecutable(kind agent.ActionKind) bool {
 	return kind == agent.ActionGet || kind == agent.ActionRevoke ||
-		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias
+		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias ||
+		kind == agent.ActionProtectURL || kind == agent.ActionProtectConnector
+}
+
+// confirmModalRouted reports whether a kind executes by opening a MODAL
+// (OpenView/trigger_id, then a separate view_submission) rather than the
+// response_url-only executeAgentAction path. processAgentConfirm routes these to
+// openAgentConnectorModal after the claim; executeAgentAction's case for them is a
+// defensive, unreachable fail-closed. It's a named predicate (like confirmExecutable
+// / adminGatedFor) so the click router AND the lockstep test share one source of
+// truth: adding a future modal kind here both routes it and excludes it from the
+// executeAgentAction lockstep check, so the two can't silently drift.
+func confirmModalRouted(kind agent.ActionKind) bool {
+	return kind == agent.ActionProtectConnector
 }
 
 // deliverAgentResult posts a completed turn's result: an interactive confirm card
@@ -96,11 +150,37 @@ func confirmExecutable(kind agent.ActionKind) bool {
 // fully-wired actions get an Approve button — a deferred-kind proposal stays an
 // honest "…isn't enabled yet" preview instead of a button that can't act.
 func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, threadTS string, result *agent.Result) {
-	if result.Proposal != nil && h.agentConfirmEnabled() && confirmExecutable(result.Proposal.Action) {
+	if result.Proposal != nil && h.agentConfirmEnabled() && h.confirmDeliverable(result.Proposal) {
 		h.postAgentConfirm(log, env, threadTS, result.Proposal)
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
+}
+
+// confirmDeliverable reports whether a confirm card should render for this proposal
+// in THIS deploy. A non-deliverable proposal falls back to the honest text preview
+// instead of a button that could only dead-end on Approve (consuming the claim):
+//   - not executable here → preview;
+//   - modal-routed kind but OpenView unwired → would Approve into "unavailable";
+//   - protect-url whose URL/alias fails the SAME grammar the execute path uses
+//     (confirmValidProtectURL → parseResourceExposeArgs) → would Approve into the
+//     generic invalid reply. Validating here, with that one validator, closes the
+//     propose→execute drift the propose layer (in a package that can't import the
+//     grammar) can't fully cover — e.g. a whitespace-bearing URL or out-of-charset
+//     alias that url.Parse alone would accept.
+func (h *Handler) confirmDeliverable(prop *agent.Proposal) bool {
+	if !confirmExecutable(prop.Action) {
+		return false
+	}
+	if confirmModalRouted(prop.Action) && h.cfg.OpenView == nil {
+		return false
+	}
+	if prop.Action == agent.ActionProtectURL {
+		if _, ok := confirmValidProtectURL(prop.URL, prop.Alias); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // adminGatedFor is the SINGLE source of truth for whether an action needs an
@@ -157,6 +237,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		Reason:    prop.Reason,
 		Alias:     prop.Alias,
 		Target:    prop.Target,
+		URL:       prop.URL,
 		ChannelID: env.Event.Channel,
 	})
 	if err != nil {
@@ -207,6 +288,12 @@ func buildAgentConfirmBlocks(summary, id string) []any {
 func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction, approve bool) {
 	id := strings.TrimSpace(action.Value)
 	responseURL := payload.ResponseURL
+	// Capture the trigger arrival as early as possible (here, not in the async
+	// body): a protect-connector Approve opens a modal with this click's trigger_id,
+	// whose ~3s window starts ticking at the click, and the ack + async-scheduling
+	// gap before processAgentConfirm runs counts against it. Threaded through so the
+	// connector branch can budget views.open the same way the slash wizard does.
+	triggerReceivedAt := h.now()
 	log := slog.With(
 		"surface", "agent_confirm",
 		"team_id", payload.Team.ID,
@@ -226,7 +313,7 @@ func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *intera
 	}
 
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processAgentConfirm(ctx, log, payload, id, approve)
+		h.processAgentConfirm(ctx, log, payload, id, approve, triggerReceivedAt)
 	}) {
 		log.Warn("async pool saturated — dropping agent confirm click")
 		h.Go(func() { _ = h.postResponse(log, responseURL, ackBusy) })
@@ -240,7 +327,7 @@ func (h *Handler) handleAgentConfirmClick(w http.ResponseWriter, payload *intera
 // intact; only the authorized winner replaces the card (replaceOriginalResponse,
 // terminal). Both Approve and Reject are gated for an admin-gated action, so a
 // non-admin can neither execute nor cancel an admin's pending action.
-func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, payload *interactionPayload, id string, approve bool) {
+func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, payload *interactionPayload, id string, approve bool, triggerReceivedAt time.Time) {
 	teamID := payload.Team.ID
 	responseURL := payload.ResponseURL
 
@@ -313,6 +400,16 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmCanceledReply)
 		return
 	}
+	// protect-connector doesn't fit the response_url-only actionResult model: it
+	// opens the guided install modal with this click's trigger_id, and the modal
+	// SUBMIT (processTunnelInstall) is the real enforcement + key delivery. Branch
+	// before executeAgentAction. Claim already happened above — required, not just
+	// consistent: the modal submit isn't idempotent across opens, so consume-once is
+	// what stops two approvers from double-opening → double-minting a connector.
+	if confirmModalRouted(pa.Action) {
+		h.openAgentConnectorModal(ctx, log, payload, triggerReceivedAt)
+		return
+	}
 	res := h.executeAgentAction(ctx, log, &pa, payload)
 	if res.ephemeralText != "" {
 		// Sensitive output (a one-time link) goes PRIVATELY to the clicker — an
@@ -320,6 +417,100 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		_ = h.postResponse(log, responseURL, res.ephemeralText)
 	}
 	_ = h.replaceOriginalResponse(log, responseURL, res.cardText)
+}
+
+// openAgentConnectorModal is the protect-connector confirm execute: open the SAME
+// guided tunnel-install modal the slash wizard opens, using the Approve click's
+// fresh trigger_id. It does NOT re-check admin — processAgentConfirm already did,
+// before the claim — which also keeps the trigger budget for views.open.
+//
+// The modal SUBMIT (processTunnelInstall) is the real enforcement point: it
+// re-checks admin, collects env/port, mints the bootstrap key, and delivers the
+// install instructions. The proposal is sparse, so v1 opens the blank wizard and
+// the admin completes it.
+//
+// KEY-DELIVERY PRIVACY: meta.ResponseURL is the PUBLIC card's response_url, but
+// processTunnelInstall delivers the install (with the bootstrap key) as an
+// EPHEMERAL message, which Slack scopes to the response_url's interacting user —
+// here the Approve clicker. meta.UserID is set to that same clicker so the modal's
+// same-user-submit gate forces submitter == clicker == ephemeral target; if those
+// diverged the key would render to the wrong person. This is the same privacy
+// class PR4a/PR4b already ship (ephemeral denials on this card). processTunnelInstall
+// also revokes the key if Slack doesn't confirm delivery, so the residual is only
+// "delivery succeeds but renders in-channel" — a hard pre-enablement smoke test (#651).
+//
+// On trigger expiry / open failure the card goes terminal with an "ask me again"
+// prompt: the action is already claimed (consumed), so the user re-asks the agent
+// to mint a fresh proposal + trigger — there is no retry on this card.
+func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, payload *interactionPayload, triggerReceivedAt time.Time) {
+	responseURL := payload.ResponseURL
+	if h.cfg.OpenView == nil {
+		log.Warn("agent confirm: protect-connector approved but OpenView is not configured")
+		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorUnavailableReply)
+		return
+	}
+
+	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
+		TeamID: payload.Team.ID,
+		// The click's channel (== the proposal's, mismatch-guarded), matching the
+		// other execute paths. The proposal's env/port/alias hints are intentionally
+		// NOT threaded in v1 — the admin completes the blank wizard.
+		ChannelID: payload.Channel.ID,
+		// The approving admin: aligns the modal's same-user-submit gate with the
+		// ephemeral key target (see the key-delivery note above).
+		UserID:        payload.User.ID,
+		ResponseURL:   responseURL,
+		CreatedAtUnix: h.now().Unix(),
+	})
+	if err != nil {
+		log.Error("agent confirm: protect-connector modal render failed", "error", err)
+		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorUnavailableReply)
+		return
+	}
+
+	// A single pre-open budget check suffices: unlike the slash wizard (which fetches
+	// resources between its two checks), the only work before views.open here is the
+	// in-memory modal render, so one check immediately before the RPC covers it.
+	openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
+	if openBudget <= 0 {
+		log.Warn("agent confirm: protect-connector trigger expired before views.open")
+		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorWindowExpiredReply)
+		return
+	}
+	openCtx, cancel := context.WithTimeout(ctx, openBudget)
+	defer cancel()
+	if err := h.openViewWithGridFallback(openCtx, log, payload.Team.ID, payload.Enterprise.ID, payload.TriggerID, view); err != nil {
+		log.Error("agent confirm: protect-connector views.open failed",
+			"error", err,
+			"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+			"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
+			"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
+		)
+		_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorOpenErrorReply(err))
+		return
+	}
+	log.Info("agent confirm: protect-connector modal opened", "channel_id", payload.Channel.ID, "user_id", payload.User.ID)
+	_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorOpenedReply)
+}
+
+// agentConfirmConnectorOpenErrorReply maps a views.open failure to the right
+// terminal card copy, so a non-expiry cause isn't mislabeled "ask me again" (which
+// won't help). Mirrors the slash wizard's cause distinction; the distinct kinds are
+// also logged for observability.
+func agentConfirmConnectorOpenErrorReply(err error) string {
+	switch {
+	case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
+		// The workspace has no usable bot token (and Grid fallback couldn't cover it):
+		// re-asking the agent won't help — it needs the app install / an admin.
+		return agentConfirmConnectorUnavailableReply
+	case errors.Is(err, ErrSlackRateLimited):
+		return agentConfirmConnectorRateLimitedReply
+	default:
+		// Trigger expired / deadline exceeded / transient: re-asking the agent mints a
+		// fresh proposal + trigger, which is exactly the fix.
+		return agentConfirmConnectorWindowExpiredReply
+	}
 }
 
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
@@ -400,10 +591,24 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
 		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias)}
-	case agent.ActionProtectConnector, agent.ActionProtectURL:
-		// Deferred to PR4c (protect opens the tunnel-install modal). Admin-gated, so
-		// a non-admin can't reach here; an admin gets a clean "not supported yet".
-		log.Warn("agent confirm: action not executable in this build", "action", pa.Action)
+	case agent.ActionProtectURL:
+		// Validate the LLM-distilled URL + channel alias through the slash grammar
+		// (single source) and execute the CANONICAL args — see confirmValidProtectURL.
+		// On failure surface a generic reply rather than echo the value onto the
+		// PUBLIC card. The result echoes only the (validated) channel alias + the
+		// backend resource alias, never the raw URL, so it's safe on the card.
+		args, ok := confirmValidProtectURL(pa.URL, pa.Alias)
+		if !ok {
+			return actionResult{cardText: agentConfirmInvalidProtectURLReply}
+		}
+		// Binds the URL resource as $alias in the CLICK's channel (channel-scoped,
+		// like the slash protect-url and the alias confirm path). Benign public result.
+		return actionResult{cardText: h.exposeURLResourceInChannel(ctx, log, payload.Team.ID, payload.Channel.ID, args)}
+	case agent.ActionProtectConnector:
+		// Unreachable from the confirm flow: processAgentConfirm routes
+		// protect-connector to openAgentConnectorModal (the modal/OpenView path)
+		// before executeAgentAction. Kept as a defensive fail-closed.
+		log.Warn("agent confirm: protect-connector reached executeAgentAction (should route to the modal)", "action", pa.Action)
 		return actionResult{cardText: agentConfirmUnsupportedReply}
 	default:
 		log.Warn("agent confirm: unknown action kind", "action", pa.Action)
