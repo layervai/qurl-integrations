@@ -790,11 +790,11 @@ func TestPostAgentConfirm_StoresPendingAndPostsCard(t *testing.T) {
 
 func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
 	// Pin the invariant: every kind confirmExecutable green-lights actually DOES
-	// something on Approve, never the no-op "unsupported" default. All kinds except
-	// protect-connector are handled by executeAgentAction; protect-connector is routed
-	// to openAgentConnectorModal BEFORE executeAgentAction (so executeAgentAction's
-	// connector case is a defensive, unreachable fail-closed) — its handled-ness is
-	// pinned by TestConfirm_ProtectConnectorOpensModalOnApprove.
+	// something on Approve, never the no-op "unsupported" default. confirmModalRouted
+	// kinds (protect-connector) are handled by openAgentConnectorModal BEFORE
+	// executeAgentAction — their handled-ness is pinned by the dedicated modal tests
+	// (TestConfirm_ProtectConnector*) — so they're excluded here via the SAME predicate
+	// the click router uses, so the two can't drift when a modal kind is added.
 	hc := newConfirmHarness(t, "Uadmin")
 	payload := confirmPayload("T1", "C1", "Uadmin", hc.respURL, "x")
 	allKinds := []agent.ActionKind{
@@ -803,8 +803,8 @@ func TestConfirmExecutable_LockstepWithExecute(t *testing.T) {
 	}
 	handled := 0
 	for _, kind := range allKinds {
-		if !confirmExecutable(kind) || kind == agent.ActionProtectConnector {
-			continue // connector is routed to the modal path, not executeAgentAction
+		if !confirmExecutable(kind) || confirmModalRouted(kind) {
+			continue // modal-routed kinds don't flow through executeAgentAction
 		}
 		handled++
 		got := hc.h.executeAgentAction(context.Background(), slog.Default(),

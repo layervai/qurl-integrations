@@ -119,6 +119,18 @@ func confirmExecutable(kind agent.ActionKind) bool {
 		kind == agent.ActionProtectURL || kind == agent.ActionProtectConnector
 }
 
+// confirmModalRouted reports whether a kind executes by opening a MODAL
+// (OpenView/trigger_id, then a separate view_submission) rather than the
+// response_url-only executeAgentAction path. processAgentConfirm routes these to
+// openAgentConnectorModal after the claim; executeAgentAction's case for them is a
+// defensive, unreachable fail-closed. It's a named predicate (like confirmExecutable
+// / adminGatedFor) so the click router AND the lockstep test share one source of
+// truth: adding a future modal kind here both routes it and excludes it from the
+// executeAgentAction lockstep check, so the two can't silently drift.
+func confirmModalRouted(kind agent.ActionKind) bool {
+	return kind == agent.ActionProtectConnector
+}
+
 // deliverAgentResult posts a completed turn's result: an interactive confirm card
 // only when the confirm flow is enabled AND the proposed action is actually
 // executable here; otherwise the text reply/preview (the merged-#650 behavior).
@@ -356,7 +368,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	// before executeAgentAction. Claim already happened above — required, not just
 	// consistent: the modal submit isn't idempotent across opens, so consume-once is
 	// what stops two approvers from double-opening → double-minting a connector.
-	if pa.Action == agent.ActionProtectConnector {
+	if confirmModalRouted(pa.Action) {
 		h.openAgentConnectorModal(ctx, log, payload, &pa, triggerReceivedAt)
 		return
 	}
