@@ -47,6 +47,12 @@ const env = loadEnv();
 // assertions read from the rendered page.
 const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+// Monotonic per-upload counter combined with RUN_NONCE so each upload is
+// unique even if two fixtures are byte-identical (no shared md5/target_url, no
+// duplicate id in createdResourceIds). No fixtures collide today; this just
+// keeps that invariant from silently breaking if one is added later.
+let uploadSeq = 0;
+
 // Every resource minted during this run, revoked in afterAll so they don't
 // persist across runs and strand on a future connector type change — that
 // persistence is the disease behind the 409 above, the nonce only escapes the
@@ -98,9 +104,12 @@ async function uploadMapLocation(
   payload: Record<string, unknown>,
   filename = 'location.json',
 ): Promise<{ viewerUrl: string; qurlLink: string; resourceId: string }> {
-  // Mix in the per-run nonce (see RUN_NONCE above) so the uploaded bytes —
-  // and therefore the md5 / target_url — are unique to this run.
-  const jsonStr = JSON.stringify({ ...payload, _e2e_nonce: RUN_NONCE });
+  // Per-upload nonce (run-unique prefix + monotonic counter) so the bytes —
+  // and therefore the md5 / target_url — are unique to this run AND distinct
+  // per upload. Computed once per call (outside the 429-retry loop below) so a
+  // retry re-sends the SAME content.
+  const uploadNonce = `${RUN_NONCE}-${uploadSeq++}`;
+  const jsonStr = JSON.stringify({ ...payload, _e2e_nonce: uploadNonce });
 
   const attempt = async (): Promise<{ viewerUrl: string; qurlLink: string; resourceId: string } | { retry: true }> => {
     const formData = new FormData();
