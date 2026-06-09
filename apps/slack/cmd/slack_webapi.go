@@ -351,7 +351,13 @@ func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, us
 			ThreadTS string `json:"thread_ts,omitempty"`
 			Text     string `json:"text"`
 			Blocks   []any  `json:"blocks"`
-		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks})
+			// mrkdwn:false renders the top-level fallback text LITERALLY, fulfilling the
+			// PostMessageBlocksFunc seam's defense-in-depth contract: a prompt-injected,
+			// LLM-distilled summary in the fallback can't surface markup (e.g. a masked
+			// link) in the notification / non-block-client preview, regardless of whether
+			// the caller also escaped it. The card itself renders the summary as plain_text.
+			Mrkdwn bool `json:"mrkdwn"`
+		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false})
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}

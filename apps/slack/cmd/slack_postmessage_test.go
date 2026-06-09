@@ -316,6 +316,7 @@ func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 		ThreadTS string           `json:"thread_ts"`
 		Text     string           `json:"text"`
 		Blocks   []map[string]any `json:"blocks"`
+		Mrkdwn   *bool            `json:"mrkdwn"` // pointer: assert it was explicitly sent, not merely absent
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -339,6 +340,10 @@ func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	}
 	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0]["type"] != "section" {
 		t.Fatalf("blocks = %+v, want one section block", gotBody.Blocks)
+	}
+	// Defense-in-depth: mrkdwn must be explicitly false so the fallback renders literally.
+	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false (literal fallback)", gotBody.Mrkdwn)
 	}
 }
 
