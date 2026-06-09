@@ -307,7 +307,7 @@ func mapCoreError(log *slog.Logger, err error, generic string) string {
 	if errors.As(err, &ue) {
 		return ":warning: " + ue.msg
 	}
-	log.Error("unexpected non-userError leaked from a mutation core", "error", err)
+	log.Error("unexpected non-userError leaked from a mutation core", "error", err, "fallback", generic)
 	return ":warning: " + generic
 }
 

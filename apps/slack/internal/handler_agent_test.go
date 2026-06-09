@@ -109,6 +109,11 @@ func TestAgentReplyText(t *testing.T) {
 	if got := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "  "}}); got != agentErrorReply {
 		t.Errorf("blank proposal summary should fall back to the error reply, got %q", got)
 	}
+	// The LLM-distilled proposal summary posts as mrkdwn in the preview, so it must
+	// be escaped (a masked link can't surface) — consistent with the confirm card.
+	if got := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "Protect <http://evil|x>."}}); strings.ContainsAny(got, "<>") {
+		t.Errorf("proposal preview must escape mrkdwn (no raw <>), got %q", got)
+	}
 }
 
 func TestAgentEnabled(t *testing.T) {

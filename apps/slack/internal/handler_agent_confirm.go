@@ -106,7 +106,9 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, agentErrorReply)
 		return
 	}
-	preview := agentProposalPreviewPrefix + summary
+	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
+	// the card fallback below and agentReplyText).
+	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
 
 	id, err := newPendingActionID()
 	if err != nil {
@@ -290,6 +292,9 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			teamID:    payload.Team.ID,
 			channelID: payload.Channel.ID,
 			userID:    payload.User.ID,
+			// triggerID seeds only getWork's idempotency key — getWork never
+			// views.open's it, so the ~3s trigger-expiry doesn't apply on this
+			// async path (the consume-once claim is the real double-execute guard).
 			triggerID: payload.TriggerID,
 		})
 		if err != nil {

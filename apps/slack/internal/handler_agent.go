@@ -406,7 +406,11 @@ func agentReplyText(result *agent.Result) string {
 		if strings.TrimSpace(result.Proposal.Summary) == "" {
 			return agentErrorReply
 		}
-		return agentProposalPreviewPrefix + result.Proposal.Summary
+		// The preview posts as mrkdwn, and the summary is LLM-distilled — escape it
+		// (consistent with the confirm card's fallback) so a prompt-injected masked
+		// link can't surface. The Reply branch below is deliberately NOT escaped: it
+		// is the agent's own answer, which is allowed light Slack formatting.
+		return agentProposalPreviewPrefix + escapeMrkdwnText(result.Proposal.Summary)
 	}
 	if strings.TrimSpace(result.Reply) == "" {
 		return agentErrorReply
