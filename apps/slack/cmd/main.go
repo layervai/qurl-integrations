@@ -154,7 +154,7 @@ func run() error {
 	agentLLM := buildAgentLLM()
 	agentStore := buildAgentStore(signalCtx)
 	agentDisabled := readAgentKillSwitch()
-	logAgentSurfaceState(agentLLM != nil, agentStore != nil, agentDisabled)
+	logAgentSurfaceState(agentLLM != nil, agentStore != nil, postMessage != nil, agentDisabled)
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
@@ -988,26 +988,36 @@ func readAgentKillSwitch() bool {
 }
 
 // logAgentSurfaceState emits one startup line describing why conversation mode is
-// live or dark. PostMessage is always wired, so only the gated seams (LLM, store)
-// and the kill switch decide liveness. The partial-config branch NAMES the
-// missing seam: silent darkness on a configured-looking deploy is the worst
-// operator experience this wiring can produce.
-func logAgentSurfaceState(llmWired, storeWired, killed bool) {
+// live or dark. The LIVE claim is gated on the SAME three seams as
+// Handler.agentEnabled (LLM + Store + PostMessage) so the line can never report
+// LIVE while the handler stays dark — even though PostMessage is wired
+// unconditionally today. The partial-config branch NAMES the missing seam: silent
+// darkness on a configured-looking deploy is the worst operator experience this
+// wiring can produce.
+func logAgentSurfaceState(llmWired, storeWired, postWired, killed bool) {
 	switch {
 	case killed:
 		slog.Warn("conversation mode is DISABLED by kill switch (QURL_AGENT_DISABLED); the read-only agent will not respond even if other seams are wired")
-	case llmWired && storeWired:
+	case llmWired && storeWired && postWired:
 		slog.Info("conversation mode (read-only) is LIVE: @mentions and DMs will be answered")
 	case !llmWired && !storeWired:
+		// LLM + Store are the operator-set agent seams; PostMessage is wired
+		// unconditionally, so "neither agent seam set" is the friendly no-agent
+		// deploy, not a partial misconfiguration.
 		slog.Info("conversation mode is DARK: no agent seams configured",
 			"hint", "set ANTHROPIC_API_KEY and "+slackdata.EnvAgentStateTable+" to enable")
 	default:
+		// Partial config — including the today-unreachable case where PostMessage
+		// is nil, so the line stays honest if PostMessage ever becomes conditional.
 		var missing []string
 		if !llmWired {
 			missing = append(missing, "ANTHROPIC_API_KEY (AgentLLM)")
 		}
 		if !storeWired {
 			missing = append(missing, slackdata.EnvAgentStateTable+" (AgentStore)")
+		}
+		if !postWired {
+			missing = append(missing, "PostMessage")
 		}
 		slog.Warn("conversation mode is DARK: partially configured; the agent stays off until every seam is set",
 			"missing", strings.Join(missing, ", "))

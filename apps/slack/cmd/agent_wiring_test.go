@@ -106,22 +106,26 @@ func TestLogAgentSurfaceState(t *testing.T) {
 		name          string
 		llm           bool
 		store         bool
+		post          bool
 		killed        bool
 		wantLevel     string
 		wantSubstr    string
 		wantMissing   string // when set, asserts the "missing" attribute contains it
 		wantNoMissing bool
 	}{
-		{name: "live", llm: true, store: true, wantLevel: "INFO", wantSubstr: "LIVE", wantNoMissing: true},
-		{name: "killed", llm: true, store: true, killed: true, wantLevel: "WARN", wantSubstr: "kill switch", wantNoMissing: true},
-		{name: "fully dark", wantLevel: "INFO", wantSubstr: "no agent seams", wantNoMissing: true},
-		{name: "partial: store missing", llm: true, wantLevel: "WARN", wantSubstr: "partially configured", wantMissing: slackdata.EnvAgentStateTable},
-		{name: "partial: llm missing", store: true, wantLevel: "WARN", wantSubstr: "partially configured", wantMissing: "ANTHROPIC_API_KEY"},
+		{name: "live", llm: true, store: true, post: true, wantLevel: "INFO", wantSubstr: "LIVE", wantNoMissing: true},
+		{name: "killed", llm: true, store: true, post: true, killed: true, wantLevel: "WARN", wantSubstr: "kill switch", wantNoMissing: true},
+		{name: "fully dark", post: true, wantLevel: "INFO", wantSubstr: "no agent seams", wantNoMissing: true},
+		{name: "partial: store missing", llm: true, post: true, wantLevel: "WARN", wantSubstr: "partially configured", wantMissing: slackdata.EnvAgentStateTable},
+		{name: "partial: llm missing", store: true, post: true, wantLevel: "WARN", wantSubstr: "partially configured", wantMissing: "ANTHROPIC_API_KEY"},
+		// PostMessage is wired unconditionally today, but the LIVE claim must still
+		// require it: LLM+Store set with PostMessage nil is partial, not LIVE.
+		{name: "partial: postmessage missing", llm: true, store: true, wantLevel: "WARN", wantSubstr: "partially configured", wantMissing: "PostMessage"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := captureSlog(t)
-			logAgentSurfaceState(tc.llm, tc.store, tc.killed)
+			logAgentSurfaceState(tc.llm, tc.store, tc.post, tc.killed)
 			records := logs()
 			if len(records) != 1 {
 				t.Fatalf("got %d log records, want 1: %v", len(records), records)
