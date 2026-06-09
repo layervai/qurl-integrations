@@ -30,6 +30,11 @@ const (
 	agentConfirmUnsupportedReply    = "I can't apply that kind of change yet."
 	agentConfirmGetDeliveredReply   = "Handled — the access link was sent privately to the approver."
 	agentConfirmFailedReply         = "Something went wrong applying that. Please try again, or use a `/qurl` command."
+	// agentConfirmInvalidAliasReply is generic ON PURPOSE: the confirm card is
+	// public, so an invalid (LLM-distilled, possibly injected) alias/target must NOT
+	// be echoed back into it — unlike the slash path, whose validation reply is
+	// ephemeral and can echo the bad token.
+	agentConfirmInvalidAliasReply = "That alias or target isn't valid — use lowercase letters, numbers, and dashes (no special characters)."
 )
 
 // pendingAction is the ephemeral snapshot persisted between proposing a mutation
@@ -347,8 +352,19 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// A revoke result ("revoked $x") is benign and useful as a public audit line.
 		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
 	case agent.ActionSetAlias:
+		// The confirm path has no parser gate (unlike the slash verb, where
+		// parseAliasArgs runs first), so the LLM-distilled alias/target reach here
+		// only normalizeToken-trimmed. Validate them through the SAME grammar — which
+		// rejects backticks / bad charset / non-tunnel targets — so an injected value
+		// can neither be bound (data hygiene) nor break out of the result's inline-
+		// code fence on the PUBLIC card. On failure we surface a generic message
+		// (agentConfirmInvalidAliasReply) rather than echo the value.
+		if _, msg := parseAliasArgs("$"+pa.Alias+" $"+pa.Target, true); msg != "" {
+			return actionResult{cardText: agentConfirmInvalidAliasReply}
+		}
 		// Binds pa.Alias → pa.Target in the CLICK's channel (channel-scoped, like
-		// the slash set-alias). Benign result → public card.
+		// the slash set-alias). Inputs are now validated, so the benign result is
+		// safe on the public card.
 		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, pa.Alias, pa.Target)}
 	case agent.ActionUnsetAlias:
 		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, pa.Alias)}

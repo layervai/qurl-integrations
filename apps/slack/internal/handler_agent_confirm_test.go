@@ -356,6 +356,23 @@ func TestConfirm_SetAliasOnApprove(t *testing.T) {
 	}
 }
 
+func TestConfirm_SetAliasRejectsInvalidInput(t *testing.T) {
+	// The confirm card is public, so an LLM-distilled alias/target with a backtick
+	// (or any out-of-grammar char) must be rejected with a GENERIC message — never
+	// bound, and never echoed onto the card (which would break the code fence).
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "ev`il", Target: "staging", ChannelID: "C1"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true)
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || text != agentConfirmInvalidAliasReply {
+		t.Fatalf("invalid set-alias should replace the card with the generic reply; replace=%v text=%q", ro, text)
+	}
+	if strings.Contains(text, "`") || strings.Contains(text, "ev") {
+		t.Fatalf("the public card must not echo the injected alias: %q", text)
+	}
+}
+
 func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, &pendingAction{Action: agent.ActionUnsetAlias, Alias: "ghost", ChannelID: "C1"})
