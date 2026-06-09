@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -729,5 +730,57 @@ func TestSetDisplayName_RevokedTargetOnFirstPageWithMorePages(t *testing.T) {
 	}
 	if capPatch.calls.Load() != 0 {
 		t.Errorf("PATCH fired against a revoked connector (calls = %d)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_NoChannelResolvesBySlug pins the channelID=="" degrade: with
+// no channel_id the alias fallback is skipped (it needs a channel), but slug
+// resolution must still work — channel_id is not required for it.
+func TestSetDisplayName_NoChannelResolvesBySlug(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	h := newTestHandler(t, displayNameQURLServer(t, testTunnelSlug, capPatch))
+	seedAliasAdminGate(t, h, testAliasTeamID)
+
+	// channelID "" sends a truly-empty channel_id on the wire.
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, "").
+		invokeAdminAsync("set-display-name "+testTunnelSlug+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, testDisplayNameNewName) || !strings.Contains(async, "`"+testTunnelSlug+"`") {
+		t.Errorf("async reply = %q, want the slug to resolve with no channel_id", async)
+	}
+	if capPatch.calls.Load() != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (slug must resolve without a channel)", capPatch.calls.Load())
+	}
+}
+
+// TestSetDisplayName_ChannelAliasLookupErrorFallsThrough pins the soft-fail: when
+// the channel-alias GetItem errors, the resolver logs and falls through to the
+// not-found copy rather than surfacing a store error or PATCHing. The admin gate
+// reads workspace_mappings (a different table), so it still succeeds — only the
+// channel_policies read the alias fallback issues is failed.
+func TestSetDisplayName_ChannelAliasLookupErrorFallsThrough(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	capPatch := &capturedPatch{}
+	// knownSlug differs from the alias, so the slug-first lookup returns empty and
+	// the resolver reaches the channel-alias fallback.
+	h := newTestHandler(t, displayNameQURLServer(t, "some-other-slug", capPatch))
+
+	// Seed the admin gate inline (like seedAliasAdminGate) but keep the fake so we
+	// can fail the channel_policies GetItem.
+	names := defaultTestTableNames()
+	ddb := newFakeDDB(t, names, nil)
+	ddb.seedItem(t, names.workspace, seedWorkspaceAdmins(testAliasTeamID, testAdminOwnerID, []string{"U_admin", "U_alias_admin"}, testWorkspaceConfiguredAt))
+	ddb.SetGetItemErr(names.channelPolicy, errors.New("ddb unavailable"))
+	h.cfg.AdminStore = newStoreFromFake(t, ddb, names, nil)
+
+	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
+		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
+
+	if !strings.Contains(async, "No qURL Connector with id") {
+		t.Errorf("async reply = %q, want the not-found copy after the alias-lookup error", async)
+	}
+	if capPatch.calls.Load() != 0 {
+		t.Errorf("PATCH fired despite the alias-lookup error (calls = %d)", capPatch.calls.Load())
 	}
 }
