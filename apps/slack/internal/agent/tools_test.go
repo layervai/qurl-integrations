@@ -179,6 +179,43 @@ func TestParseProposal(t *testing.T) {
 	}
 }
 
+func TestDecodeFields_CoercesScalars(t *testing.T) {
+	// A model may emit a number/bool for a string-schema field; the whole
+	// object must not be rejected.
+	raw := mustInput(t, map[string]any{
+		"alias": "oncall",
+		"port":  8080, // number, not string
+		"flag":  true, // bool
+		"ratio": 1.5,  // non-integer number
+		"empty": nil,  // null
+	})
+	got, err := decodeFields(raw)
+	if err != nil {
+		t.Fatalf("decodeFields: %v", err)
+	}
+	want := map[string]string{"alias": "oncall", "port": "8080", "flag": "true", "ratio": "1.5", "empty": ""}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("field %q = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+func TestParseProposal_NumericPortSurvives(t *testing.T) {
+	// Regression: propose_protect_connector with a numeric port must not lose
+	// the other fields.
+	call := ToolCall{ID: "tu", Name: toolProposeProtectConnector, Input: mustInput(t, map[string]any{
+		fieldAlias: "oncall", fieldEnv: "docker", fieldPort: 8080,
+	})}
+	p, ok, err := parseProposal(call)
+	if !ok || err != nil || p == nil {
+		t.Fatalf("ok=%v err=%v p=%v", ok, err, p)
+	}
+	if p.Alias != "oncall" || p.Env != "docker" || p.Port != "8080" {
+		t.Fatalf("numeric port lost sibling fields: %+v", p)
+	}
+}
+
 func TestToolSpecs_CoverEveryToolWithSchemas(t *testing.T) {
 	specs := toolSpecs()
 	want := []string{

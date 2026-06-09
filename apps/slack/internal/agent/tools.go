@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -80,9 +82,12 @@ func toolSpecs() []ToolSpec {
 		},
 		{
 			Name:        toolProposeRevoke,
-			Description: "Propose revoking a protected resource and ALL its qURLs, in every channel it's protected in. Destructive and admin-gated. Does NOT execute — the user must confirm.",
-			Schema:      map[string]any{fieldToken: stringProp("The $slug or $alias of the resource to revoke.")},
-			Required:    []string{fieldToken},
+			Description: "Propose revoking a protected resource and ALL its qURLs, in every channel it's protected in. Destructive and admin-gated. Does NOT execute — the user must confirm. Capture the reason for the audit trail.",
+			Schema: map[string]any{
+				fieldToken:  stringProp("The $slug or $alias of the resource to revoke."),
+				fieldReason: stringProp("Short reason distilled from the request, for the audit trail (e.g. 'decommissioned')."),
+			},
+			Required: []string{fieldToken},
 		},
 		{
 			Name:        toolProposeSetAlias,
@@ -121,18 +126,49 @@ func toolSpecs() []ToolSpec {
 }
 
 // decodeFields unmarshals a tool input object into a flat string map. Every
-// tool parameter is declared as a string in its schema, so this is a faithful
-// decode; a non-object or non-string value yields an error the caller surfaces
-// back to the model.
+// tool parameter is declared as a string in its schema, but models routinely
+// emit a bare number or bool for a numeric/boolean-sounding field (e.g.
+// `{"port": 8080}`). Decoding straight into map[string]string would reject the
+// whole object and lose the other valid fields, so we decode loosely and coerce
+// scalars to strings; only a non-object payload is an error.
 func decodeFields(raw json.RawMessage) (map[string]string, error) {
 	fields := map[string]string{}
 	if len(raw) == 0 {
 		return fields, nil
 	}
-	if err := json.Unmarshal(raw, &fields); err != nil {
+	var loose map[string]any
+	if err := json.Unmarshal(raw, &loose); err != nil {
 		return nil, fmt.Errorf("decode tool input: %w", err)
 	}
+	for k, v := range loose {
+		fields[k] = coerceToString(v)
+	}
 	return fields, nil
+}
+
+// coerceToString renders a JSON scalar as a string. Numbers lose a redundant
+// ".0" so a port arrives as "8080", not "8080.000000"; objects/arrays (which no
+// tool declares) fall back to their JSON form rather than Go's %v.
+func coerceToString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		if t == math.Trunc(t) && !math.IsInf(t, 0) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case nil:
+		return ""
+	default:
+		b, err := json.Marshal(t)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
 }
 
 // executeRead runs a read tool and returns its model-readable result plus
@@ -233,6 +269,7 @@ func proposalRevoke(f map[string]string) (*Proposal, error) {
 	return &Proposal{
 		Action:     ActionRevoke,
 		Token:      token,
+		Reason:     strings.TrimSpace(f[fieldReason]),
 		Summary:    fmt.Sprintf("Revoke `$%s` and all its qURLs, in every channel it's protected in.", token),
 		AdminGated: true,
 	}, nil

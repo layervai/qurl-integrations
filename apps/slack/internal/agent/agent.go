@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Conversation roles. Kept as constants so the loop and the SDK translation
@@ -239,7 +240,13 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		msgs = append(msgs, Message{Role: roleAssistant, Text: resp.Text, ToolCalls: resp.ToolCalls})
 
 		if len(resp.ToolCalls) == 0 {
-			return Result{Reply: resp.Text}, msgs, nil
+			// Guard against the model returning neither text nor a tool call —
+			// posting an empty message would be worse than asking again.
+			reply := resp.Text
+			if strings.TrimSpace(reply) == "" {
+				reply = iterationCapMessage
+			}
+			return Result{Reply: reply}, msgs, nil
 		}
 
 		// Parallel tool use is disabled, so there is normally one call; handle

@@ -208,6 +208,19 @@ func TestRun_ProposeRevoke_AdminGated(t *testing.T) {
 	}
 }
 
+func TestRun_EmptyModelReply_FallsBack(t *testing.T) {
+	// Model returns neither text nor tool calls — must not post an empty message.
+	llm := &scriptedLLM{responses: []Response{{StopReason: "end_turn"}}}
+	ctx, tc := testCtx()
+	res, _, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Proposal != nil || res.Reply != iterationCapMessage {
+		t.Fatalf("expected the fallback reply, got proposal=%v reply=%q", res.Proposal, res.Reply)
+	}
+}
+
 func TestRun_ClarifyingQuestion(t *testing.T) {
 	llm := &scriptedLLM{responses: []Response{textResp("Which one — $oncall or $on-call-eng?")}}
 	ctx, tc := testCtx()
