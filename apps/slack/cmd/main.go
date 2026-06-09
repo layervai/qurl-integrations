@@ -151,9 +151,17 @@ func run() error {
 	// switch is off (see Handler.agentEnabled). PostMessage shares the per-
 	// workspace token lookup and Grid fallback with the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
-	agentLLM := buildAgentLLM()
-	agentStore := buildAgentStore(signalCtx)
 	agentDisabled := readAgentKillSwitch()
+	// Skip building the LLM + state store under a kill switch: it's read once at
+	// boot and forces the surface dark regardless (agentEnabled), so the store/LLM
+	// would never be used, and un-killing requires a restart anyway. This also
+	// avoids the AWS config load + DDB client construction under a kill.
+	var agentLLM agent.LLM
+	var agentStore *slackdata.AgentStore
+	if !agentDisabled {
+		agentLLM = buildAgentLLM()
+		agentStore = buildAgentStore(signalCtx)
+	}
 	logAgentSurfaceState(agentLLM != nil, agentStore != nil, postMessage != nil, agentDisabled)
 
 	// signalCtx is hoisted above so the DDB-provider constructor can

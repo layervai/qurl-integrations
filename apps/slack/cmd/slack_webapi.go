@@ -278,6 +278,9 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 			return fmt.Errorf("chat.postMessage response read: %w", err)
 		}
 		if len(raw) > slackChatPostMessageResponseBodyLimit {
+			// LimitReader already consumed limit+1 bytes; drain the rest before Close
+			// so a keep-alive transport can reuse the connection after an oversized
+			// response (mirrors the views.open drain).
 			_, _ = io.Copy(io.Discard, resp.Body)
 			return fmt.Errorf("chat.postMessage response exceeded %d bytes", slackChatPostMessageResponseBodyLimit)
 		}
