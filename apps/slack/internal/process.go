@@ -47,7 +47,7 @@ const (
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
 
-const deleteOriginalRetryDelay = 250 * time.Millisecond
+const replaceOriginalRetryDelay = 250 * time.Millisecond
 
 // runAsync acks the request synchronously with ackWorkingOnIt and runs
 // `work` in a bounded-pool goroutine. Returns after the ack is written.
@@ -217,34 +217,46 @@ func (h *Handler) postErrorResponse(log *slog.Logger, responseURL, message strin
 	return h.postResponseBody(log, responseURL, body)
 }
 
-func (h *Handler) deleteOriginalResponse(log *slog.Logger, responseURL string) bool {
-	body, err := json.Marshal(map[string]bool{"delete_original": true})
+// replaceOriginalResponse swaps the slash-command's ephemeral "Working on it…"
+// ack for a final message once a wizard modal has opened. Slack does NOT support
+// delete_original for slash commands — it ignores the field and, because the POST
+// then carries no text, rejects it with `no_text` (HTTP 500); an ephemeral ack
+// also can't be deleted. So wizard flows REPLACE the ack rather than delete it.
+// The always-present `text` field is what keeps the POST off the `no_text` path,
+// and replace_original updates the spinner in place instead of stacking a second
+// ephemeral. Same mechanism the error paths already use via ErrorResponse.
+func (h *Handler) replaceOriginalResponse(log *slog.Logger, responseURL, message string) bool {
+	body, err := json.Marshal(map[string]any{
+		respFieldResponseType:    respTypeEphemeral,
+		respFieldReplaceOriginal: true,
+		respFieldText:            message,
+	})
 	if err != nil {
-		log.Error("marshal response_url delete payload failed", "error", err)
+		log.Error("marshal response_url replace payload failed", "error", err)
 		return false
 	}
 	if h.postResponseBody(log, responseURL, body) {
 		return true
 	}
-	// Retry only delete_original: a stale "Working on it" ack is uniquely
-	// confusing after a modal opens, while ordinary async replies are safer as
-	// single-attempt deliveries with explicit failure logging. The short delay
-	// makes the retry useful for transient Slack blips without materially
-	// extending the async worker's lifetime.
-	log.Warn("response_url delete_original failed; retrying once")
-	if !h.waitForDeleteOriginalRetry() {
-		log.Warn("response_url delete_original retry skipped because handler is shutting down")
+	// Retry only this replace: a stale "Working on it" ack is uniquely confusing
+	// after a modal opens, while ordinary async replies are safer as single-
+	// attempt deliveries with explicit failure logging. The short delay makes the
+	// retry useful for transient Slack blips without materially extending the
+	// async worker's lifetime.
+	log.Warn("response_url replace_original failed; retrying once")
+	if !h.waitForReplaceOriginalRetry() {
+		log.Warn("response_url replace_original retry skipped because handler is shutting down")
 		return false
 	}
 	return h.postResponseBody(log, responseURL, body)
 }
 
-func (h *Handler) waitForDeleteOriginalRetry() bool {
+func (h *Handler) waitForReplaceOriginalRetry() bool {
 	ctx := h.baseCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	timer := time.NewTimer(deleteOriginalRetryDelay)
+	timer := time.NewTimer(replaceOriginalRetryDelay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
