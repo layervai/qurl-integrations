@@ -446,16 +446,19 @@ func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Dura
 	return remaining
 }
 
+// errMissingBootstrapPlaintext is returned by [Handler.buildTunnelInstall] when
+// the qURL API accepted the key create but omitted the plaintext key.
+var errMissingBootstrapPlaintext = errors.New("bootstrap key response missing plaintext")
+
 // tunnelInstallBuild is the successful result of [Handler.buildTunnelInstall]:
-// the created resource, the minted bootstrap key, the rendered install
-// instructions, and the channel-alias status line. client is retained so the
-// caller can revoke key if delivery of message is never confirmed.
+// the created resource, the minted bootstrap key, and the rendered install
+// instructions (which already include the channel-alias status line). client is
+// retained so the caller can revoke key if delivery of message is never confirmed.
 type tunnelInstallBuild struct {
-	client      *client.Client
-	resource    *client.Resource
-	key         *client.APIKey
-	message     string
-	aliasStatus string
+	client   *client.Client
+	resource *client.Resource
+	key      *client.APIKey
+	message  string
 }
 
 // buildTunnelInstall is the qURL Connector mutation core, decoupled from how the
@@ -467,8 +470,9 @@ type tunnelInstallBuild struct {
 //
 // It does NOT gate admin — callers gate first (requireAdminSync on the slash
 // path; a CheckAdmin re-check on the confirm path). On failure it returns the
-// user-facing message to post plus the error, having already revoked any
-// bootstrap key it minted past the render step. On success the caller delivers
+// user-facing message to post plus the error, revoking any bootstrap key it
+// minted if key validation or the final render fails (so a key whose install
+// block never rendered doesn't stay live). On success the caller delivers
 // build.message and, if delivery is not confirmed, revokes build.key via
 // [revokeBootstrapKeyAfterInstallFailure].
 func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, setupStartedAt time.Time) (*tunnelInstallBuild, string, error) {
@@ -544,12 +548,8 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
 
-	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, aliasStatus: aliasStatus}, "", nil
+	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg}, "", nil
 }
-
-// errMissingBootstrapPlaintext is returned by buildTunnelInstall when the qURL
-// API accepted the key create but omitted the plaintext key.
-var errMissingBootstrapPlaintext = errors.New("bootstrap key response missing plaintext")
 
 // processTunnelInstall is the async-worker body for `/qurl-admin
 // protect-connector`. It runs the shared mutation core and delivers the result
