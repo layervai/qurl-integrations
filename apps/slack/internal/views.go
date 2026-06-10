@@ -329,6 +329,7 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 		aliasInitial = "$" + strings.Join(aliases, "\n$")
 	}
 	label := editResourceLabel(meta.ResourceType)
+	expiryOptions := linkExpiryOptionObjs()
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDTunnelEdit,
@@ -351,7 +352,7 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this resource shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to protect it there; remove one to revoke it.", true,
 				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
 			inputBlock(tunnelEditBlockLinkExpiry, "Default link expiry", "How long links created with /qurl get for this resource stay redeemable. Links remain one-time use.", false,
-				staticSelect(tunnelEditActionLinkExpiry, linkExpiryOptionObjs(), linkExpiryInitialOption(meta.DefaultTTL))),
+				staticSelect(tunnelEditActionLinkExpiry, expiryOptions, linkExpiryInitialOption(expiryOptions, meta.DefaultTTL))),
 		},
 	}
 	return json.Marshal(payload)
@@ -375,9 +376,10 @@ func linkExpiryOptionObjs() []map[string]any {
 
 // linkExpiryInitialOption returns the dropdown's pre-selected option for a
 // stored override ("" or an unrecognized value pre-selects the built-in
-// default — matching what the mint path would actually use).
-func linkExpiryInitialOption(stored string) map[string]any {
-	options := linkExpiryOptionObjs()
+// default — matching what the mint path would actually use). options is
+// the [linkExpiryOptionObjs] slice the dropdown renders, index-aligned
+// with [linkExpiryOptions].
+func linkExpiryInitialOption(options []map[string]any, stored string) map[string]any {
 	for i, o := range linkExpiryOptions {
 		if o.value == stored {
 			return options[i]

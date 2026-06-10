@@ -106,29 +106,47 @@ func linkExpiryHumanLabel(value string) (string, bool) {
 	return "", false
 }
 
+// storedLinkExpiry returns the recognized stored default-link-expiry
+// override for (teamID, resourceID), or "" when the built-in default
+// applies. Best-effort: a nil AdminStore, a store read failure, or a stored
+// value outside [linkExpiryOptions] (a hand-edited row, or an option later
+// removed from the set) logs under op and reads as "no override" — an
+// unrecognized value is never used. Shared by the mint path
+// ([Handler.resourceLinkExpiryFor]) and the Edit modal pre-fill, which is
+// SAFE to degrade this way: the submit handler only writes when the
+// dropdown's value differs from the pre-fill, so a degraded pre-fill the
+// admin doesn't touch never clears a real stored override.
+func (h *Handler) storedLinkExpiry(ctx context.Context, log *slog.Logger, op, teamID, resourceID string) string {
+	if h.cfg.AdminStore == nil {
+		return ""
+	}
+	stored, err := h.cfg.AdminStore.GetResourceDefaultTTL(ctx, teamID, resourceID)
+	if err != nil {
+		log.Warn(op+": default link-expiry lookup failed — using the built-in default",
+			"error", err, "team_id", teamID, "resource_id", resourceID)
+		return ""
+	}
+	if stored == "" {
+		return ""
+	}
+	if _, ok := linkExpiryHumanLabel(stored); !ok {
+		log.Warn(op+": stored default link expiry is not a recognized option — using the built-in default",
+			"stored_ttl", stored, "team_id", teamID, "resource_id", resourceID)
+		return ""
+	}
+	return stored
+}
+
 // resourceLinkExpiryFor resolves the link expiry for minting against
 // resourceID: the admin-set per-resource default when one is stored and
-// recognized, else the bot's built-in [resourceLinkExpiry]. Best-effort —
-// a store read failure or an unrecognized stored value logs and falls
-// back to the built-in default (the most restrictive option) rather than
-// failing the mint. Returns the wire value and its human label.
+// recognized, else the bot's built-in [resourceLinkExpiry] (the most
+// restrictive option). Returns the wire value and its human label.
 func (h *Handler) resourceLinkExpiryFor(ctx context.Context, log *slog.Logger, teamID, resourceID string) (value, human string) {
-	override, err := h.cfg.AdminStore.GetResourceDefaultTTL(ctx, teamID, resourceID)
-	if err != nil {
-		log.Warn("get: default link-expiry lookup failed — minting with the built-in default",
-			"error", err, "team_id", teamID, "resource_id", resourceID)
-		return resourceLinkExpiry, resourceLinkExpiryHuman
+	if override := h.storedLinkExpiry(ctx, log, "get", teamID, resourceID); override != "" {
+		label, _ := linkExpiryHumanLabel(override)
+		return override, label
 	}
-	if override == "" {
-		return resourceLinkExpiry, resourceLinkExpiryHuman
-	}
-	label, ok := linkExpiryHumanLabel(override)
-	if !ok {
-		log.Warn("get: stored default link expiry is not a recognized option — minting with the built-in default",
-			"stored_ttl", override, "team_id", teamID, "resource_id", resourceID)
-		return resourceLinkExpiry, resourceLinkExpiryHuman
-	}
-	return override, label
+	return resourceLinkExpiry, resourceLinkExpiryHuman
 }
 
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL `/qurl get`.

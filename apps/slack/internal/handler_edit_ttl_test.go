@@ -123,12 +123,13 @@ func TestParseEditLinkExpiry(t *testing.T) {
 }
 
 func TestLinkExpiryInitialOption(t *testing.T) {
-	if got := linkExpiryInitialOption("6h"); got[blockKitFieldValue] != "6h" {
+	opts := linkExpiryOptionObjs()
+	if got := linkExpiryInitialOption(opts, "6h"); got[blockKitFieldValue] != "6h" {
 		t.Errorf("stored 6h pre-selects %v, want 6h", got[blockKitFieldValue])
 	}
 	for name, stored := range map[string]string{"no override": "", "unrecognized override": "999d"} {
 		t.Run(name, func(t *testing.T) {
-			got := linkExpiryInitialOption(stored)
+			got := linkExpiryInitialOption(opts, stored)
 			if got[blockKitFieldValue] != resourceLinkExpiry {
 				t.Errorf("pre-selected %v, want the built-in default %q", got[blockKitFieldValue], resourceLinkExpiry)
 			}
@@ -136,7 +137,7 @@ func TestLinkExpiryInitialOption(t *testing.T) {
 	}
 	// The default option's label carries the "(default)" marker so admins can
 	// tell reset from override.
-	label, _ := linkExpiryInitialOption("")["text"].(map[string]any)
+	label, _ := linkExpiryInitialOption(opts, "")["text"].(map[string]any)
 	if text, _ := label["text"].(string); !strings.Contains(text, "(default)") {
 		t.Errorf("default option label = %q, want it to contain \"(default)\"", text)
 	}

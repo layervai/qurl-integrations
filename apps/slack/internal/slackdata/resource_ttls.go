@@ -45,6 +45,13 @@ func (s *Store) GetResourceDefaultTTL(ctx context.Context, teamID, resourceID st
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
+		// Project just the one map entry (the LookupChannelAlias pattern) —
+		// this runs on every mint and the row carries unrelated attributes.
+		ProjectionExpression: aws.String(exprResourceTTLs + "." + exprTTLResourceKey),
+		ExpressionAttributeNames: map[string]string{
+			exprResourceTTLs:   attrResourceDefaultTTLs,
+			exprTTLResourceKey: resourceID,
+		},
 	})
 	if err != nil {
 		return "", ddbToError("GetResourceDefaultTTL", err)

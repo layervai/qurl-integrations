@@ -107,7 +107,9 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 		// process shutdown cancels them coherently.
 		enumCtx, enumCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 		meta.ExposedChannels = h.exposedChannelsForEdit(enumCtx, log, &meta)
-		meta.DefaultTTL = h.defaultTTLForEdit(enumCtx, log, meta.TeamID, meta.ResourceID)
+		// Pre-fill is best-effort like the channels above: a degraded read
+		// pre-fills the built-in default, which is SAFE — see storedLinkExpiry.
+		meta.DefaultTTL = h.storedLinkExpiry(enumCtx, log, "list edit", meta.TeamID, meta.ResourceID)
 		enumCancel()
 
 		view, err := TunnelEditModal(&meta, snapshot.DisplayName, snapshot.Aliases)
@@ -178,36 +180,6 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 		}
 	}
 	return channels
-}
-
-// defaultTTLForEdit reads the resource's stored default-link-expiry override
-// for the Edit modal pre-fill ("" when none). Best-effort, mirroring
-// exposedChannelsForEdit: a read failure — or an unrecognized stored value —
-// pre-fills the built-in default instead of blocking the modal. That is SAFE
-// for the override: the submit handler only writes when the dropdown's value
-// actually differs from this pre-fill, so a degraded pre-fill the admin
-// doesn't touch never clears a real stored override.
-func (h *Handler) defaultTTLForEdit(ctx context.Context, log *slog.Logger, teamID, resourceID string) string {
-	if h.cfg.AdminStore == nil {
-		return ""
-	}
-	stored, err := h.cfg.AdminStore.GetResourceDefaultTTL(ctx, teamID, resourceID)
-	if err != nil {
-		log.Warn("list edit: default link-expiry read failed — pre-filling the built-in default",
-			"error", err, "team_id", teamID, "resource_id", resourceID)
-		return ""
-	}
-	if stored == "" {
-		return ""
-	}
-	if _, ok := linkExpiryHumanLabel(stored); !ok {
-		// Matches resourceLinkExpiryFor's posture: an unrecognized stored
-		// value is never used, so pre-fill what minting would actually do.
-		log.Warn("list edit: stored default link expiry is not a recognized option — pre-filling the built-in default",
-			"stored_ttl", stored, "team_id", teamID, "resource_id", resourceID)
-		return ""
-	}
-	return stored
 }
 
 // handleTunnelEditSubmission processes the Edit modal's view_submission: it
