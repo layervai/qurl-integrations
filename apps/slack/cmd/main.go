@@ -156,6 +156,10 @@ func run() error {
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
+	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
+	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
+	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
+	agentDefaultEnabled := readAgentDefaultEnabled()
 	// Skip building the LLM + state store under a kill switch: it's read once at
 	// boot and forces the surface dark regardless (agentEnabled), so the store/LLM
 	// would never be used, and un-killing requires a restart anyway. This also
@@ -212,6 +216,7 @@ func run() error {
 		AgentDisabled:       agentDisabled,
 		PostMessageBlocks:   postMessageBlocks,
 		AgentConfirmEnabled: agentConfirmEnabled,
+		AgentDefaultEnabled: agentDefaultEnabled,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
@@ -1025,6 +1030,15 @@ func readAgentKillSwitch() bool {
 // surface is live and PostMessageBlocks is wired (Handler.agentConfirmEnabled).
 func readAgentConfirmEnabled() bool {
 	return readBoolEnvFailSafe("QURL_AGENT_CONFIRM_ENABLED", false, false)
+}
+
+// readAgentDefaultEnabled reads QURL_AGENT_DEFAULT_ENABLED — the per-workspace
+// conversation-mode default for a workspace that hasn't set its own toggle. Absent →
+// off (the staged opt-in rollout; each workspace opts in via `/qurl-admin agent on`).
+// GA flips it true (every workspace on unless it explicitly opted out). FAILS SAFE to
+// off, so a typo can never silently turn the surface on for every workspace at once.
+func readAgentDefaultEnabled() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_DEFAULT_ENABLED", false, false)
 }
 
 // agentSurfaceState groups the boot-time facts that decide what conversation mode

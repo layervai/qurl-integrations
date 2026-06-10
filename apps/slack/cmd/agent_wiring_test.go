@@ -174,6 +174,32 @@ func TestReadAgentConfirmEnabled(t *testing.T) {
 	}
 }
 
+func TestReadAgentDefaultEnabled(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "unset is off (staged rollout)", val: "", want: false},
+		{name: "true enables the GA default", val: "true", want: true},
+		{name: "1 enables", val: "1", want: true},
+		{name: "false stays off", val: "false", want: false},
+		{name: "0 stays off", val: "0", want: false},
+		// Fail-safe: an unparseable value must stay OFF, never silently turn the
+		// surface on for every workspace at once.
+		{name: "garbage fails safe to off", val: "enable", want: false},
+		{name: "yes fails safe to off", val: "yes", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QURL_AGENT_DEFAULT_ENABLED", tc.val)
+			if got := readAgentDefaultEnabled(); got != tc.want {
+				t.Fatalf("readAgentDefaultEnabled(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLogAgentSurfaceState_ConfirmMode(t *testing.T) {
 	// The confirm/mutation line must key on the EFFECTIVE predicate
 	// (Handler.agentConfirmEnabled), never the raw flag: a flag set while the surface

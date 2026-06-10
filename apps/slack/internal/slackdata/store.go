@@ -301,6 +301,21 @@ func stringAttr(v string) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberS{Value: v}
 }
 
+func boolAttr(v bool) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberBOOL{Value: v}
+}
+
+// readBoolPresent reads a BOOL attr. present is false when the attr is missing or
+// the wrong type — the caller needs the three-state distinction (absent vs an
+// explicit true/false) so an opt-out can survive a default flip.
+func readBoolPresent(item map[string]ddbtypes.AttributeValue, key string) (value, present bool) {
+	v, ok := item[key].(*ddbtypes.AttributeValueMemberBOOL)
+	if !ok {
+		return false, false
+	}
+	return v.Value, true
+}
+
 // readString reads a string attr; returns "" if missing or wrong type.
 func readString(item map[string]ddbtypes.AttributeValue, key string) string {
 	v, ok := item[key].(*ddbtypes.AttributeValueMemberS)
