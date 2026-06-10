@@ -190,20 +190,23 @@ func validateRails(f *flags) error {
 	return nil
 }
 
-// looksProd reports whether this run targets production, by either the operator
-// label or a "prod" substring in any resolved table name. Defense-in-depth: a
-// forgotten -env=prod still trips the rail when the table names say prod.
+// looksProd reports whether this run targets production: the operator label, a
+// "prod" substring in any resolved table name or the qurl-service endpoint, or
+// the canonical prod API origin — the endpoint is the clearest prod signal, and
+// the real one (api.layerv.ai) carries no "prod" substring, so it gets its own
+// check. Defense-in-depth: a forgotten -env=prod still trips the rail when the
+// wiring says prod. False positives just require the explicit opt-in flag.
 func looksProd(f *flags) bool {
 	switch strings.ToLower(strings.TrimSpace(f.envLabel)) {
 	case "prod", "production":
 		return true
 	}
-	for _, t := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.workspaceStateTable} {
-		if strings.Contains(strings.ToLower(t), "prod") {
+	for _, v := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.workspaceStateTable, f.qurlEndpoint} {
+		if strings.Contains(strings.ToLower(v), "prod") {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(strings.ToLower(f.qurlEndpoint), "layerv.ai")
 }
 
 // run wires the live AWS clients and hands off to crawl. Kept thin so crawl —
@@ -234,6 +237,13 @@ func crawl(ctx context.Context, f *flags, logger *slog.Logger, store purger, key
 	rows, err := scanPolicyRows(ctx, reader, f.channelPoliciesTable, f.onlyTeam)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("scan channel_policies: %w", err)
+	}
+	if f.onlyTeam != "" && len(rows) == 0 {
+		// A typo'd -team and a policy-free workspace are indistinguishable here (a
+		// partition-key Query on a nonexistent id just returns zero rows), so don't
+		// let the run end looking like a clean bill of health.
+		logger.Warn("scoped crawl matched no channel_policies rows — verify the -team id before reading this as 'workspace healthy'",
+			"team_id", f.onlyTeam)
 	}
 
 	rep := newReport(f)

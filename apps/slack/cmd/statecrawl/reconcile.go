@@ -57,21 +57,23 @@ func resolveLiveness(ctx context.Context, keys auth.Provider, f *flags, teamID s
 	return liveness{resolved: true, byID: byID}
 }
 
-// maxResourcePages caps the liveness pagination. The empty-cursor / HasMore
-// checks already terminate normally; this is a fail-safe so a server bug that
-// returns HasMore=true with a stable cursor errors out (→ team reported
-// indeterminate, never purged) instead of looping forever. 1000 pages ×
-// listResourcesMaxLimit (100) = 100k resources, far beyond any real workspace.
-const maxResourcePages = 1000
+// maxResourceList caps the TOTAL resources accumulated while paginating, so the
+// fail-safe is independent of the -page-limit tuning knob (a page-count cap
+// would shrink the effective ceiling 10× under -page-limit=10 and abort a
+// legitimately large workspace). 100k is far beyond any real workspace.
+const maxResourceList = 100_000
 
 // listAllResources pages GET /v1/resources to completion. The bot deliberately
 // scans only the first page (latency budget); a backfill reconciler must be
 // exhaustive so it never misclassifies a live resource on a later page as an
-// orphan. Bounded by maxResourcePages so a misbehaving server can't wedge it.
+// orphan. The empty-cursor / HasMore checks terminate normally; the two
+// progress guards below are fail-safes so a server bug that keeps returning
+// HasMore=true errors out (→ team reported indeterminate, never purged)
+// instead of looping forever.
 func listAllResources(ctx context.Context, c *client.Client, pageLimit int) ([]client.Resource, error) {
 	var all []client.Resource
 	cursor := ""
-	for page := 0; page < maxResourcePages; page++ {
+	for {
 		out, err := c.ListResources(ctx, client.ListResourcesInput{Limit: pageLimit, Cursor: cursor})
 		if err != nil {
 			return nil, err //nolint:wrapcheck // caller annotates with the team context.
@@ -80,9 +82,16 @@ func listAllResources(ctx context.Context, c *client.Client, pageLimit int) ([]c
 		if !out.HasMore || out.NextCursor == "" {
 			return all, nil
 		}
+		// Every continued iteration must have made progress and stay under the
+		// ceiling — together these guarantee termination on a stuck cursor.
+		if len(out.Resources) == 0 {
+			return nil, errors.New("resource list returned an empty page with has_more=true; aborting (treated as unverifiable, never purged)")
+		}
+		if len(all) >= maxResourceList {
+			return nil, errors.New("resource list exceeded " + strconv.Itoa(maxResourceList) + " resources; aborting (treated as unverifiable, never purged)")
+		}
 		cursor = out.NextCursor
 	}
-	return nil, errors.New("resource list exceeded " + strconv.Itoa(maxResourcePages) + " pages; aborting (treated as unverifiable, never purged)")
 }
 
 // resourceStatus classifies a referenced resource id against the workspace's
@@ -104,6 +113,12 @@ const (
 // classifyResource reports the resourceStatus of rid plus the live resource's
 // slug (empty unless it's a live tunnel). Caller must only invoke this for a
 // resolved team.
+//
+// STATUS-SET ASSUMPTION (sibling of resolveLiveness's OWNERSHIP INVARIANT):
+// "not StatusActive ⇒ orphan" is exact only while the resource tier is
+// two-state (active|revoked — see client.Resource.Status). If qurl-service ever
+// adds an intermediate status (e.g. pending/suspended), this must enumerate the
+// dead statuses explicitly or those live-ish bindings would be purged.
 func classifyResource(live liveness, rid string) (status resourceStatus, slug string) {
 	r, ok := live.byID[rid]
 	if !ok || r.Status != client.StatusActive {

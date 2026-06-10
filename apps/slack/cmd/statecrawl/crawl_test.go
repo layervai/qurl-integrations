@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -155,6 +157,34 @@ func TestCrawl_IndeterminateNeverPurged(t *testing.T) {
 	}
 	if snap.OrphanAliases != 0 || snap.Purged != 0 {
 		t.Errorf("an unverifiable team must yield no orphans/purges: %+v", snap)
+	}
+}
+
+// TestCrawl_ScopedZeroRowsWarns pins the disambiguation warning: a -team run
+// that matches no policy rows must say so loudly, because a typo'd team id and
+// a policy-free workspace otherwise produce the same "clean" exit-0 output.
+func TestCrawl_ScopedZeroRowsWarns(t *testing.T) {
+	fake := &fakeDDB{} // no query pages: the scoped Query matches nothing
+	store, err := slackdata.NewStore(context.Background(),
+		slackdata.WithDynamoDBClient(fake),
+		slackdata.WithTableNames("wm", "cp"),
+	)
+	if err != nil {
+		t.Fatalf("build store: %v", err)
+	}
+	f := crawlFlags("http://unused.invalid", true)
+	f.onlyTeam = "T404"
+
+	var buf bytes.Buffer
+	snap, err := crawl(context.Background(), f, slog.New(slog.NewJSONHandler(&buf, nil)), store, fakeProvider{}, fake)
+	if err != nil {
+		t.Fatalf("crawl: %v", err)
+	}
+	if snap.ChannelsScanned != 0 {
+		t.Errorf("channels_scanned = %d, want 0", snap.ChannelsScanned)
+	}
+	if !strings.Contains(buf.String(), "scoped crawl matched no channel_policies rows") {
+		t.Errorf("zero-row scoped crawl must WARN about a possible -team typo; logs:\n%s", buf.String())
 	}
 }
 
