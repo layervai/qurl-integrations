@@ -2,67 +2,188 @@ package slackdata
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// burst is the default bucket capacity (== default hourly rate), and
-// refillInterval is the time to accrue one token. Both mirror the
-// values [Store.CheckRateLimit] derives from the default
-// MintRatePerHour, so the assertions track the production policy.
-const (
-	burst          = mintRatePerHour
-	refillInterval = time.Hour / mintRatePerHour
-)
+type rateLimitFakeDDB struct {
+	mu          sync.Mutex
+	items       map[string]map[string]ddbtypes.AttributeValue
+	updateErr   error
+	getErr      error
+	updateCalls int
+	getCalls    int
+}
 
-// newRateLimitStore returns a Store whose clock is driven by *clk, so
-// tests can advance time deterministically without sleeping. It reuses
-// the in-package stubDDB/newStore helpers from store_test.go — the
-// rate limiter never touches DynamoDB, so the stub's defaults suffice.
-// MintRatePerHour is left unset to exercise CheckRateLimit's fallback
-// to the package default.
-func newRateLimitStore(clk *time.Time) *Store {
-	s := newStore(&stubDDB{})
+func newRateLimitFakeDDB() *rateLimitFakeDDB {
+	return &rateLimitFakeDDB{
+		items: make(map[string]map[string]ddbtypes.AttributeValue),
+	}
+}
+
+func (f *rateLimitFakeDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	key := readString(in.Key, attrSlackTeamID)
+	return &dynamodb.GetItemOutput{Item: cloneRateLimitItem(f.items[key])}, nil
+}
+
+func (f *rateLimitFakeDDB) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+func (f *rateLimitFakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.updateCalls++
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	key := readString(in.Key, attrSlackTeamID)
+	if key == "" {
+		return nil, errors.New("missing slack_team_id key")
+	}
+	if aws.ToString(in.UpdateExpression) == "SET #kind = :kind, #subject_team_id = :team_id, #slack_user_id = :slack_user_id, #window_start = :window_start, #mint_count = :one, #updated_at = :now" {
+		return f.resetWindow(in, key)
+	}
+	return f.incrementWindow(in, key)
+}
+
+func (f *rateLimitFakeDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	return &dynamodb.DeleteItemOutput{}, nil
+}
+
+func (f *rateLimitFakeDDB) Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	return &dynamodb.QueryOutput{}, nil
+}
+
+func (f *rateLimitFakeDDB) incrementWindow(in *dynamodb.UpdateItemInput, key string) (*dynamodb.UpdateItemOutput, error) {
+	item, present := f.items[key]
+	windowStart := readNumber(in.ExpressionAttributeValues, ":window_start")
+	limit := readNumber(in.ExpressionAttributeValues, ":limit")
+
+	_, hasWindowStart := item[attrRateLimitWindowStart]
+	_, hasCount := item[attrRateLimitMintCount]
+	currentWindowOK := !present || !hasWindowStart || readNumber(item, attrRateLimitWindowStart) == windowStart
+	countOK := !present || !hasCount || readNumber(item, attrRateLimitMintCount) < limit
+	if !currentWindowOK || !countOK {
+		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("rate limit exceeded")}
+	}
+
+	if !present {
+		item = map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(key)}
+		f.items[key] = item
+	}
+	item[attrRateLimitKind] = in.ExpressionAttributeValues[":kind"]
+	item[attrRateLimitSubjectTeamID] = in.ExpressionAttributeValues[":team_id"]
+	item[attrRateLimitSlackUserID] = in.ExpressionAttributeValues[":slack_user_id"]
+	if !hasWindowStart {
+		item[attrRateLimitWindowStart] = in.ExpressionAttributeValues[":window_start"]
+	}
+	item[attrUpdatedAt] = in.ExpressionAttributeValues[":now"]
+	item[attrRateLimitMintCount] = numberAttr(readNumber(item, attrRateLimitMintCount) + 1)
+	return &dynamodb.UpdateItemOutput{}, nil
+}
+
+func (f *rateLimitFakeDDB) resetWindow(in *dynamodb.UpdateItemInput, key string) (*dynamodb.UpdateItemOutput, error) {
+	item, present := f.items[key]
+	windowStart := readNumber(in.ExpressionAttributeValues, ":window_start")
+	if present && readNumber(item, attrRateLimitWindowStart) >= windowStart {
+		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("window already reset")}
+	}
+	if !present {
+		item = map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(key)}
+		f.items[key] = item
+	}
+	item[attrRateLimitKind] = in.ExpressionAttributeValues[":kind"]
+	item[attrRateLimitSubjectTeamID] = in.ExpressionAttributeValues[":team_id"]
+	item[attrRateLimitSlackUserID] = in.ExpressionAttributeValues[":slack_user_id"]
+	item[attrRateLimitWindowStart] = in.ExpressionAttributeValues[":window_start"]
+	item[attrRateLimitMintCount] = in.ExpressionAttributeValues[":one"]
+	item[attrUpdatedAt] = in.ExpressionAttributeValues[":now"]
+	return &dynamodb.UpdateItemOutput{}, nil
+}
+
+func (f *rateLimitFakeDDB) item(key string) map[string]ddbtypes.AttributeValue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return cloneRateLimitItem(f.items[key])
+}
+
+func cloneRateLimitItem(in map[string]ddbtypes.AttributeValue) map[string]ddbtypes.AttributeValue {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]ddbtypes.AttributeValue, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func newRateLimitStore(clk *time.Time, ddb *rateLimitFakeDDB) *Store {
+	s := newStore(ddb)
 	s.Now = func() time.Time { return *clk }
 	return s
 }
 
-// TestCheckRateLimit_FirstMintAllowed pins that a user the task has
-// never seen starts with a full bucket: the first mint is allowed with
-// no retry hint.
-func TestCheckRateLimit_FirstMintAllowed(t *testing.T) {
+func TestCheckRateLimit_FirstMintWritesGlobalCounter(t *testing.T) {
 	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
+	ddb := newRateLimitFakeDDB()
+	s := newRateLimitStore(&clk, ddb)
 
 	allowed, retry, err := s.CheckRateLimit(context.Background(), "U1", "T1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !allowed {
-		t.Errorf("first mint denied; want allowed")
+		t.Fatal("first mint denied; want allowed")
 	}
 	if retry != 0 {
-		t.Errorf("retry = %v on an allowed mint, want 0", retry)
+		t.Errorf("retry = %v on allowed mint, want 0", retry)
+	}
+
+	item := ddb.item(mintRateLimitKey("T1", "U1"))
+	if got := readNumber(item, attrRateLimitMintCount); got != 1 {
+		t.Errorf("mint_count = %d, want 1", got)
+	}
+	if got := readNumber(item, attrRateLimitWindowStart); got != mintWindowStart(clk).Unix() {
+		t.Errorf("window_start = %d, want %d", got, mintWindowStart(clk).Unix())
+	}
+	if got := readString(item, attrRateLimitSubjectTeamID); got != "T1" {
+		t.Errorf("subject team = %q, want T1", got)
+	}
+	if got := readString(item, attrRateLimitSlackUserID); got != "U1" {
+		t.Errorf("slack user = %q, want U1", got)
 	}
 }
 
-// TestCheckRateLimit_BurstThenDeny pins the bucket capacity: with the
-// clock frozen, exactly burst mints succeed back-to-back and the next
-// is denied with a retry of one refill interval (the deficit is a
-// whole token).
 func TestCheckRateLimit_BurstThenDeny(t *testing.T) {
 	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
+	ddb := newRateLimitFakeDDB()
+	s := newRateLimitStore(&clk, ddb)
+	s.MintRatePerHour = 2
 
-	for i := 0; i < burst; i++ {
+	for i := 0; i < 2; i++ {
 		allowed, _, err := s.CheckRateLimit(context.Background(), "U1", "T1")
 		if err != nil {
 			t.Fatalf("mint %d: unexpected error: %v", i+1, err)
 		}
 		if !allowed {
-			t.Fatalf("mint %d/%d within burst denied; want allowed", i+1, burst)
+			t.Fatalf("mint %d/2 denied; want allowed", i+1)
 		}
 	}
 
@@ -71,127 +192,74 @@ func TestCheckRateLimit_BurstThenDeny(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if allowed {
-		t.Errorf("mint %d allowed; want denied (over burst)", burst+1)
+		t.Fatal("third mint allowed under 2/hr budget; want denied")
 	}
-	if retry != refillInterval {
-		t.Errorf("retry = %v, want %v (one full token deficit)", retry, refillInterval)
-	}
-}
-
-// TestCheckRateLimit_RefillsOverTime pins continuous refill: after the
-// bucket is drained, advancing the clock by one refill interval frees
-// exactly one token — enough for a single subsequent mint, after which
-// the user is denied again.
-func TestCheckRateLimit_RefillsOverTime(t *testing.T) {
-	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
-
-	// Drain the full bucket.
-	for i := 0; i < burst; i++ {
-		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
-			t.Fatalf("mint %d within burst denied; want allowed", i+1)
-		}
-	}
-
-	// One refill interval passes → one token back.
-	clk = clk.Add(refillInterval)
-	allowed, _, err := s.CheckRateLimit(context.Background(), "U1", "T1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !allowed {
-		t.Errorf("mint after one refill interval denied; want allowed")
-	}
-
-	// The single refilled token is now spent — next is denied again.
-	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); allowed {
-		t.Errorf("second mint after one refill interval allowed; want denied")
+	if want := mintWindowStart(clk).Add(time.Hour).Sub(clk); retry != want {
+		t.Errorf("retry = %v, want %v", retry, want)
 	}
 }
 
-// TestCheckRateLimit_RefillCapsAtBurst pins that idle time can't
-// accrue more than the burst capacity: after draining and idling far
-// longer than a full window, the user gets back exactly burst mints —
-// not more.
-func TestCheckRateLimit_RefillCapsAtBurst(t *testing.T) {
+func TestCheckRateLimit_ResetsAtNextWindow(t *testing.T) {
 	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
+	ddb := newRateLimitFakeDDB()
+	s := newRateLimitStore(&clk, ddb)
+	s.MintRatePerHour = 1
 
-	for i := 0; i < burst; i++ {
-		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
-			t.Fatalf("mint %d within burst denied; want allowed", i+1)
-		}
-	}
-
-	// Idle for ten full windows — refill must still cap at the burst.
-	clk = clk.Add(10 * burst * refillInterval)
-	for i := 0; i < burst; i++ {
-		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
-			t.Fatalf("post-idle mint %d/%d denied; want allowed", i+1, burst)
-		}
+	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
+		t.Fatal("first mint denied; want allowed")
 	}
 	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); allowed {
-		t.Errorf("post-idle mint %d allowed; refill exceeded burst cap", burst+1)
+		t.Fatal("second mint in same 1/hr window allowed; want denied")
 	}
-}
 
-// TestCheckRateLimit_PerUserIsolation pins that buckets are keyed per
-// slack_user_id: draining one user leaves another user's budget
-// untouched.
-func TestCheckRateLimit_PerUserIsolation(t *testing.T) {
-	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
-
-	for i := 0; i < burst+5; i++ {
-		_, _, _ = s.CheckRateLimit(context.Background(), "U1", "T1")
-	}
-	// U1 is now over budget; U2 must still be allowed.
-	allowed, _, err := s.CheckRateLimit(context.Background(), "U2", "T1")
+	clk = mintWindowStart(clk).Add(time.Hour)
+	allowed, retry, err := s.CheckRateLimit(context.Background(), "U1", "T1")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error after window rollover: %v", err)
 	}
 	if !allowed {
-		t.Errorf("U2's first mint denied after U1 drained their own bucket; buckets are not per-user")
+		t.Fatal("mint after window rollover denied; want allowed")
+	}
+	if retry != 0 {
+		t.Errorf("retry = %v after rollover, want 0", retry)
+	}
+
+	item := ddb.item(mintRateLimitKey("T1", "U1"))
+	if got := readNumber(item, attrRateLimitMintCount); got != 1 {
+		t.Errorf("mint_count after reset = %d, want 1", got)
+	}
+	if got := readNumber(item, attrRateLimitWindowStart); got != clk.Unix() {
+		t.Errorf("window_start after reset = %d, want %d", got, clk.Unix())
 	}
 }
 
-// TestCheckRateLimit_MintRatePerHourOverride pins that the
-// MintRatePerHour field overrides the default budget — both burst and
-// refill interval derive from it.
-func TestCheckRateLimit_MintRatePerHourOverride(t *testing.T) {
+func TestCheckRateLimit_PerTeamUserIsolation(t *testing.T) {
 	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
-	s.MintRatePerHour = 2 // tiny budget: 2/hr → refill every 30m.
+	ddb := newRateLimitFakeDDB()
+	s := newRateLimitStore(&clk, ddb)
+	s.MintRatePerHour = 1
 
-	// Two mints allowed, third denied with a 30-minute retry.
-	for i := 0; i < 2; i++ {
-		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
-			t.Fatalf("mint %d/2 denied under 2/hr budget; want allowed", i+1)
-		}
+	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
+		t.Fatal("first T1/U1 mint denied; want allowed")
 	}
-	allowed, retry, _ := s.CheckRateLimit(context.Background(), "U1", "T1")
-	if allowed {
-		t.Errorf("third mint allowed under a 2/hr budget; want denied")
+	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); allowed {
+		t.Fatal("second T1/U1 mint allowed; want denied")
 	}
-	if want := time.Hour / 2; retry != want {
-		t.Errorf("retry = %v, want %v (one token at 2/hr)", retry, want)
+	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U2", "T1"); !allowed {
+		t.Fatal("T1/U2 mint denied after T1/U1 drained; want isolated budget")
+	}
+	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T2"); !allowed {
+		t.Fatal("T2/U1 mint denied after T1/U1 drained; want team-scoped budget")
 	}
 }
 
-// TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBurst fences the
-// mutex contract: with the clock frozen (no refill), many goroutines
-// minting for ONE user must see EXACTLY burst allows in total. The
-// refill-check-consume is a read-modify-write on the user's bucket; if any
-// part escaped mintBucketsMu, two goroutines could both observe tokens >= 1
-// and overspend. The serial tests assert correctness by construction — this
-// is the only one that exercises real contention (run with -race, as CI
-// does, to also surface the data race directly).
-func TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBurst(t *testing.T) {
+func TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBudget(t *testing.T) {
 	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
+	ddb := newRateLimitFakeDDB()
+	s := newRateLimitStore(&clk, ddb)
 
 	const goroutines = 64
-	const perGoroutine = 4 // 256 attempts, far over the burst of 30.
+	const perGoroutine = 4
 	var allowed atomic.Int64
 	var wg sync.WaitGroup
 	for range goroutines {
@@ -199,7 +267,12 @@ func TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBurst(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range perGoroutine {
-				if ok, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); ok {
+				ok, _, err := s.CheckRateLimit(context.Background(), "U1", "T1")
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if ok {
 					allowed.Add(1)
 				}
 			}
@@ -207,42 +280,25 @@ func TestCheckRateLimit_ConcurrentSingleUserNeverExceedsBurst(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := allowed.Load(); got != int64(burst) {
-		t.Errorf("concurrent single-user allows = %d, want exactly %d — burst breached under contention", got, burst)
+	if got := allowed.Load(); got != int64(mintRatePerHour) {
+		t.Errorf("concurrent single-user allows = %d, want exactly %d", got, mintRatePerHour)
 	}
 }
 
-// TestCheckRateLimit_FractionalAccrualAcrossSubIntervals pins that refill
-// is LOSSLESS across gaps shorter than one refill interval. Tokens are
-// fractional, so crediting elapsed/refill on each call must accumulate:
-// four gaps of refill/4 (each crediting 0.25 of a token — none enough on
-// its own) sum to one whole token. An integer/truncating refill would floor
-// each sub-interval credit to zero and never reopen the bucket. Quarters
-// are exact in IEEE-754, so the boundary is deterministic.
-func TestCheckRateLimit_FractionalAccrualAcrossSubIntervals(t *testing.T) {
+func TestCheckRateLimit_DDBErrorSurfaces(t *testing.T) {
 	clk := time.Unix(1_700_000_000, 0).UTC()
-	s := newRateLimitStore(&clk)
+	ddb := newRateLimitFakeDDB()
+	ddb.updateErr = errors.New("injected update failure")
+	s := newRateLimitStore(&clk, ddb)
 
-	// Drain the full bucket at the frozen clock.
-	for i := 0; i < burst; i++ {
-		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
-			t.Fatalf("mint %d within burst denied; want allowed", i+1)
-		}
+	allowed, retry, err := s.CheckRateLimit(context.Background(), "U1", "T1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
 	}
-
-	// Three sub-interval gaps accrue 0.25 + 0.25 + 0.25 = 0.75 of a token —
-	// under one whole token, so each is still denied.
-	quarter := refillInterval / 4
-	for i := 0; i < 3; i++ {
-		clk = clk.Add(quarter)
-		if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); allowed {
-			t.Fatalf("sub-interval mint %d allowed at %d%% of a token; fractional credit must not mint early", i+1, (i+1)*25)
-		}
+	if allowed {
+		t.Error("allowed = true on DDB error, want false")
 	}
-	// The fourth quarter completes one whole token — allowed, proving the
-	// fractional credits accumulated rather than flooring away.
-	clk = clk.Add(quarter)
-	if allowed, _, _ := s.CheckRateLimit(context.Background(), "U1", "T1"); !allowed {
-		t.Error("mint after four refill/4 gaps denied; fractional accrual was lost to rounding")
+	if retry != 0 {
+		t.Errorf("retry = %v on DDB error, want 0", retry)
 	}
 }

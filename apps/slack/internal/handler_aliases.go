@@ -36,8 +36,8 @@ const noChannelAliasesMessage = ":mag: No aliases are configured for this channe
 // gate (slackdata.CheckRateLimit) is now real for /qurl get, but it's a
 // *mint* budget — this is a read with no mint, so reusing that gate here
 // would drain the user's mint quota on a listing. A read-side limiter
-// (separate budget, same in-memory token-bucket shape) is the right
-// follow-up; tracked in #436.
+// (separate budget, same shared-counter shape) is the right follow-up;
+// tracked in #436.
 func (h *Handler) handleAliases(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "aliases", values, func(ctx context.Context, log *slog.Logger) {
 		h.processAliases(ctx, log, values)

@@ -38,30 +38,24 @@ not-authorized aliases are turned away before the gate, so a fat-finger
 never burns quota. When a user is over budget, `/qurl get` replies
 "Rate limit hit. Try again in …" with the time until their next mint.
 
-**Decision: in-memory token bucket, per Fargate task.** Each user has a
-bucket that refills continuously at one token per (hour ÷ rate) and is
-held in the task's memory under a mutex. This was chosen over a
-DynamoDB-backed counter because it adds **zero per-mint I/O/latency** on
-the hot path and is sufficient for the goal — blunting runaway
-loops/abuse — without billing-grade precision.
+**Decision: DynamoDB-backed fixed hourly counter.** Each
+`(slack_team_id, slack_user_id)` pair has one synthetic row in
+`workspace_mappings`, keyed with a reserved rate-limit prefix. A mint
+attempt increments the current one-hour window with an atomic conditional
+`UpdateItem`; once the count reaches the configured rate, later attempts
+are denied until the next window.
 
 Tradeoffs, accepted deliberately:
 
-- **Per-task, not global.** Slack does not route a user's slash commands
-  to a sticky task, so with N running tasks a single user's effective
-  ceiling is ≈ N × 30/hr. This is an abuse-rate backstop; qurl-service's
-  customer-level API-key quota remains the hard cross-task ceiling
-  underneath it.
-- **Resets on redeploy/restart.** A deploy hands every user a fresh full
-  bucket. Acceptable: the intent is to bound abuse within a task's
-  lifetime, not to persist a rolling hourly count across deploys.
-
-**Future upgrade path** (only if a globally-consistent cross-task limit
-is ever required): move the counter to DynamoDB via an atomic
-conditional `UpdateItem` (token-count + last-refill attributes) keyed by
-`slack_user_id` on the `channel_policies`/workspace row. That buys
-durability and cross-task consistency at the cost of one extra DDB write
-per mint.
+- **Global across tasks.** Slack slash-command routing is not sticky, so
+  the counter must be shared across every running Fargate task.
+- **Fixed window, not smoothing token bucket.** A user can spend the
+  full budget near the end of one hour and again at the start of the
+  next. The goal is a global abuse backstop, not billing-grade rolling
+  quota precision.
+- **One extra write per mint attempt.** `/qurl get` already reads DDB for
+  workspace/policy state before minting, so the additional conditional
+  write is acceptable on this path.
 
 The rate is a code-level policy (`Store.MintRatePerHour`, defaulting to
 30), **not** an environment variable — there is no operator knob to set;

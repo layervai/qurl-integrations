@@ -45,7 +45,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -101,30 +100,13 @@ type Store struct {
 	// Defaults to time.Now.
 	Now func() time.Time
 
-	// MintRatePerHour is the per-Slack-user mint budget enforced by
-	// [Store.CheckRateLimit] — both the steady-state hourly rate and
-	// the burst capacity (see the strategy comment in rate_limit.go).
-	// [NewStore] defaults it to mintRatePerHour; a non-positive value
-	// falls back to that default at check time. Exposed as a field so
-	// the limit is set in code rather than via an env knob, and so tests
-	// can grant headroom to flows whose intent is orthogonal to rate
-	// limiting.
-	//
-	// CONCURRENCY: set once before the Store serves any request and
-	// then treated as read-only. CheckRateLimit reads it outside
-	// mintBucketsMu (see mintBurst/mintRefillInterval), so mutating it
-	// on a live Store while checks run concurrently is a data race. The
-	// production Store sets it in NewStore; tests set it before
-	// launching goroutines. It is NOT a runtime-tunable knob.
+	// MintRatePerHour is the per-(Slack workspace, Slack user) mint budget
+	// enforced by [Store.CheckRateLimit] for each fixed one-hour window.
+	// [NewStore] defaults it to mintRatePerHour; a non-positive value falls
+	// back to that default at check time. Exposed as a field so tests can grant
+	// headroom to flows whose intent is orthogonal to rate limiting. It is a
+	// code-level policy, not a runtime-tunable operator knob.
 	MintRatePerHour int
-
-	// mintBuckets holds the per-Slack-user mint token buckets read by
-	// [Store.CheckRateLimit]. In-memory and per-Fargate-task; see the
-	// strategy/tradeoffs comment in rate_limit.go. Guarded by
-	// mintBucketsMu. Initialized by [NewStore]; CheckRateLimit
-	// lazily allocates it as a fallback for directly-built Stores.
-	mintBuckets   map[string]*mintBucket
-	mintBucketsMu sync.Mutex
 }
 
 // StoreOption configures [NewStore].
@@ -191,7 +173,6 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 		ChannelPoliciesName:   o.channelPoliciesName,
 		Now:                   time.Now,
 		MintRatePerHour:       mintRatePerHour,
-		mintBuckets:           make(map[string]*mintBucket),
 	}, nil
 }
 
