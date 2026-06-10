@@ -49,6 +49,19 @@ const agentRateLimitedReply = "Conversation mode is at its limit for now — giv
 // The env limits are expressed per hour, so the window is one hour.
 const agentTurnRateWindow = time.Hour
 
+// agentAckReaction is the glanceable "working on it" emoji the agent adds to the
+// triggering message while a turn runs (reactions.add), then removes when it ends.
+const agentAckReaction = "eyes"
+
+// agentAckTimeout bounds each reactions.add/remove round-trip. The add is on the
+// turn's critical path (synchronous, before the LLM call), so this is deliberately
+// tight and decoupled from the 4s chat.postMessage budget: a cosmetic "working on it"
+// ack that hasn't landed in ~2s is already too late to feel responsive, so giving up
+// (no 👀 — the deferred remove then hits no_reaction → benign) beats delaying the turn
+// it's meant to make feel responsive. Taking the add off the critical path entirely
+// (async add + clear-joins-add) is tracked as a follow-up.
+const agentAckTimeout = 2 * time.Second
+
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
 type slackEventEnvelope struct {
@@ -146,6 +159,39 @@ func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, s
 		return true
 	}
 	return false
+}
+
+// addAgentAck reacts agentAckReaction (👀) on the triggering message to acknowledge
+// the turn is being worked. Best-effort: a failed ack never fails the turn, and a nil
+// Reactions seam is a no-op (the ack is simply absent). It runs SYNCHRONOUSLY on the
+// live turn ctx — one short round-trip before the LLM call — and must STAY
+// synchronous: firing it in a goroutine would let the deferred clearAgentAck race
+// ahead of an in-flight reactions.add and strand the 👀 on the message forever.
+func (h *Handler) addAgentAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+	if h.cfg.Reactions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, agentAckTimeout)
+	defer cancel()
+	if err := h.cfg.Reactions.Add(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
+		log.Warn("agent: ack reaction add failed (best-effort)", "error", err)
+	}
+}
+
+// clearAgentAck removes the working-on-it reaction when the turn ends — deferred so it
+// runs on EVERY exit (reply posted, error, panic). Best-effort and nil-safe like
+// addAgentAck, but on a FRESH ctx off baseCtx: by defer time the turn ctx is spent
+// (agentTurnTimeout elapsed, or shutdown), so removing on it would fail instantly and
+// strand the 👀 — the same spent-ctx lesson as postAgentReply.
+func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
+	if h.cfg.Reactions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(h.baseCtx, agentAckTimeout)
+	defer cancel()
+	if err := h.cfg.Reactions.Remove(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
+		log.Warn("agent: ack reaction remove failed (best-effort)", "error", err)
+	}
 }
 
 // handleAgentEvent decides whether an event_callback should drive a
@@ -313,6 +359,13 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
 		return
 	}
+
+	// Working-on-it ack: react 👀 on the triggering message now that the turn is
+	// committed (past the disabled/dedupe/rate-limit gates), and clear it on every
+	// exit. Best-effort, behind the Reactions seam (nil = no ack). The add is
+	// synchronous so the deferred clear can't race an in-flight add (see addAgentAck).
+	h.addAgentAck(ctx, log, env)
+	defer h.clearAgentAck(log, env)
 
 	threadKey := agentEventThreadKey(env)
 	history, version, err := h.loadAgentHistory(ctx, log, partition, threadKey)

@@ -154,6 +154,10 @@ func run() error {
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
+	// wired (same token lookup as the post seams); inert until the agent surface is live
+	// and needs the reactions:write scope in the Slack manifest to actually land.
+	agentReactions := newSlackReactionPortWithTokenLookup(workspaceTokenLookup, userAgent, slackReactionsAddURL, slackReactionsRemoveURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
@@ -224,6 +228,7 @@ func run() error {
 		AgentDefaultEnabled:         agentDefaultEnabled,
 		AgentMaxTurnsPerUserPerHour: agentMaxTurnsPerUser,
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
+		Reactions:                   agentReactions,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so

@@ -374,6 +374,13 @@ type Config struct {
 	// transient counter error must not drop a legitimate turn.
 	AgentMaxTurnsPerUserPerHour int
 	AgentMaxTurnsPerTeamPerHour int
+
+	// Reactions adds/removes the agent's glanceable "working on it" emoji on the
+	// triggering message (reactions.add/remove on the per-workspace bot token). It is
+	// a best-effort UX ack: a failure never fails the turn, and Nil simply omits the
+	// ack (the reply posts exactly as before). Behind the kill switch via
+	// agentEnabled() like the rest; production wires it in cmd/main.go.
+	Reactions ReactionPort
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
@@ -392,6 +399,17 @@ type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, 
 // confirm flow passes escapeMrkdwnText output); the production impl should also
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
+
+// ReactionPort adds and removes a single emoji reaction on a message via the Slack
+// reactions.add / reactions.remove web API (per-workspace bot token, Grid-aware).
+// name is the emoji short name without colons (e.g. "eyes"). timestamp is the target
+// message's ts. The conversation surface uses it for a best-effort working-on-it ack,
+// so implementations should treat the benign idempotent outcomes (add of an existing
+// reaction, remove of an absent one) as success rather than errors.
+type ReactionPort interface {
+	Add(ctx context.Context, teamID, enterpriseID, channelID, timestamp, name string) error
+	Remove(ctx context.Context, teamID, enterpriseID, channelID, timestamp, name string) error
+}
 
 // Handler processes Slack events and commands.
 type Handler struct {
