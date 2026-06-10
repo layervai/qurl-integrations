@@ -357,6 +357,49 @@ func TestHandleEvent_DedupesRetries(t *testing.T) {
 	}
 }
 
+// dmMessageBody builds a DM (message.im) event_callback — a human DM to the agent,
+// which dispatches but carries no channel name to resolve.
+func dmMessageBody(eventID string) string {
+	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+		`"event":{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"100.2","text":"what can I reach?"}}`
+}
+
+func TestHandleEvent_AgentResolvesChannelNameSkippingDMs(t *testing.T) {
+	var mu sync.Mutex
+	var resolved []string
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, _, _ := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM: fakeAgentLLM{reply: "ok"}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true,
+		ResolveChannelName: func(_ context.Context, _, _, channelID string) (string, error) {
+			mu.Lock()
+			resolved = append(resolved, channelID)
+			mu.Unlock()
+			return "general", nil
+		},
+	})
+	t.Cleanup(h.Wait)
+
+	// A channel @mention resolves the channel name for the prompt.
+	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvCh")))
+	h.Wait()
+	mu.Lock()
+	if len(resolved) != 1 || resolved[0] != "C1" {
+		mu.Unlock()
+		t.Fatalf("a channel mention should resolve its channel name (C1), got %v", resolved)
+	}
+	mu.Unlock()
+
+	// A DM has no channel name → resolution is skipped; describeChannel uses the id.
+	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvDM")))
+	h.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(resolved) != 1 {
+		t.Fatalf("a DM must not resolve a channel name, got %v", resolved)
+	}
+}
+
 // agentEventBody builds an app_mention event_callback with a controllable
 // event_id, message ts, and (optional) thread_ts — for exercising the dedupe key.
 func agentEventBody(eventID, ts, threadTS string) string {

@@ -221,6 +221,8 @@ const (
 	slackReactionsRemoveURL = "https://slack.com/api/reactions.remove"
 )
 
+const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
+
 // slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
 // single post this 4s client timeout is the BINDING deadline: the conversation-
 // mode delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
@@ -372,6 +374,86 @@ func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, us
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
 		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
+// newSlackResolveChannelNameFuncWithTokenLookup builds the
+// [internal.ResolveChannelNameFunc] seam: a conversations.info read on the
+// per-workspace bot token returning the channel's name. Unlike the POST seams
+// (which discard the body), this parses the response, so it doesn't use the shared
+// poster; it replicates the same token lookup + Enterprise Grid org-token fallback.
+// Requires the channels:read / groups:read scopes — without them Slack answers
+// missing_scope and the agent falls back to the channel id.
+func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveChannelNameFunc {
+	if httpClient == nil {
+		httpClient = defaultSlackPostMessageClient()
+	}
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		userAgent = defaultSlackAPIUserAgent
+	}
+	// get resolves one owner's token and reads conversations.info. A token-lookup
+	// failure is wrapped with %w so the caller's errors.Is(ErrSlackBotTokenNotConfigured)
+	// Grid fallback fires, mirroring slackWebAPIPoster.post.
+	get := func(ctx context.Context, ownerID, channelID string) (string, error) {
+		token, err := lookup(ctx, ownerID)
+		if err != nil {
+			return "", fmt.Errorf("conversations.info token lookup: %w", err)
+		}
+		if token = strings.TrimSpace(token); token == "" {
+			return "", errors.New("conversations.info token lookup: empty token")
+		}
+		// The channel id is a Slack object id (C/G/D + base32) from the
+		// signature-verified Events payload; its charset can't contain a query-reserved
+		// character, so interpolating it raw is equivalent to escaping it. (The only
+		// caller passes that trusted id — a future untrusted source would need escaping.)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, conversationsInfoURL+"?channel="+channelID, http.NoBody)
+		if err != nil {
+			return "", fmt.Errorf("conversations.info request build: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("conversations.info request: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+		if err != nil {
+			return "", fmt.Errorf("conversations.info response read: %w", err)
+		}
+		if len(raw) > slackWebAPIResponseBodyLimit {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return "", fmt.Errorf("conversations.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+		}
+		var out struct {
+			OK      bool   `json:"ok"`
+			Error   string `json:"error"`
+			Channel struct {
+				Name string `json:"name"`
+			} `json:"channel"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return "", fmt.Errorf("conversations.info decode: %w", err)
+		}
+		if !out.OK {
+			slackErr := out.Error
+			if slackErr == "" {
+				slackErr = fmt.Sprintf("status %d", resp.StatusCode)
+			}
+			return "", fmt.Errorf("conversations.info: %s", slackErr)
+		}
+		return out.Channel.Name, nil
+	}
+	return func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error) {
+		name, err := get(ctx, teamID, channelID)
+		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+			return name, err
+		}
+		if enterpriseID == "" || enterpriseID == teamID {
+			return name, err
+		}
+		return get(ctx, enterpriseID, channelID)
 	}
 }
 
