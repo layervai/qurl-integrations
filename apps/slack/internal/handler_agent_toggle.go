@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +18,22 @@ import (
 // toggle gates the agent on TOP of the org-level surface — while the deployment's
 // conversation mode is dark, setting it just pre-stages the opt-in.
 func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
+	// Admin-gate BEFORE parsing the arg, so every unauthorized caller takes the same
+	// audited admin-only path: a non-admin probing `agent <anything>` must not get a
+	// different (and unaudited) reply than `agent on`.
+	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	if teamID == "" {
+		respondSlack(w, ":warning: missing team_id in slash command payload")
+		return
+	}
+	userID := strings.TrimSpace(values.Get(fieldUserID))
+	if !h.requireAdminStoreSync(w) {
+		return
+	}
+	if !h.requireAdminSync(w, teamID, userID, AdminActionAgentToggle) {
+		return
+	}
+
 	_, rest := slashVerb(strings.TrimSpace(values.Get(fieldText)), adminVerbAgent)
 	arg := strings.ToLower(strings.TrimSpace(rest))
 
@@ -33,18 +50,6 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	teamID := strings.TrimSpace(values.Get(fieldTeamID))
-	if teamID == "" {
-		respondSlack(w, ":warning: missing team_id in slash command payload")
-		return
-	}
-	if !h.requireAdminStoreSync(w) {
-		return
-	}
-	if !h.requireAdminSync(w, teamID, strings.TrimSpace(values.Get(fieldUserID)), AdminActionAgentToggle) {
-		return
-	}
-
 	// Single-DDB sync admin verb (one UpdateItem to set, or one GetItem to show) —
 	// same shape and budget as add/remove/admins, not the multi-hop alias verbs.
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
@@ -58,6 +63,10 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, agentToggleSetError(err))
 		return
 	}
+	// Audit the config change: a successful toggle is a security-relevant mutation, so
+	// it must reach on-call like the other admin writes — the AdminAction gate label
+	// otherwise only surfaces in CloudWatch on the denial path.
+	slog.Info("agent toggle succeeded", "team_id", teamID, "user_id", userID, "enabled", enable)
 	if enable {
 		respondSlack(w, "Conversation mode is now *on* for this workspace — members can @mention or DM the qURL Secure Access Agent."+h.agentToggleOrgDarkSuffix())
 		return
@@ -70,6 +79,7 @@ func (h *Handler) handleAgentToggle(w http.ResponseWriter, values url.Values) {
 func (h *Handler) agentToggleStatus(ctx context.Context, teamID string) string {
 	enabled, set, err := h.cfg.AdminStore.AgentEnabledFor(ctx, teamID)
 	if err != nil {
+		slog.Warn("agent toggle: status read failed", "team_id", teamID, "error", err)
 		return "Couldn't read the conversation-mode setting right now. Please try again."
 	}
 	if !set {
