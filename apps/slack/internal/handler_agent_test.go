@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -164,9 +165,10 @@ func (panicAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, 
 // memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem +
 // conditional PutItem (attribute_not_exists / version match).
 type memAgentDDB struct {
-	mu     sync.Mutex
-	items  map[string]map[string]ddbtypes.AttributeValue
-	getErr error // when set, GetItem (conversation load) fails
+	mu        sync.Mutex
+	items     map[string]map[string]ddbtypes.AttributeValue
+	getErr    error // when set, GetItem (conversation load) fails
+	updateErr error // when set, UpdateItem (turn-rate counter) fails
 }
 
 func newMemAgentDDB() *memAgentDDB {
@@ -203,8 +205,44 @@ func (f *memAgentDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ..
 	return &dynamodb.PutItemOutput{}, nil
 }
 
-func (f *memAgentDDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-	return &dynamodb.UpdateItemOutput{}, nil
+// UpdateItem fakes only the one shape BumpTurnCount emits — "ADD turn_count :one SET
+// ttl = :ttl" — applying the number ADD and the SET, then returning UPDATED_NEW. A
+// no-op stub would make the rate-limit tests vacuously pass (count always 0), so it
+// actually mutates; anything other than that exact shape errors loudly.
+func (f *memAgentDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	if expr := aws.ToString(in.UpdateExpression); expr != "ADD turn_count :one SET ttl = :ttl" {
+		return nil, fmt.Errorf("memAgentDDB.UpdateItem: unsupported expression %q", expr)
+	}
+	k := memKey(in.Key)
+	item, present := f.items[k]
+	if !present {
+		item = map[string]ddbtypes.AttributeValue{}
+		for kk, vv := range in.Key {
+			item[kk] = vv
+		}
+	}
+	newVal := memNumberValue(item["turn_count"]) + memNumberValue(in.ExpressionAttributeValues[":one"])
+	item["turn_count"] = &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(newVal, 10)}
+	item["ttl"] = in.ExpressionAttributeValues[":ttl"]
+	f.items[k] = item
+	return &dynamodb.UpdateItemOutput{Attributes: map[string]ddbtypes.AttributeValue{
+		"turn_count": item["turn_count"],
+		"ttl":        item["ttl"],
+	}}, nil
+}
+
+func memNumberValue(av ddbtypes.AttributeValue) int64 {
+	n, ok := av.(*ddbtypes.AttributeValueMemberN)
+	if !ok {
+		return 0
+	}
+	v, _ := strconv.ParseInt(n.Value, 10, 64)
+	return v
 }
 
 func (f *memAgentDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {

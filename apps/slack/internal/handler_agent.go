@@ -38,6 +38,17 @@ const agentErrorReply = "Something went wrong handling that. Please try again, o
 // former. Still leaks no internals.
 const agentTransientReply = "That took longer than I could handle just now — please try again, or use a `/qurl` command."
 
+// agentRateLimitedReply is posted when a turn is dropped for hitting the per-user or
+// per-team turn-rate cap. Deliberately uniform across both limits (don't leak which
+// cap, or its value) and points at the always-available slash commands. Phrased
+// neutrally ("conversation mode is at its limit", not "you've reached…") so it
+// doesn't wrongly blame an innocent member when it's the per-workspace cap that hit.
+const agentRateLimitedReply = "Conversation mode is at its limit for now — give it a few minutes, or use a `/qurl` command in the meantime."
+
+// agentTurnRateWindow is the fixed window for the per-user / per-team turn counters.
+// The env limits are expressed per hour, so the window is one hour.
+const agentTurnRateWindow = time.Hour
+
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
 type slackEventEnvelope struct {
@@ -91,6 +102,50 @@ func (h *Handler) workspaceAgentEnabled(ctx context.Context, log *slog.Logger, t
 		return enabled
 	}
 	return h.cfg.AgentDefaultEnabled
+}
+
+// agentTurnLimited enforces the per-user and per-team turn-rate caps for one turn,
+// returning the reply to post when the turn must be dropped. It is a COST BACKSTOP,
+// not a security gate, so it FAILS OPEN: a transient counter error logs and allows
+// the turn rather than dropping a legitimate member — the opposite of the
+// fail-closed workspace/dedupe gates. The per-user counter is bumped FIRST so one
+// member spamming can't inflate the shared per-team counter for everyone else.
+//
+// One asymmetry, by design: a turn the per-user cap denies never reaches the
+// per-team counter, but a turn the per-team cap denies has ALREADY incremented the
+// per-user counter (it was a real attempt). Both only inflate within the window and
+// reset when it rolls, so it's a non-issue for a backstop.
+func (h *Handler) agentTurnLimited(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) (reply string, limited bool) {
+	// A non-positive limit disables that scope (unlimited), so each guard also
+	// short-circuits the counter bump when its cap is off — both off ⇒ no DDB calls.
+	// env.Event.User is non-empty here: shouldDispatchAgentEvent (the only gate before
+	// processAgentEvent) rejects e.User == "", so the per-user scope can't collapse
+	// into one shared "user#" bucket.
+	if l := h.cfg.AgentMaxTurnsPerUserPerHour; l > 0 && h.overTurnLimit(ctx, log, env.TeamID, "user#"+env.Event.User, l) {
+		return agentRateLimitedReply, true
+	}
+	if l := h.cfg.AgentMaxTurnsPerTeamPerHour; l > 0 && h.overTurnLimit(ctx, log, env.TeamID, "team", l) {
+		return agentRateLimitedReply, true
+	}
+	return "", false
+}
+
+// overTurnLimit bumps the named fixed-window counter and reports whether this turn
+// crossed the limit. Fails OPEN (returns false) on a counter error — a conscious
+// tradeoff: this leaves the cap weakest exactly under DDB stress (throttling is also
+// when a busy workspace racks up cost), but dropping a legitimate member's turn on a
+// transient blip is worse for a backstop than briefly running uncapped.
+func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, scope string, limit int) bool {
+	count, err := h.cfg.AgentStore.BumpTurnCount(ctx, teamID, scope, agentTurnRateWindow)
+	if err != nil {
+		log.Warn("agent: turn-rate counter failed; allowing turn (fail-open)", "scope", scope, "team_id", teamID, "error", err)
+		return false
+	}
+	if count > int64(limit) {
+		log.Info("agent: turn rate limit reached", "scope", scope, "team_id", teamID, "count", count, "limit", limit)
+		return true
+	}
+	return false
 }
 
 // handleAgentEvent decides whether an event_callback should drive a
@@ -241,6 +296,21 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	}
 	if !first {
 		log.Info("agent: duplicate event ignored")
+		return
+	}
+
+	// Rate-limit AFTER dedupe (count unique messages, not redeliveries) and BEFORE
+	// the turn runs (the LLM is the cost we're capping). Confirm-clicks
+	// (processAgentConfirm) are deliberately NOT limited: they're consume-once and
+	// admin-gated and carry no LLM cost. A limited turn still gets a reply — silence
+	// would read as the agent ignoring the member.
+	//
+	// The count is of turn ATTEMPTS, not answered turns — a turn bumped here that then
+	// fails transiently (agentTransientReply) still counts, so the cap is "N
+	// attempts/hour". That's the right unit for a COST backstop: the LLM round-trip is
+	// the spend whether or not it produced a usable answer.
+	if reply, limited := h.agentTurnLimited(ctx, log, env); limited {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
 		return
 	}
 
