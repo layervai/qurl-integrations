@@ -116,6 +116,9 @@ func (h *Handler) workspaceAgentEnabled(ctx context.Context, log *slog.Logger, t
 func (h *Handler) agentTurnLimited(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) (reply string, limited bool) {
 	// A non-positive limit disables that scope (unlimited), so each guard also
 	// short-circuits the counter bump when its cap is off — both off ⇒ no DDB calls.
+	// env.Event.User is non-empty here: shouldDispatchAgentEvent (the only gate before
+	// processAgentEvent) rejects e.User == "", so the per-user scope can't collapse
+	// into one shared "user#" bucket.
 	if l := h.cfg.AgentMaxTurnsPerUserPerHour; l > 0 && h.overTurnLimit(ctx, log, env.TeamID, "user#"+env.Event.User, l) {
 		return agentRateLimitedReply, true
 	}
