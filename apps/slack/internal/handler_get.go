@@ -149,6 +149,15 @@ func (h *Handler) resourceLinkExpiryFor(ctx context.Context, log *slog.Logger, t
 	return resourceLinkExpiry, resourceLinkExpiryHuman
 }
 
+// overPlanExpiryMintMessage is the user-facing copy for a 400 mint rejection
+// while a per-resource default link expiry override is active. Hedged with
+// "may" because a 400 can have other causes (mapMintError has already logged
+// the upstream code/detail loud for the operator); the load-bearing part is
+// routing the user to the admin who set the override instead of a retry loop.
+func overPlanExpiryMintMessage(expiryHuman string) string {
+	return "Failed to create qURL. This resource's default link expiry (" + expiryHuman + ") may exceed your workspace plan's maximum. Please contact your Slack admin for assistance."
+}
+
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL `/qurl get`.
 // The parser flags the case with the terse [ErrURLNotSupportedGet] sentinel;
 // this is the rich reply the handler renders so multi-sentence prose stays out
@@ -486,7 +495,20 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		return "", mapMintError(log, err)
+		// mapMintError first so its loud 400 log (with the upstream code and
+		// detail) always fires; only the user-facing copy is specialized below.
+		mintErr := mapMintError(log, err)
+		// A 400 rejection while a per-resource expiry override is active is
+		// most often the override exceeding the workspace plan's maximum link
+		// expiry — the bot can't see the plan, so it can't pre-validate at
+		// set time (the Edit modal). The generic copy's "try again" would
+		// loop the user on a failure only an admin can fix, so route them
+		// there instead.
+		var apiErr *client.APIError
+		if expiresIn != resourceLinkExpiry && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+			return "", &userError{msg: overPlanExpiryMintMessage(expiresInHuman)}
+		}
+		return "", mintErr
 	}
 	// Defensive: a 200 with an empty qurl_link is a server contract
 	// surprise — log loud and surface the generic retry message.

@@ -386,6 +386,53 @@ func TestHandleGet_MintsBuiltInDefaultWithoutOverride(t *testing.T) {
 	}
 }
 
+// TestHandleGet_OverPlanExpiry400RoutesToAdmin fences the admin-routed copy:
+// a 400 mint rejection while an expiry override is active (e.g. a 7-day
+// override on a plan capped lower) names the override and points at the
+// admin instead of the generic "try again" loop the user can't fix.
+func TestHandleGet_OverPlanExpiry400RoutesToAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeAPIError(t, w, http.StatusBadRequest, "validation_error", "expires_in exceeds plan maximum")
+	})
+	h := newAdminTestHandler(t, ts)
+	if err := h.cfg.AdminStore.SetResourceDefaultTTL(context.Background(), testAdminTeamID, testResourceIDFix, "7d"); err != nil {
+		t.Fatalf("seed TTL: %v", err)
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	for _, want := range []string{"7 days", "contact your Slack admin"} {
+		if !strings.Contains(async, want) {
+			t.Errorf("reply missing %q: %q", want, async)
+		}
+	}
+	if strings.Contains(async, "Please try again") {
+		t.Errorf("over-plan 400 must not tell the user to retry: %q", async)
+	}
+}
+
+// TestHandleGet_Mint400WithoutOverrideKeepsGenericCopy pins that the
+// admin-routed copy is scoped to overridden mints: a 400 on a default-expiry
+// mint renders the pre-existing generic message.
+func TestHandleGet_Mint400WithoutOverrideKeepsGenericCopy(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeAPIError(t, w, http.StatusBadRequest, "validation_error", "bad request")
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, commonGetMintFailedMessage) {
+		t.Errorf("reply = %q, want the generic mint-failed copy", async)
+	}
+}
+
 // TestHandleGet_UnrecognizedStoredExpiryMintsDefault fences the read-side
 // fence: a stored value outside linkExpiryOptions (hand-edited row, or an
 // option later removed) never reaches the wire — the mint falls back to the
