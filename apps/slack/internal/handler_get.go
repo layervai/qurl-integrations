@@ -31,7 +31,9 @@ const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to create a qURL for a 
 // their listed `$alias`. These limits bound a shared Slack-created link to a
 // single short-lived viewer:
 //   - resourceLinkExpiry: the link only admits a NEW visitor session for this
-//     long after minting (qurl-service `expires_in`).
+//     long after minting (qurl-service `expires_in`). This is the built-in
+//     default; admins can override it per resource via the `/qurl list` Edit
+//     modal (see [linkExpiryOptions] and [Handler.resourceLinkExpiryFor]).
 //   - resourceSessionDuration: how long an admitted visitor session lasts
 //     (qurl-service `session_duration`).
 //   - resourceMaxSessions: max concurrent visitor sessions (qurl-service
@@ -65,6 +67,69 @@ const (
 	// terse "1m" duration syntax. Keep in sync with resourceLinkExpiry above.
 	resourceLinkExpiryHuman = "1 minute"
 )
+
+// linkExpiryOption pairs a qurl-service `expires_in` duration string with
+// its user-facing label, for the `/qurl list` Edit modal's default-link-
+// expiry dropdown and the mint reply's "link expires in …" suffix.
+type linkExpiryOption struct {
+	value string
+	label string
+}
+
+// linkExpiryOptions is the admin-selectable default-link-expiry set,
+// ordered shortest→longest. The first entry is the bot's built-in default
+// ([resourceLinkExpiry]) — selecting it clears the stored per-resource
+// override rather than writing one, so absence-of-entry stays the single
+// representation of "default". The rest mirror the Discord bot's expiry
+// choices (apps/discord EXPIRY_LABELS) for cross-integration consistency.
+// Values land on the wire as `expires_in`; qurl-service still enforces the
+// plan's max expiry at mint time.
+var linkExpiryOptions = []linkExpiryOption{
+	{value: resourceLinkExpiry, label: resourceLinkExpiryHuman},
+	{value: "30m", label: "30 minutes"},
+	{value: "1h", label: "1 hour"},
+	{value: "6h", label: "6 hours"},
+	{value: "24h", label: "24 hours"},
+	{value: "7d", label: "7 days"},
+}
+
+// linkExpiryHumanLabel returns the user-facing label for a stored expiry
+// value, and whether the value is a recognized option. Callers treat an
+// unrecognized value (a hand-edited row, or an option later removed from
+// the set) as "fall back to the default" — never forwarding it upstream.
+func linkExpiryHumanLabel(value string) (string, bool) {
+	for _, o := range linkExpiryOptions {
+		if o.value == value {
+			return o.label, true
+		}
+	}
+	return "", false
+}
+
+// resourceLinkExpiryFor resolves the link expiry for minting against
+// resourceID: the admin-set per-resource default when one is stored and
+// recognized, else the bot's built-in [resourceLinkExpiry]. Best-effort —
+// a store read failure or an unrecognized stored value logs and falls
+// back to the built-in default (the most restrictive option) rather than
+// failing the mint. Returns the wire value and its human label.
+func (h *Handler) resourceLinkExpiryFor(ctx context.Context, log *slog.Logger, teamID, resourceID string) (value, human string) {
+	override, err := h.cfg.AdminStore.GetResourceDefaultTTL(ctx, teamID, resourceID)
+	if err != nil {
+		log.Warn("get: default link-expiry lookup failed — minting with the built-in default",
+			"error", err, "team_id", teamID, "resource_id", resourceID)
+		return resourceLinkExpiry, resourceLinkExpiryHuman
+	}
+	if override == "" {
+		return resourceLinkExpiry, resourceLinkExpiryHuman
+	}
+	label, ok := linkExpiryHumanLabel(override)
+	if !ok {
+		log.Warn("get: stored default link expiry is not a recognized option — minting with the built-in default",
+			"stored_ttl", override, "team_id", teamID, "resource_id", resourceID)
+		return resourceLinkExpiry, resourceLinkExpiryHuman
+	}
+	return override, label
+}
 
 // urlNotSupportedGetMessage is the user-facing copy for a raw-URL `/qurl get`.
 // The parser flags the case with the terse [ErrURLNotSupportedGet] sentinel;
@@ -378,13 +443,17 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 		return "", &userError{msg: rateLimitMessage(retry, "")}
 	}
 
+	// Per-resource default link expiry, set by admins via the `/qurl list`
+	// Edit modal; falls back to the built-in resourceLinkExpiry.
+	expiresIn, expiresInHuman := h.resourceLinkExpiryFor(ctx, log, args.teamID, boundResourceID)
+
 	input := client.CreateInput{
 		Reason: args.cmd.Reason(),
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
 		OneTimeUse: true,
 		// Slack-created resource access limits — see the const block above.
-		ExpiresIn:       resourceLinkExpiry,
+		ExpiresIn:       expiresIn,
 		SessionDuration: resourceSessionDuration,
 		MaxSessions:     resourceMaxSessions,
 		IdempotencyKey:  IdempotencyKey(args.teamID, args.channelID, args.userID, args.triggerID),
@@ -409,11 +478,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	}
 
 	// Unconditional suffix — every `/qurl get` link is one-time use (see
-	// OneTimeUse above) AND only admits a session within resourceLinkExpiry of
-	// minting. That admit window is tight, so surface it at the point of
-	// sharing: a recipient who clicks after it lapses gets a dead link, and
-	// the suffix tells them why.
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + resourceLinkExpiryHuman + ")"
+	// OneTimeUse above) AND only admits a session within the resolved expiry
+	// of minting. That admit window can be tight, so surface it at the point
+	// of sharing: a recipient who clicks after it lapses gets a dead link,
+	// and the suffix tells them why.
+	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + expiresInHuman + ")"
 	if args.cmd.DM() {
 		return h.deliverGetDM(ctx, log, args.userID, message), nil
 	}

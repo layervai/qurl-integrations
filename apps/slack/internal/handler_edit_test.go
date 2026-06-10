@@ -144,31 +144,31 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 	}
 
 	t.Run("happy", func(t *testing.T) {
-		name, changed, aliases, fe := parseTunnelEditModalArgs(values("New Name", "$one\n$two"), meta(testEditDisplay))
+		edit, fe := parseTunnelEditModalArgs(values("New Name", "$one\n$two"), meta(testEditDisplay))
 		if len(fe) != 0 {
 			t.Fatalf("unexpected field errors: %v", fe)
 		}
-		if !changed {
+		if !edit.nameChanged {
 			t.Errorf("nameChanged = false, want true (New Name != %q)", testEditDisplay)
 		}
-		if name != "New Name" || strings.Join(aliases, ",") != "one,two" {
-			t.Errorf("got name=%q aliases=%v", name, aliases)
+		if edit.displayName != "New Name" || strings.Join(edit.aliases, ",") != "one,two" {
+			t.Errorf("got name=%q aliases=%v", edit.displayName, edit.aliases)
 		}
 	})
 	t.Run("empty display name is a field error when changed", func(t *testing.T) {
-		_, _, _, fe := parseTunnelEditModalArgs(values("   ", ""), meta(testEditDisplay))
+		_, fe := parseTunnelEditModalArgs(values("   ", ""), meta(testEditDisplay))
 		if _, ok := fe[tunnelEditBlockDisplayName]; !ok {
 			t.Errorf("expected a display-name field error, got %v", fe)
 		}
 	})
 	t.Run("mrkdwn-injecting display name rejected when changed", func(t *testing.T) {
-		_, _, _, fe := parseTunnelEditModalArgs(values("<!channel> hi", ""), meta(testEditDisplay))
+		_, fe := parseTunnelEditModalArgs(values("<!channel> hi", ""), meta(testEditDisplay))
 		if _, ok := fe[tunnelEditBlockDisplayName]; !ok {
 			t.Errorf("expected display-name char rejection, got %v", fe)
 		}
 	})
 	t.Run("bad alias is a field error", func(t *testing.T) {
-		_, _, _, fe := parseTunnelEditModalArgs(values("ok", "$NOPE"), meta(testEditDisplay))
+		_, fe := parseTunnelEditModalArgs(values("ok", "$NOPE"), meta(testEditDisplay))
 		if _, ok := fe[tunnelEditBlockAliases]; !ok {
 			t.Errorf("expected an aliases field error, got %v", fe)
 		}
@@ -177,25 +177,25 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 		// A stored name carrying a now-disallowed backtick, pre-filled and left
 		// untouched, must NOT block an alias-only edit.
 		const legacy = "Prod `db`"
-		_, changed, aliases, fe := parseTunnelEditModalArgs(values(legacy, "$one"), meta(legacy))
+		edit, fe := parseTunnelEditModalArgs(values(legacy, "$one"), meta(legacy))
 		if len(fe) != 0 {
 			t.Fatalf("untouched legacy name should not error: %v", fe)
 		}
-		if changed {
+		if edit.nameChanged {
 			t.Errorf("nameChanged = true for an untouched pre-filled name")
 		}
-		if strings.Join(aliases, ",") != "one" {
-			t.Errorf("aliases = %v, want [one]", aliases)
+		if strings.Join(edit.aliases, ",") != "one" {
+			t.Errorf("aliases = %v, want [one]", edit.aliases)
 		}
 	})
 	t.Run("whitespace-only difference is not a change", func(t *testing.T) {
 		// Stored name with surrounding whitespace, pre-filled and untouched: the
 		// trim must not register as a change (which would fire a spurious PATCH).
-		_, changed, _, fe := parseTunnelEditModalArgs(values("  "+testEditDisplay+"  ", ""), meta(testEditDisplay))
+		edit, fe := parseTunnelEditModalArgs(values("  "+testEditDisplay+"  ", ""), meta(testEditDisplay))
 		if len(fe) != 0 {
 			t.Fatalf("unexpected field errors: %v", fe)
 		}
-		if changed {
+		if edit.nameChanged {
 			t.Errorf("nameChanged = true for a whitespace-only difference (would fire a spurious PATCH)")
 		}
 	})
@@ -204,7 +204,7 @@ func TestParseTunnelEditModalArgs(t *testing.T) {
 func TestFormatResourceEditSummary_EscapesToken(t *testing.T) {
 	// A token can be an upstream slug that never passed the alias charset fence,
 	// so a backtick must be escaped or it breaks the code span (defense-in-depth).
-	out := formatResourceEditSummary("ev`il", "", nil, &aliasReconcileResult{}, &channelExposureResult{})
+	out := formatResourceEditSummary("ev`il", "", nil, &aliasReconcileResult{}, &channelExposureResult{}, false)
 	if strings.Contains(out, "ev`il") {
 		t.Errorf("raw backtick token leaked into the summary: %q", out)
 	}
@@ -214,7 +214,7 @@ func TestFormatResourceEditSummary_EscapesToken(t *testing.T) {
 }
 
 func TestFormatResourceEditSummary_UsesURLResourceConflictCopy(t *testing.T) {
-	out := formatResourceEditSummary("docs", client.ResourceTypeURL, nil, &aliasReconcileResult{conflicts: []string{"taken"}}, &channelExposureResult{})
+	out := formatResourceEditSummary("docs", client.ResourceTypeURL, nil, &aliasReconcileResult{conflicts: []string{"taken"}}, &channelExposureResult{}, false)
 	for _, want := range []string{"Updated URL resource `$docs`", "Skipped (already used by another URL resource in this channel): `$taken`"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q: %s", want, out)

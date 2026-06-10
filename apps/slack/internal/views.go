@@ -108,6 +108,8 @@ const (
 	tunnelEditActionAliases     = "edit_aliases_input"
 	tunnelEditBlockChannels     = "edit_channels"
 	tunnelEditActionChannels    = "edit_channels_select"
+	tunnelEditBlockLinkExpiry   = "edit_link_expiry"
+	tunnelEditActionLinkExpiry  = "edit_link_expiry_select"
 )
 
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
@@ -293,6 +295,14 @@ type TunnelEditModalMetadata struct {
 	// Connector for backwards compatibility with already-rendered connector
 	// buttons that predate this field.
 	ResourceType string `json:"resource_type,omitempty"`
+	// DefaultTTL is the resource's stored default-link-expiry override at the
+	// moment the modal opened ("" when none — the built-in default). Read
+	// fresh by handleListEditClick, shown as the dropdown's initial option,
+	// and diffed against on submit so an untouched dropdown never writes —
+	// the same skip-the-no-op posture DisplayName has. Best-effort at open:
+	// a failed read pre-fills the default, and the no-write-when-unchanged
+	// diff means a stale pre-fill can't clear a real override.
+	DefaultTTL string `json:"default_ttl,omitempty"`
 }
 
 // TunnelEditModal renders the admin Edit modal opened from a `/qurl list` row.
@@ -340,9 +350,40 @@ func TunnelEditModal(meta *TunnelEditModalMetadata, displayName string, aliases 
 				multilinePlainTextInput(tunnelEditActionAliases, "$staging\n$db", aliasInitial)),
 			inputBlock(tunnelEditBlockChannels, "Channels", "Channels where this resource shows in /qurl list and can be minted with /qurl get. The channel you're editing from always keeps access. Add channels to protect it there; remove one to revoke it.", true,
 				multiConversationsSelect(tunnelEditActionChannels, meta.ExposedChannels)),
+			inputBlock(tunnelEditBlockLinkExpiry, "Default link expiry", "How long links created with /qurl get for this resource stay redeemable. Links remain one-time use.", false,
+				staticSelect(tunnelEditActionLinkExpiry, linkExpiryOptionObjs(), linkExpiryInitialOption(meta.DefaultTTL))),
 		},
 	}
 	return json.Marshal(payload)
+}
+
+// linkExpiryOptionObjs renders [linkExpiryOptions] as Block Kit option
+// objects for the Edit modal's default-link-expiry dropdown. The built-in
+// default's label is suffixed "(default)" so admins can tell the reset
+// option from a real override.
+func linkExpiryOptionObjs() []map[string]any {
+	options := make([]map[string]any, len(linkExpiryOptions))
+	for i, o := range linkExpiryOptions {
+		label := o.label
+		if o.value == resourceLinkExpiry {
+			label += " (default)"
+		}
+		options[i] = optionObj(label, o.value)
+	}
+	return options
+}
+
+// linkExpiryInitialOption returns the dropdown's pre-selected option for a
+// stored override ("" or an unrecognized value pre-selects the built-in
+// default — matching what the mint path would actually use).
+func linkExpiryInitialOption(stored string) map[string]any {
+	options := linkExpiryOptionObjs()
+	for i, o := range linkExpiryOptions {
+		if o.value == stored {
+			return options[i]
+		}
+	}
+	return options[0]
 }
 
 func editResourceLabel(resourceType string) string {

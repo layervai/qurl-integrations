@@ -107,6 +107,7 @@ func (h *Handler) handleListEditClick(w http.ResponseWriter, payload *interactio
 		// process shutdown cancels them coherently.
 		enumCtx, enumCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 		meta.ExposedChannels = h.exposedChannelsForEdit(enumCtx, log, &meta)
+		meta.DefaultTTL = h.defaultTTLForEdit(enumCtx, log, meta.TeamID, meta.ResourceID)
 		enumCancel()
 
 		view, err := TunnelEditModal(&meta, snapshot.DisplayName, snapshot.Aliases)
@@ -179,6 +180,36 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 	return channels
 }
 
+// defaultTTLForEdit reads the resource's stored default-link-expiry override
+// for the Edit modal pre-fill ("" when none). Best-effort, mirroring
+// exposedChannelsForEdit: a read failure — or an unrecognized stored value —
+// pre-fills the built-in default instead of blocking the modal. That is SAFE
+// for the override: the submit handler only writes when the dropdown's value
+// actually differs from this pre-fill, so a degraded pre-fill the admin
+// doesn't touch never clears a real stored override.
+func (h *Handler) defaultTTLForEdit(ctx context.Context, log *slog.Logger, teamID, resourceID string) string {
+	if h.cfg.AdminStore == nil {
+		return ""
+	}
+	stored, err := h.cfg.AdminStore.GetResourceDefaultTTL(ctx, teamID, resourceID)
+	if err != nil {
+		log.Warn("list edit: default link-expiry read failed — pre-filling the built-in default",
+			"error", err, "team_id", teamID, "resource_id", resourceID)
+		return ""
+	}
+	if stored == "" {
+		return ""
+	}
+	if _, ok := linkExpiryHumanLabel(stored); !ok {
+		// Matches resourceLinkExpiryFor's posture: an unrecognized stored
+		// value is never used, so pre-fill what minting would actually do.
+		log.Warn("list edit: stored default link expiry is not a recognized option — pre-filling the built-in default",
+			"stored_ttl", stored, "team_id", teamID, "resource_id", resourceID)
+		return ""
+	}
+	return stored
+}
+
 // handleTunnelEditSubmission processes the Edit modal's view_submission: it
 // validates the submitted Display Name + alias lines, re-checks that the
 // submitter is still a qURL admin (the real mutation gate), then applies
@@ -216,12 +247,11 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		return
 	}
 
-	displayName, nameChanged, aliases, fieldErrors := parseTunnelEditModalArgs(payload.View.State.Values, &meta)
+	edit, fieldErrors := parseTunnelEditModalArgs(payload.View.State.Values, &meta)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)
 		return
 	}
-	desiredChannels := parseEditChannelSelection(payload.View.State.Values, &meta)
 
 	// Mutation gate. Bounded so a slow store fails closed inside Slack's ack
 	// window; off h.baseCtx (not the request ctx) so a client abort can't
@@ -250,7 +280,7 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 		"view_id", payload.View.ID,
 	)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelEdit(ctx, log, &meta, displayName, nameChanged, aliases, desiredChannels)
+		h.processTunnelEdit(ctx, log, &meta, &edit)
 	}) {
 		respondTunnelEditModalError(w, modalBusyMsg)
 		return
@@ -259,11 +289,13 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 }
 
 // parseTunnelEditModalArgs validates the Edit modal's submitted state: the
-// Display Name (char-fenced via the shared validateDisplayNameChars) and the
-// multiline aliases field. token is the row's primary `$<token>`, excluded
-// from the editable alias set; currentName is the pre-filled Display Name the
-// modal opened with. Returns the cleaned Display Name, whether it actually
-// changed, the deduped/validated extra-alias set, or a per-field error map.
+// Display Name (char-fenced via the shared validateDisplayNameChars), the
+// multiline aliases field, and the default-link-expiry dropdown. token is the
+// row's primary `$<token>`, excluded from the editable alias set; currentName
+// is the pre-filled Display Name the modal opened with. Returns the cleaned
+// Display Name, whether it actually changed, the deduped/validated
+// extra-alias set, the desired default-link-expiry override ("" = built-in
+// default) plus whether it changed, or a per-field error map.
 //
 // The name is diffed against the IDENTICALLY-normalized currentName, and is
 // validated ONLY when it changed. Two reasons: (1) a legacy or API-set name
@@ -272,12 +304,12 @@ func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *int
 // untouched bad name would otherwise be un-saveable; (2) normalizing both
 // sides means surrounding whitespace/quotes on the stored value don't register
 // as a change and fire a spurious PATCH on an alias-only edit.
-func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue, meta *TunnelEditModalMetadata) (displayName string, nameChanged bool, aliases []string, fieldErrors map[string]string) {
+func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue, meta *TunnelEditModalMetadata) (edit tunnelEditChanges, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
 	rawName := normalizeDisplayNameInput(interactionStateText(values, tunnelEditBlockDisplayName, tunnelEditActionDisplayName))
-	nameChanged = rawName != normalizeDisplayNameInput(meta.DisplayName)
-	if nameChanged {
+	edit.nameChanged = rawName != normalizeDisplayNameInput(meta.DisplayName)
+	if edit.nameChanged {
 		if rawName == "" {
 			// Reached only when clearing a previously-set name (empty + unchanged
 			// is a no-op). This modal renames; clearing entirely is a separate verb.
@@ -286,16 +318,49 @@ func parseTunnelEditModalArgs(values map[string]map[string]interactionStateValue
 			fieldErrors[tunnelEditBlockDisplayName] = msg
 		}
 	}
+	edit.displayName = rawName
 
 	aliases, aliasMsg := parseEditAliasLines(interactionStateText(values, tunnelEditBlockAliases, tunnelEditActionAliases), meta.Token, meta.Aliases)
 	if aliasMsg != "" {
 		fieldErrors[tunnelEditBlockAliases] = aliasMsg
 	}
+	edit.aliases = aliases
+
+	defaultTTL, ttlMsg := parseEditLinkExpiry(values, meta)
+	if ttlMsg != "" {
+		fieldErrors[tunnelEditBlockLinkExpiry] = ttlMsg
+	}
+	edit.defaultTTL = defaultTTL
+	edit.ttlChanged = defaultTTL != meta.DefaultTTL
+
+	edit.channels = parseEditChannelSelection(values, meta)
 
 	if len(fieldErrors) > 0 {
-		return "", false, nil, fieldErrors
+		return tunnelEditChanges{}, fieldErrors
 	}
-	return rawName, nameChanged, aliases, nil
+	return edit, nil
+}
+
+// parseEditLinkExpiry reads the Edit modal's default-link-expiry dropdown
+// into the desired stored override: "" for the built-in default option
+// (absence-of-entry is the single representation of "default" — see
+// [linkExpiryOptions]), the selected duration value otherwise. A view in
+// flight from before the dropdown existed submits no such block; that reads
+// as "unchanged" (meta's pre-fill). A value outside the option set can only
+// be a hand-crafted payload (static_select is not free-text), but it is
+// refused rather than stored because the value lands on the mint wire.
+func parseEditLinkExpiry(values map[string]map[string]interactionStateValue, meta *TunnelEditModalMetadata) (defaultTTL, userMsg string) {
+	selected, ok := interactionStateTextOK(values, tunnelEditBlockLinkExpiry, tunnelEditActionLinkExpiry)
+	if !ok {
+		return meta.DefaultTTL, ""
+	}
+	if _, known := linkExpiryHumanLabel(selected); !known {
+		return "", "Choose one of the listed expiry options."
+	}
+	if selected == resourceLinkExpiry {
+		return "", ""
+	}
+	return selected, ""
 }
 
 // parseEditAliasLines parses the modal's one-alias-per-line field into a
@@ -388,17 +453,32 @@ func parseEditChannelSelection(values map[string]map[string]interactionStateValu
 	return out
 }
 
+// tunnelEditChanges bundles a parsed Edit-modal submission for the async
+// worker: the desired Display Name / default-link-expiry override (each with
+// its parse-time changed flag, so untouched fields are never written) plus
+// the desired alias and channel sets the reconciles drive toward. Built by
+// parseTunnelEditModalArgs.
+type tunnelEditChanges struct {
+	displayName string
+	nameChanged bool
+	defaultTTL  string // "" = built-in default (clears the stored override)
+	ttlChanged  bool
+	aliases     []string
+	channels    []string
+}
+
 // processTunnelEdit is the async worker for an Edit modal submission. It
 // PATCHes the Display Name (only when changed, so an alias-only edit can't
-// clobber a concurrent display-name change), reconciles the channel aliases AND
-// the channel exposure to the submitted sets, and posts an outcome summary to
-// the list message's response_url.
+// clobber a concurrent display-name change), writes the default-link-expiry
+// override (only when changed, same rationale), reconciles the channel
+// aliases AND the channel exposure to the submitted sets, and posts an
+// outcome summary to the list message's response_url.
 //
 // The name PATCH fails fast (returns before any reconcile) so a name failure
-// doesn't half-apply alias/channel changes. The two reconciles are each
-// best-effort and independent: a per-item failure is flagged in the summary
-// rather than aborting the rest.
-func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, displayName string, nameChanged bool, desiredAliases, desiredChannels []string) {
+// doesn't half-apply alias/channel changes. The expiry write and the two
+// reconciles are each best-effort and independent: a failure is flagged in
+// the summary rather than aborting the rest.
+func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta *TunnelEditModalMetadata, edit *tunnelEditChanges) {
 	c, err := h.authenticatedClient(ctx, meta.TeamID)
 	if err != nil {
 		log.Error("tunnel edit: API key lookup failed", "error", err)
@@ -410,8 +490,8 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 	// Display Name: PATCH only when it actually changed (computed in
 	// parseTunnelEditModalArgs against the normalized pre-filled value), so an
 	// alias-only edit doesn't overwrite a concurrent set-display-name.
-	if nameChanged {
-		if _, err := c.UpdateResource(ctx, meta.ResourceID, &client.UpdateResourceInput{Description: &displayName}); err != nil {
+	if edit.nameChanged {
+		if _, err := c.UpdateResource(ctx, meta.ResourceID, &client.UpdateResourceInput{Description: &edit.displayName}); err != nil {
 			log.Error("tunnel edit: display name update failed", "error", err, "resource_id", meta.ResourceID)
 			_ = h.postResponse(log, meta.ResponseURL, sanitizeAPIError(err, "Failed to update the Display Name"))
 			return
@@ -419,9 +499,33 @@ func (h *Handler) processTunnelEdit(ctx context.Context, log *slog.Logger, meta 
 		changes = append(changes, "Display Name updated")
 	}
 
-	aliasResult := h.reconcileChannelAliases(ctx, log, meta, desiredAliases)
-	channelResult := h.reconcileChannelExposure(ctx, log, meta, desiredChannels)
-	_ = h.postResponse(log, meta.ResponseURL, formatResourceEditSummary(meta.Token, meta.ResourceType, changes, &aliasResult, &channelResult))
+	// Default link expiry: written only when the dropdown moved off its
+	// pre-fill, so an untouched (or degraded — see defaultTTLForEdit)
+	// pre-fill never clears a real override.
+	ttlErr := false
+	if edit.ttlChanged {
+		if err := h.cfg.AdminStore.SetResourceDefaultTTL(ctx, meta.TeamID, meta.ResourceID, edit.defaultTTL); err != nil {
+			log.Error("tunnel edit: default link-expiry update failed", "error", err, "resource_id", meta.ResourceID)
+			ttlErr = true
+		} else {
+			changes = append(changes, linkExpirySummaryLine(edit.defaultTTL))
+		}
+	}
+
+	aliasResult := h.reconcileChannelAliases(ctx, log, meta, edit.aliases)
+	channelResult := h.reconcileChannelExposure(ctx, log, meta, edit.channels)
+	_ = h.postResponse(log, meta.ResponseURL, formatResourceEditSummary(meta.Token, meta.ResourceType, changes, &aliasResult, &channelResult, ttlErr))
+}
+
+// linkExpirySummaryLine renders the edit summary's line for an applied
+// default-link-expiry change. The value is parse-validated against
+// [linkExpiryOptions], so the label lookup can't miss.
+func linkExpirySummaryLine(defaultTTL string) string {
+	if defaultTTL == "" {
+		return "Default link expiry reset to " + resourceLinkExpiryHuman + " (the default)"
+	}
+	label, _ := linkExpiryHumanLabel(defaultTTL)
+	return "Default link expiry set to " + label
 }
 
 // aliasReconcileResult buckets the outcome of reconciling a tunnel's channel
@@ -633,7 +737,7 @@ func (h *Handler) channelHasAliasForResource(ctx context.Context, log *slog.Logg
 	return false
 }
 
-func formatResourceEditSummary(token, resourceType string, changes []string, aliasRes *aliasReconcileResult, chanRes *channelExposureResult) string {
+func formatResourceEditSummary(token, resourceType string, changes []string, aliasRes *aliasReconcileResult, chanRes *channelExposureResult, ttlErr bool) string {
 	label := editResourceLabel(resourceType)
 	var first string
 	if token == "" {
@@ -667,10 +771,11 @@ func formatResourceEditSummary(token, resourceType string, changes []string, ali
 	nothingApplied := len(changes) == 0 &&
 		len(aliasRes.added) == 0 && len(aliasRes.removed) == 0 && len(aliasRes.conflicts) == 0 &&
 		len(chanRes.exposed) == 0 && len(chanRes.revoked) == 0 && len(chanRes.aliasRetained) == 0
-	if !aliasRes.hadError && !chanRes.hadError && nothingApplied {
+	hadError := aliasRes.hadError || chanRes.hadError || ttlErr
+	if !hadError && nothingApplied {
 		lines = append(lines, "No changes.")
 	}
-	if aliasRes.hadError || chanRes.hadError {
+	if hadError {
 		lines = append(lines, ":warning: Some changes may not have applied. Run `/qurl list` to check, and retry if needed.")
 	}
 	return strings.Join(lines, "\n")
