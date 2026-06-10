@@ -40,8 +40,10 @@ const agentTransientReply = "That took longer than I could handle just now — p
 
 // agentRateLimitedReply is posted when a turn is dropped for hitting the per-user or
 // per-team turn-rate cap. Deliberately uniform across both limits (don't leak which
-// cap, or its value) and points at the always-available slash commands.
-const agentRateLimitedReply = "You've reached the conversation-mode limit for now — give it a few minutes, or use a `/qurl` command in the meantime."
+// cap, or its value) and points at the always-available slash commands. Phrased
+// neutrally ("conversation mode is at its limit", not "you've reached…") so it
+// doesn't wrongly blame an innocent member when it's the per-workspace cap that hit.
+const agentRateLimitedReply = "Conversation mode is at its limit for now — give it a few minutes, or use a `/qurl` command in the meantime."
 
 // agentTurnRateWindow is the fixed window for the per-user / per-team turn counters.
 // The env limits are expressed per hour, so the window is one hour.
