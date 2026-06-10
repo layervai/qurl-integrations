@@ -352,6 +352,16 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		return
 	}
 
+	// Per-workspace toggle re-checked at click time, like agentConfirmEnabled above:
+	// a card proposed before the workspace turned conversation mode off (within the
+	// ~10-min pending-action TTL) must NOT still execute on Approve — same "disabled
+	// ⇒ nothing executes" standard as the org kill switch. Before the claim, so it
+	// gates BOTH Approve and Reject; fails closed on a read error.
+	if !h.workspaceAgentEnabled(ctx, log, teamID) {
+		_ = h.postResponse(log, responseURL, agentConfirmExpiredReply)
+		return
+	}
+
 	blob, found, err := h.cfg.AgentStore.LoadPendingAction(ctx, teamID, id)
 	if err != nil {
 		log.Error("agent confirm: load pending action failed", "error", err)

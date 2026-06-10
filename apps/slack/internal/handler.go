@@ -356,6 +356,14 @@ type Config struct {
 	// re-check. Separate from AgentDisabled/AgentLLM so the read-only surface can
 	// ship enabled while the confirm flow stays staged (dark → beta).
 	AgentConfirmEnabled bool
+
+	// AgentDefaultEnabled is the per-workspace conversation-mode default for a
+	// workspace that hasn't set the toggle (`/qurl-admin agent on|off`, stored in
+	// workspace_mappings via AdminStore). False during the staged per-workspace
+	// rollout (each workspace opts in); GA flips it true (every workspace on unless
+	// it explicitly opted out). Read alongside the org-level agentEnabled gate — it
+	// only matters once the org seams are wired and not killed.
+	AgentDefaultEnabled bool
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
@@ -764,6 +772,9 @@ const (
 	// single word or hyphenated-word only, no space-separated sub-verbs.
 	adminVerbProtectConnector = "protect-connector"
 	adminVerbProtectURL       = "protect-url"
+	// adminVerbAgent is `/qurl-admin agent on|off` — the per-workspace
+	// conversation-mode toggle (bare `agent` shows the current state).
+	adminVerbAgent = "agent"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
@@ -781,7 +792,7 @@ const (
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -1068,6 +1079,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	// readability — all three protect entries sit together. Each connector/URL
 	// verb opens its guided modal when bare and runs the typed power-user form
 	// when given arguments (handleExposeConnector / handleExposeURL).
+	case slashSubcommand(text, adminVerbAgent):
+		// Per-workspace conversation-mode toggle: `agent on|off` (bare shows state).
+		h.handleAgentToggle(w, values)
 	case slashSubcommand(text, adminVerbProtectConnector):
 		h.handleExposeConnector(w, values)
 	case slashSubcommand(text, adminVerbProtectURL):
@@ -1491,6 +1505,12 @@ func (h *Handler) adminHelpMessage(command string) string {
 			"• `/qurl-admin add @user` — Promote a Slack user to admin",
 			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
 			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
+		)
+		appendSectionHeader("*Conversation mode*")
+		lines = append(lines,
+			"• `/qurl-admin agent on` — Let members @mention or DM the qURL Secure Access Agent in this workspace",
+			"• `/qurl-admin agent off` — Turn conversation mode off for this workspace",
+			"• `/qurl-admin agent` — Show whether conversation mode is on for this workspace",
 		)
 	}
 	// Always-present anchor: the sections above are all gated on sandbox wiring,

@@ -154,6 +154,9 @@ func newConfirmHarness(t *testing.T, adminUserID string) *confirmHarness {
 		PostMessage:         postText,
 		PostMessageBlocks:   blocks.fn(),
 		AgentConfirmEnabled: true,
+		// Per-workspace toggle defaults ON in the harness (conversation mode is
+		// enabled); the toggle-specific tests seed an explicit per-workspace value.
+		AgentDefaultEnabled: true,
 	})
 	h.SetAliasStore(adminStore)
 	h.validateResponseURLFn = url.Parse

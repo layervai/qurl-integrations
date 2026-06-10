@@ -90,6 +90,9 @@ const (
 	AdminActionSetDisplayName   AdminAction = "set_display_name"
 	AdminActionUnsetDisplayName AdminAction = "unset_display_name"
 	AdminActionRevoke           AdminAction = "revoke"
+	// AdminActionAgentToggle is the gate-audit label for `/qurl-admin agent on|off`,
+	// the per-workspace conversation-mode toggle.
+	AdminActionAgentToggle AdminAction = "agent_toggle"
 )
 
 // Command is the parsed shape of a `/qurl …` slash command.

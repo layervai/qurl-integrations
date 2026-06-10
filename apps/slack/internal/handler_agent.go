@@ -71,6 +71,28 @@ func (h *Handler) agentEnabled() bool {
 		h.cfg.PostMessage != nil
 }
 
+// workspaceAgentEnabled resolves the per-workspace conversation-mode toggle, on top
+// of the org-level agentEnabled gate: the stored agent_enabled flag if the workspace
+// set it (AgentEnabledFor), else Config.AgentDefaultEnabled. It FAILS CLOSED on a
+// read error — don't run the agent if we can't confirm the workspace opted in, and
+// never override an explicit opt-out on a transient blip. With no AdminStore wired
+// there's no per-workspace store to read, so the org default governs. The read is a
+// single workspace_mappings GetItem, off the ack path (callers are already async).
+func (h *Handler) workspaceAgentEnabled(ctx context.Context, log *slog.Logger, teamID string) bool {
+	if h.cfg.AdminStore == nil {
+		return h.cfg.AgentDefaultEnabled
+	}
+	enabled, set, err := h.cfg.AdminStore.AgentEnabledFor(ctx, teamID)
+	if err != nil {
+		log.Warn("agent: per-workspace toggle read failed; treating as disabled", "team_id", teamID, "error", err)
+		return false
+	}
+	if set {
+		return enabled
+	}
+	return h.cfg.AgentDefaultEnabled
+}
+
 // handleAgentEvent decides whether an event_callback should drive a
 // conversation turn and, if so, dispatches it to the async pool. The caller
 // (handleEvent) always acks 200 regardless — Slack must not retry — so this only
@@ -198,6 +220,14 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 			h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentErrorReply)
 		}
 	}()
+
+	// Per-workspace toggle, BEFORE the dedupe marker so a disabled workspace consumes
+	// nothing. A workspace that hasn't opted in (or opted out) gets no reply — the
+	// same silent behavior as the org-level dark surface; members use slash commands.
+	if !h.workspaceAgentEnabled(ctx, log, env.TeamID) {
+		log.Info("agent: conversation mode disabled for this workspace; ignoring @mention/DM")
+		return
+	}
 
 	partition := agentEventPartition(env)
 

@@ -237,7 +237,7 @@ func newAgentEventHandler(t *testing.T, reply string) (*Handler, *[]capturedRepl
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
-	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: reply}, AgentStore: store, PostMessage: post})
+	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: reply}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
 	t.Cleanup(h.Wait)
 	return h, posts, mu
 }
@@ -332,7 +332,7 @@ func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
 	fake.getErr = errors.New("ddb read down") // GetItem (load) fails; PutItem (dedupe) still succeeds
 	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
-	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: "unused"}, AgentStore: store, PostMessage: post})
+	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: "unused"}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
 	t.Cleanup(h.Wait)
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvLF")))
 	h.Wait()
@@ -377,7 +377,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 				posts = append(posts, capturedReply{channel, threadTS, text})
 				return nil
 			}
-			h := NewHandler(Config{AgentLLM: c.llm, AgentStore: store, PostMessage: post})
+			h := NewHandler(Config{AgentLLM: c.llm, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
 
 			// A spent turn ctx, exactly as the 90s budget elapsing would leave it.
 			ctx, cancel := context.WithCancel(context.Background())
@@ -400,9 +400,10 @@ func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{
-		AgentLLM:    fakeAgentLLM{err: errors.New("model 500")},
-		AgentStore:  store,
-		PostMessage: post,
+		AgentLLM:            fakeAgentLLM{err: errors.New("model 500")},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
 	})
 
 	h.processAgentEvent(context.Background(), slog.Default(),
@@ -423,7 +424,7 @@ func TestProcessAgentEvent_PanicPostsError(t *testing.T) {
 	// not satisfied by an ordinary in-budget error that also posts agentErrorReply.
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
-	h := NewHandler(Config{AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post})
+	h := NewHandler(Config{AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))

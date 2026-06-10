@@ -30,6 +30,13 @@ const (
 	// post-install, so on-call can answer "who was the original
 	// installer?" from CloudWatch + a direct DDB read.
 	attrSeedAdminSlackUser = "seed_admin_slack_user_id"
+	// attrAgentEnabled is the per-workspace conversation-mode toggle
+	// (three-state: absent / true / false). Absent → the org default
+	// (Handler.cfg.AgentDefaultEnabled, flipped on at GA); an explicit
+	// false is an opt-out that survives the GA default flip. Set by
+	// `/qurl-admin agent on|off`, read on the agent propose + confirm
+	// paths. Mirror the schema fenced in modules/qurl-slack-ddb/main.tf.
+	attrAgentEnabled = "agent_enabled"
 )
 
 // Error codes surfaced on [*Error.Code] by [Store.BindWorkspace]'s
@@ -206,6 +213,63 @@ func (s *Store) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isA
 		}
 	}
 	return false, ownerID, nil
+}
+
+// SetAgentEnabled writes the per-workspace conversation-mode toggle on the
+// workspace_mappings row. It refuses a missing row (404) so the toggle can't be set
+// for an unclaimed workspace — the workspace must be bound via /qurl setup first.
+// The stored value is explicit (true OR false); AgentEnabledFor distinguishes it
+// from an absent attribute so an opt-out (false) survives the GA default flip.
+func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool) error {
+	if teamID == "" {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "SetAgentEnabled: team_id is required"}
+	}
+	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+		UpdateExpression:    aws.String("SET " + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow),
+		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ")"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":v":    boolAttr(enabled),
+			exprNow: stringAttr(nowISO),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if errors.As(err, &ccfe) {
+		return &Error{StatusCode: http.StatusNotFound, Title: "SetAgentEnabled: workspace is not bound — run /qurl setup first"}
+	}
+	return ddbToError("SetAgentEnabled", err)
+}
+
+// AgentEnabledFor reads the per-workspace conversation-mode toggle. The three-state
+// return (value, set) lets the caller fall back to the org default when the attr is
+// absent while honoring an explicit opt-out: set=false must stay off even after the
+// default flips on at GA. A missing workspace row reads as absent (not an error).
+func (s *Store) AgentEnabledFor(ctx context.Context, teamID string) (value, set bool, err error) {
+	if teamID == "" {
+		return false, false, &Error{StatusCode: http.StatusBadRequest, Title: "AgentEnabledFor: team_id is required"}
+	}
+	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      aws.String(s.WorkspaceMappingsName),
+		ConsistentRead: aws.Bool(false), // eventual is fine for a feature toggle
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if getErr != nil {
+		return false, false, ddbToError("AgentEnabledFor", getErr)
+	}
+	if len(out.Item) == 0 {
+		return false, false, nil
+	}
+	value, set = readBoolPresent(out.Item, attrAgentEnabled)
+	return value, set, nil
 }
 
 // BindWorkspace creates the workspace mapping row on first setup.
