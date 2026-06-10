@@ -17,9 +17,10 @@ import (
 
 // Slack Events API event types this handler reacts to.
 const (
-	slackEventTypeAppMention = "app_mention"
-	slackEventTypeMessage    = "message"
-	slackChannelTypeIM       = "im"
+	slackEventTypeAppMention             = "app_mention"
+	slackEventTypeMessage                = "message"
+	slackEventTypeAssistantThreadStarted = "assistant_thread_started"
+	slackChannelTypeIM                   = "im"
 )
 
 // agentProposalPreviewPrefix prefixes a proposed-mutation reply while
@@ -75,7 +76,8 @@ type slackEventEnvelope struct {
 	Event        slackInnerEvent `json:"event"`
 }
 
-// slackInnerEvent is the inner `event` object for app_mention / message events.
+// slackInnerEvent is the inner `event` object for app_mention / message events,
+// plus the assistant_thread object on assistant_thread_started.
 type slackInnerEvent struct {
 	Type        string `json:"type"`
 	User        string `json:"user"`
@@ -86,6 +88,26 @@ type slackInnerEvent struct {
 	ChannelType string `json:"channel_type"`
 	TS          string `json:"ts"`
 	ThreadTS    string `json:"thread_ts"`
+	// AssistantThread is set only on assistant_thread_started (the container
+	// first-run event), which carries a nested object rather than the flat fields.
+	AssistantThread *assistantThread `json:"assistant_thread,omitempty"`
+}
+
+// assistantThread is the assistant_thread object on an assistant_thread_started
+// event: the assistant DM channel + thread the user just opened, plus the context
+// (the channel they were viewing). Context is modeled now for later DM-scoped reads
+// but is unused in this first-run slice.
+type assistantThread struct {
+	UserID    string                 `json:"user_id"`
+	ChannelID string                 `json:"channel_id"`
+	ThreadTS  string                 `json:"thread_ts"`
+	Context   assistantThreadContext `json:"context"`
+}
+
+type assistantThreadContext struct {
+	ChannelID    string `json:"channel_id"`
+	TeamID       string `json:"team_id"`
+	EnterpriseID string `json:"enterprise_id"`
 }
 
 // agentEnabled reports whether conversation mode is fully wired and not killed.
@@ -200,7 +222,16 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
 // (handleEvent) always acks 200 regardless — Slack must not retry — so this only
 // schedules work; it never writes the response.
 func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
-	if !h.agentEnabled() || !shouldDispatchAgentEvent(env) {
+	if !h.agentEnabled() {
+		return
+	}
+	// The Assistants-container first-run event is additive and UX-only (no turn) —
+	// handle it before the turn-dispatch filter, which only admits app_mention/message.
+	if env.Event.Type == slackEventTypeAssistantThreadStarted {
+		h.handleAssistantThreadStarted(env)
+		return
+	}
+	if !shouldDispatchAgentEvent(env) {
 		return
 	}
 	log := slog.With(

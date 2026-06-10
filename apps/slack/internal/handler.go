@@ -391,6 +391,15 @@ type Config struct {
 	// the id for the TTL instead of re-hitting Slack every turn. Best-effort: a
 	// resolve error never fails the turn.
 	ResolveChannelName ResolveChannelNameFunc
+
+	// AssistantThreads drives the Slack Assistants-container first-run UX
+	// (assistant.threads.setTitle / setSuggestedPrompts) when a user opens the
+	// agent's assistant pane. Additive to the @mention/DM surface and UX-only (no
+	// LLM). Nil = no-op (the events only arrive once the "Agents & AI Apps" manifest
+	// toggle + assistant:write scope are set), so the surface stays dark until both
+	// the seam is wired and the manifest is updated. Best-effort: a failure is logged,
+	// never surfaced.
+	AssistantThreads AssistantThreadsPort
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
@@ -416,6 +425,23 @@ type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, chann
 // transport failure — the caller treats any error as "no name" and falls back to
 // the channel id.
 type ResolveChannelNameFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error)
+
+// SuggestedPrompt is one Assistants-container starter prompt: Title is the short
+// clickable label, Message is the text inserted into the composer when clicked.
+type SuggestedPrompt struct {
+	Title   string
+	Message string
+}
+
+// AssistantThreadsPort sets a freshly-opened Assistants-container thread's title
+// and suggested prompts via the Slack assistant.threads.* web API (per-workspace
+// bot token, Grid-aware). channelID is the assistant DM channel, threadTS the
+// thread the assistant_thread_started event opened. Best-effort first-run UX — the
+// conversation surface still works without it.
+type AssistantThreadsPort interface {
+	SetTitle(ctx context.Context, teamID, enterpriseID, channelID, threadTS, title string) error
+	SetSuggestedPrompts(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, prompts []SuggestedPrompt) error
+}
 
 // ReactionPort adds and removes a single emoji reaction on a message via the Slack
 // reactions.add / reactions.remove web API (per-workspace bot token, Grid-aware).
