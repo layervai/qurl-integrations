@@ -160,6 +160,11 @@ func run() error {
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
 	agentDefaultEnabled := readAgentDefaultEnabled()
+	// Per-user / per-workspace turn caps (turns per rolling hour) — a cost backstop on
+	// the LLM spend once conversation mode is live. Conservative non-zero defaults so
+	// the backstop holds even if the operator never sets the env; 0 = unlimited.
+	agentMaxTurnsPerUser := readAgentMaxTurnsPerUser()
+	agentMaxTurnsPerTeam := readAgentMaxTurnsPerTeam()
 	// Skip building the LLM + state store under a kill switch: it's read once at
 	// boot and forces the surface dark regardless (agentEnabled), so the store/LLM
 	// would never be used, and un-killing requires a restart anyway. This also
@@ -210,13 +215,15 @@ func run() error {
 				client.WithRetry(2),
 			)
 		},
-		AgentLLM:            agentLLM,
-		AgentStore:          agentStore,
-		PostMessage:         postMessage,
-		AgentDisabled:       agentDisabled,
-		PostMessageBlocks:   postMessageBlocks,
-		AgentConfirmEnabled: agentConfirmEnabled,
-		AgentDefaultEnabled: agentDefaultEnabled,
+		AgentLLM:                    agentLLM,
+		AgentStore:                  agentStore,
+		PostMessage:                 postMessage,
+		AgentDisabled:               agentDisabled,
+		PostMessageBlocks:           postMessageBlocks,
+		AgentConfirmEnabled:         agentConfirmEnabled,
+		AgentDefaultEnabled:         agentDefaultEnabled,
+		AgentMaxTurnsPerUserPerHour: agentMaxTurnsPerUser,
+		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
@@ -1039,6 +1046,43 @@ func readAgentConfirmEnabled() bool {
 // off, so a typo can never silently turn the surface on for every workspace at once.
 func readAgentDefaultEnabled() bool {
 	return readBoolEnvFailSafe("QURL_AGENT_DEFAULT_ENABLED", false, false)
+}
+
+// Conservative per-hour turn caps applied when the operator doesn't set the env, so
+// a GA-live agent always has a cost backstop. Tunable via QURL_AGENT_MAX_TURNS_PER_*;
+// an explicit 0 disables the cap.
+const (
+	defaultAgentMaxTurnsPerUser = 30
+	defaultAgentMaxTurnsPerTeam = 300
+)
+
+// readAgentMaxTurnsPerUser / readAgentMaxTurnsPerTeam read the per-user and
+// per-workspace agent-turn caps (turns per rolling hour) used as an LLM-cost
+// backstop. Absent → the conservative default; an explicit "0" disables the cap.
+func readAgentMaxTurnsPerUser() int {
+	return readIntEnvFailSafe("QURL_AGENT_MAX_TURNS_PER_USER_HOUR", defaultAgentMaxTurnsPerUser)
+}
+
+func readAgentMaxTurnsPerTeam() int {
+	return readIntEnvFailSafe("QURL_AGENT_MAX_TURNS_PER_TEAM_HOUR", defaultAgentMaxTurnsPerTeam)
+}
+
+// readIntEnvFailSafe reads a non-negative integer env var. Absent → def. A
+// set-but-malformed or negative value FAILS SAFE to def and logs loudly (a negative
+// cap is a typo, not a choice). An explicit "0" is honored and distinct from absent —
+// callers use it as a sentinel (e.g. "unlimited" for the turn caps).
+func readIntEnvFailSafe(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		slog.Warn("agent env int flag set to an invalid value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+			"env", name, "value", raw, "fail_safe_default", def)
+		return def
+	}
+	return v
 }
 
 // agentSurfaceState groups the boot-time facts that decide what conversation mode

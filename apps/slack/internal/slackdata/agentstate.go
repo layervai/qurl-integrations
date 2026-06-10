@@ -43,11 +43,17 @@ const (
 	attrAgentVersion  = "conv_version"
 	attrAgentTTL      = "ttl"
 	attrPendPayload   = "pend_payload"
+	// attrTurnCount is the running tally on a fixed-window turn-rate counter item
+	// (sk = "rate#<scope>#<window-start>"), incremented atomically per agent turn.
+	attrTurnCount = "turn_count"
 
 	convSKPrefix      = "conv#"
 	eventSKPrefix     = "evt#"
 	pendSKPrefix      = "pend#"
 	pendClaimSKPrefix = "pendclaim#"
+	// rateSKPrefix namespaces the per-window turn-rate counters; the full sk is
+	// "rate#<scope>#<window-start-unix>" where scope is "team" or "user#<id>".
+	rateSKPrefix = "rate#"
 )
 
 // Default TTLs. Conversations live long enough to span a thread's natural pace
@@ -199,6 +205,51 @@ func (s *AgentStore) putMarkerIfAbsent(ctx context.Context, partition, sk string
 		return false, err
 	}
 	return true, nil
+}
+
+// BumpTurnCount atomically increments and returns the agent-turn count for a
+// fixed window. teamID is the partition (a workspace, NOT the enterprise-else-team
+// event partition — a per-workspace cap shouldn't collapse into one shared bucket
+// across an enterprise grid); scope is "team" or "user#<slack_user_id>". The window
+// is keyed into the sort key (truncated to window start) so each window is a fresh
+// item the table's TTL reaps — no reset write needed.
+//
+// Uses an atomic ADD (not read-modify-write): the per-team counter is a single hot
+// item shared by every member, so a strict atomic increment is the only thing that
+// holds the cap under concurrent turns — exactly when a cost backstop matters.
+// Returns the NEW count; the caller compares it to its configured limit. A returned
+// count above the limit means this turn is the one that crossed it.
+func (s *AgentStore) BumpTurnCount(ctx context.Context, teamID, scope string, window time.Duration) (count int64, err error) {
+	if teamID == "" || scope == "" {
+		return 0, &Error{StatusCode: http.StatusBadRequest, Title: "BumpTurnCount: team_id and scope are required"}
+	}
+	if window <= 0 {
+		return 0, &Error{StatusCode: http.StatusBadRequest, Title: "BumpTurnCount: window must be positive"}
+	}
+	windowStart := s.now().UTC().Truncate(window)
+	sk := fmt.Sprintf("%s%s#%d", rateSKPrefix, scope, windowStart.Unix())
+	// TTL a full window past the window's end so a clock running behind the DDB TTL
+	// reaper can't drop a still-current counter; the window-keyed sk makes the next
+	// window start fresh regardless.
+	expiresAt := windowStart.Add(2 * window).Unix()
+
+	out, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrAgentPK: stringAttr(teamID),
+			attrAgentSK: stringAttr(sk),
+		},
+		UpdateExpression: aws.String("ADD " + attrTurnCount + " :one SET " + attrAgentTTL + " = :ttl"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":one": numberAttr(1),
+			":ttl": numberAttr(expiresAt),
+		},
+		ReturnValues: ddbtypes.ReturnValueUpdatedNew,
+	})
+	if err != nil {
+		return 0, ddbToError("BumpTurnCount", err)
+	}
+	return readNumber(out.Attributes, attrTurnCount), nil
 }
 
 // LoadConversation returns the stored transcript blob and its version for a

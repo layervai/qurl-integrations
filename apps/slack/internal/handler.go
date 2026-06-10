@@ -364,6 +364,16 @@ type Config struct {
 	// it explicitly opted out). Read alongside the org-level agentEnabled gate — it
 	// only matters once the org seams are wired and not killed.
 	AgentDefaultEnabled bool
+
+	// AgentMaxTurnsPerUserPerHour / AgentMaxTurnsPerTeamPerHour cap how many agent
+	// turns a single member, and a whole workspace, can drive per rolling hour — a
+	// cost backstop on LLM spend, enforced in processAgentEvent before the turn runs.
+	// 0 disables that limit (unlimited). Both default to a conservative non-zero
+	// value (see cmd/main.go) so a GA-live agent has a backstop even if the operator
+	// never sets the env var. Unlike the workspace/dedupe gates these fail OPEN: a
+	// transient counter error must not drop a legitimate turn.
+	AgentMaxTurnsPerUserPerHour int
+	AgentMaxTurnsPerTeamPerHour int
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
