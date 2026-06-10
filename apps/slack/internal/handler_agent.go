@@ -129,7 +129,10 @@ func (h *Handler) agentTurnLimited(ctx context.Context, log *slog.Logger, env *s
 }
 
 // overTurnLimit bumps the named fixed-window counter and reports whether this turn
-// crossed the limit. Fails OPEN (returns false) on a counter error.
+// crossed the limit. Fails OPEN (returns false) on a counter error — a conscious
+// tradeoff: this leaves the cap weakest exactly under DDB stress (throttling is also
+// when a busy workspace racks up cost), but dropping a legitimate member's turn on a
+// transient blip is worse for a backstop than briefly running uncapped.
 func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, scope string, limit int) bool {
 	count, err := h.cfg.AgentStore.BumpTurnCount(ctx, teamID, scope, agentTurnRateWindow)
 	if err != nil {
@@ -299,6 +302,11 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	// (processAgentConfirm) are deliberately NOT limited: they're consume-once and
 	// admin-gated and carry no LLM cost. A limited turn still gets a reply — silence
 	// would read as the agent ignoring the member.
+	//
+	// The count is of turn ATTEMPTS, not answered turns — a turn bumped here that then
+	// fails transiently (agentTransientReply) still counts, so the cap is "N
+	// attempts/hour". That's the right unit for a COST backstop: the LLM round-trip is
+	// the spend whether or not it produced a usable answer.
 	if reply, limited := h.agentTurnLimited(ctx, log, env); limited {
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
 		return
