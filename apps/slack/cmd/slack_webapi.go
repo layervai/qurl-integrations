@@ -452,8 +452,9 @@ var (
 
 // slackReactionPort implements [internal.ReactionPort] over reactions.add /
 // reactions.remove. Each verb has its own shared-transport poster (token lookup + Grid
-// fallback + benign-tolerant parse), and the two share one http.Client — one
-// short-lived best-effort call at a time. This is the conversation-mode ack seam.
+// fallback + benign-tolerant parse), and the two share one http.Client (which is safe
+// for the concurrent turns the async pool may run). This is the conversation-mode ack
+// seam.
 type slackReactionPort struct {
 	add    *slackWebAPIPoster
 	remove *slackWebAPIPoster

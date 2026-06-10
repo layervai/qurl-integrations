@@ -53,10 +53,14 @@ const agentTurnRateWindow = time.Hour
 // triggering message while a turn runs (reactions.add), then removes when it ends.
 const agentAckReaction = "eyes"
 
-// agentAckTimeout bounds each reactions.add/remove round-trip. Tighter than the 15s
-// delivery budget: the add is on the turn's critical path (before the LLM call), so a
-// stuck ack must free quickly rather than delay the turn it's acknowledging.
-const agentAckTimeout = 4 * time.Second
+// agentAckTimeout bounds each reactions.add/remove round-trip. The add is on the
+// turn's critical path (synchronous, before the LLM call), so this is deliberately
+// tight and decoupled from the 4s chat.postMessage budget: a cosmetic "working on it"
+// ack that hasn't landed in ~2s is already too late to feel responsive, so giving up
+// (no 👀 — the deferred remove then hits no_reaction → benign) beats delaying the turn
+// it's meant to make feel responsive. Taking the add off the critical path entirely
+// (async add + clear-joins-add) is tracked as a follow-up.
+const agentAckTimeout = 2 * time.Second
 
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
