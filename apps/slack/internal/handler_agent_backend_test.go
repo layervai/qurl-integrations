@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,6 +190,72 @@ func TestAgentBackend_ChannelScopeMemoizedPerTurn(t *testing.T) {
 	}
 	if gets != 1 {
 		t.Fatalf("channel scope read %d times, want 1 (memoized)", gets)
+	}
+}
+
+func TestAgentBackend_ResourceScanMemoizedPerTurn(t *testing.T) {
+	// list_resources may be called several times in one turn; the channel's
+	// reachable set is invariant within a (read-only) turn, so the workspace scan
+	// must run once and be reused — not re-paged on every call.
+	b, _ := newBackendUnderTest(t, false) // allowed = {r_1, r_2}
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gets.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		// Both reachable ids on a single page (no has_more) → one GET per scan.
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"},{"resource_id":"r_2","slug":"staging","type":"tunnel"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	ctx := context.Background()
+	for range 3 {
+		if _, err := b.ListResources(ctx, backendTC()); err != nil {
+			t.Fatalf("ListResources: %v", err)
+		}
+	}
+	if g := gets.Load(); g != 1 {
+		t.Fatalf("workspace resource list fetched %d times across 3 calls, want 1 (memoized)", g)
+	}
+}
+
+func TestAgentBackend_StalePolicyScanMemoized(t *testing.T) {
+	// A stale channel_policies id (r_2 here is absent workspace-side) keeps
+	// len(found) below len(allowed), so collectChannelResources' early-stop can't
+	// fire and the scan pages to the end. The per-turn memo bounds that cost: the
+	// stale-policy scan is paid once per turn, not re-paged on every list_resources.
+	b, _ := newBackendUnderTest(t, false) // allowed = {r_1, r_2}
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("cursor") == "" {
+			// Page 1: r_1 reachable, plus has_more. r_2 never appears (stale).
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"}],"meta":{"has_more":true,"next_cursor":"c2"}}`))
+			return
+		}
+		// Page 2: nothing reachable, no has_more → scan ends here (2 GETs/scan).
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_9","type":"tunnel"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	ctx := context.Background()
+	for range 3 {
+		out, err := b.ListResources(ctx, backendTC())
+		if err != nil {
+			t.Fatalf("ListResources: %v", err)
+		}
+		if !strings.Contains(out, "r_1") {
+			t.Fatalf("reachable resource missing from scan: %q", out)
+		}
+	}
+	// Without the memo this stale-policy scan re-pages on every call (2 × 3 = 6);
+	// the memo bounds it to a single 2-page scan for the turn.
+	if g := gets.Load(); g != 2 {
+		t.Fatalf("stale-policy scan fetched %d pages across 3 calls, want 2 (one memoized scan)", g)
 	}
 }
 

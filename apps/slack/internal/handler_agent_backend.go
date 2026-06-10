@@ -44,6 +44,20 @@ type agentBackend struct {
 	allowedOnce sync.Once
 	allowed     map[string]struct{}
 	allowedErr  error
+
+	// Per-turn memo of the channel's reachable resource scan. list_resources can
+	// be called several times in a turn; collectChannelResources pages the
+	// workspace-wide list (up to channelResourcesMaxPages reads — and a stale
+	// channel_policies id defeats its early-stop, forcing the full scan), so
+	// without this memo every call re-pages. The scan is invariant within a
+	// read-only turn (the agent loop only reads; mutations are separate click
+	// interactions), so one scan is shared across the turn. Like allowedOnce, a
+	// failed scan is cached too: a transient error on the first call fails
+	// list_resources for the rest of the turn rather than re-hammering a failing
+	// API mid-scan — intentional, fail-fast.
+	resourcesOnce sync.Once
+	resources     []client.Resource
+	resourcesErr  error
 }
 
 // newAgentBackend builds the backend from the handler's authenticated-client
@@ -64,6 +78,18 @@ func (b *agentBackend) channelAllowed(ctx context.Context, tc *agent.TurnContext
 		b.allowed, b.allowedErr = b.store.AllowedResourceIDsForChannel(ctx, tc.TeamID, tc.ChannelID)
 	})
 	return b.allowed, b.allowedErr
+}
+
+// channelResources returns the channel's reachable resource set, scanned once and
+// memoized for the turn (mirrors channelAllowed). ctx, c, and allowed are used
+// only on the first call; subsequent calls return the cached scan, so
+// list_resources costs one workspace scan per turn no matter how many times the
+// model calls it.
+func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+	b.resourcesOnce.Do(func() {
+		b.resources, b.resourcesErr = collectChannelResources(ctx, c, allowed)
+	})
+	return b.resources, b.resourcesErr
 }
 
 // fail logs a backend read error for operators and returns it wrapped with op
@@ -95,7 +121,7 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 	if err != nil {
 		return b.fail("list resources: client", err)
 	}
-	resources, err := collectChannelResources(ctx, c, allowed)
+	resources, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
 		return b.fail("list resources", err)
 	}
@@ -125,7 +151,9 @@ const channelResourcesMaxPages = 20
 // references a resource id that no longer exists workspace-side (a stale policy):
 // found never reaches len(allowed), so the loop runs the full
 // channelResourcesMaxPages. Correct, just worst-case more reads until the stale
-// row is cleaned up.
+// row is cleaned up. channelResources memoizes this per turn, so that worst-case
+// scan is paid at most once per turn however many times list_resources is called
+// (it bounds the repeat, not the single-scan cost).
 func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
 	found := make([]client.Resource, 0, len(allowed))
 	cursor := ""
