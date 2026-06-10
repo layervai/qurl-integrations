@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -423,10 +424,17 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	// copies history, then appends this turn's messages — pinned by
 	// agent.TestRun_AppendsToPriorHistoryWithoutMutatingInput). So this turn's
 	// delta is the suffix; saveAgentHistory re-applies just it onto the winner's
-	// transcript if a concurrent turn won the save race.
+	// transcript if a concurrent turn won the save race. Verify that invariant at
+	// runtime (not just len(newHistory) >= len(history)): if a.Run ever stops being
+	// pure-append, leave delta nil so a conflict DROPS this turn rather than
+	// grafting a wrong suffix onto the winner — the silent corruption #666 exists to
+	// prevent. The first save still persists newHistory normally; only the
+	// conflict-merge is skipped.
 	var delta []agent.Message
-	if len(newHistory) >= len(history) {
+	if agentRunPreservedPrefix(history, newHistory) {
 		delta = newHistory[len(history):]
+	} else {
+		log.Error("agent: a.Run did not return loaded history as an exact prefix; conflict-merge disabled for this turn")
 	}
 	h.saveAgentHistory(log, partition, threadKey, newHistory, delta, version)
 
@@ -469,6 +477,27 @@ const maxPersistedMessages = 40
 // the blob fits. (Read-only tool output is compact today; this matters more once
 // mutation tool_results land.)
 const maxPersistedBytes = 350 * 1024
+
+// agentRunPreservedPrefix reports whether newHistory begins with loaded
+// element-for-element — the exact-prefix invariant a.Run guarantees (it copies
+// loaded, then appends this turn's messages) and that the conflict-merge delta
+// (newHistory[len(loaded):]) depends on. The call site verifies this at runtime,
+// not just len(newHistory) >= len(loaded): a future a.Run that rewrote or
+// reordered earlier turns while netting longer (e.g. history compaction) would
+// pass a length check yet make the suffix a WRONG delta — grafting it onto a
+// concurrent winner's transcript is the silent corruption #666 prevents. Cheap:
+// runs once per turn (post-LLM), at most maxPersistedMessages comparisons.
+func agentRunPreservedPrefix(loaded, newHistory []agent.Message) bool {
+	if len(newHistory) < len(loaded) {
+		return false
+	}
+	for i := range loaded {
+		if !reflect.DeepEqual(loaded[i], newHistory[i]) {
+			return false
+		}
+	}
+	return true
+}
 
 // saveAgentHistory persists the updated transcript under optimistic concurrency,
 // trimmed to a bounded length and byte size. If a concurrent turn on the same
