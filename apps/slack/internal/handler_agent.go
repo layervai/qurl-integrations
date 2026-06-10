@@ -418,7 +418,17 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	// Save before posting: the transcript must be durably consistent before the
 	// user can fire a follow-up turn against it. The post is the slower,
 	// user-visible step, so this trades a little reply latency for that ordering.
-	h.saveAgentHistory(log, partition, threadKey, newHistory, version)
+	//
+	// a.Run returns the loaded `history` as an exact prefix of newHistory (it
+	// copies history, then appends this turn's messages — pinned by
+	// agent.TestRun_AppendsToPriorHistoryWithoutMutatingInput). So this turn's
+	// delta is the suffix; saveAgentHistory re-applies just it onto the winner's
+	// transcript if a concurrent turn won the save race.
+	var delta []agent.Message
+	if len(newHistory) >= len(history) {
+		delta = newHistory[len(history):]
+	}
+	h.saveAgentHistory(log, partition, threadKey, newHistory, delta, version)
 
 	// Deliver: an interactive confirm card for an executable proposal once the
 	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
@@ -460,16 +470,76 @@ const maxPersistedMessages = 40
 // mutation tool_results land.)
 const maxPersistedBytes = 350 * 1024
 
-// saveAgentHistory persists the updated transcript, trimmed to a bounded length
-// and byte size. A version conflict (a concurrent turn won) is logged and
-// dropped — the reply still posts. Persistence runs on its own context off
-// h.baseCtx (see agentDeliveryBudget), not the possibly-spent turn ctx.
-func (h *Handler) saveAgentHistory(log *slog.Logger, partition, threadKey string, history []agent.Message, version int64) {
+// saveAgentHistory persists the updated transcript under optimistic concurrency,
+// trimmed to a bounded length and byte size. If a concurrent turn on the same
+// thread won the version race (ErrConversationConflict), it reloads the winner's
+// transcript, re-applies just this turn's delta on top, and retries exactly once,
+// so a parallel turn no longer silently drops this turn's reply from the thread.
+//
+// delta is this turn's appended suffix (the messages a.Run added on top of the
+// transcript loaded at turn start — computed at the call site). It always begins
+// with the user message a.Run prepends, the same clean boundary as any cross-turn
+// append, so grafting it onto the winner's (turn-end) transcript is well-formed by
+// the same construction that makes sequential turns well-formed. The grafted reply
+// was computed against the pre-conflict context, so it may be slightly stale
+// relative to the winner's turn — structurally valid, semantically best-effort,
+// and strictly better than dropping the turn.
+//
+// Persistence runs on its own context off h.baseCtx (see agentDeliveryBudget), not
+// the possibly-spent turn ctx. One reload+retry, not a loop: under sustained
+// contention the user can re-ask; an unbounded race would pin the worker.
+func (h *Handler) saveAgentHistory(log *slog.Logger, partition, threadKey string, updated, delta []agent.Message, version int64) {
+	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	defer cancel()
+
+	if err := h.persistBoundedHistory(ctx, log, partition, threadKey, updated, version); !errors.Is(err, slackdata.ErrConversationConflict) {
+		return // saved, or a non-retryable failure already logged
+	}
+	// A concurrent turn advanced the stored version. Merge this turn's delta onto
+	// the winner's transcript so neither turn is lost, then retry exactly once.
+	if len(delta) == 0 {
+		// Nothing to re-apply: the turn appended nothing on top of the base, or the
+		// a.Run prefix invariant was violated (guarded at the call site). Drop,
+		// matching pre-merge behavior.
+		log.Info("agent: conversation version conflict; concurrent turn won, no delta to merge")
+		return
+	}
+	if len(delta[0].ToolResults) > 0 {
+		// Defense-in-depth for the merge seam: a.Run always begins this turn's delta
+		// with the user message it prepends (a clean turn boundary), never a
+		// tool_results message. If that ever stops holding (e.g. a.Run starts
+		// compacting history), grafting a delta that opens with tool_results onto the
+		// winner's transcript would leave an orphaned tool_result at the seam — drop
+		// rather than persist a malformed transcript that would poison every future
+		// turn on this thread. trimAgentHistory can't be relied on to repair this: a
+		// short merged transcript is never trimmed.
+		log.Warn("agent: conversation version conflict; delta head is a tool_results message, dropping turn")
+		return
+	}
+	reloaded, reVersion, ok := h.reloadForMerge(ctx, log, partition, threadKey)
+	if !ok {
+		log.Info("agent: conversation version conflict; reload for merge failed, dropping turn")
+		return
+	}
+	merged := make([]agent.Message, 0, len(reloaded)+len(delta))
+	merged = append(merged, reloaded...)
+	merged = append(merged, delta...)
+	if err := h.persistBoundedHistory(ctx, log, partition, threadKey, merged, reVersion); errors.Is(err, slackdata.ErrConversationConflict) {
+		log.Info("agent: conversation version conflict persisted again after one retry; dropping turn")
+	}
+}
+
+// persistBoundedHistory trims history to the message-count and byte caps, marshals
+// it, and writes it at expectedVersion under optimistic concurrency. It returns
+// ErrConversationConflict (for the caller's retry decision) on a version clash; a
+// marshal failure or a non-conflict save error is logged here and returns nil —
+// nothing the caller can usefully retry.
+func (h *Handler) persistBoundedHistory(ctx context.Context, log *slog.Logger, partition, threadKey string, history []agent.Message, expectedVersion int64) error {
 	trimmed := trimAgentHistory(history, maxPersistedMessages)
 	blob, err := json.Marshal(trimmed)
 	if err != nil {
 		log.Error("agent: marshal conversation failed", "error", err)
-		return
+		return nil
 	}
 	// Byte guard: drop oldest turns (one per pass — trimAgentHistory cuts at a
 	// turn boundary) until the blob fits or only the latest turn remains. Break
@@ -486,17 +556,42 @@ func (h *Handler) saveAgentHistory(log *slog.Logger, partition, threadKey string
 		trimmed = next
 		if blob, err = json.Marshal(trimmed); err != nil {
 			log.Error("agent: marshal conversation failed", "error", err)
-			return
+			return nil
 		}
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
-	defer cancel()
-	switch err := h.cfg.AgentStore.SaveConversation(ctx, partition, threadKey, blob, version); {
+	switch err := h.cfg.AgentStore.SaveConversation(ctx, partition, threadKey, blob, expectedVersion); {
 	case errors.Is(err, slackdata.ErrConversationConflict):
-		log.Info("agent: conversation version conflict; concurrent turn won")
+		return err
 	case err != nil:
 		log.Error("agent: save conversation failed", "error", err)
+		return nil
 	}
+	return nil
+}
+
+// reloadForMerge re-reads a thread's transcript for the conflict-retry merge.
+// Unlike loadAgentHistory (which treats a corrupt blob as an empty thread to be
+// overwritten), a hard load error OR a decode failure here returns ok=false: the
+// retry must not graft this turn's delta onto a garbage base, and overwriting the
+// winner's blob with only this turn's delta would lose the winner's turn. Both
+// cases drop, preserving whatever the winner stored. (The decode branch is nearly
+// unreachable — the winner wrote that blob with the same marshal path — so the
+// hard-load-error branch is the realistic one.)
+func (h *Handler) reloadForMerge(ctx context.Context, log *slog.Logger, partition, threadKey string) ([]agent.Message, int64, bool) {
+	blob, version, err := h.cfg.AgentStore.LoadConversation(ctx, partition, threadKey)
+	if err != nil {
+		log.Error("agent: reload conversation for merge failed", "error", err)
+		return nil, 0, false
+	}
+	if len(blob) == 0 {
+		return nil, version, true
+	}
+	var history []agent.Message
+	if err := json.Unmarshal(blob, &history); err != nil {
+		log.Warn("agent: reload conversation for merge: corrupt blob, dropping turn", "error", err)
+		return nil, 0, false
+	}
+	return history, version, true
 }
 
 // trimAgentHistory bounds the transcript to roughly the most recent maxMessages,
