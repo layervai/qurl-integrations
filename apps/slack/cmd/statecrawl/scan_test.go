@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -127,6 +129,50 @@ func TestResolveLiveness_ListErrorUnresolved(t *testing.T) {
 	if live.resolved {
 		t.Fatal("a resource-list failure must NOT resolve (else live bindings look orphaned)")
 	}
+}
+
+// TestListAllResources_FailSafes pins the pagination fail-safes: a server bug
+// that keeps answering has_more=true degrades the team to unresolved (never
+// purged) instead of looping forever — and the ceiling counts RESOURCES, not
+// pages, so a small -page-limit can't shrink it.
+func TestListAllResources_FailSafes(t *testing.T) {
+	provider := fakeProvider{keys: map[string]string{"T1": "key"}}
+
+	t.Run("empty page with has_more", func(t *testing.T) {
+		srv := paginatedQURLServer(t,
+			map[string][]map[string]any{"": {}, "loop": {}},
+			map[string]string{"": "loop", "loop": "loop"})
+
+		live := resolveLiveness(context.Background(), provider, crawlFlags(srv.URL, true), "T1")
+		if live.resolved {
+			t.Fatal("an empty page with has_more=true must degrade to unresolved")
+		}
+		if !strings.Contains(live.reason, "empty page") {
+			t.Errorf("reason = %q, want the empty-page guard to have fired", live.reason)
+		}
+	})
+
+	t.Run("runaway list hits the resource ceiling", func(t *testing.T) {
+		// The same 1000-resource page forever: only the resource-count ceiling
+		// stops this. 100 round trips to reach maxResourceList.
+		page := make([]map[string]any, 1000)
+		for i := range page {
+			page[i] = qurlResource(fmt.Sprintf("r_%06d", i), client.ResourceTypeTunnel, "s", client.StatusActive)
+		}
+		srv := paginatedQURLServer(t,
+			map[string][]map[string]any{"": page, "loop": page},
+			map[string]string{"": "loop", "loop": "loop"})
+
+		f := crawlFlags(srv.URL, true)
+		f.pageLimit = 7 // a tiny tuning knob must not lower the abort threshold
+		live := resolveLiveness(context.Background(), provider, f, "T1")
+		if live.resolved {
+			t.Fatal("a runaway resource list must degrade to unresolved")
+		}
+		if !strings.Contains(live.reason, "exceeded") {
+			t.Errorf("reason = %q, want the resource-ceiling guard to have fired", live.reason)
+		}
+	})
 }
 
 // paginatedQURLServer serves GET /v1/resources by the request's cursor query

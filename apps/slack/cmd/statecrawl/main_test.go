@@ -130,6 +130,9 @@ func TestLooksProd(t *testing.T) {
 		{"env sandbox", flags{envLabel: "sandbox"}, false},
 		{"table prod", flags{channelPoliciesTable: "qurl-bot-slack-prod-cp"}, true},
 		{"state table prod", flags{workspaceStateTable: "qurl-prod-state"}, true},
+		{"endpoint prod substring", flags{qurlEndpoint: "https://qurl-prod.example/v1"}, true},
+		{"endpoint canonical prod origin", flags{qurlEndpoint: "https://api.layerv.ai/v1"}, true},
+		{"endpoint sandbox origin", flags{qurlEndpoint: "https://api.layerv.xyz/v1"}, false},
 		{"all sandbox", flags{envLabel: "sandbox", channelPoliciesTable: "qurl-sandbox-cp"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
