@@ -208,18 +208,18 @@ func TestReadAgentMaxTurns(t *testing.T) {
 		read func() int
 		want int
 	}{
-		{"per-user unset → default backstop", "QURL_AGENT_MAX_TURNS_PER_USER_HOUR", "", readAgentMaxTurnsPerUser, defaultAgentMaxTurnsPerUser},
-		{"per-user explicit", "QURL_AGENT_MAX_TURNS_PER_USER_HOUR", "5", readAgentMaxTurnsPerUser, 5},
+		{"per-user unset → default backstop", "QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR", "", readAgentMaxTurnsPerUser, defaultAgentMaxTurnsPerUser},
+		{"per-user explicit", "QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR", "5", readAgentMaxTurnsPerUser, 5},
 		// An explicit 0 is honored as "unlimited" — distinct from absent (which gets
 		// the conservative default).
-		{"per-user 0 = unlimited", "QURL_AGENT_MAX_TURNS_PER_USER_HOUR", "0", readAgentMaxTurnsPerUser, 0},
+		{"per-user 0 = unlimited", "QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR", "0", readAgentMaxTurnsPerUser, 0},
 		// Fail-safe: a typo'd or negative cap falls back to the backstop, never to
 		// "unlimited" by accident.
-		{"per-user malformed → default", "QURL_AGENT_MAX_TURNS_PER_USER_HOUR", "lots", readAgentMaxTurnsPerUser, defaultAgentMaxTurnsPerUser},
-		{"per-user negative → default", "QURL_AGENT_MAX_TURNS_PER_USER_HOUR", "-3", readAgentMaxTurnsPerUser, defaultAgentMaxTurnsPerUser},
-		{"per-team unset → default backstop", "QURL_AGENT_MAX_TURNS_PER_TEAM_HOUR", "", readAgentMaxTurnsPerTeam, defaultAgentMaxTurnsPerTeam},
-		{"per-team explicit", "QURL_AGENT_MAX_TURNS_PER_TEAM_HOUR", "150", readAgentMaxTurnsPerTeam, 150},
-		{"per-team 0 = unlimited", "QURL_AGENT_MAX_TURNS_PER_TEAM_HOUR", "0", readAgentMaxTurnsPerTeam, 0},
+		{"per-user malformed → default", "QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR", "lots", readAgentMaxTurnsPerUser, defaultAgentMaxTurnsPerUser},
+		{"per-user negative → default", "QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR", "-3", readAgentMaxTurnsPerUser, defaultAgentMaxTurnsPerUser},
+		{"per-team unset → default backstop", "QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR", "", readAgentMaxTurnsPerTeam, defaultAgentMaxTurnsPerTeam},
+		{"per-team explicit", "QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR", "150", readAgentMaxTurnsPerTeam, 150},
+		{"per-team 0 = unlimited", "QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR", "0", readAgentMaxTurnsPerTeam, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

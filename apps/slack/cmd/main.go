@@ -1060,11 +1060,11 @@ const (
 // per-workspace agent-turn caps (turns per rolling hour) used as an LLM-cost
 // backstop. Absent → the conservative default; an explicit "0" disables the cap.
 func readAgentMaxTurnsPerUser() int {
-	return readIntEnvFailSafe("QURL_AGENT_MAX_TURNS_PER_USER_HOUR", defaultAgentMaxTurnsPerUser)
+	return readIntEnvFailSafe("QURL_AGENT_MAX_TURNS_PER_USER_PER_HOUR", defaultAgentMaxTurnsPerUser)
 }
 
 func readAgentMaxTurnsPerTeam() int {
-	return readIntEnvFailSafe("QURL_AGENT_MAX_TURNS_PER_TEAM_HOUR", defaultAgentMaxTurnsPerTeam)
+	return readIntEnvFailSafe("QURL_AGENT_MAX_TURNS_PER_TEAM_PER_HOUR", defaultAgentMaxTurnsPerTeam)
 }
 
 // readIntEnvFailSafe reads a non-negative integer env var. Absent → def. A
