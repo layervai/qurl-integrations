@@ -378,13 +378,21 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		return
 	}
 
-	// ChannelName is intentionally left unset: the Events payload carries only the
-	// channel id (describeChannel falls back to it), and resolving the name would
-	// cost a conversations.info call per turn. Tracked in #659.
+	// Resolve the channel name for a friendlier system prompt ("#general (C123)" vs
+	// the bare id). shouldDispatchAgentEvent admits app_mention (any channel type) and
+	// message.im (1:1 DMs); skipping channel_type=="im" covers those DMs. An
+	// app_mention in a group DM (mpim) still resolves here, but conversations.info
+	// returns no usable name → negative-cached, harmless. Cached per channel
+	// (channelNameTTL), best-effort; describeChannel falls back to the id when empty.
+	channelName := ""
+	if env.Event.ChannelType != slackChannelTypeIM {
+		channelName = h.resolveChannelName(ctx, log, env.TeamID, env.EnterpriseID, env.Event.Channel)
+	}
 	tc := agent.TurnContext{
 		TeamID:        env.TeamID,
 		EnterpriseID:  env.EnterpriseID,
 		ChannelID:     env.Event.Channel,
+		ChannelName:   channelName,
 		UserID:        env.Event.User,
 		CallerIsAdmin: h.callerIsAdmin(log, env.TeamID, env.Event.User),
 	}

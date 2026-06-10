@@ -158,6 +158,10 @@ func run() error {
 	// wired (same token lookup as the post seams); inert until the agent surface is live
 	// and needs the reactions:write scope in the Slack manifest to actually land.
 	agentReactions := newSlackReactionPortWithTokenLookup(workspaceTokenLookup, userAgent, slackReactionsAddURL, slackReactionsRemoveURL, nil)
+	// conversations.info seam so the agent's system prompt can name the channel
+	// ("#general (C123)"). Always wired (same token lookup); degrades to the bare
+	// channel id until the channels:read / groups:read scopes are in the manifest.
+	agentResolveChannelName := newSlackResolveChannelNameFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
@@ -229,6 +233,7 @@ func run() error {
 		AgentMaxTurnsPerUserPerHour: agentMaxTurnsPerUser,
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
 		Reactions:                   agentReactions,
+		ResolveChannelName:          agentResolveChannelName,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so

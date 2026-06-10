@@ -381,6 +381,16 @@ type Config struct {
 	// ack (the reply posts exactly as before). Behind the kill switch via
 	// agentEnabled() like the rest; production wires it in cmd/main.go.
 	Reactions ReactionPort
+
+	// ResolveChannelName resolves a channel id to its human name (conversations.info
+	// on the per-workspace bot token, Grid-aware) so the agent's system prompt can
+	// render "#general (C123)" instead of the bare id. Nil leaves
+	// TurnContext.ChannelName empty — describeChannel falls back to the id — so the
+	// agent works without the channels:read / groups:read scope. Results (including
+	// failures) are cached per-Handler with a TTL, so a missing scope falls back to
+	// the id for the TTL instead of re-hitting Slack every turn. Best-effort: a
+	// resolve error never fails the turn.
+	ResolveChannelName ResolveChannelNameFunc
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
@@ -400,6 +410,13 @@ type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, 
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
 
+// ResolveChannelNameFunc resolves a channel id to its human name via
+// conversations.info on the per-workspace bot token (enterpriseID for Grid token
+// resolution). It returns an error on a missing scope, a DM/unknown channel, or a
+// transport failure — the caller treats any error as "no name" and falls back to
+// the channel id.
+type ResolveChannelNameFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error)
+
 // ReactionPort adds and removes a single emoji reaction on a message via the Slack
 // reactions.add / reactions.remove web API (per-workspace bot token, Grid-aware).
 // name is the emoji short name without colons (e.g. "eyes"). timestamp is the target
@@ -417,6 +434,10 @@ type Handler struct {
 	// now is injected so tests can pin the clock for timestamp-skew checks
 	// without touching a package global. Defaults to time.Now.
 	now func() time.Time
+	// channelNames memoizes agent channel-name resolutions (cfg.ResolveChannelName)
+	// for the process with a TTL. nil-receiver-safe, so a Handler built without
+	// NewHandler simply doesn't cache. See handler_agent_channel.go.
+	channelNames *channelNameCache
 	// oauthSetup carries the runtime configuration the /qurl setup
 	// slash-command needs to mint a state token and build the /start
 	// URL. nil when the OAuth surface is not configured (sandbox /
@@ -557,6 +578,7 @@ func NewHandler(cfg Config) *Handler {
 		sem:                   make(chan struct{}, maxAsync),
 		responseURLClient:     respClient,
 		validateResponseURLFn: validateResponseURL,
+		channelNames:          newChannelNameCache(channelNameTTL),
 	}
 }
 
