@@ -817,6 +817,35 @@ func TestSaveAgentHistory_MalformedDeltaHeadDropsTurn(t *testing.T) {
 	}
 }
 
+func TestAgentRunPreservedPrefix(t *testing.T) {
+	base := []agent.Message{
+		{Role: "user", Text: "q1"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "t1", Name: "list_resources"}}},
+		{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "t1", Content: "r"}}},
+	}
+	appended := append(append([]agent.Message{}, base...),
+		agent.Message{Role: "user", Text: "q2"},
+		agent.Message{Role: "assistant", Text: "a2"},
+	)
+	if !agentRunPreservedPrefix(base, appended) {
+		t.Fatal("pure-append should preserve the prefix")
+	}
+	if !agentRunPreservedPrefix(nil, appended) {
+		t.Fatal("empty loaded history is always a prefix")
+	}
+	if agentRunPreservedPrefix(base, base[:2]) {
+		t.Fatal("a shorter transcript can't contain loaded as a prefix")
+	}
+	// Same length-or-longer, but a prefix element rewritten (a hypothetical
+	// compaction). The length check alone would pass; the exact-prefix check must
+	// not — this is the silent-corruption case the runtime guard exists to catch.
+	rewritten := append([]agent.Message{}, appended...)
+	rewritten[1] = agent.Message{Role: "assistant", Text: "compacted"}
+	if agentRunPreservedPrefix(base, rewritten) {
+		t.Fatal("a rewritten prefix element must fail the exact-prefix check")
+	}
+}
+
 func TestTrimAgentHistory(t *testing.T) {
 	// Short history is untouched.
 	short := []agent.Message{{Role: "user", Text: "hi"}, {Role: "assistant", Text: "yo"}}
