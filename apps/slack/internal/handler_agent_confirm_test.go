@@ -421,6 +421,54 @@ func TestConfirm_SetAliasOnApprove(t *testing.T) {
 	}
 }
 
+func TestAgentConfirmAttributedCard(t *testing.T) {
+	const body = "Revoked $staging."
+	// asker != approver → both mentions + the agent name, body preserved as prefix.
+	out := agentConfirmAttributedCard(body, "Uasker", "Uadmin")
+	for _, want := range []string{"<@Uasker>", "<@Uadmin>", agentAttributionAgentName, "Requested by", "approved by"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("attributed card missing %q: %q", want, out)
+		}
+	}
+	if !strings.HasPrefix(out, body) {
+		t.Fatalf("attribution must preserve the result text as a prefix: %q", out)
+	}
+	// asker == approver (a get, or an admin approving their own request) → one
+	// mention, no redundant "approved by".
+	self := agentConfirmAttributedCard(body, "Uself", "Uself")
+	if !strings.Contains(self, "<@Uself>") || strings.Contains(self, "approved by") {
+		t.Fatalf("self-approved card should name one person without 'approved by': %q", self)
+	}
+	// Defensive empty asker → still marks the agent, with no dangling mention.
+	none := agentConfirmAttributedCard(body, "", "Uadmin")
+	if !strings.Contains(none, agentAttributionAgentName) || strings.Contains(none, "<@") {
+		t.Fatalf("empty-asker card should mark the agent with no mention: %q", none)
+	}
+}
+
+func TestConfirm_ExecutedCardCarriesAttribution(t *testing.T) {
+	// An EXECUTED action (set-alias here, which runs the alias core) replaces the
+	// public card with the result PLUS an on-behalf attribution footer: the asker who
+	// requested it, the approver who clicked Approve, and the agent that performed it
+	// (#662). Pre-execution rejections are NOT attributed — covered by
+	// TestConfirm_AliasRejectsInvalidInput, whose cards stay byte-exact.
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1", Asker: "Uasker"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+
+	_, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	for _, want := range []string{"<@Uasker>", "<@Uadmin>", agentAttributionAgentName} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("executed card missing attribution %q: %q", want, text)
+		}
+	}
+	// Attribution augments the core result, never replaces it: the footer follows
+	// the (non-empty) result, so "Requested by" can't be at the very start.
+	if i := strings.Index(text, "Requested by"); i <= 0 {
+		t.Fatalf("attribution must follow the core result, not be the whole card: %q", text)
+	}
+}
+
 func TestConfirm_AliasRejectsInvalidInput(t *testing.T) {
 	// The confirm card is public, so an LLM-distilled alias/target that's out of
 	// grammar (backtick — fence break; bidi/zero-width control — spoofing; bad

@@ -34,6 +34,9 @@ const (
 	agentConfirmUnsupportedReply    = "I can't apply that kind of change yet."
 	agentConfirmGetDeliveredReply   = "Handled — the access link was sent privately to the approver."
 	agentConfirmFailedReply         = "Something went wrong applying that. Please try again, or use a `/qurl` command."
+	// agentAttributionAgentName names the actor in an executed action's attribution
+	// footer — the product's user-facing agent name, never "bot".
+	agentAttributionAgentName = "qURL Secure Access Agent"
 	// agentConfirmInvalidAliasReply is generic ON PURPOSE: the confirm card is
 	// public, so an invalid (LLM-distilled, possibly injected) alias/target must NOT
 	// be echoed back into it — unlike the slash path, whose validation reply is
@@ -450,10 +453,45 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	res := h.executeAgentAction(ctx, log, &pa, payload)
 	if res.ephemeralText != "" {
 		// Sensitive output (a one-time link) goes PRIVATELY to the clicker — an
-		// ephemeral on the same response_url — never on the public card.
+		// ephemeral on the same response_url — never on the public card. No
+		// attribution footer here: it's a self-delivered credential, and the public
+		// card already carries the attribution.
 		_ = h.postResponse(log, responseURL, res.ephemeralText)
 	}
-	_ = h.replaceOriginalResponse(log, responseURL, res.cardText)
+	// The public terminal card for an EXECUTED action carries the on-behalf
+	// attribution: who requested the change, who approved it, and that the agent
+	// performed it (#662). Pre-execution rejections aren't attributed (res.attributed
+	// is false), so their generic copy stays byte-exact.
+	card := res.cardText
+	if res.attributed {
+		card = agentConfirmAttributedCard(res.cardText, pa.Asker, payload.User.ID)
+	}
+	_ = h.replaceOriginalResponse(log, responseURL, card)
+}
+
+// agentConfirmAttributedCard appends an attribution footer to an executed
+// confirm-card result, so channel members reading the (public) terminal card see
+// that a human authorized the change and the qURL Secure Access Agent carried it
+// out — the accountability a consequential action needs (#662). asker is the
+// member who requested the action through the agent (pendingAction.Asker);
+// approver is the member who clicked Approve. They coincide for a get (asker-only)
+// and may differ for an admin-gated action. The wording is neutral provenance, not
+// a "done" claim, so it reads correctly on both success and failure result cards.
+// asker/approver are Slack-supplied user IDs (not LLM-distilled input), so the
+// `<@id>` mentions need no sanitizing.
+func agentConfirmAttributedCard(cardText, asker, approver string) string {
+	var footer string
+	switch asker {
+	case "":
+		// Asker is always set at propose time; this only guards a malformed pending
+		// action so the agent marker is never silently dropped.
+		footer = "Performed via the " + agentAttributionAgentName
+	case approver:
+		footer = "Requested by <@" + asker + "> via the " + agentAttributionAgentName
+	default:
+		footer = "Requested by <@" + asker + ">, approved by <@" + approver + ">, via the " + agentAttributionAgentName
+	}
+	return cardText + "\n\n_" + footer + "._"
 }
 
 // openAgentConnectorModal is the protect-connector confirm execute: open the SAME
@@ -559,6 +597,12 @@ func agentConfirmConnectorOpenErrorReply(err error) string {
 type actionResult struct {
 	cardText      string
 	ephemeralText string
+	// attributed marks a card that reflects an ACTUALLY-EXECUTED action (a mutation
+	// core was invoked), so the click path appends the on-behalf attribution footer.
+	// Pre-execution rejections (invalid LLM-distilled input, unsupported kinds) leave
+	// it false: nothing was performed, so there's nothing to attribute — and their
+	// generic copy stays byte-exact for the no-echo security checks.
+	attributed bool
 }
 
 // executeAgentAction runs the mapped mutation core for a claimed action and returns
@@ -596,14 +640,14 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// clicker and keep the public card neutral, exactly as a typed /qurl get stays
 		// ephemeral to its requester. The asker-only gate (processAgentConfirm) ensures
 		// the clicker IS the asker, so ephemeral-to-clicker delivers to the right person.
-		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: result}
+		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: result, attributed: true}
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {
 			return actionResult{cardText: mapCoreError(log, err, commonRevokeFailedMessage)}
 		}
 		// A revoke result ("revoked $x") is benign and useful as a public audit line.
-		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token)}
+		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token), attributed: true}
 	case agent.ActionSetAlias:
 		// The confirm path has no parser gate (unlike the slash verb), so validate the
 		// LLM-distilled alias/target through the SAME grammar first — see
@@ -616,7 +660,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		// Binds alias → target in the CLICK's channel (channel-scoped, like the slash
 		// set-alias). Inputs are validated, so the benign result is safe on the card.
-		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, alias, target)}
+		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, alias, target), attributed: true}
 	case agent.ActionUnsetAlias:
 		// Validate the alias like set-alias before echoing it onto the public card:
 		// unbindAliasResult escapes backticks, but non-printables (bidi/zero-width)
@@ -626,7 +670,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		if !ok {
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
-		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias)}
+		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias), attributed: true}
 	case agent.ActionProtectURL:
 		// Validate the LLM-distilled URL + channel alias through the slash grammar
 		// (single source) and execute the CANONICAL args — see confirmValidProtectURL.
@@ -639,7 +683,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		// Binds the URL resource as $alias in the CLICK's channel (channel-scoped,
 		// like the slash protect-url and the alias confirm path). Benign public result.
-		return actionResult{cardText: h.exposeURLResourceInChannel(ctx, log, payload.Team.ID, payload.Channel.ID, args)}
+		return actionResult{cardText: h.exposeURLResourceInChannel(ctx, log, payload.Team.ID, payload.Channel.ID, args), attributed: true}
 	case agent.ActionProtectConnector:
 		// Unreachable from the confirm flow: processAgentConfirm routes
 		// protect-connector to openAgentConnectorModal (the modal/OpenView path)
