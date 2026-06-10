@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -373,6 +374,23 @@ func TestRun_AppendsToPriorHistoryWithoutMutatingInput(t *testing.T) {
 	}
 	if len(history) <= priorLen {
 		t.Fatalf("expected history to grow; got %d", len(history))
+	}
+
+	// EXACT-PREFIX invariant: handler_agent.go's saveAgentHistory computes this
+	// turn's delta as history[len(prior):] and, on a concurrent-save conflict,
+	// re-applies just that delta onto the winner's transcript. That is correct only
+	// if Run returns the input history UNCHANGED as a prefix. If Run ever rewrites
+	// or reorders prior history, this assertion must fail loudly — otherwise the
+	// delta logic would silently corrupt persisted transcripts.
+	for i := range prior {
+		if !reflect.DeepEqual(history[i], prior[i]) {
+			t.Fatalf("Run did not preserve prior history as an exact prefix at index %d: got %+v want %+v", i, history[i], prior[i])
+		}
+	}
+	// The delta begins with the user message Run prepends — the clean turn boundary
+	// the conflict-merge grafts onto the winner's transcript.
+	if d := history[priorLen]; d.Role != roleUser || d.Text != "follow-up" {
+		t.Fatalf("delta does not begin with the user message: %+v", d)
 	}
 }
 
