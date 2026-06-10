@@ -216,6 +216,11 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 
 const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 
+const (
+	slackReactionsAddURL    = "https://slack.com/api/reactions.add"
+	slackReactionsRemoveURL = "https://slack.com/api/reactions.remove"
+)
+
 // slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
 // single post this 4s client timeout is the BINDING deadline: the conversation-
 // mode delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
@@ -228,25 +233,28 @@ const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 // built), so the org-token attempt is the first and only HTTP call.
 const slackChatPostMessageTimeout = 4 * time.Second
 
-// Slack echoes the posted message back in successful chat.postMessage responses.
-// Keep the body bounded; an agent reply plus Slack message metadata stays well
-// under this.
-const slackChatPostMessageResponseBodyLimit = 64 * 1024
+// slackWebAPIResponseBodyLimit bounds any Slack web API response the shared poster
+// reads (an echoed chat.postMessage body, a reactions.add confirmation) — all stay
+// well under this.
+const slackWebAPIResponseBodyLimit = 64 * 1024
 
-// slackPostMessagePoster posts a pre-marshaled chat.postMessage body using the
-// per-workspace bot token with the Enterprise Grid fallback. The text (PostMessage)
-// and Block Kit (PostMessageBlocks) seams each construct their OWN poster (so their
-// own http.Client) and reuse this transport TYPE — they differ only in the marshaled
-// JSON body. Separate clients are fine for a low-volume bot; share one poster
-// between the two seams if connection pooling ever matters.
-type slackPostMessagePoster struct {
+// slackWebAPIPoster posts a pre-marshaled JSON body to one Slack web API method using
+// the per-workspace bot token with the Enterprise Grid fallback. It's the shared
+// transport behind the conversation-mode seams — chat.postMessage (text + Block Kit)
+// and reactions.add/remove — which differ only in the URL, the marshaled body, the
+// op label (for error strings), and the response parser (respErr). Each seam
+// constructs its own poster (so its own http.Client + timeout); share one if
+// connection pooling ever matters.
+type slackWebAPIPoster struct {
 	lookup     slackBotTokenLookup
 	userAgent  string
 	url        string
+	op         string // method label for error strings, e.g. "chat.postMessage"
+	respErr    func(statusCode int, header http.Header, raw []byte) error
 	httpClient *http.Client
 }
 
-func newSlackPostMessagePoster(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) *slackPostMessagePoster {
+func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string, respErr func(int, http.Header, []byte) error, httpClient *http.Client) *slackWebAPIPoster {
 	if httpClient == nil {
 		httpClient = defaultSlackPostMessageClient()
 	}
@@ -254,15 +262,15 @@ func newSlackPostMessagePoster(lookup slackBotTokenLookup, userAgent, postMessag
 	if userAgent == "" {
 		userAgent = defaultSlackAPIUserAgent
 	}
-	return &slackPostMessagePoster{lookup: lookup, userAgent: userAgent, url: postMessageURL, httpClient: httpClient}
+	return &slackWebAPIPoster{lookup: lookup, userAgent: userAgent, url: url, op: op, respErr: respErr, httpClient: httpClient}
 }
 
 // postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
 // the enterprise org) and POSTs the already-marshaled body.
-func (p *slackPostMessagePoster) postOnce(ctx context.Context, ownerID string, body []byte) error {
+func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body []byte) error {
 	token, err := p.lookup(ctx, ownerID)
 	if err != nil {
-		return fmt.Errorf("chat.postMessage token lookup: %w", err)
+		return fmt.Errorf("%s token lookup: %w", p.op, err)
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -270,11 +278,11 @@ func (p *slackPostMessagePoster) postOnce(ctx context.Context, ownerID string, b
 		// trigger the Grid fallback. That's fine: the real workspaceTokenLookup returns
 		// ErrSlackBotTokenNotConfigured (which does fall back), never an empty-but-nil
 		// token. A future lookup returning ("", nil) on a miss would need the sentinel.
-		return errors.New("chat.postMessage token lookup: empty token")
+		return fmt.Errorf("%s token lookup: empty token", p.op)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("chat.postMessage request build: %w", err)
+		return fmt.Errorf("%s request build: %w", p.op, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -282,22 +290,22 @@ func (p *slackPostMessagePoster) postOnce(ctx context.Context, ownerID string, b
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("chat.postMessage request: %w", err)
+		return fmt.Errorf("%s request: %w", p.op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackChatPostMessageResponseBodyLimit+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
 	if err != nil {
-		return fmt.Errorf("chat.postMessage response read: %w", err)
+		return fmt.Errorf("%s response read: %w", p.op, err)
 	}
-	if len(raw) > slackChatPostMessageResponseBodyLimit {
+	if len(raw) > slackWebAPIResponseBodyLimit {
 		// LimitReader already consumed limit+1 bytes; drain the rest before Close so a
 		// keep-alive transport can reuse the connection after an oversized response
 		// (mirrors the views.open drain).
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("chat.postMessage response exceeded %d bytes", slackChatPostMessageResponseBodyLimit)
+		return fmt.Errorf("%s response exceeded %d bytes", p.op, slackWebAPIResponseBodyLimit)
 	}
-	return slackChatPostMessageResponseError(resp.StatusCode, resp.Header, raw)
+	return p.respErr(resp.StatusCode, resp.Header, raw)
 }
 
 // post sends body with the workspace token, then retries once with the Enterprise
@@ -305,7 +313,7 @@ func (p *slackPostMessagePoster) postOnce(ctx context.Context, ownerID string, b
 // enterprise is a distinct owner. Same retry as openViewWithGridFallback; it lives
 // in this seam because PostMessage*Func carry enterpriseID (OpenView's seam takes
 // only teamID, so its handler owns the retry). body is reused across both attempts.
-func (p *slackPostMessagePoster) post(ctx context.Context, teamID, enterpriseID string, body []byte) error {
+func (p *slackWebAPIPoster) post(ctx context.Context, teamID, enterpriseID string, body []byte) error {
 	err := p.postOnce(ctx, teamID, body)
 	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
 		return err
@@ -316,8 +324,8 @@ func (p *slackPostMessagePoster) post(ctx context.Context, teamID, enterpriseID 
 	// Parity with openViewWithGridFallback's warn: a breadcrumb so an operator
 	// debugging "why is the bot posting as the org install?" can see the workspace
 	// token was missing. No *slog.Logger is threaded into this seam; use the default.
-	slog.Warn("workspace Slack bot token missing; retrying chat.postMessage with Enterprise Grid install token",
-		"team_id", teamID, "enterprise_id", enterpriseID)
+	slog.Warn("workspace Slack bot token missing; retrying with Enterprise Grid install token",
+		"op", p.op, "team_id", teamID, "enterprise_id", enterpriseID)
 	return p.postOnce(ctx, enterpriseID, body)
 }
 
@@ -325,7 +333,7 @@ func (p *slackPostMessagePoster) post(ctx context.Context, teamID, enterpriseID 
 // a threaded text chat.postMessage using the per-workspace bot token (the same token
 // resolution as the slash-command modals).
 func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
-	poster := newSlackPostMessagePoster(lookup, userAgent, postMessageURL, httpClient)
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error {
 		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
 		body, err := json.Marshal(struct {
@@ -346,7 +354,7 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 // non-block-client fallback. It shares the poster (token lookup + Grid fallback +
 // response parsing) with the text seam — only the JSON body differs.
 func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageBlocksFunc {
-	poster := newSlackPostMessagePoster(lookup, userAgent, postMessageURL, httpClient)
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error {
 		body, err := json.Marshal(struct {
 			Channel  string `json:"channel"`
@@ -379,23 +387,26 @@ func defaultSlackPostMessageClient() *http.Client {
 	}
 }
 
-// slackChatPostMessageResponseError maps a chat.postMessage HTTP response to an
-// error (or nil on success). Unlike views.open, chat.postMessage returns HTTP 200
-// with `ok:false` for most failures (channel_not_found, not_in_channel,
-// msg_too_long), so the ok field — not the status code — is the real signal. It
-// reuses the shared snippet/error-code helpers but has no trigger_id concept.
-func slackChatPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
+// slackWebAPIResponseError maps a Slack web API HTTP response to an error (or nil on
+// success). op prefixes the error strings; benign holds ok:false error codes treated
+// as SUCCESS (an idempotent no-op already at the desired end state — e.g. reactions.add
+// of an existing reaction, reactions.remove of an absent one). Unlike views.open, most
+// methods return HTTP 200 with `ok:false` for failures, so the ok field — not the
+// status code — is the real signal; both the 429 path and a 200-body
+// `ok:false:ratelimited` map to the rate-limit sentinel (load-bearing for the
+// chat.postMessage delivery worker — do not "harmonize" the ratelimited branch away).
+func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode int, header http.Header, raw []byte) error {
 	if statusCode == http.StatusTooManyRequests {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
 	if statusCode >= 300 {
 		if snippet := slackAPIBodySnippet(raw); snippet != "" {
-			return fmt.Errorf("chat.postMessage returned HTTP %d: %s", statusCode, snippet)
+			return fmt.Errorf("%s returned HTTP %d: %s", op, statusCode, snippet)
 		}
-		return fmt.Errorf("chat.postMessage returned HTTP %d", statusCode)
+		return fmt.Errorf("%s returned HTTP %d", op, statusCode)
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return errors.New("chat.postMessage: empty response body")
+		return fmt.Errorf("%s: empty response body", op)
 	}
 
 	var out struct {
@@ -404,23 +415,93 @@ func slackChatPostMessageResponseError(statusCode int, header http.Header, raw [
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		if snippet := slackAPIBodySnippet(raw); snippet != "" {
-			return fmt.Errorf("chat.postMessage response JSON: %w: %s", err, snippet)
+			return fmt.Errorf("%s response JSON: %w: %s", op, err, snippet)
 		}
-		return fmt.Errorf("chat.postMessage response JSON: %w", err)
+		return fmt.Errorf("%s response JSON: %w", op, err)
 	}
 	if out.OK {
 		return nil
 	}
 	code := slackAPIErrorCode(out.Error)
-	// chat.postMessage-specific: unlike views.open (which surfaces rate limits via
-	// the 429 path / slackOpenViewAPIError), chat.postMessage commonly returns a
-	// 200 body with ok:false:ratelimited, so map that to the sentinel here. Do not
-	// "harmonize" this branch away to match slackOpenViewResponseError.
 	if code == "ratelimited" {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
+	}
+	if _, ok := benign[code]; ok {
+		return nil
 	}
 	if code == "" {
 		code = "not_ok"
 	}
-	return fmt.Errorf("chat.postMessage: %s", code)
+	return fmt.Errorf("%s: %s", op, code)
+}
+
+// slackChatPostMessageResponseError preserves the chat.postMessage error shape: no
+// ok:false code is benign (a post that didn't happen is a real failure the delivery
+// worker must surface).
+func slackChatPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
+	return slackWebAPIResponseError("chat.postMessage", nil, statusCode, header, raw)
+}
+
+// slackReactionAddBenign / slackReactionRemoveBenign are the idempotent no-op ok:false
+// codes the best-effort working-on-it ack treats as success: the reaction already
+// exists (add) or is already absent (remove) — the desired end state already holds.
+var (
+	slackReactionAddBenign    = map[string]struct{}{"already_reacted": {}}
+	slackReactionRemoveBenign = map[string]struct{}{"no_reaction": {}}
+)
+
+// slackReactionPort implements [internal.ReactionPort] over reactions.add /
+// reactions.remove. Each verb has its own shared-transport poster (token lookup + Grid
+// fallback + benign-tolerant parse), and the two share one http.Client — one
+// short-lived best-effort call at a time. This is the conversation-mode ack seam.
+type slackReactionPort struct {
+	add    *slackWebAPIPoster
+	remove *slackWebAPIPoster
+}
+
+func newSlackReactionPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, addURL, removeURL string, httpClient *http.Client) internal.ReactionPort {
+	if httpClient == nil {
+		// Reuse the chat.postMessage transport posture: 4s timeout + redirect-as-response.
+		httpClient = defaultSlackPostMessageClient()
+	}
+	add := newSlackWebAPIPoster(lookup, userAgent, addURL, "reactions.add",
+		func(s int, h http.Header, raw []byte) error {
+			return slackWebAPIResponseError("reactions.add", slackReactionAddBenign, s, h, raw)
+		}, httpClient)
+	remove := newSlackWebAPIPoster(lookup, userAgent, removeURL, "reactions.remove",
+		func(s int, h http.Header, raw []byte) error {
+			return slackWebAPIResponseError("reactions.remove", slackReactionRemoveBenign, s, h, raw)
+		}, httpClient)
+	return &slackReactionPort{add: add, remove: remove}
+}
+
+func (p *slackReactionPort) Add(ctx context.Context, teamID, enterpriseID, channelID, timestamp, name string) error {
+	return p.react(ctx, p.add, teamID, enterpriseID, channelID, timestamp, name)
+}
+
+func (p *slackReactionPort) Remove(ctx context.Context, teamID, enterpriseID, channelID, timestamp, name string) error {
+	return p.react(ctx, p.remove, teamID, enterpriseID, channelID, timestamp, name)
+}
+
+// react marshals the (identical add/remove) reactions body once and posts it via the
+// given verb's poster — the shared body of Add and Remove.
+func (p *slackReactionPort) react(ctx context.Context, poster *slackWebAPIPoster, teamID, enterpriseID, channelID, timestamp, name string) error {
+	body, err := marshalReactionBody(channelID, timestamp, name)
+	if err != nil {
+		return err
+	}
+	return poster.post(ctx, teamID, enterpriseID, body)
+}
+
+// marshalReactionBody builds the reactions.add/remove payload (identical for both).
+func marshalReactionBody(channelID, timestamp, name string) ([]byte, error) {
+	body, err := json.Marshal(struct {
+		Channel   string `json:"channel"`
+		Timestamp string `json:"timestamp"`
+		Name      string `json:"name"`
+	}{Channel: channelID, Timestamp: timestamp, Name: name})
+	if err != nil {
+		return nil, fmt.Errorf("reactions request marshal: %w", err)
+	}
+	return body, nil
 }

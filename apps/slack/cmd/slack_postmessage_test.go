@@ -220,7 +220,7 @@ func TestSlackPostMessageFuncRejectsOversizedResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Write more than the bounded-read limit so the seam trips its cap.
 		_, _ = w.Write([]byte(`{"ok":true,"padding":"`))
-		_, _ = w.Write([]byte(strings.Repeat("a", slackChatPostMessageResponseBodyLimit+1024)))
+		_, _ = w.Write([]byte(strings.Repeat("a", slackWebAPIResponseBodyLimit+1024)))
 		_, _ = w.Write([]byte(`"}`))
 	}))
 	t.Cleanup(srv.Close)
