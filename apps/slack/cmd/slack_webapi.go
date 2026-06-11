@@ -293,11 +293,13 @@ func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string,
 }
 
 // postOnce resolves one owner's bot token (workspace team or, on the Grid fallback,
-// the enterprise org) and POSTs the already-marshaled body.
-func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body []byte) error {
+// the enterprise org) and POSTs the already-marshaled body, returning the (size-bounded)
+// response body alongside the parsed error. Most seams ignore the body (via post); only
+// chat.startStream reads it, for the stream ts (see slackAgentStreamPort.StartStream).
+func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body []byte) ([]byte, error) {
 	token, err := p.lookup(ctx, ownerID)
 	if err != nil {
-		return fmt.Errorf("%s token lookup: %w", p.op, err)
+		return nil, fmt.Errorf("%s token lookup: %w", p.op, err)
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -305,11 +307,11 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 		// trigger the Grid fallback. That's fine: the real workspaceTokenLookup returns
 		// ErrSlackBotTokenNotConfigured (which does fall back), never an empty-but-nil
 		// token. A future lookup returning ("", nil) on a miss would need the sentinel.
-		return fmt.Errorf("%s token lookup: empty token", p.op)
+		return nil, fmt.Errorf("%s token lookup: empty token", p.op)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("%s request build: %w", p.op, err)
+		return nil, fmt.Errorf("%s request build: %w", p.op, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -317,36 +319,36 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s request: %w", p.op, err)
+		return nil, fmt.Errorf("%s request: %w", p.op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
 	if err != nil {
-		return fmt.Errorf("%s response read: %w", p.op, err)
+		return nil, fmt.Errorf("%s response read: %w", p.op, err)
 	}
 	if len(raw) > slackWebAPIResponseBodyLimit {
 		// LimitReader already consumed limit+1 bytes; drain the rest before Close so a
 		// keep-alive transport can reuse the connection after an oversized response
 		// (mirrors the views.open drain).
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("%s response exceeded %d bytes", p.op, slackWebAPIResponseBodyLimit)
+		return nil, fmt.Errorf("%s response exceeded %d bytes", p.op, slackWebAPIResponseBodyLimit)
 	}
-	return p.respErr(resp.StatusCode, resp.Header, raw)
+	return raw, p.respErr(resp.StatusCode, resp.Header, raw)
 }
 
-// post sends body with the workspace token, then retries once with the Enterprise
-// Grid org-install token when the workspace itself has no bot token and the
-// enterprise is a distinct owner. Same retry as openViewWithGridFallback; it lives
-// in this seam because PostMessage*Func carry enterpriseID (OpenView's seam takes
-// only teamID, so its handler owns the retry). body is reused across both attempts.
-func (p *slackWebAPIPoster) post(ctx context.Context, teamID, enterpriseID string, body []byte) error {
-	err := p.postOnce(ctx, teamID, body)
+// gridPost sends body with the workspace token, then retries once with the Enterprise
+// Grid org-install token when the workspace itself has no bot token and the enterprise
+// is a distinct owner. Same retry as openViewWithGridFallback; it lives in this seam
+// because PostMessage*Func carry enterpriseID. body is reused across both attempts.
+// Returns the successful (or last) attempt's response body.
+func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID string, body []byte) ([]byte, error) {
+	raw, err := p.postOnce(ctx, teamID, body)
 	if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-		return err
+		return raw, err
 	}
 	if enterpriseID == "" || enterpriseID == teamID {
-		return err
+		return raw, err
 	}
 	// Parity with openViewWithGridFallback's warn: a breadcrumb so an operator
 	// debugging "why is the bot posting as the org install?" can see the workspace
@@ -354,6 +356,14 @@ func (p *slackWebAPIPoster) post(ctx context.Context, teamID, enterpriseID strin
 	slog.Warn("workspace Slack bot token missing; retrying with Enterprise Grid install token",
 		"op", p.op, "team_id", teamID, "enterprise_id", enterpriseID)
 	return p.postOnce(ctx, enterpriseID, body)
+}
+
+// post sends body with the Grid fallback, discarding the response body — the shape the
+// fire-and-forget seams (chat.postMessage, reactions, assistant.threads.*, views.publish,
+// chat.appendStream/stopStream) use.
+func (p *slackWebAPIPoster) post(ctx context.Context, teamID, enterpriseID string, body []byte) error {
+	_, err := p.gridPost(ctx, teamID, enterpriseID, body)
+	return err
 }
 
 // newSlackPostMessageFuncWithTokenLookup builds the [internal.PostMessageFunc] seam:
@@ -435,6 +445,92 @@ func newSlackAppHomePublishFuncWithTokenLookup(lookup slackBotTokenLookup, userA
 		}
 		return poster.post(ctx, teamID, enterpriseID, body)
 	}
+}
+
+const (
+	slackChatStartStreamURL  = "https://slack.com/api/chat.startStream"
+	slackChatAppendStreamURL = "https://slack.com/api/chat.appendStream"
+	slackChatStopStreamURL   = "https://slack.com/api/chat.stopStream"
+)
+
+// slackAgentStreamPort implements [internal.AgentStreamPort] over Slack's native AI-app
+// streaming. startStream reads the response for the stream ts; appendStream/stopStream
+// are fire-and-forget. All three share the per-team token lookup + Grid fallback poster.
+type slackAgentStreamPort struct {
+	start *slackWebAPIPoster
+	appnd *slackWebAPIPoster
+	stop  *slackWebAPIPoster
+}
+
+func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, startURL, appendURL, stopURL string, httpClient *http.Client) internal.AgentStreamPort {
+	if httpClient == nil {
+		// One shared client across start/append×N/stop so a streamed turn's verb sequence
+		// reuses keep-alive connections (parity with the assistant/reactions ports).
+		httpClient = defaultSlackPostMessageClient()
+	}
+	mk := func(url, op string) *slackWebAPIPoster {
+		return newSlackWebAPIPoster(lookup, userAgent, url, op, func(s int, h http.Header, raw []byte) error {
+			return slackWebAPIResponseError(op, nil, s, h, raw)
+		}, httpClient)
+	}
+	return &slackAgentStreamPort{
+		start: mk(startURL, "chat.startStream"),
+		appnd: mk(appendURL, "chat.appendStream"),
+		stop:  mk(stopURL, "chat.stopStream"),
+	}
+}
+
+func (p *slackAgentStreamPort) StartStream(ctx context.Context, teamID, enterpriseID, channelID, threadTS, recipientUserID string) (string, error) {
+	// RecipientTeamID is the caller's workspace team — correct for the pane (DM) turns this
+	// serves today, where the recipient and the owning workspace are the same. The channel /
+	// Enterprise-Grid streaming follow-up (#706) can stream to a recipient in a DIFFERENT team,
+	// where recipient_team_id must be the recipient's team, not teamID — revisit this there.
+	body, err := json.Marshal(struct {
+		Channel         string `json:"channel"`
+		ThreadTS        string `json:"thread_ts,omitempty"`
+		RecipientTeamID string `json:"recipient_team_id,omitempty"`
+		RecipientUserID string `json:"recipient_user_id,omitempty"`
+	}{Channel: channelID, ThreadTS: threadTS, RecipientTeamID: teamID, RecipientUserID: recipientUserID})
+	if err != nil {
+		return "", fmt.Errorf("chat.startStream request marshal: %w", err)
+	}
+	raw, err := p.start.gridPost(ctx, teamID, enterpriseID, body)
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		TS string `json:"ts"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return "", fmt.Errorf("chat.startStream: decode response: %w", err)
+	}
+	if r.TS == "" {
+		return "", errors.New("chat.startStream: response carried no stream ts")
+	}
+	return r.TS, nil
+}
+
+func (p *slackAgentStreamPort) AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error {
+	body, err := json.Marshal(struct {
+		Channel      string `json:"channel"`
+		TS           string `json:"ts"`
+		MarkdownText string `json:"markdown_text"`
+	}{Channel: channelID, TS: streamTS, MarkdownText: markdownText})
+	if err != nil {
+		return fmt.Errorf("chat.appendStream request marshal: %w", err)
+	}
+	return p.appnd.post(ctx, teamID, enterpriseID, body)
+}
+
+func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error {
+	body, err := json.Marshal(struct {
+		Channel string `json:"channel"`
+		TS      string `json:"ts"`
+	}{Channel: channelID, TS: streamTS})
+	if err != nil {
+		return fmt.Errorf("chat.stopStream request marshal: %w", err)
+	}
+	return p.stop.post(ctx, teamID, enterpriseID, body)
 }
 
 // newSlackResolveChannelNameFuncWithTokenLookup builds the
