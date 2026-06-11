@@ -466,20 +466,33 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		return
 	}
 
-	// Resolve the channel name for a friendlier system prompt ("#general (C123)" vs
-	// the bare id). shouldDispatchAgentEvent admits app_mention (any channel type) and
-	// message.im (1:1 DMs); skipping channel_type=="im" covers those DMs. An
-	// app_mention in a group DM (mpim) still resolves here, but conversations.info
-	// returns no usable name → negative-cached, harmless. Cached per channel
-	// (channelNameTTL), best-effort; describeChannel falls back to the id when empty.
+	// The channel the agent OPERATES on this turn (scopes every channel-scoped read via
+	// TurnContext.ChannelID). For an @mention it's the channel the mention came from; for an
+	// assistant-pane (DM) turn it's the channel the user opened the pane FROM — but only when
+	// they're a confirmed member of it (paneContextChannel), else the bare DM. The reply
+	// still posts to env.Event.Channel; only the operating channel changes. The mutation path
+	// is unaffected — it anchors to env.Event.Channel / the click's channel, never this — so
+	// the override widens reads only, never actions.
+	operatingChannel := env.Event.Channel
+	if env.Event.ChannelType == slackChannelTypeIM {
+		if c := h.paneContextChannel(ctx, log, env); c != "" {
+			operatingChannel = c
+		}
+	}
+
+	// Resolve the operating channel's name for a friendlier system prompt ("#general (C123)"
+	// vs the bare id). A 1:1 DM with no pane context has no usable name → skipped; a scoped
+	// pane operates on a real channel, so it resolves like an @mention. (An app_mention in a
+	// group DM still resolves but yields no name → negative-cached, harmless.) Cached per
+	// channel (channelNameTTL), best-effort; describeChannel falls back to the id when empty.
 	channelName := ""
-	if env.Event.ChannelType != slackChannelTypeIM {
-		channelName = h.resolveChannelName(ctx, log, env.TeamID, env.EnterpriseID, env.Event.Channel)
+	if operatingChannel != env.Event.Channel || env.Event.ChannelType != slackChannelTypeIM {
+		channelName = h.resolveChannelName(ctx, log, env.TeamID, env.EnterpriseID, operatingChannel)
 	}
 	tc := agent.TurnContext{
 		TeamID:        env.TeamID,
 		EnterpriseID:  env.EnterpriseID,
-		ChannelID:     env.Event.Channel,
+		ChannelID:     operatingChannel,
 		ChannelName:   channelName,
 		UserID:        env.Event.User,
 		CallerIsAdmin: h.callerIsAdmin(log, env.TeamID, env.Event.User),

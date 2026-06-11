@@ -162,6 +162,12 @@ func run() error {
 	// ("#general (C123)"). Always wired (same token lookup); degrades to the bare
 	// channel id until the channels:read / groups:read scopes are in the manifest.
 	agentResolveChannelName := newSlackResolveChannelNameFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// conversations.members seam: gates whether an assistant-pane turn may scope its reads
+	// to the channel the user opened the pane from (only a confirmed member's pane is
+	// scoped). Always wired (same token lookup + channels:read / groups:read scopes as the
+	// name resolver); fail-closed, so until the scopes are in the manifest it answers
+	// missing_scope and the pane stays on the un-scoped DM.
+	agentChannelMembership := newSlackChannelMembershipFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsMembersURL, nil)
 	// assistant.threads.* seam for the Assistants-container UX (first-run title +
 	// suggested prompts, and the per-turn "thinking…" status). Always wired (same token
 	// lookup); inert until the "Agents & AI Apps" manifest toggle + assistant:write scope
@@ -239,6 +245,7 @@ func run() error {
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
 		Reactions:                   agentReactions,
 		ResolveChannelName:          agentResolveChannelName,
+		ChannelMembership:           agentChannelMembership,
 		AssistantThreads:            agentAssistantThreads,
 	})
 

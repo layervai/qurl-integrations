@@ -392,6 +392,16 @@ type Config struct {
 	// resolve error never fails the turn.
 	ResolveChannelName ResolveChannelNameFunc
 
+	// ChannelMembership reports whether a user is a member of a channel
+	// (conversations.members on the per-workspace bot token, Grid-aware). It gates whether
+	// an assistant-pane turn may scope its reads to the channel the user opened the pane
+	// from: only a confirmed member's pane is scoped, so the agent never enumerates a
+	// channel's qURL topology to a non-member previewing it. Nil disables the scope (the
+	// pane stays on the un-scoped DM). Best-effort + fail-closed: an error or timeout means
+	// "not confirmed" → no scope. Results are cached per-Handler with a TTL. Reuses the
+	// channels:read / groups:read scopes (same as ResolveChannelName).
+	ChannelMembership ChannelMembershipFunc
+
 	// AssistantThreads drives the Slack Assistants-container UX via assistant.threads.*:
 	// setTitle / setSuggestedPrompts give a freshly-opened pane its first-run title +
 	// starter prompts, and setStatus shows the native "thinking…" indicator while a pane
@@ -425,6 +435,15 @@ type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, chann
 // transport failure — the caller treats any error as "no name" and falls back to
 // the channel id.
 type ResolveChannelNameFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error)
+
+// ChannelMembershipFunc reports whether userID is a member of channelID via
+// conversations.members on the per-workspace bot token (enterpriseID for Grid token
+// resolution). It returns (false, nil) when the bounded membership scan completes without
+// finding the user — a non-member, or a member beyond the scanned bound — and a non-nil
+// error on a transport/decode failure OR a Slack ok:false (missing scope, channel_not_found,
+// or a private channel the bot isn't in). The caller treats any error or a false as "don't
+// scope", so the gate is fail-closed by construction either way.
+type ChannelMembershipFunc func(ctx context.Context, teamID, enterpriseID, channelID, userID string) (bool, error)
 
 // SuggestedPrompt is one Assistants-container starter prompt: Title is the short
 // clickable label, Message is the text inserted into the composer when clicked.
@@ -467,6 +486,10 @@ type Handler struct {
 	// for the process with a TTL. nil-receiver-safe, so a Handler built without
 	// NewHandler simply doesn't cache. See handler_agent_channel.go.
 	channelNames *channelNameCache
+	// channelMembers memoizes agent (channel, user) membership decisions
+	// (cfg.ChannelMembership) for the process with a TTL. nil-receiver-safe; see
+	// handler_agent_membership.go.
+	channelMembers *channelMembershipCache
 	// oauthSetup carries the runtime configuration the /qurl setup
 	// slash-command needs to mint a state token and build the /start
 	// URL. nil when the OAuth surface is not configured (sandbox /
@@ -608,6 +631,7 @@ func NewHandler(cfg Config) *Handler {
 		responseURLClient:     respClient,
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),
+		channelMembers:        newChannelMembershipCache(channelMembershipTTL),
 	}
 }
 

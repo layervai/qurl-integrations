@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -222,6 +223,24 @@ const (
 )
 
 const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
+const slackConversationsMembersURL = "https://slack.com/api/conversations.members"
+
+const (
+	// maxMembershipPages bounds the conversations.members page scan for one membership check.
+	// Coverage is up to maxMembershipPages × the EFFECTIVE per-page size — and Slack may return
+	// fewer than membershipPageLimit per page (its docs recommend ≤200 and warn a page can be
+	// short even when the list isn't exhausted), so don't assume the full 2×1000. A member
+	// beyond whatever the scan reaches reads as not-confirmed and the pane stays un-scoped — an
+	// acceptable degradation for a best-effort access guard, NOT a correctness bug (the bound is
+	// the cap, fail-closed is the safety); it also bounds the non-member case, which would
+	// otherwise scan every page. The effective page size should be confirmed against a large
+	// channel before enablement (qurl-integrations-infra#1004) and the bound tuned if it's small.
+	maxMembershipPages = 2
+	// membershipPageLimit is the per-page member count REQUESTED (member ids are a light
+	// payload). Slack may cap the returned page below this (see maxMembershipPages); requesting
+	// the practical max just maximizes coverage where Slack honors it.
+	membershipPageLimit = 1000
+)
 
 const (
 	slackAssistantSetTitleURL            = "https://slack.com/api/assistant.threads.setTitle"
@@ -460,6 +479,115 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 			return name, err
 		}
 		return get(ctx, enterpriseID, channelID)
+	}
+}
+
+// fetchConversationsMembersPage GETs one conversations.members page on token and returns its
+// member ids + the next_cursor (empty when the membership is exhausted). The body is bounded
+// by slackWebAPIResponseBodyLimit; a Slack ok:false surfaces as an error.
+func fetchConversationsMembersPage(ctx context.Context, httpClient *http.Client, baseURL, userAgent, token, channelID, cursor string) (members []string, nextCursor string, err error) {
+	// channelID is a trusted Slack object id (its charset has no query-reserved character —
+	// see the conversations.info seam); the cursor is Slack-issued and opaque (can carry
+	// '=' / '/' / '+'), so it MUST be escaped.
+	reqURL := fmt.Sprintf("%s?channel=%s&limit=%d", baseURL, channelID, membershipPageLimit)
+	if cursor != "" {
+		reqURL += "&cursor=" + neturl.QueryEscape(cursor)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+	if err != nil {
+		return nil, "", fmt.Errorf("conversations.members request build: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("conversations.members request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("conversations.members response read: %w", err)
+	}
+	if len(raw) > slackWebAPIResponseBodyLimit {
+		_, _ = io.Copy(io.Discard, resp.Body) // drain so keep-alive can reuse the connection
+		return nil, "", fmt.Errorf("conversations.members response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+	}
+	var out struct {
+		OK               bool     `json:"ok"`
+		Error            string   `json:"error"`
+		Members          []string `json:"members"`
+		ResponseMetadata struct {
+			NextCursor string `json:"next_cursor"`
+		} `json:"response_metadata"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, "", fmt.Errorf("conversations.members decode: %w", err)
+	}
+	if !out.OK {
+		slackErr := out.Error
+		if slackErr == "" {
+			slackErr = fmt.Sprintf("status %d", resp.StatusCode)
+		}
+		return nil, "", fmt.Errorf("conversations.members: %s", slackErr)
+	}
+	return out.Members, out.ResponseMetadata.NextCursor, nil
+}
+
+// newSlackChannelMembershipFuncWithTokenLookup builds the [internal.ChannelMembershipFunc]
+// seam: a bounded conversations.members scan on the per-workspace bot token reporting
+// whether userID is a member of channelID. Like the conversations.info seam it parses the
+// response and replicates the token lookup + Enterprise Grid org-token fallback. Requires
+// the channels:read / groups:read scopes (same as ResolveChannelName) — without them Slack
+// answers missing_scope and the caller treats the error as "not confirmed" (no scope). It
+// scans at most maxMembershipPages pages, so a member beyond that bound reads as
+// not-confirmed; that's an acceptable degradation for a best-effort access guard.
+func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsMembersURL string, httpClient *http.Client) internal.ChannelMembershipFunc {
+	if httpClient == nil {
+		httpClient = defaultSlackPostMessageClient()
+	}
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		userAgent = defaultSlackAPIUserAgent
+	}
+	// isMember runs the bounded page scan + member match on one owner's token; a token-lookup
+	// failure wraps %w so the outer Grid fallback can retry on the org token.
+	isMember := func(ctx context.Context, ownerID, channelID, userID string) (bool, error) {
+		token, err := lookup(ctx, ownerID)
+		if err != nil {
+			return false, fmt.Errorf("conversations.members token lookup: %w", err)
+		}
+		if token = strings.TrimSpace(token); token == "" {
+			return false, errors.New("conversations.members token lookup: empty token")
+		}
+		// Scan up to maxMembershipPages, following next_cursor: a hit returns true; an
+		// exhausted-within-bound scan (or a member beyond the bound) returns false — the
+		// fail-closed degradation.
+		cursor := ""
+		for page := 0; page < maxMembershipPages; page++ {
+			members, next, err := fetchConversationsMembersPage(ctx, httpClient, conversationsMembersURL, userAgent, token, channelID, cursor)
+			if err != nil {
+				return false, err
+			}
+			for _, m := range members {
+				if m == userID {
+					return true, nil
+				}
+			}
+			if cursor = next; cursor == "" {
+				break
+			}
+		}
+		return false, nil
+	}
+	return func(ctx context.Context, teamID, enterpriseID, channelID, userID string) (bool, error) {
+		member, err := isMember(ctx, teamID, channelID, userID)
+		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+			return member, err
+		}
+		if enterpriseID == "" || enterpriseID == teamID {
+			return member, err
+		}
+		return isMember(ctx, enterpriseID, channelID, userID)
 	}
 }
 
