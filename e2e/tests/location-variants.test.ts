@@ -94,7 +94,9 @@ describe('Location Variants', () => {
     // revoked in afterAll even if an expect() below throws — otherwise it leaks
     // past cleanup, reintroducing the exact uncleaned-prod-state class this fix
     // closes. (Matches google-maps.test.ts, which tracks before validating.)
-    createdResourceIds.push(result.resource_id);
+    // Guard on a defined id so a malformed mint fails only its assertion below,
+    // not also a spurious `revokeLink(undefined)` 404 warning in afterAll.
+    if (result.resource_id) createdResourceIds.push(result.resource_id);
     expect(result.qurl_link).toBeDefined();
     expect(result.resource_id).toMatch(/^r_/);
     console.log(`${id}: ${result.qurl_link}`);
@@ -121,7 +123,7 @@ describe('Location Variants', () => {
       target_url: withRunNonce('https://example.com/access-location-test'),
       expires_in: '1h',
     });
-    createdResourceIds.push(result.resource_id);
+    if (result.resource_id) createdResourceIds.push(result.resource_id);
     const res = await qurl.accessLink(result.qurl_link);
     expect(res.status).toBe(200);
   });
