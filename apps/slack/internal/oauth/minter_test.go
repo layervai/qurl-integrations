@@ -444,6 +444,43 @@ func TestHTTPAPIKeyMinterMintWorkspaceAlreadyBound(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceEnvelopeCodesRequireExpectedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		code        string
+		mustNotWrap error
+	}{
+		{
+			name:        "api key limit on unexpected status",
+			code:        errCodeAPIKeyLimit,
+			mustNotWrap: ErrAPIKeyLimitReached,
+		},
+		{
+			name:        "already exists on unexpected status",
+			code:        errCodeAlreadyExists,
+			mustNotWrap: ErrExternalIdentityAlreadyBound,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"error":{"code":"`+tc.code+`","title":"Upstream Error","detail":"unexpected status"}}`)
+			}))
+			t.Cleanup(srv.Close)
+
+			m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+			err := mintWorkspaceOnlyErr(m)
+			if errors.Is(err, tc.mustNotWrap) {
+				t.Fatalf("unexpected typed error for 500 envelope: %v", err)
+			}
+			if err == nil || !strings.Contains(err.Error(), "500") {
+				t.Fatalf("expected generic 500 error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")

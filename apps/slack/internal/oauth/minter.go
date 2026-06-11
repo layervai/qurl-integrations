@@ -224,12 +224,18 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		}
 		switch errorEnvelopeCode(rb) {
 		case errCodeAPIKeyLimit:
+			if resp.StatusCode != http.StatusForbidden {
+				break
+			}
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		case errCodeAlreadyExists:
+			if resp.StatusCode != http.StatusConflict {
+				break
+			}
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
 		default:
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 		}
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 	}
 	var br bindingResponse
 	if err := json.Unmarshal(rb, &br); err != nil {

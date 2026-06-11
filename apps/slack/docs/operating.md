@@ -49,6 +49,11 @@ at the OAuth-callback bind layer.
   Missing or revoked stored keys ask qURL to provision the Slack workspace key;
   if qURL reports that the workspace is already connected but the stored key
   cannot be recovered, setup stops with admin-facing recovery guidance.
+  If the callback reports that a qURL key was provisioned but not stored,
+  rerun `/qurl setup <email>` for the same workspace and qURL account within
+  24 hours. qURL can replay the setup key during that window. After the window
+  expires, or if the admin abandons setup, use qURL account/API-key management
+  or operator tooling to revoke the unused workspace key before retrying.
   Rerunning setup is intentionally not a healthy-key rotation or qURL-account
   switch command; use the qURL dashboard / API-key management surface or
   operator tooling for rotation and admin hand-off. Keys are field-level

@@ -640,7 +640,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
 		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
-		slog.Error("oauth/callback qurl-service mint failed",
+		slog.Error("oauth/callback qurl-service provision failed",
 			"error", err,
 			"team_id", teamID,
 			"api_key_limit_reached", limitReached,
