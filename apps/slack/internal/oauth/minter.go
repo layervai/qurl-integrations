@@ -3,6 +3,8 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,36 +18,45 @@ import (
 
 const (
 	minterTimeout = 15 * time.Second
-	// minterBodyLimit caps the qurl-service /v1/api-keys response body.
+	// minterBodyLimit caps the qurl-service key-provision response body.
 	// The real response is ~few hundred bytes; 8 KiB is generous head-
 	// room without leaving an unbounded read on a misbehaving upstream.
 	minterBodyLimit = 8 << 10
 
 	// errCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
-	// when POST /v1/api-keys is refused because the owner is already at
+	// when key provisioning is refused because the owner is already at
 	// their plan's API-key cap (free tier = 3). Mirrors qurl-service's
 	// validation.ErrorCodeAPIKeyLimit. Both that endpoint's qurl:write
 	// scope gate AND this quota check surface as HTTP 403, so the status
 	// code alone can't disambiguate — the body `code` is the only signal.
-	errCodeAPIKeyLimit = "api_key_limit"
+	errCodeAPIKeyLimit         = "api_key_limit"
+	errCodeAlreadyExists       = "already_exists"
+	errCodeServiceUnavailable  = "service_unavailable"
+	bindingUnavailableRetrySec = "60"
 )
 
-// ErrAPIKeyLimitReached is returned by MintAPIKey when qurl-service refuses
-// the mint because the account holds the maximum number of API keys for its
-// plan. The OAuth callback maps this to an actionable "revoke a key" page
-// rather than the generic "try again" message — retrying never clears a
-// quota, so the old advice was actively misleading.
+// ErrAPIKeyLimitReached is returned when qurl-service refuses provisioning
+// because the account holds the maximum number of API keys for its plan. The
+// OAuth callback maps this to an actionable "revoke a key" page rather than
+// the generic "try again" message — retrying never clears a quota, so the old
+// advice was actively misleading.
 var ErrAPIKeyLimitReached = errors.New("qurl-service API key limit reached")
+
+// ErrExternalIdentityAlreadyBound is returned when qurl-service reports that
+// the Slack workspace already has an external identity binding, but the bot
+// cannot recover a usable stored workspace key locally.
+var ErrExternalIdentityAlreadyBound = errors.New("qurl-service external identity already bound")
 
 // ErrStoredAPIKeyInvalid is returned by ValidateAPIKey only when the
 // workspace's stored qURL API key is empty or rejected by qurl-service as
-// unauthenticated. The callback may mint a replacement for this case; other
-// validation errors, including 403, are treated as non-replaceable failures
-// because they may indicate a scope/server issue on an otherwise live key.
+// unauthenticated. The callback may attempt replacement provisioning for this
+// case; other validation errors, including 403, are treated as non-replaceable
+// failures because they may indicate a scope/server issue on an otherwise live
+// key.
 var ErrStoredAPIKeyInvalid = errors.New("stored qURL API key is invalid")
 
-// HTTPAPIKeyMinter is the production QURLAPIKeyMinter, calling
-// qurl-service /v1/api-keys with the Auth0 access_token as Bearer.
+// HTTPAPIKeyMinter is the production QURLAPIKeyMinter, calling qurl-service
+// with the Auth0 access_token as Bearer.
 type HTTPAPIKeyMinter struct {
 	// BaseURL is the qurl-service origin (e.g. https://api.layerv.ai).
 	// Trailing slashes are tolerated — joinAPIKeyURL uses url.JoinPath.
@@ -67,12 +78,26 @@ type mintRequest struct {
 	Scopes []string `json:"scopes"`
 }
 
+type bindingRequest struct {
+	Provider    string `json:"provider"`
+	ExternalID  string `json:"external_id"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
 type mintResponse struct {
 	Data struct {
 		APIKey    string `json:"api_key"`
 		KeyID     string `json:"key_id"`
 		KeyPrefix string `json:"key_prefix"`
 	} `json:"data"`
+}
+
+type bindingResponse struct {
+	APIKey struct {
+		Plaintext string `json:"plaintext"`
+		KeyID     string `json:"key_id"`
+		KeyPrefix string `json:"key_prefix"`
+	} `json:"api_key"`
 }
 
 func (m *HTTPAPIKeyMinter) client() *http.Client {
@@ -90,6 +115,15 @@ func (m *HTTPAPIKeyMinter) client() *http.Client {
 func (m *HTTPAPIKeyMinter) joinAPIKeyURL(elem ...string) (string, error) {
 	parts := append([]string{"v1", "api-keys"}, elem...)
 	u, err := url.JoinPath(m.BaseURL, parts...)
+	if err != nil {
+		return "", fmt.Errorf("compose qurl-service URL: %w", err)
+	}
+	return u, nil
+}
+
+// joinExternalBindingURL composes BaseURL + "/v1/external-identity-bindings".
+func (m *HTTPAPIKeyMinter) joinExternalBindingURL() (string, error) {
+	u, err := url.JoinPath(m.BaseURL, "v1", "external-identity-bindings")
 	if err != nil {
 		return "", fmt.Errorf("compose qurl-service URL: %w", err)
 	}
@@ -136,11 +170,83 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 	}
 }
 
-// MintAPIKey posts to POST /v1/api-keys with Bearer = accessToken.
-// Returns (apiKey, keyID, keyPrefix, err). All three plaintext fields
-// must be present for success — a missing keyID would leave us unable
-// to revoke an orphan key if the subsequent DDB persist fails.
-func (m *HTTPAPIKeyMinter) MintAPIKey(ctx context.Context, accessToken, name string, scopes []string) (apiKey, keyID, keyPrefix string, err error) {
+// MintWorkspaceAPIKey creates the Slack workspace external identity binding
+// and returns the qURL API key minted for that binding.
+func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (apiKey, keyID, keyPrefix string, err error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return "", "", "", errors.New("MintWorkspaceAPIKey: empty teamID")
+	}
+	displayName := "Slack workspace " + teamID
+	idempotencyKey := bindingIdempotencyKey(teamID)
+
+	body, err := json.Marshal(bindingRequest{
+		Provider:    "slack",
+		ExternalID:  teamID,
+		DisplayName: displayName,
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("marshal: %w", err)
+	}
+	reqURL, err := m.joinExternalBindingURL()
+	if err != nil {
+		return "", "", "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return "", "", "", fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Idempotency-Key", idempotencyKey)
+	resp, err := m.client().Do(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("do request: %w", err)
+	}
+	defer func() {
+		// Bounded drain — see callback.go drainCap rationale.
+		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
+		_ = resp.Body.Close()
+	}()
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
+	if err != nil {
+		return "", "", "", fmt.Errorf("read body: %w", err)
+	}
+	if len(rb) > minterBodyLimit {
+		return "", "", "", fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		if shouldFallbackToLegacyMint(resp.StatusCode, resp.Header, rb) {
+			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), idempotencyKey)
+		}
+		switch errorEnvelopeCode(rb) {
+		case errCodeAPIKeyLimit:
+			return "", "", "", fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+		case errCodeAlreadyExists:
+			return "", "", "", fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
+		default:
+			return "", "", "", fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
+		}
+	}
+	var br bindingResponse
+	if err := json.Unmarshal(rb, &br); err != nil {
+		return "", "", "", fmt.Errorf("parse response: %w", err)
+	}
+	if br.APIKey.Plaintext == "" || br.APIKey.KeyID == "" {
+		return "", "", "", errors.New("qurl-service returned empty api_key plaintext or key_id")
+	}
+	if br.APIKey.KeyPrefix == "" {
+		br.APIKey.KeyPrefix = storedAPIKeyPrefix(br.APIKey.Plaintext)
+	}
+	return br.APIKey.Plaintext, br.APIKey.KeyID, br.APIKey.KeyPrefix, nil
+}
+
+// mintLegacyAPIKey posts to POST /v1/api-keys. Returns (apiKey, keyID,
+// keyPrefix, err). apiKey and keyID must be present for success — a missing
+// keyID would leave us unable to revoke an orphan key if the subsequent DDB
+// persist fails.
+func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, name string, scopes []string, idempotencyKey string) (apiKey, keyID, keyPrefix string, err error) {
 	body, err := json.Marshal(mintRequest{Name: name, Scopes: scopes})
 	if err != nil {
 		return "", "", "", fmt.Errorf("marshal: %w", err)
@@ -156,6 +262,9 @@ func (m *HTTPAPIKeyMinter) MintAPIKey(ctx context.Context, accessToken, name str
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	resp, err := m.client().Do(req)
 	if err != nil {
 		return "", "", "", fmt.Errorf("do request: %w", err)
@@ -220,6 +329,25 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 	return nil
 }
 
+func bindingIdempotencyKey(teamID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(teamID)))
+	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
+}
+
+func shouldFallbackToLegacyMint(status int, header http.Header, body []byte) bool {
+	if status == http.StatusNotFound {
+		return true
+	}
+	if status != http.StatusServiceUnavailable {
+		return false
+	}
+	if header.Get("Retry-After") != bindingUnavailableRetrySec {
+		return false
+	}
+	return errorEnvelopeCode(body) == errCodeServiceUnavailable &&
+		strings.Contains(string(body), "not enabled")
+}
+
 // apiKeyLimitError reports whether body is a qurl-service error envelope
 // carrying the api-key-limit code. The envelope shape is
 // {"error":{"code":"...", ...}} — qurl-service's own nested form, NOT RFC
@@ -229,13 +357,17 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 // bare {"error":"forbidden"} string, or non-JSON) returns false so the
 // caller falls back to the generic status-code error.
 func apiKeyLimitError(body []byte) bool {
+	return errorEnvelopeCode(body) == errCodeAPIKeyLimit
+}
+
+func errorEnvelopeCode(body []byte) string {
 	var env struct {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return false
+		return ""
 	}
-	return env.Error.Code == errCodeAPIKeyLimit
+	return env.Error.Code
 }

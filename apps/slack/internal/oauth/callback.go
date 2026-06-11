@@ -45,10 +45,10 @@ const (
 	// persistTimeout — the two are separate constants so a future
 	// adjustment of one doesn't accidentally retune the other.
 	bindTimeout = 15 * time.Second
-	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
+	// mintTimeout bounds the qurl-service provisioning call from
 	// mintAndPersist. Same fresh-context rationale as persistTimeout:
-	// TimeoutHandler canceling mid-mint would orphan a key the bot
-	// can no longer revoke (no keyID to DELETE against).
+	// TimeoutHandler canceling mid-mint would orphan a key the bot can
+	// no longer revoke (no keyID to DELETE against).
 	mintTimeout         = 15 * time.Second
 	existingKeyTimeout  = 5 * time.Second
 	dmTimeout           = 5 * time.Second
@@ -208,7 +208,7 @@ type auth0TokenResponse struct {
 //     install can't overwrite the existing admin's stored API key.
 //     Same-caller re-entry is idempotent success.
 //  6. Reuse the stored workspace key when it still validates on
-//     qurl-service; otherwise POST to /v1/api-keys to mint one.
+//     qurl-service; otherwise create the workspace binding to mint one.
 //  7. For a newly minted key, upsert via WorkspaceStore.SetAPIKey; on
 //     failure, fire-and-forget revoke on qurl-service to bound the
 //     orphan-key window.
@@ -488,10 +488,10 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 		// owner_id matches the verified caller (owner-only short-circuit;
 		// added admins do NOT land here, they get AlreadyBound). We
 		// continue to the key stage, which reuses a healthy stored key
-		// or mints a replacement only when the stored key is missing or
-		// revoked. Operator-visible effect: setup succeeds, owner +
-		// admin set unchanged, and no extra key is minted for a healthy
-		// workspace.
+		// or attempts replacement provisioning only when the stored key
+		// is missing or revoked. Operator-visible effect: setup
+		// succeeds, owner + admin set unchanged, and no extra key is
+		// minted for a healthy workspace.
 		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID)
 		return true
@@ -619,7 +619,6 @@ func storedAPIKeyPrefix(apiKey string) string {
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
-	keyName := "Slack workspace " + teamID
 	// Fresh bounded context for the mint, decoupled from the request
 	// context. TimeoutHandler's 60s deadline could fire mid-mint;
 	// qurl-service may have already created the key, but we'd surface
@@ -629,12 +628,16 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// distinctly, qurl-service's idempotency will eventually reconcile.
 	mintCtx, mintCancel := context.WithTimeout(context.Background(), mintTimeout)
 	defer mintCancel()
-	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(mintCtx, accessToken,
-		keyName, apiKeyScopes())
+	apiKey, keyID, keyPrefix, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
 		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
-		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID, "api_key_limit_reached", limitReached)
+		slog.Error("oauth/callback qurl-service mint failed",
+			"error", err,
+			"team_id", teamID,
+			"api_key_limit_reached", limitReached,
+			"external_identity_already_bound", alreadyBound)
 		if limitReached {
 			// Quota is a precondition the admin must clear themselves —
 			// retrying does nothing (the old "run setup again" advice was
@@ -644,6 +647,11 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 			// qurl-service's to own.
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
 				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Revoke one you no longer use, then run /qurl setup <email> again.")
+			return "", false
+		}
+		if alreadyBound {
+			renderOAuthErrorPage(w, http.StatusConflict, "qURL already connected",
+				"qURL is already connected for this Slack workspace, but this setup attempt could not recover the workspace key. Contact your qURL administrator for help.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",

@@ -45,13 +45,15 @@ at the OAuth-callback bind layer.
   recovery override when a deployment must force a specific connection. The
   callback's security gate is the verified email claim, not the connection
   hint by itself. If a workspace already has a qURL API key and qurl-service
-  still accepts it, setup reuses that key instead of minting another one;
-  missing or revoked stored keys mint a replacement. Rerunning setup is
-  intentionally not a healthy-key rotation or qURL-account switch command;
-  revoke the workspace key from qURL's API-key management / dashboard or
-  operator tooling first, then rerun setup to mint a replacement under the
-  newly authenticated account. Keys are field-level encrypted at rest using
-  KMS envelope encryption, with `workspace_id` bound as AAD.
+  still accepts it, setup reuses that key instead of minting another one.
+  Missing or revoked stored keys ask qURL to provision the Slack workspace key;
+  if qURL reports that the workspace is already connected but the stored key
+  cannot be recovered, setup stops with admin-facing recovery guidance.
+  Rerunning setup is intentionally not a healthy-key rotation or qURL-account
+  switch command; use the qURL dashboard / API-key management surface or
+  operator tooling for rotation and admin hand-off. Keys are field-level
+  encrypted at rest using KMS envelope encryption, with `workspace_id` bound as
+  AAD.
 - **Slack app install:** customer workspaces install qURL through
   `/oauth/slack/install`, which redirects to Slack OAuth with the bot scopes
   needed by the slash command and modal surfaces. The callback stores Slack's
@@ -105,7 +107,7 @@ at the OAuth-callback bind layer.
 | `GET /oauth/slack/install` | Begin Slack app install; redirects to Slack OAuth |
 | `GET /oauth/slack/callback` | Slack OAuth redirect target; encrypts + persists workspace bot token |
 | `GET /oauth/qurl/start` | Begin OAuth flow (state token required) |
-| `GET /oauth/qurl/callback` | Auth0 redirect target; mints + persists key |
+| `GET /oauth/qurl/callback` | Auth0 redirect target; provisions + persists key |
 | `GET /health` | Load-balancer health probe |
 
 ## Development

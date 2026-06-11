@@ -12,38 +12,67 @@ import (
 	"testing"
 )
 
-// mintAPIKeyOnlyErr is a test helper that discards the three return values
-// the success-path tests assert on. Test error-only branches use it so
-// they aren't tripped by dogsled.
-func mintAPIKeyOnlyErr(m *HTTPAPIKeyMinter) error {
-	_, _, _, err := m.MintAPIKey(context.Background(), "tok", "name", nil) //nolint:dogsled // intentional discard on error-only paths.
+const (
+	testBindingPath = "/v1/external-identity-bindings"
+	testAPIKeysPath = "/v1/api-keys"
+)
+
+// mintWorkspaceOnlyErr is a test helper that discards the three return values
+// the success-path tests assert on. Test error-only branches use it so they
+// aren't tripped by dogsled.
+func mintWorkspaceOnlyErr(m *HTTPAPIKeyMinter) error {
+	_, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID) //nolint:dogsled // intentional discard on error-only paths.
 	return err
 }
 
-func TestHTTPAPIKeyMinterMintHappyPath(t *testing.T) {
+func writeBindingSuccess(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"api_key": map[string]string{
+			"plaintext":  testAPIKey,
+			"key_id":     testKeyID,
+			"key_prefix": testKeyPrefix,
+		},
+	})
+}
+
+func writeLegacyMintSuccess(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data": map[string]string{
+			"api_key":    testAPIKey,
+			"key_id":     testKeyID,
+			"key_prefix": testKeyPrefix,
+		},
+	})
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	var (
-		gotMethod string
-		gotPath   string
-		gotAuth   string
+		gotMethod         string
+		gotPath           string
+		gotAuth           string
+		gotIdempotencyKey string
+		gotBody           bindingRequest
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]string{
-				"api_key":    testAPIKey,
-				"key_id":     testKeyID,
-				"key_prefix": testKeyPrefix,
-			},
-		})
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeBindingSuccess(t, w)
 	}))
 	t.Cleanup(srv.Close)
+
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	apiKey, keyID, keyPrefix, err := m.MintAPIKey(context.Background(), "tok", "ws T1", []string{"qurl:read", "qurl:write"})
+	apiKey, keyID, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	if err != nil {
-		t.Fatalf("MintAPIKey: %v", err)
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
 	}
 	if apiKey != testAPIKey || keyID != testKeyID || keyPrefix != testKeyPrefix {
 		t.Errorf("unexpected fields: %q %q %q", apiKey, keyID, keyPrefix)
@@ -51,30 +80,119 @@ func TestHTTPAPIKeyMinterMintHappyPath(t *testing.T) {
 	if gotMethod != http.MethodPost {
 		t.Errorf("method: got %q want POST", gotMethod)
 	}
-	if gotPath != "/v1/api-keys" {
-		t.Errorf("path: got %q want /v1/api-keys", gotPath)
+	if gotPath != testBindingPath {
+		t.Errorf("path: got %q want %s", gotPath, testBindingPath)
 	}
 	if gotAuth != "Bearer tok" {
 		t.Errorf("auth: got %q want Bearer tok", gotAuth)
+	}
+	if gotIdempotencyKey != bindingIdempotencyKey(testTeamID) || len(gotIdempotencyKey) < 32 {
+		t.Errorf("Idempotency-Key = %q, want stable 32+ char key", gotIdempotencyKey)
+	}
+	if gotBody.Provider != "slack" || gotBody.ExternalID != testTeamID {
+		t.Errorf("binding body = %+v, want slack/%s", gotBody, testTeamID)
+	}
+	if gotBody.DisplayName != "Slack workspace "+testTeamID {
+		t.Errorf("display_name = %q", gotBody.DisplayName)
 	}
 }
 
 func TestHTTPAPIKeyMinterTolerateBaseURLTrailingSlash(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify the path doesn't get the double-slash treatment ("//v1").
-		if r.URL.Path != "/v1/api-keys" {
+		if r.URL.Path != testBindingPath {
 			http.Error(w, "wrong path "+r.URL.Path, http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]string{"api_key": "k", "key_id": "id", "key_prefix": "p"},
-		})
+		writeBindingSuccess(t, w)
 	}))
 	t.Cleanup(srv.Close)
+
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL + "/", HTTPClient: srv.Client()}
-	if _, _, _, err := m.MintAPIKey(context.Background(), "tok", "name", nil); err != nil {
-		t.Fatalf("MintAPIKey: %v", err)
+	if _, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID); err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testing.T) {
+	var paths []string
+	var legacyIdempotency string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case testBindingPath:
+			http.NotFound(w, r)
+		case testAPIKeysPath:
+			legacyIdempotency = r.Header.Get("Idempotency-Key")
+			writeLegacyMintSuccess(t, w)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	apiKey, keyID, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	if err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if apiKey != testAPIKey || keyID != testKeyID || keyPrefix != testKeyPrefix {
+		t.Errorf("unexpected fallback fields: %q %q %q", apiKey, keyID, keyPrefix)
+	}
+	if strings.Join(paths, ",") != testBindingPath+","+testAPIKeysPath {
+		t.Errorf("paths = %v", paths)
+	}
+	if legacyIdempotency != bindingIdempotencyKey(testTeamID) {
+		t.Errorf("legacy fallback Idempotency-Key = %q", legacyIdempotency)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingsDisabled(t *testing.T) {
+	var legacyCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case testBindingPath:
+			w.Header().Set("Retry-After", bindingUnavailableRetrySec)
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"code":"service_unavailable","detail":"External identity bindings are not enabled in this environment."}}`)
+		case testAPIKeysPath:
+			legacyCalled = true
+			writeLegacyMintSuccess(t, w)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if _, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID); err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if !legacyCalled {
+		t.Fatal("expected legacy fallback when bindings are disabled")
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnTransient503(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == testAPIKeysPath {
+			t.Fatal("must not fall back to legacy mint on transient binding 503")
+		}
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"code":"service_unavailable","detail":"Idempotency lookup transiently unavailable; retry with the same Idempotency-Key."}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil {
+		t.Fatal("expected error on transient 503")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("expected status code in error, got %q", err.Error())
 	}
 }
 
@@ -159,14 +277,14 @@ func TestHTTPAPIKeyMinterValidateAPIKeyRejectsEmptyKey(t *testing.T) {
 	}
 }
 
-func TestHTTPAPIKeyMinterMintNon2xx(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `{"error":"forbidden"}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := mintAPIKeyOnlyErr(m)
+	err := mintWorkspaceOnlyErr(m)
 	if err == nil {
 		t.Fatal("expected error on 4xx")
 	}
@@ -175,11 +293,7 @@ func TestHTTPAPIKeyMinterMintNon2xx(t *testing.T) {
 	}
 }
 
-// TestHTTPAPIKeyMinterMintAPIKeyLimit locks the contract that a 403 carrying
-// qurl-service's api_key_limit envelope maps to the ErrAPIKeyLimitReached
-// sentinel (so the callback can render the "revoke a key" guidance) — while
-// the plain {"error":"forbidden"} 403 above stays a generic status error.
-func TestHTTPAPIKeyMinterMintAPIKeyLimit(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
@@ -187,23 +301,30 @@ func TestHTTPAPIKeyMinterMintAPIKeyLimit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := mintAPIKeyOnlyErr(m)
+	err := mintWorkspaceOnlyErr(m)
 	if !errors.Is(err, ErrAPIKeyLimitReached) {
 		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
 	}
-	// The %w wrap also keeps the status in the message operator logs grep —
-	// lock it so a refactor that drops the "(status %d)" suffix is caught.
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected wrapped status code in error, got %q", err.Error())
 	}
 }
 
-// TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric is the negative case
-// for apiKeyLimitError's code match: a well-formed error envelope carrying a
-// NON-limit code (here insufficient_scope) must stay a generic status error,
-// not the ErrAPIKeyLimitReached sentinel. Pins that the match is on the exact
-// code, so a future "any code containing limit" loosening breaks loudly.
-func TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceAlreadyBound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":{"code":"already_exists","title":"Already Exists","detail":"Binding already exists"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if !errors.Is(err, ErrExternalIdentityAlreadyBound) {
+		t.Fatalf("expected ErrExternalIdentityAlreadyBound, got %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
@@ -211,7 +332,7 @@ func TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := mintAPIKeyOnlyErr(m)
+	err := mintWorkspaceOnlyErr(m)
 	if errors.Is(err, ErrAPIKeyLimitReached) {
 		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyLimitReached, got %v", err)
 	}
@@ -220,32 +341,26 @@ func TestHTTPAPIKeyMinterMintForbiddenEnvelopeStaysGeneric(t *testing.T) {
 	}
 }
 
-// TestHTTPAPIKeyMinterMintMissingAPIKey is the symmetric case to
-// MissingKeyID — qurl-service returns 200 with key_id but the api_key
-// field empty. The mint must reject so the bot doesn't hand the caller
-// "" and watch qurl-service surface an opaque 401 downstream.
-func TestHTTPAPIKeyMinterMintMissingAPIKey(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceMissingAPIKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"data":{"key_id":"k_1","key_prefix":"lv_x"}}`)
+		_, _ = io.WriteString(w, `{"api_key":{"key_id":"k_1","key_prefix":"lv_x"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	if err := mintAPIKeyOnlyErr(m); err == nil {
-		t.Fatal("expected error when api_key is empty")
+	if err := mintWorkspaceOnlyErr(m); err == nil {
+		t.Fatal("expected error when api_key plaintext is empty")
 	}
 }
 
-func TestHTTPAPIKeyMinterMintMissingKeyID(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceMissingKeyID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Note: api_key present, key_id missing → unable-to-revoke later
-		// so the minter must refuse rather than return ("lv_…", "", …).
-		_, _ = io.WriteString(w, `{"data":{"api_key":"lv_xxx","key_prefix":"lv_x"}}`)
+		_, _ = io.WriteString(w, `{"api_key":{"plaintext":"lv_xxx","key_prefix":"lv_x"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := mintAPIKeyOnlyErr(m)
+	err := mintWorkspaceOnlyErr(m)
 	if err == nil {
 		t.Fatal("expected error when key_id is missing")
 	}
@@ -293,23 +408,16 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	}
 }
 
-// TestHTTPAPIKeyMinterMintParseFailure exercises the json.Unmarshal
-// error path — qurl-service returning non-JSON 200 (e.g. a CDN error
-// page) should surface as a wrapped error rather than a zero-value
-// quiet success.
-func TestHTTPAPIKeyMinterMintParseFailure(t *testing.T) {
+func TestHTTPAPIKeyMinterMintWorkspaceParseFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "<html>not json</html>")
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	err := mintAPIKeyOnlyErr(m)
+	err := mintWorkspaceOnlyErr(m)
 	if err == nil {
 		t.Fatal("expected error on non-JSON 200")
 	}
-	// The wrapped error chain must preserve a json.SyntaxError so callers
-	// (and future tests) can errors.As on it. Pinning prevents a refactor
-	// that swaps json.Unmarshal for a string-only error message.
 	var syntaxErr *json.SyntaxError
 	if !errors.As(err, &syntaxErr) {
 		t.Errorf("expected json.SyntaxError in chain, got %v", err)

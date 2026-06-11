@@ -9,8 +9,8 @@
 // Auth0 redirects to /callback with `code` + `state`. /callback exchanges
 // the code for an access_token, verifies the id_token against Auth0's
 // JWKS, reuses an existing valid workspace qURL API key when possible,
-// otherwise mints one via POST /v1/api-keys, persists it via DDBProvider,
-// and DMs the admin.
+// otherwise provisions one through the qURL binding flow, persists it via
+// DDBProvider, and DMs the admin.
 //
 // The Slack workspace install side is handled by apps/slack/internal/slackinstall's
 // /oauth/slack/install routes. This package owns the qURL account connection
@@ -49,11 +49,11 @@ const (
 // server-wide write timeout (which would mask hung /slack/* requests).
 const oauthHandlerTimeout = 60 * time.Second
 
-// apiKeyScopes is the qurl-service scope set the callback requests for
-// the workspace API key. Returned fresh on each call so an in-package
-// caller can't mutate the slice and silently change every future mint.
-// authorizeURL also weaves "openid email" in for the id_token email
-// claim consumed by the success page.
+// apiKeyScopes is the qurl-service scope set the legacy fallback requests for
+// the workspace API key. Returned fresh on each call so an in-package caller
+// can't mutate the slice and silently change every future mint. authorizeURL
+// also weaves "openid email" in for the id_token email claim consumed by the
+// success page.
 func apiKeyScopes() []string {
 	return []string{"qurl:read", "qurl:write"}
 }
@@ -112,12 +112,12 @@ type SlackClient interface {
 	PostDirectMessage(ctx context.Context, userID, text string) error
 }
 
-// QURLAPIKeyMinter is the slice of qurl-service the callback hits to
-// mint the workspace-scoped key. Interface for the same testability
-// reason as SlackClient.
+// QURLAPIKeyMinter is the slice of qurl-service the callback hits to provision
+// the workspace-scoped key. Interface for the same testability reason as
+// SlackClient.
 type QURLAPIKeyMinter interface {
 	ValidateAPIKey(ctx context.Context, apiKey string) error
-	MintAPIKey(ctx context.Context, accessToken, name string, scopes []string) (apiKey, keyID, keyPrefix string, err error)
+	MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (apiKey, keyID, keyPrefix string, err error)
 	RevokeAPIKey(ctx context.Context, accessToken, keyID string) error
 }
 
@@ -243,8 +243,8 @@ type Config struct {
 	// inject a noop verifier; production wires a JWKSVerifier.
 	IDTokenVerifier IDTokenVerifier
 
-	// Minter calls qurl-service /v1/api-keys. Tests inject a fake;
-	// production wires HTTPAPIKeyMinter.
+	// Minter calls qurl-service to provision the workspace API key. Tests
+	// inject a fake; production wires HTTPAPIKeyMinter.
 	Minter QURLAPIKeyMinter
 
 	// SlackClient sends the success-confirmation DM. Tests can inject
