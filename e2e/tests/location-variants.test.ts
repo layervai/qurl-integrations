@@ -45,13 +45,16 @@ function withRunNonce(url: string): string {
 }
 
 afterAll(async () => {
-  // Best-effort: swallow failures (transient API hiccups, already-expired 1h
-  // links). Cleanup must never fail the run or mask a real test failure.
+  // Best-effort: never fail the run or mask a real test failure. But DO warn on
+  // a failed revoke — a systematically-failing cleanup (e.g. the key lost
+  // qurl:write) would otherwise silently let prod leaks resume, the exact thing
+  // this suite guards against. Transient single failures are harmless (the 1h
+  // links expire on their own).
   for (const id of createdResourceIds) {
     try {
       await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, id);
-    } catch {
-      /* best-effort cleanup */
+    } catch (err) {
+      console.warn(`afterAll: best-effort revoke of ${id} failed: ${String(err)}`);
     }
   }
 });
