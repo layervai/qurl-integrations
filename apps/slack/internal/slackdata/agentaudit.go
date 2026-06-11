@@ -39,17 +39,20 @@ const (
 
 // AuditEntry is one confirmed mutation, recorded for the App Home review surface.
 // Every field is a plain string the caller derives from the executed pending action.
-// The rendering surface MUST treat Target/Reason/Outcome as untrusted echo (they are
-// partly LLM-distilled / user-influenced) and escape or validate them exactly as the
-// confirm card does before display — never render them raw.
+// Any rendering surface MUST treat the displayed fields (Target, Reason) as untrusted
+// echo (they are partly LLM-distilled / user-influenced) and escape or validate them
+// exactly as the confirm card does before display — never render them raw.
 type AuditEntry struct {
 	Actor   string `json:"actor"`             // Slack user id who confirmed the action
 	Action  string `json:"action"`            // the mutation kind (get/revoke/set_alias/...)
 	Target  string `json:"target,omitempty"`  // the resource token/alias/url acted on
 	Channel string `json:"channel,omitempty"` // the channel the action ran in
 	Reason  string `json:"reason,omitempty"`  // the audit reason (LLM-distilled intent)
-	Outcome string `json:"outcome,omitempty"` // a short result summary
-	UnixSec int64  `json:"ts"`                // when it ran, for display (store-stamped)
+	// Outcome is the formatted public card text. Captured in the record, but the App
+	// Home summary does NOT echo it: escaping its intentional backticks for safety renders
+	// it degraded, and it largely repeats Target. A clean per-result line is a follow-up.
+	Outcome string `json:"outcome,omitempty"`
+	UnixSec int64  `json:"ts"` // when it ran, for display (store-stamped)
 }
 
 func (s *AgentStore) auditTTL() time.Duration {
@@ -100,7 +103,10 @@ func (s *AgentStore) PutAuditEntry(ctx context.Context, partition string, entry 
 // (the per-user boundary — never a cross-channel or workspace aggregate). A
 // non-positive limit falls back to defaultAuditListLimit. Past-TTL items are filtered
 // at read time (DynamoDB's TTL reaper lags by hours/days), and an entry whose payload
-// won't decode is skipped rather than failing the whole list.
+// won't decode is skipped rather than failing the whole list. Because Limit caps the
+// items SCANNED (newest-first) before that filter runs, a newest-N window heavy with
+// expired/corrupt items can return fewer than limit valid entries — fine for a
+// recent-actions view, not a fill-to-N guarantee (which would need over-fetch + trim).
 func (s *AgentStore) ListAuditEntries(ctx context.Context, partition, userID string, limit int) ([]AuditEntry, error) {
 	if partition == "" || userID == "" {
 		return nil, &Error{StatusCode: http.StatusBadRequest, Title: "ListAuditEntries: partition and user_id are required"}

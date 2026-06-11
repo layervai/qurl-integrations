@@ -66,7 +66,7 @@ func TestBuildAgentHomeView_EmptyState(t *testing.T) {
 
 func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 	entries := []slackdata.AuditEntry{
-		{Actor: "U1", Action: string(agent.ActionRevoke), Target: "billing", Channel: "C1", Outcome: "revoked the qURL and its links", UnixSec: 1_700_000_100},
+		{Actor: "U1", Action: string(agent.ActionRevoke), Target: "billing", Channel: "C1", Reason: "stale resource cleanup", Outcome: "revoked the qURL and its links", UnixSec: 1_700_000_100},
 		{Actor: "U1", Action: string(agent.ActionGet), Target: "staging", Channel: "C1", UnixSec: 1_700_000_000},
 	}
 	blocks := buildAgentHomeView(entries)
@@ -80,9 +80,13 @@ func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 	if !blocksContain(t, blocks, "Get access") || !blocksContain(t, blocks, "staging") {
 		t.Fatal("the get entry must render its neutral label + target")
 	}
-	// The captured Outcome (the real result) is rendered, so a failure would read honestly.
-	if !blocksContain(t, blocks, "revoked the qURL and its links") {
-		t.Fatal("the entry must render its captured Outcome")
+	// The audit reason renders (escaped); the formatted Outcome does NOT — its escaped
+	// backticks would read degraded, and it's captured in the record only (see #704).
+	if !blocksContain(t, blocks, "stale resource cleanup") {
+		t.Fatal("the entry must render its reason")
+	}
+	if blocksContain(t, blocks, "revoked the qURL and its links") {
+		t.Fatal("the formatted Outcome must not be echoed in the summary view")
 	}
 	// Channel renders as a Slack mention, not the raw id text.
 	if !blocksContain(t, blocks, "<#C1>") {

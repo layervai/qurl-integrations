@@ -92,14 +92,15 @@ func buildAgentHomeView(entries []slackdata.AuditEntry) []any {
 }
 
 // agentHomeEntryText renders one audit entry as mrkdwn. This is a PUBLIC-echo surface:
-// Target, Outcome, and Reason are partly LLM-distilled / core-generated, so they're
-// escaped with the same primitives the confirm card uses (escapeMrkdwnCode for the
-// backticked target, escapeMrkdwnText for free text) — a stored alias named "*ignore*"
-// or one carrying bidi/zero-width characters renders inert. The label is a NEUTRAL
-// description of the action attempted (not a success claim): the Outcome line carries
-// the real result, so a failed revoke/alias/protect-url reads honestly. (A get always
-// reports the same neutral public outcome — its true mint result is private and
-// deliberately not audited, mirroring the public card.)
+// Target and Reason are partly LLM-distilled, so they're escaped with the same
+// primitives the confirm card uses (escapeMrkdwnCode for the backticked target,
+// escapeMrkdwnText for the free-text reason) — a stored alias named "*ignore*" or one
+// carrying bidi/zero-width characters renders inert. The label is a NEUTRAL description
+// of the action attempted (not a success claim), so a failed action doesn't read as a
+// success. The stored Outcome is deliberately NOT echoed here: it's the formatted public
+// card text, and escaping its intentional backticks for safety would render it degraded
+// (and it largely repeats the target shown cleanly above) — a clean per-result line is a
+// follow-up (#704) that needs the action core to hand back a structured result.
 func agentHomeEntryText(e *slackdata.AuditEntry) string {
 	var b strings.Builder
 	b.WriteString("*")
@@ -121,20 +122,15 @@ func agentHomeEntryText(e *slackdata.AuditEntry) string {
 	b.WriteString("\n_")
 	b.WriteString(time.Unix(e.UnixSec, 0).UTC().Format("2006-01-02 15:04 MST"))
 	b.WriteString("_")
-	if e.Outcome != "" {
-		b.WriteString(" — ")
-		b.WriteString(escapeMrkdwnText(e.Outcome))
-	}
 	if e.Reason != "" {
-		b.WriteString("\n_")
+		b.WriteString(" · ")
 		b.WriteString(escapeMrkdwnText(e.Reason))
-		b.WriteString("_")
 	}
 	return b.String()
 }
 
 // agentHomeActionLabel maps a stored action kind to a NEUTRAL display label for the
-// action attempted (the Outcome line, not the label, reports success/failure), falling
+// action attempted (not a success claim — per-result success/failure is #704), falling
 // back to the raw kind (which the caller still escapes) for an unrecognized value.
 func agentHomeActionLabel(action string) string {
 	switch action {
