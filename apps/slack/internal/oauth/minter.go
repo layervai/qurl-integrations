@@ -215,12 +215,16 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
-	if len(rb) > minterBodyLimit {
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+	bodyOversized := len(rb) > minterBodyLimit
+	if bodyOversized {
+		rb = rb[:minterBodyLimit]
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
+		}
+		if bodyOversized {
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 		}
 		code := errorEnvelopeCode(rb)
 		if code == errCodeAPIKeyLimit && resp.StatusCode == http.StatusForbidden {
@@ -231,20 +235,31 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 	}
+	if bodyOversized {
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+	}
+	return bindingMintFromResponse(rb)
+}
+
+func bindingMintFromResponse(body []byte) (WorkspaceAPIKeyMint, error) {
 	var br bindingResponse
-	if err := json.Unmarshal(rb, &br); err != nil {
+	if err := json.Unmarshal(body, &br); err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("parse response: %w", err)
 	}
 	if br.APIKey.Plaintext == "" || br.APIKey.KeyID == "" {
 		return WorkspaceAPIKeyMint{}, errors.New("qurl-service returned empty api_key plaintext or key_id")
 	}
-	if br.APIKey.KeyPrefix == "" {
-		br.APIKey.KeyPrefix = storedAPIKeyPrefix(br.APIKey.Plaintext)
+	keyPrefix := br.APIKey.KeyPrefix
+	if keyPrefix == "" {
+		keyPrefix = storedAPIKeyPrefix(br.APIKey.Plaintext)
+	}
+	if keyPrefix == "" {
+		return WorkspaceAPIKeyMint{}, errors.New("qurl-service returned empty api_key key_prefix")
 	}
 	return WorkspaceAPIKeyMint{
 		APIKey:        br.APIKey.Plaintext,
 		KeyID:         br.APIKey.KeyID,
-		KeyPrefix:     br.APIKey.KeyPrefix,
+		KeyPrefix:     keyPrefix,
 		BindingBacked: true,
 	}, nil
 }
@@ -304,6 +319,9 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 	}
 	if mr.Data.KeyPrefix == "" {
 		mr.Data.KeyPrefix = storedAPIKeyPrefix(mr.Data.APIKey)
+	}
+	if mr.Data.KeyPrefix == "" {
+		return WorkspaceAPIKeyMint{}, errors.New("qurl-service returned empty key_prefix")
 	}
 	return WorkspaceAPIKeyMint{
 		APIKey:    mr.Data.APIKey,

@@ -149,6 +149,56 @@ func TestHTTPAPIKeyMinterMintWorkspaceDerivesBindingKeyPrefix(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceRejectsShortKeyWithoutPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "binding",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"api_key": map[string]string{
+						"plaintext": "short",
+						"key_id":    testKeyID,
+					},
+				})
+			},
+		},
+		{
+			name: "legacy fallback",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case testBindingPath:
+					http.NotFound(w, r)
+				case testAPIKeysPath:
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"data": map[string]string{
+							"api_key": "short",
+							"key_id":  testKeyID,
+						},
+					})
+				default:
+					http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			t.Cleanup(srv.Close)
+
+			m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+			err := mintWorkspaceOnlyErr(m)
+			if err == nil || !strings.Contains(err.Error(), "key_prefix") {
+				t.Fatalf("expected key_prefix error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestHTTPAPIKeyMinterTolerateBaseURLTrailingSlash(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify the path doesn't get the double-slash treatment ("//v1").
@@ -220,6 +270,35 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	}
 	if legacyIdempotency != legacyFallbackIdempotencyKey(testTeamID) {
 		t.Errorf("legacy fallback Idempotency-Key = %q", legacyIdempotency)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenRouteMissingBodyTooLarge(t *testing.T) {
+	var legacyCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case testBindingPath:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, strings.Repeat("route missing\n", minterBodyLimit))
+		case testAPIKeysPath:
+			legacyCalled = true
+			writeLegacyMintSuccess(t, w)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	if err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if !legacyCalled {
+		t.Fatal("expected legacy fallback for oversized unstructured 404")
+	}
+	if minted.BindingBacked {
+		t.Error("oversized route-missing fallback must not mark the key binding-backed")
 	}
 }
 
