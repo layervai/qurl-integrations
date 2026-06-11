@@ -51,13 +51,14 @@ at the OAuth-callback bind layer.
   cannot be recovered, setup stops with admin-facing recovery guidance.
   If the callback reports that a qURL key was provisioned but not stored,
   rerun `/qurl setup <email>` for the same workspace and qURL account within
-  24 hours. qURL can replay the setup key during that window; this value is
-  qurl-service's external-binding idempotency TTL and must stay in sync with
-  the qURL API rollout contract (`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`;
-  source: layervai/qurl-service#904, recovery follow-up: layervai/qurl-service#910).
-  After the window expires, or if the admin abandons setup, use qURL
-  account/API-key management or operator tooling to revoke the unused
-  workspace key before retrying.
+  qurl-service's configured external-binding idempotency window (currently 24
+  hours; `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`, source:
+  layervai/qurl-service#904). qURL can replay the setup key during that
+  window. After the window expires, if the stored Slack key is lost/revoked, or
+  if the admin abandons setup, use qURL account/API-key management or operator
+  tooling to revoke the unused workspace key before retrying; self-service
+  rotation/recovery for that path is tracked in layervai/qurl-service#910 and
+  abandoned binding-backed setup visibility is tracked in #710.
   Rerunning setup is intentionally not a healthy-key rotation or qURL-account
   switch command; use the qURL dashboard / API-key management surface or
   operator tooling for rotation and admin hand-off. Keys are field-level

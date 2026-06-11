@@ -224,8 +224,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
+	defer drainAndCloseResponse(resp)
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
-	drainAndCloseResponse(resp)
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
@@ -417,6 +417,10 @@ func apiKeyLimitError(body []byte) bool {
 	return errorEnvelopeCode(body) == errCodeAPIKeyLimit
 }
 
+// errorEnvelopeCode returns qurl-service's nested error.code when present.
+// It returns structuredErrorEnvelopeCode for qURL-like shapes that must fail
+// closed (JSON strings and code-less error objects), and "" for generic
+// route-missing bodies that may use the rollout fallback.
 func errorEnvelopeCode(body []byte) string {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
