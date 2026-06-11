@@ -208,15 +208,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
-	bindingBodyClosed := false
-	defer func() {
-		// The fallback branch closes the binding response before the nested
-		// legacy POST, so skip the normal deferred close in that path.
-		if !bindingBodyClosed {
-			drainAndCloseResponse(resp)
-		}
-	}()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
+	drainAndCloseResponse(resp)
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
@@ -227,8 +220,6 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		code := errorEnvelopeCode(rb)
 		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
-			drainAndCloseResponse(resp)
-			bindingBodyClosed = true
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
 		}
 		if bodyOversized {
@@ -391,8 +382,10 @@ func shouldFallbackToLegacyMint(status int, errorCode string) bool {
 		// without a qURL envelope code as legacy-compatible while the new
 		// endpoint rolls out, even though that can also catch an infra 404.
 		// TODO(#705): remove this path as soon as the binding route is live
-		// everywhere. If a deployed route returns a structured qURL error
-		// envelope, surface it instead of minting a legacy key.
+		// everywhere. A rollback during a persist-failure retry can otherwise
+		// fall back to a legacy key instead of replaying the binding. If a
+		// deployed route returns a structured qURL error envelope, surface it
+		// instead of minting a legacy key.
 		return errorCode == ""
 	}
 	if status != http.StatusServiceUnavailable {
