@@ -369,12 +369,8 @@ func drainAndCloseResponse(resp *http.Response) {
 func bindingIdempotencyKey(teamID string) string {
 	// qurl-service requires a 32+ character idempotency key. Slack team IDs
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
-	return workspaceIdempotencyKey("slack-workspace-binding-v1-", teamID)
-}
-
-func workspaceIdempotencyKey(prefix, teamID string) string {
 	sum := sha256.Sum256([]byte(teamID))
-	return prefix + hex.EncodeToString(sum[:])
+	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
 }
 
 func shouldFallbackToLegacyMint(status int, errorCode string) bool {
@@ -409,6 +405,9 @@ func apiKeyLimitError(body []byte) bool {
 }
 
 func errorEnvelopeCode(body []byte) string {
+	// Normal error envelopes parse completely. The partial parser below exists
+	// only for bounded reads where a truncated-but-structured qURL error must
+	// still fail closed instead of looking like a route-missing fallback.
 	var env struct {
 		Error json.RawMessage `json:"error"`
 	}
