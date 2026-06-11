@@ -53,9 +53,10 @@ at the OAuth-callback bind layer.
   rerun `/qurl setup <email>` for the same workspace and qURL account within
   24 hours. qURL can replay the setup key during that window; this value is
   qurl-service's external-binding idempotency TTL and must stay in sync with
-  the qURL API rollout contract. After the window expires, or if the admin
-  abandons setup, use qURL account/API-key management or operator tooling to
-  revoke the unused workspace key before retrying.
+  the qURL API rollout contract (`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`).
+  After the window expires, or if the admin abandons setup, use qURL
+  account/API-key management or operator tooling to revoke the unused
+  workspace key before retrying.
   Rerunning setup is intentionally not a healthy-key rotation or qURL-account
   switch command; use the qURL dashboard / API-key management surface or
   operator tooling for rotation and admin hand-off. Keys are field-level

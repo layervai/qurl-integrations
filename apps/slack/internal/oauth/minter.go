@@ -236,6 +236,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		code := errorEnvelopeCode(rb)
 		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
+			// Legacy fallback keys are revoked on local persist failure, so omit
+			// Idempotency-Key and preserve mint-fresh retry behavior.
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), "")
 		}
 		if bodyOversized {
