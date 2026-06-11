@@ -182,6 +182,8 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // returning already_exists. qurl-service scopes those records by authenticated
 // owner (pinned in qurl-service's APIKeyIdempotencyPKWithPurpose tests), so
 // another qURL principal cannot replay this workspace's plaintext.
+// qurl-service also assigns provider scopes server-side; Slack bindings are
+// pinned to the same qurl:read/qurl:write set requested by the legacy fallback.
 // After that replay window, the existing binding owns recovery: qurl-service
 // returns already_exists until the binding is rotated or revoked.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
