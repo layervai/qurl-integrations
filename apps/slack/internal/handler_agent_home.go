@@ -76,7 +76,7 @@ func (h *Handler) publishAgentHome(ctx context.Context, log *slog.Logger, teamID
 // section per recent action (newest-first, as ListAuditEntries returns them), or an
 // empty-state line when there are none.
 func buildAgentHomeView(entries []slackdata.AuditEntry) []any {
-	blocks := make([]any, 0, 3+len(entries)) // header + intro + divider + one per entry
+	blocks := make([]any, 0, 4+len(entries)) // header + intro + divider + entries (or the empty-state line)
 	blocks = append(blocks,
 		headerBlock(agentHomeTitle),
 		sectionBlock(agentHomeIntro),
@@ -110,7 +110,10 @@ func agentHomeEntryText(e *slackdata.AuditEntry) string {
 		b.WriteString(escapeMrkdwnCode(e.Target))
 		b.WriteString("`")
 	}
-	if e.Channel != "" {
+	// Guard the channel id like the escaped fields around it: render the mention only for
+	// a well-formed id (an id is normally a signature-verified payload.Channel.ID, but a
+	// stray ">" would close the mention early), so this surface is uniformly defended.
+	if slackChannelIDPattern.MatchString(e.Channel) {
 		b.WriteString(" in <#")
 		b.WriteString(e.Channel)
 		b.WriteString(">")
