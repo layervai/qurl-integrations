@@ -80,7 +80,7 @@ type mintRequest struct {
 type bindingRequest struct {
 	Provider    string `json:"provider"`
 	ExternalID  string `json:"external_id"`
-	DisplayName string `json:"display_name,omitempty"`
+	DisplayName string `json:"display_name"`
 }
 
 type mintResponse struct {
@@ -222,18 +222,12 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
 		}
-		switch errorEnvelopeCode(rb) {
-		case errCodeAPIKeyLimit:
-			if resp.StatusCode != http.StatusForbidden {
-				break
-			}
+		code := errorEnvelopeCode(rb)
+		if code == errCodeAPIKeyLimit && resp.StatusCode == http.StatusForbidden {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
-		case errCodeAlreadyExists:
-			if resp.StatusCode != http.StatusConflict {
-				break
-			}
+		}
+		if code == errCodeAlreadyExists && resp.StatusCode == http.StatusConflict {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
-		default:
 		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 	}
@@ -369,9 +363,9 @@ func shouldFallbackToLegacyMint(status int, body []byte) bool {
 	if status == http.StatusNotFound {
 		// During rollout, an older qurl-service has no route and returns an
 		// unstructured 404. Intentionally treat that as legacy-compatible
-		// while the new endpoint rolls out; remove this path after rollout.
-		// If a deployed route returns a structured qURL error envelope,
-		// surface it instead of minting a legacy key.
+		// while the new endpoint rolls out. TODO(#705): remove this path
+		// after rollout. If a deployed route returns a structured qURL error
+		// envelope, surface it instead of minting a legacy key.
 		return errorEnvelopeCode(body) == ""
 	}
 	if status != http.StatusServiceUnavailable {

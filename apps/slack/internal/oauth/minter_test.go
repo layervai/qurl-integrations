@@ -123,6 +123,13 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceRejectsEmptyTeamID(t *testing.T) {
+	m := &HTTPAPIKeyMinter{BaseURL: "https://api.example.test"}
+	if _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", " \t "); err == nil {
+		t.Fatal("expected error for empty teamID")
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceDerivesBindingKeyPrefix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeBindingSuccessWithoutPrefix(t, w)
