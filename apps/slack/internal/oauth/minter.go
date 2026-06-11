@@ -180,7 +180,8 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // successful binding responses in its idempotency store for the 24h setup-retry
 // window, so identical retries recover the same plaintext key instead of
 // returning already_exists. qurl-service scopes those records by authenticated
-// owner, so another qURL principal cannot replay this workspace's plaintext.
+// owner (pinned in qurl-service's APIKeyIdempotencyPKWithPurpose tests), so
+// another qURL principal cannot replay this workspace's plaintext.
 // After that replay window, the existing binding owns recovery: qurl-service
 // returns already_exists until the binding is rotated or revoked.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
