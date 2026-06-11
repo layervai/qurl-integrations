@@ -49,8 +49,8 @@ const (
 // server-wide write timeout (which would mask hung /slack/* requests).
 const oauthHandlerTimeout = 60 * time.Second
 
-// apiKeyScopes is the qurl-service scope set the legacy fallback requests for
-// the workspace API key. Returned fresh on each call so an in-package caller
+// apiKeyScopes is the qurl-service scope set requested by the legacy fallback
+// for the workspace API key. Returned fresh on each call so an in-package caller
 // can't mutate the slice and silently change every future mint. authorizeURL
 // also weaves "openid email" in for the id_token email claim consumed by the
 // success page.

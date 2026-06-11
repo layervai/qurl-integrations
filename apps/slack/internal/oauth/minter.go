@@ -172,9 +172,10 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // and returns the qURL API key minted for that binding. qurl-service retains
 // successful binding responses in its idempotency store for the 24h setup-retry
 // window, so identical retries recover the same plaintext key instead of
-// returning already_exists. After that replay window, the existing binding
-// owns recovery: qurl-service returns already_exists until the binding is
-// rotated or revoked.
+// returning already_exists. qurl-service scopes those records by authenticated
+// owner, so another qURL principal cannot replay this workspace's plaintext.
+// After that replay window, the existing binding owns recovery: qurl-service
+// returns already_exists until the binding is rotated or revoked.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
@@ -224,7 +225,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		rb = rb[:minterBodyLimit]
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
+		code := errorEnvelopeCode(rb)
+		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
 			drainAndCloseResponse(resp)
 			bindingBodyClosed = true
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
@@ -232,7 +234,6 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if bodyOversized {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 		}
-		code := errorEnvelopeCode(rb)
 		if code == errCodeAPIKeyLimit && resp.StatusCode == http.StatusForbidden {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
@@ -383,7 +384,7 @@ func workspaceIdempotencyKey(prefix, teamID string) string {
 	return prefix + hex.EncodeToString(sum[:])
 }
 
-func shouldFallbackToLegacyMint(status int, body []byte) bool {
+func shouldFallbackToLegacyMint(status int, errorCode string) bool {
 	if status == http.StatusNotFound {
 		// During rollout, an older qurl-service has no route and returns a
 		// 404 that is not a qURL error envelope. Intentionally treat any 404
@@ -392,12 +393,12 @@ func shouldFallbackToLegacyMint(status int, body []byte) bool {
 		// TODO(#705): remove this path as soon as the binding route is live
 		// everywhere. If a deployed route returns a structured qURL error
 		// envelope, surface it instead of minting a legacy key.
-		return errorEnvelopeCode(body) == ""
+		return errorCode == ""
 	}
 	if status != http.StatusServiceUnavailable {
 		return false
 	}
-	return errorEnvelopeCode(body) == errCodeBindingsDisabled
+	return errorCode == errCodeBindingsDisabled
 }
 
 // apiKeyLimitError reports whether body is a qurl-service error envelope
