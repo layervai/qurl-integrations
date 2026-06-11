@@ -537,6 +537,8 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 // spawn earlier would silently regress.
 func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	cfg, _, minter := newCallbackCfgStoreMinter(t)
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
 	minter.mintErr = errors.New("qurl-service down")
 	state := mintTestState(t, &cfg)
 
@@ -554,8 +556,13 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 		t.Errorf("502 body should render the styled error page heading; got: %q", body)
 	}
 	assertSecurityHeaders(t, rec)
-	// Give any spurious revoke goroutine a window to fire.
-	time.Sleep(50 * time.Millisecond)
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	used := tracker.used
+	tracker.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("mint failure must not schedule async revoke work; got %d async calls", used)
+	}
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
 	if minter.revoked {
@@ -618,6 +625,8 @@ func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.
 
 func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
 	store.setErr = errors.New("ddb down")
 	state := mintTestState(t, &cfg)
 
@@ -629,7 +638,13 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	}
 	// Binding-backed keys must stay in qurl-service so the admin can retry
 	// setup and replay the binding idempotency record into Slack storage.
-	time.Sleep(50 * time.Millisecond)
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	used := tracker.used
+	tracker.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("binding-backed persist failure must not schedule async revoke work; got %d async calls", used)
+	}
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
 	if minter.revoked {
