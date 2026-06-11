@@ -29,10 +29,9 @@ const (
 	// validation.ErrorCodeAPIKeyLimit. Both that endpoint's qurl:write
 	// scope gate AND this quota check surface as HTTP 403, so the status
 	// code alone can't disambiguate — the body `code` is the only signal.
-	errCodeAPIKeyLimit         = "api_key_limit"
-	errCodeAlreadyExists       = "already_exists"
-	errCodeBindingsDisabled    = "bindings_disabled"
-	bindingUnavailableRetrySec = "60"
+	errCodeAPIKeyLimit      = "api_key_limit"
+	errCodeAlreadyExists    = "already_exists"
+	errCodeBindingsDisabled = "bindings_disabled"
 )
 
 // ErrAPIKeyLimitReached is returned when qurl-service refuses provisioning

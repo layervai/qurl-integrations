@@ -46,12 +46,14 @@ const (
 	// adjustment of one doesn't accidentally retune the other.
 	bindTimeout = 15 * time.Second
 	// mintTimeout bounds qurl-service provisioning from mintAndPersist.
-	// During the staged binding rollout this may be one binding attempt
-	// plus a legacy fallback, so keep room for two bounded upstream calls.
+	// Keep one tight budget across binding + optional legacy fallback:
+	// fallback only runs for fast route-missing/dark-launch responses,
+	// while slow or transient binding failures are surfaced. A larger
+	// budget widens the post-timeout orphan-key window described below.
 	// Same fresh-context rationale as persistTimeout: TimeoutHandler
 	// canceling mid-mint would orphan a key the bot can no longer revoke
 	// (no keyID to DELETE against).
-	mintTimeout         = 30 * time.Second
+	mintTimeout         = 15 * time.Second
 	existingKeyTimeout  = 5 * time.Second
 	dmTimeout           = 5 * time.Second
 	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
@@ -613,7 +615,7 @@ func storedAPIKeyPrefix(apiKey string) string {
 // cancel doesn't desync row state from what we tell the user. The
 // flip side: if oauthHandlerTimeout (60s) fires after we already
 // started the mint, the goroutine continues for up to
-// mintTimeout + persistTimeout (up to 45s) after we've returned an error
+// mintTimeout + persistTimeout (up to 30s) after we've returned an error
 // to the user. The user retries, mints K2, and the eventual
 // completion of K1 races K2's persist as a row overwrite. K1 then
 // becomes an orphan in qurl-service (no revoke wired for this case).

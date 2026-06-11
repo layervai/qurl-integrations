@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	testBindingPath = "/v1/external-identity-bindings"
-	testAPIKeysPath = "/v1/api-keys"
+	testBindingPath            = "/v1/external-identity-bindings"
+	testAPIKeysPath            = "/v1/api-keys"
+	bindingUnavailableRetrySec = "60"
 )
 
 // mintWorkspaceOnlyErr is a test helper that discards the three return values
