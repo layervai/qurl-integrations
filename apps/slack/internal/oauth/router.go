@@ -112,12 +112,23 @@ type SlackClient interface {
 	PostDirectMessage(ctx context.Context, userID, text string) error
 }
 
+// WorkspaceAPIKeyMint is the result of provisioning a qURL API key for a
+// Slack workspace. BindingBacked is true when qurl-service created an
+// external identity binding that can replay the plaintext on an idempotent
+// setup retry; legacy fallback keys do not have that recovery path.
+type WorkspaceAPIKeyMint struct {
+	APIKey        string
+	KeyID         string
+	KeyPrefix     string
+	BindingBacked bool
+}
+
 // QURLAPIKeyMinter is the slice of qurl-service the callback hits to provision
 // the workspace-scoped key. Interface for the same testability reason as
 // SlackClient.
 type QURLAPIKeyMinter interface {
 	ValidateAPIKey(ctx context.Context, apiKey string) error
-	MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (apiKey, keyID, keyPrefix string, err error)
+	MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error)
 	RevokeAPIKey(ctx context.Context, accessToken, keyID string) error
 }
 

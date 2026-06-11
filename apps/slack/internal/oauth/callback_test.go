@@ -62,6 +62,7 @@ func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { r
 type fakeMinter struct {
 	apiKey, keyID, keyPrefix string
 	mintErr                  error
+	bindingBacked            bool
 	mintCalls                int
 	mintMu                   sync.Mutex
 	revoked                  bool
@@ -77,11 +78,16 @@ func (f *fakeMinter) ValidateAPIKey(_ context.Context, _ string) error {
 	f.validateCalls++
 	return f.validateErr
 }
-func (f *fakeMinter) MintWorkspaceAPIKey(_ context.Context, _, _ string) (apiKey, keyID, keyPrefix string, err error) {
+func (f *fakeMinter) MintWorkspaceAPIKey(_ context.Context, _, _ string) (WorkspaceAPIKeyMint, error) {
 	f.mintMu.Lock()
 	f.mintCalls++
 	f.mintMu.Unlock()
-	return f.apiKey, f.keyID, f.keyPrefix, f.mintErr
+	return WorkspaceAPIKeyMint{
+		APIKey:        f.apiKey,
+		KeyID:         f.keyID,
+		KeyPrefix:     f.keyPrefix,
+		BindingBacked: f.bindingBacked,
+	}, f.mintErr
 }
 func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
 	f.revokeMu.Lock()
@@ -174,7 +180,7 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 	}))
 	t.Cleanup(auth0.Close)
 	store := &fakeWorkspaceStore{}
-	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix}
+	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix, bindingBacked: true}
 
 	// Re-point HTTPClient at the stub Auth0 by rewriting the request host
 	// via a custom Transport. The simplest path: a Transport that
@@ -610,7 +616,7 @@ func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.
 	}
 }
 
-func TestCallbackRevokesOnPersistFailure(t *testing.T) {
+func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.setErr = errors.New("ddb down")
 	state := mintTestState(t, &cfg)
@@ -621,7 +627,30 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
-	// Revoke is fire-and-forget in a goroutine — give it a moment.
+	// Binding-backed keys must stay in qurl-service so the admin can retry
+	// setup and replay the binding idempotency record into Slack storage.
+	time.Sleep(50 * time.Millisecond)
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if minter.revoked {
+		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
+	}
+}
+
+func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.bindingBacked = false
+	store.setErr = errors.New("ddb down")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d want 500", rec.Code)
+	}
+	// Legacy fallback has no qurl-service binding replay path, so the
+	// unstored key is an orphan and should still be revoked asynchronously.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		minter.revokeMu.Lock()
@@ -632,7 +661,7 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("expected RevokeAPIKey to be called after persist failure")
+	t.Error("expected RevokeAPIKey to be called after legacy persist failure")
 }
 
 func TestCallbackRejectsMissingCode(t *testing.T) {

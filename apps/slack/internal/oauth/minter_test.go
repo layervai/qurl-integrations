@@ -18,11 +18,11 @@ const (
 	bindingUnavailableRetrySec = "60"
 )
 
-// mintWorkspaceOnlyErr is a test helper that discards the three return values
-// the success-path tests assert on. Test error-only branches use it so they
-// aren't tripped by dogsled.
+// mintWorkspaceOnlyErr is a test helper that discards the success result the
+// success-path tests assert on. Test error-only branches use it so they aren't
+// tripped by dogsled.
 func mintWorkspaceOnlyErr(m *HTTPAPIKeyMinter) error {
-	_, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID) //nolint:dogsled // intentional discard on error-only paths.
+	_, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	return err
 }
 
@@ -93,12 +93,15 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	apiKey, keyID, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	if err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
 	}
-	if apiKey != testAPIKey || keyID != testKeyID || keyPrefix != testKeyPrefix {
-		t.Errorf("unexpected fields: %q %q %q", apiKey, keyID, keyPrefix)
+	if minted.APIKey != testAPIKey || minted.KeyID != testKeyID || minted.KeyPrefix != testKeyPrefix {
+		t.Errorf("unexpected fields: %+v", minted)
+	}
+	if !minted.BindingBacked {
+		t.Error("binding path must mark the key binding-backed")
 	}
 	if gotMethod != http.MethodPost {
 		t.Errorf("method: got %q want POST", gotMethod)
@@ -127,12 +130,15 @@ func TestHTTPAPIKeyMinterMintWorkspaceDerivesBindingKeyPrefix(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	_, _, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	if err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
 	}
-	if keyPrefix != testKeyPrefix {
-		t.Fatalf("derived keyPrefix = %q, want %q", keyPrefix, testKeyPrefix)
+	if minted.KeyPrefix != testKeyPrefix {
+		t.Fatalf("derived keyPrefix = %q, want %q", minted.KeyPrefix, testKeyPrefix)
+	}
+	if !minted.BindingBacked {
+		t.Error("binding path must mark the key binding-backed")
 	}
 }
 
@@ -148,7 +154,7 @@ func TestHTTPAPIKeyMinterTolerateBaseURLTrailingSlash(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL + "/", HTTPClient: srv.Client()}
-	if _, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID); err != nil {
+	if _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID); err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
 	}
 }
@@ -192,12 +198,15 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	apiKey, keyID, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	if err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
 	}
-	if apiKey != testAPIKey || keyID != testKeyID || keyPrefix != testKeyPrefix {
-		t.Errorf("unexpected fallback fields: %q %q %q", apiKey, keyID, keyPrefix)
+	if minted.APIKey != testAPIKey || minted.KeyID != testKeyID || minted.KeyPrefix != testKeyPrefix {
+		t.Errorf("unexpected fallback fields: %+v", minted)
+	}
+	if minted.BindingBacked {
+		t.Error("legacy fallback path must not mark the key binding-backed")
 	}
 	if strings.Join(paths, ",") != testBindingPath+","+testAPIKeysPath {
 		t.Errorf("paths = %v", paths)
@@ -221,12 +230,15 @@ func TestHTTPAPIKeyMinterMintWorkspaceDerivesLegacyKeyPrefix(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	_, _, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	if err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
 	}
-	if keyPrefix != testKeyPrefix {
-		t.Fatalf("derived legacy keyPrefix = %q, want %q", keyPrefix, testKeyPrefix)
+	if minted.KeyPrefix != testKeyPrefix {
+		t.Fatalf("derived legacy keyPrefix = %q, want %q", minted.KeyPrefix, testKeyPrefix)
+	}
+	if minted.BindingBacked {
+		t.Error("legacy fallback path must not mark the key binding-backed")
 	}
 }
 
@@ -248,8 +260,12 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingsDisabled(t *testing.T
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	if _, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID); err != nil {
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	if err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if minted.BindingBacked {
+		t.Error("disabled fallback path must not mark the key binding-backed")
 	}
 	if !legacyCalled {
 		t.Fatal("expected legacy fallback when bindings are disabled")

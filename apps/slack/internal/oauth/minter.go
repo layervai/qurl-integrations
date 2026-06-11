@@ -174,10 +174,10 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 
 // MintWorkspaceAPIKey creates the Slack workspace external identity binding
 // and returns the qURL API key minted for that binding.
-func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (apiKey, keyID, keyPrefix string, err error) {
+func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
-		return "", "", "", errors.New("MintWorkspaceAPIKey: empty teamID")
+		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceAPIKey: empty teamID")
 	}
 	displayName := "Slack workspace " + teamID
 	idempotencyKey := bindingIdempotencyKey(teamID)
@@ -188,15 +188,15 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		DisplayName: displayName,
 	})
 	if err != nil {
-		return "", "", "", fmt.Errorf("marshal: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("marshal: %w", err)
 	}
 	reqURL, err := m.joinExternalBindingURL()
 	if err != nil {
-		return "", "", "", err
+		return WorkspaceAPIKeyMint{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
-		return "", "", "", fmt.Errorf("new request: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -204,7 +204,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	req.Header.Set("Idempotency-Key", idempotencyKey)
 	resp, err := m.client().Do(req)
 	if err != nil {
-		return "", "", "", fmt.Errorf("do request: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
 		// Bounded drain — see callback.go drainCap rationale.
@@ -213,10 +213,10 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	}()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
 	if err != nil {
-		return "", "", "", fmt.Errorf("read body: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
 	if len(rb) > minterBodyLimit {
-		return "", "", "", fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
@@ -224,42 +224,46 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		}
 		switch errorEnvelopeCode(rb) {
 		case errCodeAPIKeyLimit:
-			return "", "", "", fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		case errCodeAlreadyExists:
-			return "", "", "", fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
 		default:
-			return "", "", "", fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 		}
 	}
 	var br bindingResponse
 	if err := json.Unmarshal(rb, &br); err != nil {
-		return "", "", "", fmt.Errorf("parse response: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("parse response: %w", err)
 	}
 	if br.APIKey.Plaintext == "" || br.APIKey.KeyID == "" {
-		return "", "", "", errors.New("qurl-service returned empty api_key plaintext or key_id")
+		return WorkspaceAPIKeyMint{}, errors.New("qurl-service returned empty api_key plaintext or key_id")
 	}
 	if br.APIKey.KeyPrefix == "" {
 		br.APIKey.KeyPrefix = storedAPIKeyPrefix(br.APIKey.Plaintext)
 	}
-	return br.APIKey.Plaintext, br.APIKey.KeyID, br.APIKey.KeyPrefix, nil
+	return WorkspaceAPIKeyMint{
+		APIKey:        br.APIKey.Plaintext,
+		KeyID:         br.APIKey.KeyID,
+		KeyPrefix:     br.APIKey.KeyPrefix,
+		BindingBacked: true,
+	}, nil
 }
 
-// mintLegacyAPIKey posts to POST /v1/api-keys. Returns (apiKey, keyID,
-// keyPrefix, err). apiKey and keyID must be present for success — a missing
-// keyID would leave us unable to revoke an orphan key if the subsequent DDB
-// persist fails.
-func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, name string, scopes []string, idempotencyKey string) (apiKey, keyID, keyPrefix string, err error) {
+// mintLegacyAPIKey posts to POST /v1/api-keys. apiKey and keyID must be
+// present for success — a missing keyID would leave us unable to revoke an
+// orphan key if the subsequent DDB persist fails.
+func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, name string, scopes []string, idempotencyKey string) (WorkspaceAPIKeyMint, error) {
 	body, err := json.Marshal(mintRequest{Name: name, Scopes: scopes})
 	if err != nil {
-		return "", "", "", fmt.Errorf("marshal: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("marshal: %w", err)
 	}
 	reqURL, err := m.joinAPIKeyURL()
 	if err != nil {
-		return "", "", "", err
+		return WorkspaceAPIKeyMint{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
-		return "", "", "", fmt.Errorf("new request: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -269,7 +273,7 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 	}
 	resp, err := m.client().Do(req)
 	if err != nil {
-		return "", "", "", fmt.Errorf("do request: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
 		// Bounded drain — see callback.go drainCap rationale.
@@ -280,28 +284,32 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 	// as truncated — see exchangeAuth0Code for the rationale.
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
 	if err != nil {
-		return "", "", "", fmt.Errorf("read body: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
 	if len(rb) > minterBodyLimit {
-		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if apiKeyLimitError(rb) {
-			return "", "", "", fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
-		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
 	}
 	var mr mintResponse
 	if err := json.Unmarshal(rb, &mr); err != nil {
-		return "", "", "", fmt.Errorf("parse response: %w", err)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("parse response: %w", err)
 	}
 	if mr.Data.APIKey == "" || mr.Data.KeyID == "" {
-		return "", "", "", errors.New("qurl-service returned empty api_key or key_id")
+		return WorkspaceAPIKeyMint{}, errors.New("qurl-service returned empty api_key or key_id")
 	}
 	if mr.Data.KeyPrefix == "" {
 		mr.Data.KeyPrefix = storedAPIKeyPrefix(mr.Data.APIKey)
 	}
-	return mr.Data.APIKey, mr.Data.KeyID, mr.Data.KeyPrefix, nil
+	return WorkspaceAPIKeyMint{
+		APIKey:    mr.Data.APIKey,
+		KeyID:     mr.Data.KeyID,
+		KeyPrefix: mr.Data.KeyPrefix,
+	}, nil
 }
 
 // RevokeAPIKey best-effort deletes the minted key. Matches the Discord
@@ -337,22 +345,27 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 func bindingIdempotencyKey(teamID string) string {
 	// qurl-service requires a 32+ character idempotency key. Slack team IDs
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
-	sum := sha256.Sum256([]byte(strings.TrimSpace(teamID)))
-	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
+	return workspaceIdempotencyKey("slack-workspace-binding-v1-", teamID)
 }
 
 func legacyFallbackIdempotencyKey(teamID string) string {
 	// Keep the legacy fallback idempotency domain separate from the binding
 	// domain even if qurl-service stores idempotency keys globally.
+	return workspaceIdempotencyKey("slack-workspace-legacy-v1-", teamID)
+}
+
+func workspaceIdempotencyKey(prefix, teamID string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(teamID)))
-	return "slack-workspace-legacy-v1-" + hex.EncodeToString(sum[:])
+	return prefix + hex.EncodeToString(sum[:])
 }
 
 func shouldFallbackToLegacyMint(status int, body []byte) bool {
 	if status == http.StatusNotFound {
 		// During rollout, an older qurl-service has no route and returns an
-		// unstructured 404. If a deployed route returns a structured qURL
-		// error envelope, surface it instead of minting a legacy key.
+		// unstructured 404. Intentionally treat that as legacy-compatible
+		// while the new endpoint rolls out; remove this path after rollout.
+		// If a deployed route returns a structured qURL error envelope,
+		// surface it instead of minting a legacy key.
 		return errorEnvelopeCode(body) == ""
 	}
 	if status != http.StatusServiceUnavailable {
