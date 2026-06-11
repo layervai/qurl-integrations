@@ -162,6 +162,11 @@ func run() error {
 	// ("#general (C123)"). Always wired (same token lookup); degrades to the bare
 	// channel id until the channels:read / groups:read scopes are in the manifest.
 	agentResolveChannelName := newSlackResolveChannelNameFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// assistant.threads.* seam for the Assistants-container first-run UX (title +
+	// suggested prompts). Always wired (same token lookup); inert until the "Agents &
+	// AI Apps" manifest toggle + assistant:write scope are set (the events don't
+	// arrive, and the calls would no-op, until then).
+	agentAssistantThreads := newSlackAssistantThreadsPortWithTokenLookup(workspaceTokenLookup, userAgent, slackAssistantSetTitleURL, slackAssistantSetSuggestedPromptsURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
@@ -234,6 +239,7 @@ func run() error {
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
 		Reactions:                   agentReactions,
 		ResolveChannelName:          agentResolveChannelName,
+		AssistantThreads:            agentAssistantThreads,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so

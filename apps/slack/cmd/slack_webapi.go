@@ -223,6 +223,11 @@ const (
 
 const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
 
+const (
+	slackAssistantSetTitleURL            = "https://slack.com/api/assistant.threads.setTitle"
+	slackAssistantSetSuggestedPromptsURL = "https://slack.com/api/assistant.threads.setSuggestedPrompts"
+)
+
 // slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
 // single post this 4s client timeout is the BINDING deadline: the conversation-
 // mode delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
@@ -455,6 +460,65 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 		}
 		return get(ctx, enterpriseID, channelID)
 	}
+}
+
+// slackAssistantThreadsPort implements [internal.AssistantThreadsPort] over
+// assistant.threads.setTitle / setSuggestedPrompts. Each verb has its own
+// shared-transport poster (token lookup + Grid fallback + parse), like the reactions
+// port — it drives the Assistants-container first-run UX.
+type slackAssistantThreadsPort struct {
+	setTitle   *slackWebAPIPoster
+	setPrompts *slackWebAPIPoster
+}
+
+func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, setTitleURL, setSuggestedPromptsURL string, httpClient *http.Client) internal.AssistantThreadsPort {
+	if httpClient == nil {
+		httpClient = defaultSlackPostMessageClient()
+	}
+	setTitle := newSlackWebAPIPoster(lookup, userAgent, setTitleURL, "assistant.threads.setTitle",
+		func(s int, h http.Header, raw []byte) error {
+			return slackWebAPIResponseError("assistant.threads.setTitle", nil, s, h, raw)
+		}, httpClient)
+	setPrompts := newSlackWebAPIPoster(lookup, userAgent, setSuggestedPromptsURL, "assistant.threads.setSuggestedPrompts",
+		func(s int, h http.Header, raw []byte) error {
+			return slackWebAPIResponseError("assistant.threads.setSuggestedPrompts", nil, s, h, raw)
+		}, httpClient)
+	return &slackAssistantThreadsPort{setTitle: setTitle, setPrompts: setPrompts}
+}
+
+func (p *slackAssistantThreadsPort) SetTitle(ctx context.Context, teamID, enterpriseID, channelID, threadTS, title string) error {
+	body, err := json.Marshal(struct {
+		ChannelID string `json:"channel_id"`
+		ThreadTS  string `json:"thread_ts"`
+		Title     string `json:"title"`
+	}{ChannelID: channelID, ThreadTS: threadTS, Title: title})
+	if err != nil {
+		return fmt.Errorf("assistant.threads.setTitle request marshal: %w", err)
+	}
+	return p.setTitle.post(ctx, teamID, enterpriseID, body)
+}
+
+func (p *slackAssistantThreadsPort) SetSuggestedPrompts(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, prompts []internal.SuggestedPrompt) error {
+	apiPrompts := make([]assistantPromptBody, len(prompts))
+	for i := range prompts {
+		apiPrompts[i] = assistantPromptBody{Title: prompts[i].Title, Message: prompts[i].Message}
+	}
+	body, err := json.Marshal(struct {
+		ChannelID string                `json:"channel_id"`
+		ThreadTS  string                `json:"thread_ts"`
+		Prompts   []assistantPromptBody `json:"prompts"`
+	}{ChannelID: channelID, ThreadTS: threadTS, Prompts: apiPrompts})
+	if err != nil {
+		return fmt.Errorf("assistant.threads.setSuggestedPrompts request marshal: %w", err)
+	}
+	return p.setPrompts.post(ctx, teamID, enterpriseID, body)
+}
+
+// assistantPromptBody is the Slack assistant.threads.setSuggestedPrompts prompt
+// shape ({title, message}).
+type assistantPromptBody struct {
+	Title   string `json:"title"`
+	Message string `json:"message"`
 }
 
 // defaultSlackPostMessageClient builds the seam's HTTP client. Mirrors
