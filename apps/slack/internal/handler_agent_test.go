@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -286,8 +287,38 @@ func (f *memAgentDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-func (f *memAgentDDB) Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	return &dynamodb.QueryOutput{}, nil
+// Query models the one shape ListAuditEntries emits: pk equality + begins_with(sk),
+// honoring ScanIndexForward + Limit. (Other AgentStore reads are point GetItems.)
+func (f *memAgentDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	vals := in.ExpressionAttributeValues
+	pkv, _ := vals[":pk"].(*ddbtypes.AttributeValueMemberS)
+	prefv, _ := vals[":prefix"].(*ddbtypes.AttributeValueMemberS)
+	var matched []map[string]ddbtypes.AttributeValue
+	for _, item := range f.items {
+		pk, _ := item["pk"].(*ddbtypes.AttributeValueMemberS)
+		sk, _ := item["sk"].(*ddbtypes.AttributeValueMemberS)
+		if pk == nil || sk == nil || pkv == nil || pk.Value != pkv.Value {
+			continue
+		}
+		if prefv != nil && !strings.HasPrefix(sk.Value, prefv.Value) {
+			continue
+		}
+		matched = append(matched, item)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		si := matched[i]["sk"].(*ddbtypes.AttributeValueMemberS).Value
+		sj := matched[j]["sk"].(*ddbtypes.AttributeValueMemberS).Value
+		if in.ScanIndexForward != nil && !*in.ScanIndexForward {
+			return si > sj
+		}
+		return si < sj
+	})
+	if in.Limit != nil && int(*in.Limit) < len(matched) {
+		matched = matched[:*in.Limit]
+	}
+	return &dynamodb.QueryOutput{Items: matched}, nil
 }
 
 type capturedReply struct {
