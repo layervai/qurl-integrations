@@ -12,7 +12,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -102,23 +101,19 @@ func (r *recordingSink) fn(delta string) { r.deltas = append(r.deltas, delta) }
 func (r *recordingSink) joined() string  { return strings.Join(r.deltas, "") }
 
 // proposeRevokeRespWithText is a single round that narrates AND calls propose_revoke —
-// the case where streaming surfaces text the non-streaming path drops.
+// the case where streaming surfaces text the non-streaming path drops. Reuses toolResp
+// (the tool_use builder) and adds the narration text.
 func proposeRevokeRespWithText(text, token string) Response {
-	raw, _ := json.Marshal(map[string]any{fieldToken: token})
-	return Response{
-		Text:       text,
-		ToolCalls:  []ToolCall{{ID: "tu_propose", Name: toolProposeRevoke, Input: raw}},
-		StopReason: "tool_use",
-	}
+	r := toolResp(toolProposeRevoke, map[string]any{fieldToken: token})
+	r.Text = text
+	return r
 }
 
 // readRespWithText is a non-terminal round that narrates AND calls a read tool.
 func readRespWithText(text, toolName string) Response {
-	return Response{
-		Text:       text,
-		ToolCalls:  []ToolCall{{ID: "tu_" + toolName, Name: toolName, Input: json.RawMessage(`{}`)}},
-		StopReason: "tool_use",
-	}
+	r := toolResp(toolName, map[string]any{})
+	r.Text = text
+	return r
 }
 
 func TestRun_Streaming_ForwardsFinalReplyDeltas(t *testing.T) {
