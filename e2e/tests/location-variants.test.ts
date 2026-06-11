@@ -45,16 +45,19 @@ function withRunNonce(url: string): string {
 }
 
 afterAll(async () => {
-  // Best-effort: never fail the run or mask a real test failure. But DO warn on
-  // a failed revoke — a systematically-failing cleanup (e.g. the key lost
-  // qurl:write) would otherwise silently let prod leaks resume, the exact thing
-  // this suite guards against. Transient single failures are harmless (the 1h
-  // links expire on their own).
+  // Best-effort: never fail the run or mask a real test failure. But DO warn
+  // when a revoke doesn't succeed — a systematically-failing cleanup (e.g. the
+  // key lost qurl:write → every DELETE 403s) would otherwise silently let prod
+  // leaks resume, the exact thing this suite guards against. revokeLink returns
+  // res.ok (false on a 4xx, NO throw) and only throws on a network error, so
+  // surface BOTH paths — the 403 case is the dangerous one. Transient single
+  // failures are harmless (the 1h links expire on their own).
   for (const id of createdResourceIds) {
     try {
-      await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, id);
+      const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, id);
+      if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
     } catch (err) {
-      console.warn(`afterAll: best-effort revoke of ${id} failed: ${String(err)}`);
+      console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);
     }
   }
 });
