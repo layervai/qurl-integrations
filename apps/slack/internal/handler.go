@@ -410,6 +410,13 @@ type Config struct {
 	// so the surface stays dark until both the seam is wired and the manifest is updated.
 	// Best-effort: a failure is logged, never surfaced.
 	AssistantThreads AssistantThreadsPort
+
+	// AppHomePublish publishes a user's App Home tab (views.publish) with the agent's
+	// review surface — their own recent confirmed actions. Nil = no-op (the Home tab
+	// only exists once the manifest's App Home feature + app_home_opened subscription
+	// are enabled), so the surface stays dark until both the seam is wired and the
+	// manifest is updated. Best-effort: a failure is logged, never surfaced.
+	AppHomePublish AppHomePublishFunc
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
@@ -428,6 +435,14 @@ type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, 
 // confirm flow passes escapeMrkdwnText output); the production impl should also
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
+
+// AppHomePublishFunc publishes a user's App Home tab via views.publish on the
+// per-workspace bot token (enterpriseID for Grid token resolution). blocks is the
+// Home view's content (the map[string]any block shape the views.go builders emit); the
+// impl wraps it in a {"type":"home"} view. The blocks already carry escaped echo (the
+// caller renders untrusted action fields through escapeMrkdwn*), so no further
+// sanitization is needed here.
+type AppHomePublishFunc func(ctx context.Context, teamID, enterpriseID, userID string, blocks []any) error
 
 // ResolveChannelNameFunc resolves a channel id to its human name via
 // conversations.info on the per-workspace bot token (enterpriseID for Grid token

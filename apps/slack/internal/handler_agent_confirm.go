@@ -452,12 +452,6 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		return
 	}
 	res := h.executeAgentAction(ctx, log, &pa, payload)
-	// Best-effort: record an EXECUTED mutation for the App Home review surface, keyed
-	// to the approver who ran it. Only attributed results invoked a mutation core — a
-	// pre-execution rejection records nothing. A store failure never affects the click.
-	if res.attributed {
-		h.recordAgentAudit(ctx, log, payload, &pa, res.cardText)
-	}
 	if res.ephemeralText != "" {
 		// Sensitive output (a one-time link) goes PRIVATELY to the clicker — an
 		// ephemeral on the same response_url — never on the public card. No
@@ -474,6 +468,17 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		card = agentConfirmAttributedCard(res.cardText, pa.Asker, payload.User.ID)
 	}
 	_ = h.replaceOriginalResponse(log, responseURL, card)
+
+	// Best-effort: record the EXECUTED mutation for the App Home review surface, keyed
+	// to the approver who ran it. Done AFTER the user-visible card swap so the audit
+	// PutItem adds no latency to it. Only attributed results invoked a mutation core (a
+	// pre-execution rejection records nothing); a store failure never affects the
+	// already-delivered outcome. NOTE: protect-connector never reaches here — it routes
+	// to the modal (confirmModalRouted, above) and its execution + audit are deferred to
+	// the modal-submit path; tracked in #701.
+	if res.attributed {
+		h.recordAgentAudit(ctx, log, payload, &pa, res.cardText)
+	}
 }
 
 // agentConfirmAttributedCard appends an attribution footer to an executed

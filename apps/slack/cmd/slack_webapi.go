@@ -402,6 +402,41 @@ func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, us
 	}
 }
 
+const slackViewsPublishURL = "https://slack.com/api/views.publish"
+
+// slackViewsPublishResponseError preserves the views.publish error shape via the shared
+// mapper (no benign codes).
+func slackViewsPublishResponseError(statusCode int, header http.Header, raw []byte) error {
+	return slackWebAPIResponseError("views.publish", nil, statusCode, header, raw)
+}
+
+// slackHomeView is the {"type":"home", "blocks":[...]} view object views.publish wraps
+// the App Home content in.
+type slackHomeView struct {
+	Type   string `json:"type"`
+	Blocks []any  `json:"blocks"`
+}
+
+// newSlackAppHomePublishFuncWithTokenLookup builds the [internal.AppHomePublishFunc]
+// seam: a views.publish that sets a user's App Home tab to the agent's review surface
+// (their own recent confirmed actions). It shares the poster (token lookup + Grid
+// fallback + response parsing) with the chat seams — only the JSON body differs. No
+// extra OAuth scope is needed beyond the bot token, but the manifest's App Home tab
+// must be enabled for Slack to render the published view.
+func newSlackAppHomePublishFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, viewsPublishURL string, httpClient *http.Client) internal.AppHomePublishFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, viewsPublishURL, "views.publish", slackViewsPublishResponseError, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, userID string, blocks []any) error {
+		body, err := json.Marshal(struct {
+			UserID string        `json:"user_id"`
+			View   slackHomeView `json:"view"`
+		}{UserID: userID, View: slackHomeView{Type: "home", Blocks: blocks}})
+		if err != nil {
+			return fmt.Errorf("views.publish request marshal: %w", err)
+		}
+		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
 // newSlackResolveChannelNameFuncWithTokenLookup builds the
 // [internal.ResolveChannelNameFunc] seam: a conversations.info read on the
 // per-workspace bot token returning the channel's name. Unlike the POST seams

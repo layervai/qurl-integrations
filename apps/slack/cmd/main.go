@@ -173,6 +173,11 @@ func run() error {
 	// lookup); inert until the "Agents & AI Apps" manifest toggle + assistant:write scope
 	// are set (the events don't arrive, and the calls would no-op, until then).
 	agentAssistantThreads := newSlackAssistantThreadsPortWithTokenLookup(workspaceTokenLookup, userAgent, slackAssistantSetTitleURL, slackAssistantSetSuggestedPromptsURL, slackAssistantSetStatusURL, nil)
+	// views.publish seam for the App Home review surface (a user's own recent confirmed
+	// actions). Always wired (same token lookup); inert until the manifest's App Home tab
+	// feature + app_home_opened subscription are set — the event doesn't arrive, and the
+	// view would no-op, until then.
+	agentAppHomePublish := newSlackAppHomePublishFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsPublishURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
@@ -247,6 +252,7 @@ func run() error {
 		ResolveChannelName:          agentResolveChannelName,
 		ChannelMembership:           agentChannelMembership,
 		AssistantThreads:            agentAssistantThreads,
+		AppHomePublish:              agentAppHomePublish,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
