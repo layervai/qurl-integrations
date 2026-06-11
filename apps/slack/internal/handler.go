@@ -392,13 +392,13 @@ type Config struct {
 	// resolve error never fails the turn.
 	ResolveChannelName ResolveChannelNameFunc
 
-	// AssistantThreads drives the Slack Assistants-container first-run UX
-	// (assistant.threads.setTitle / setSuggestedPrompts) when a user opens the
-	// agent's assistant pane. Additive to the @mention/DM surface and UX-only (no
-	// LLM). Nil = no-op (the events only arrive once the "Agents & AI Apps" manifest
-	// toggle + assistant:write scope are set), so the surface stays dark until both
-	// the seam is wired and the manifest is updated. Best-effort: a failure is logged,
-	// never surfaced.
+	// AssistantThreads drives the Slack Assistants-container UX via assistant.threads.*:
+	// setTitle / setSuggestedPrompts give a freshly-opened pane its first-run title +
+	// starter prompts, and setStatus shows the native "thinking…" indicator while a pane
+	// (DM) turn runs. Additive to the @mention/DM surface. Nil = no-op (the pane only
+	// exists once the "Agents & AI Apps" manifest toggle + assistant:write scope are set),
+	// so the surface stays dark until both the seam is wired and the manifest is updated.
+	// Best-effort: a failure is logged, never surfaced.
 	AssistantThreads AssistantThreadsPort
 }
 
@@ -433,14 +433,17 @@ type SuggestedPrompt struct {
 	Message string
 }
 
-// AssistantThreadsPort sets a freshly-opened Assistants-container thread's title
-// and suggested prompts via the Slack assistant.threads.* web API (per-workspace
-// bot token, Grid-aware). channelID is the assistant DM channel, threadTS the
-// thread the assistant_thread_started event opened. Best-effort first-run UX — the
-// conversation surface still works without it.
+// AssistantThreadsPort drives the Slack Assistants-container UX via the
+// assistant.threads.* web API (per-workspace bot token, Grid-aware). channelID is
+// the assistant DM channel, threadTS the thread the assistant_thread_started event
+// opened. SetTitle and SetSuggestedPrompts are the first-run UX (set once when the
+// pane opens); SetStatus shows the per-turn "thinking…" indicator while a turn runs,
+// which Slack auto-clears when the agent posts its reply (an empty status also clears
+// it). All are best-effort — the conversation surface still works without them.
 type AssistantThreadsPort interface {
 	SetTitle(ctx context.Context, teamID, enterpriseID, channelID, threadTS, title string) error
 	SetSuggestedPrompts(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, prompts []SuggestedPrompt) error
+	SetStatus(ctx context.Context, teamID, enterpriseID, channelID, threadTS, status string) error
 }
 
 // ReactionPort adds and removes a single emoji reaction on a message via the Slack

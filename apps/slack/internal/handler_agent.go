@@ -55,14 +55,20 @@ const agentTurnRateWindow = time.Hour
 // triggering message while a turn runs (reactions.add), then removes when it ends.
 const agentAckReaction = "eyes"
 
-// agentAckTimeout bounds each reactions.add/remove round-trip. The add is on the
-// turn's critical path (synchronous, before the LLM call), so this is deliberately
-// tight and decoupled from the 4s chat.postMessage budget: a cosmetic "working on it"
-// ack that hasn't landed in ~2s is already too late to feel responsive, so giving up
-// (no 👀 — the deferred remove then hits no_reaction → benign) beats delaying the turn
-// it's meant to make feel responsive. Taking the add off the critical path entirely
-// (async add + clear-joins-add) is tracked as a follow-up.
+// agentAckTimeout bounds each cosmetic working-on-it round-trip — the reactions.add/
+// remove ack and the assistant-pane setStatus (setAgentThinkingStatus), both set
+// synchronously on the turn's critical path before the LLM call. It's deliberately
+// tight and decoupled from the 4s chat.postMessage budget: a "working on it" ack that
+// hasn't landed in ~2s is already too late to feel responsive, so giving up (no 👀 —
+// the deferred remove then hits no_reaction → benign) beats delaying the turn it's
+// meant to make feel responsive. Taking the add off the critical path entirely (async
+// add + clear-joins-add) is tracked as a follow-up.
 const agentAckTimeout = 2 * time.Second
+
+// agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
+// turn runs (assistant.threads.setStatus); Slack renders it as "<app> is thinking…".
+// See setAgentThinkingStatus.
+const agentThinkingStatus = "is thinking…"
 
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
@@ -214,6 +220,36 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
 	defer cancel()
 	if err := h.cfg.Reactions.Remove(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
 		log.Warn("agent: ack reaction remove failed (best-effort)", "error", err)
+	}
+}
+
+// setAgentThinkingStatus shows the native assistant "thinking…" status in the pane for a
+// DM (message.im) turn — the pane-native counterpart to addAgentAck's 👀 reaction.
+// Best-effort behind the AssistantThreads seam (nil = no-op) and ONLY for im turns:
+// app_mention is a channel, not an assistant thread, so setStatus has nothing to scope
+// to. Set SYNCHRONOUSLY on the live turn ctx before the LLM call (like addAgentAck) so
+// it's visible while the turn runs, under its own agentAckTimeout cap — a per-call
+// round-trip budget, NOT a deadline shared with the reaction ack (an im turn where both
+// seams hang can add up to 2×agentAckTimeout before the LLM; that additive cost is
+// tracked in #693). There is NO deferred clear: Slack auto-clears the status when the
+// agent posts its reply (every turn exit posts one), and a 2-minute server-side timeout
+// backstops the no-reply case. The auto-clear only fires when the reply lands on the
+// SAME thread the status was set on, so the thread_ts here MUST equal the reply's — both
+// derive from agentEventRootTS(&env.Event); keep them coupled.
+//
+// A failure logs at Debug, not Warn: until the "Agents & AI Apps" pane is enabled (infra
+// #1004) there is no assistant thread, so every pre-enablement im turn fails here — a fast
+// Slack error response, bounded by the agentAckTimeout ctx (the poster's 4s client timeout
+// backstops it), so it's one cheap throwaway round-trip per im turn, never a hang.
+// Warn-per-turn would be noise; the 👀 ack covers the working-on-it cue in that era.
+func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+	if h.cfg.AssistantThreads == nil || env.Event.ChannelType != slackChannelTypeIM {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, agentAckTimeout)
+	defer cancel()
+	if err := h.cfg.AssistantThreads.SetStatus(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, agentEventRootTS(&env.Event), agentThinkingStatus); err != nil {
+		log.Debug("agent: set assistant pane status failed (best-effort)", "error", err)
 	}
 }
 
@@ -398,6 +434,10 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	// synchronous so the deferred clear can't race an in-flight add (see addAgentAck).
 	h.addAgentAck(ctx, log, env)
 	defer h.clearAgentAck(log, env)
+
+	// Additive to the 👀 ack above: a DM (pane) turn also gets the native "thinking…"
+	// status (the reaction still fires, covering the pre-#1004 era before the pane exists).
+	h.setAgentThinkingStatus(ctx, log, env)
 
 	threadKey := agentEventThreadKey(env)
 	history, version, err := h.loadAgentHistory(ctx, log, partition, threadKey)

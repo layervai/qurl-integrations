@@ -1,8 +1,8 @@
 package main
 
-// Tests for the assistant.threads.* seam (container Slice 1): request shape (URL
-// routing, {channel_id, thread_ts, title} for setTitle and {…, prompts:[{title,
-// message}]} for setSuggestedPrompts, bearer token).
+// Tests for the assistant.threads.* seam (container Slices 1–2): request shape (URL
+// routing, {channel_id, thread_ts, title} for setTitle, {…, prompts:[{title, message}]}
+// for setSuggestedPrompts, {…, status} for setStatus, bearer token).
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func TestSlackAssistantThreadsPort_RequestShapes(t *testing.T) {
 
 	port := newSlackAssistantThreadsPortWithTokenLookup(
 		staticTokenLookup("xoxb-test"), "qurl-slack/test",
-		srv.URL+"/setTitle", srv.URL+"/setSuggestedPrompts", srv.Client())
+		srv.URL+"/setTitle", srv.URL+"/setSuggestedPrompts", srv.URL+"/setStatus", srv.Client())
 
 	if err := port.SetTitle(context.Background(), "T1", "", "D1", testAssistantThreadTS, "qURL Secure Access Agent"); err != nil {
 		t.Fatalf("SetTitle: %v", err)
@@ -43,9 +43,12 @@ func TestSlackAssistantThreadsPort_RequestShapes(t *testing.T) {
 		[]internal.SuggestedPrompt{{Title: "What can I reach?", Message: "What can I reach?"}}); err != nil {
 		t.Fatalf("SetSuggestedPrompts: %v", err)
 	}
+	if err := port.SetStatus(context.Background(), "T1", "", "D1", testAssistantThreadTS, "is thinking…"); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
 
-	if len(got) != 2 {
-		t.Fatalf("want 2 requests, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("want 3 requests, got %d", len(got))
 	}
 	// setTitle
 	if tt := got[0]; tt.path != "/setTitle" || tt.auth != testBearerXoxb ||
@@ -63,5 +66,10 @@ func TestSlackAssistantThreadsPort_RequestShapes(t *testing.T) {
 	}
 	if first, _ := prompts[0].(map[string]any); first["title"] != "What can I reach?" || first["message"] != "What can I reach?" {
 		t.Errorf("prompt[0] = %+v", prompts[0])
+	}
+	// setStatus
+	if st := got[2]; st.path != "/setStatus" || st.auth != testBearerXoxb ||
+		st.body["channel_id"] != "D1" || st.body["thread_ts"] != testAssistantThreadTS || st.body["status"] != "is thinking…" {
+		t.Errorf("setStatus request = %+v", st)
 	}
 }
