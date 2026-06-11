@@ -206,6 +206,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	}
 	bindingBodyClosed := false
 	defer func() {
+		// The fallback branch closes the binding response before the nested
+		// legacy POST, so skip the normal deferred close in that path.
 		if !bindingBodyClosed {
 			drainAndCloseResponse(resp)
 		}
