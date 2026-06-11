@@ -75,19 +75,17 @@ func (l *anthropicLLM) StreamComplete(ctx context.Context, req *Request, onText 
 	return fromSDKMessage(&msg), nil
 }
 
-// streamTextDelta returns the assistant text a streaming event carries, or "" for
-// any non-text event. It reads the flattened [anthropic.MessageStreamEventUnion]
-// fields (Type + Delta.Text) the SDK already populates at decode time, rather than
-// the typed .AsAny() accessors, which re-parse the event JSON on every call — this
-// runs once per token on the streaming hot path. Delta.Text is non-empty only for a
-// content_block_delta's text delta (an input_json / stop / thinking delta fills a
-// different field), and the explicit type guard keeps that intent legible. Taken by
-// pointer: the event union is a large struct, so per-token copies would add up.
+// streamTextDelta returns the assistant text a streaming event carries, or "" for any
+// non-text event. It reads the flattened [anthropic.MessageStreamEventUnion] Delta.Text
+// field the SDK populates at decode time, rather than the typed .AsAny() accessors,
+// which re-parse the event JSON on every call — this runs once per token on the
+// streaming hot path. Delta.Text is non-empty ONLY for a content_block_delta's text
+// delta: an input_json (tool args), stop, or thinking delta fills a different flattened
+// field, and a non-delta event (message_start/_stop, content_block_start/_stop) carries
+// no text — all pinned in TestStreamTextDelta against real wire JSON. Taken by pointer:
+// the event union is a large struct, so per-token copies would add up.
 func streamTextDelta(event *anthropic.MessageStreamEventUnion) string {
-	if event.Type == "content_block_delta" {
-		return event.Delta.Text
-	}
-	return ""
+	return event.Delta.Text
 }
 
 // buildParams assembles the Messages API request. Pure (no network) so the

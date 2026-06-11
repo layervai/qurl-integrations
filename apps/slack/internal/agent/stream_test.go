@@ -94,6 +94,15 @@ func proposeRevokeRespWithText(text, token string) Response {
 	}
 }
 
+// readRespWithText is a non-terminal round that narrates AND calls a read tool.
+func readRespWithText(text, toolName string) Response {
+	return Response{
+		Text:       text,
+		ToolCalls:  []ToolCall{{ID: "tu_" + toolName, Name: toolName, Input: json.RawMessage(`{}`)}},
+		StopReason: "tool_use",
+	}
+}
+
 func TestRun_Streaming_ForwardsFinalReplyDeltas(t *testing.T) {
 	const reply = "You can reach the staging dashboard in this channel."
 	llm := &streamingFakeLLM{responses: []Response{{
@@ -200,6 +209,36 @@ func TestRun_Streaming_MultiRound_StreamsTerminalReply(t *testing.T) {
 	}
 	if res.Reply != reply {
 		t.Fatalf("Result.Reply = %q, want %q", res.Reply, reply)
+	}
+}
+
+// An intermediate read round that NARRATES (text) and calls a tool, followed by a
+// terminal reply round, streams BOTH rounds' text — in order — pinning the documented
+// "the sink observes EVERY round's text" contract (WithStreamSink). This is the case
+// PR2's finalization must reason about: text from semantically distinct rounds
+// (intermediate narration + the final reply) concatenated into one stream. A future
+// refactor that streamed only the terminal round would silently break this.
+func TestRun_Streaming_IntermediateNarrationThenReply_StreamsBoth(t *testing.T) {
+	const narration = "Let me check what's reachable here. "
+	const reply = "You can reach staging-dash."
+	llm := &streamingFakeLLM{responses: []Response{
+		readRespWithText(narration, toolListResources), // round 1: narrate + read
+		{Text: reply, StopReason: "end_turn"},          // round 2: terminal reply
+	}}
+	sink := &recordingSink{}
+	ctx, tc := testCtx()
+
+	res, _, err := New(llm, &fakeBackend{resources: "staging-dash (r_1)"}, WithStreamSink(sink.fn)).Run(ctx, tc, nil, "what's here?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sink.joined() != narration+reply {
+		t.Fatalf("sink must hold both rounds' text in order\n got: %q\nwant: %q", sink.joined(), narration+reply)
+	}
+	// Result.Reply is still only the terminal round's text — the stream shows more than
+	// the persisted reply when an intermediate round narrates.
+	if res.Reply != reply {
+		t.Fatalf("Result.Reply = %q, want the terminal round's text %q", res.Reply, reply)
 	}
 }
 

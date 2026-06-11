@@ -294,7 +294,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 
 	var usage Usage
 	for range a.maxIterations {
-		resp, err := a.complete(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
+		resp, err := a.roundTrip(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
 		if err != nil {
 			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm complete: %w", err)
 		}
@@ -348,10 +348,10 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	return Result{Reply: iterationCapMessage, Usage: usage}, msgs, nil
 }
 
-// complete runs one model round-trip, routing to the streaming path when a per-turn
+// roundTrip runs one model round-trip, routing to the streaming path when a per-turn
 // sink is set and the LLM implements [streamingLLM], else the plain [LLM.Complete].
 // Centralizing the choice here keeps [Run]'s loop identical for both paths.
-func (a *Agent) complete(ctx context.Context, req *Request) (Response, error) {
+func (a *Agent) roundTrip(ctx context.Context, req *Request) (Response, error) {
 	if a.streamSink != nil {
 		if s, ok := a.llm.(streamingLLM); ok {
 			return s.StreamComplete(ctx, req, a.streamSink)
