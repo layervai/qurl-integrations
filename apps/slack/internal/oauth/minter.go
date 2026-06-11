@@ -158,9 +158,7 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
-		// Bounded drain — see callback.go drainCap rationale.
-		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
-		_ = resp.Body.Close()
+		drainAndCloseResponse(resp)
 	}()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
@@ -206,10 +204,11 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
+	bindingBodyClosed := false
 	defer func() {
-		// Bounded drain — see callback.go drainCap rationale.
-		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
-		_ = resp.Body.Close()
+		if !bindingBodyClosed {
+			drainAndCloseResponse(resp)
+		}
 	}()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
 	if err != nil {
@@ -221,6 +220,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
+			drainAndCloseResponse(resp)
+			bindingBodyClosed = true
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
 		}
 		if bodyOversized {
@@ -291,9 +292,7 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
-		// Bounded drain — see callback.go drainCap rationale.
-		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
-		_ = resp.Body.Close()
+		drainAndCloseResponse(resp)
 	}()
 	// Read limit+1 so an exact-cap legitimate body isn't misclassified
 	// as truncated — see exchangeAuth0Code for the rationale.
@@ -350,14 +349,18 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
-		// Bounded drain — see callback.go drainCap rationale.
-		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
-		_ = resp.Body.Close()
+		drainAndCloseResponse(resp)
 	}()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func drainAndCloseResponse(resp *http.Response) {
+	// Bounded drain — see callback.go drainCap rationale.
+	_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
+	_ = resp.Body.Close()
 }
 
 func bindingIdempotencyKey(teamID string) string {
