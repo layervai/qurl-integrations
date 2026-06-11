@@ -29,8 +29,14 @@ const (
 	// validation.ErrorCodeAPIKeyLimit. Both that endpoint's qurl:write
 	// scope gate AND this quota check surface as HTTP 403, so the status
 	// code alone can't disambiguate — the body `code` is the only signal.
-	errCodeAPIKeyLimit      = "api_key_limit"
-	errCodeAlreadyExists    = "already_exists"
+	errCodeAPIKeyLimit = "api_key_limit"
+	// errCodeAlreadyExists must pair with HTTP 409. It means qurl-service has
+	// already bound the workspace identity and the Slack app should show the
+	// administrator recovery path instead of minting a second legacy key.
+	errCodeAlreadyExists = "already_exists"
+	// errCodeBindingsDisabled must pair with HTTP 503. It is the stable dark-
+	// launch signal that allows Slack setup to fall back to the legacy API-key
+	// endpoint without also masking transient qurl-service outages.
 	errCodeBindingsDisabled = "bindings_disabled"
 
 	// structuredErrorEnvelopeCode is an internal sentinel for a bounded
@@ -410,10 +416,18 @@ func errorEnvelopeCode(body []byte) string {
 	// Normal error envelopes parse completely. The partial parser below exists
 	// only for bounded reads where a truncated-but-structured qURL error must
 	// still fail closed instead of looking like a route-missing fallback.
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	var message string
+	if err := json.Unmarshal(trimmed, &message); err == nil {
+		return structuredErrorEnvelopeCode
+	}
 	var env struct {
 		Error json.RawMessage `json:"error"`
 	}
-	if err := json.Unmarshal(body, &env); err == nil {
+	if err := json.Unmarshal(trimmed, &env); err == nil {
 		if len(env.Error) == 0 {
 			return ""
 		}
@@ -429,8 +443,9 @@ func errorEnvelopeCode(body []byte) string {
 		if bytes.HasPrefix(bytes.TrimSpace(env.Error), []byte("{")) {
 			return structuredErrorEnvelopeCode
 		}
+		return ""
 	}
-	return partialErrorEnvelopeCode(body)
+	return partialErrorEnvelopeCode(trimmed)
 }
 
 func partialErrorEnvelopeCode(body []byte) string {
