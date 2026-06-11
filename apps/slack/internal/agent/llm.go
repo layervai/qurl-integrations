@@ -82,8 +82,9 @@ func (l *anthropicLLM) StreamComplete(ctx context.Context, req *Request, onText 
 // streaming hot path. Delta.Text is non-empty ONLY for a content_block_delta's text
 // delta: an input_json (tool args), stop, or thinking delta fills a different flattened
 // field, and a non-delta event (message_start/_stop, content_block_start/_stop) carries
-// no text — all pinned in TestStreamTextDelta against real wire JSON. Taken by pointer:
-// the event union is a large struct, so per-token copies would add up.
+// no text — all pinned in TestStreamTextDelta against real wire JSON. Taken by pointer
+// to avoid a second copy of the large event union per call (stream.Current already
+// copied it once into the loop variable).
 func streamTextDelta(event *anthropic.MessageStreamEventUnion) string {
 	return event.Delta.Text
 }

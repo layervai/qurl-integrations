@@ -256,6 +256,18 @@ func WithMaxIterations(n int) Option {
 // that ends in a [Proposal] may still have streamed narration first — [Run] returns
 // the [Proposal] regardless (the streamed text is the agent "speaking" before the
 // confirm card follows). The caller's stream finalization handles that case.
+//
+// The divergence runs the other way too: a [Result.Reply] can contain text the sink
+// NEVER saw. The iteration-cap message and the empty-reply fallback (both in [Run]) are
+// synthesized rather than produced as model deltas, so a turn can end with a Reply no
+// delta carried. A finalizer therefore must reconcile against the [Result] — it cannot
+// assume the finalized message equals the concatenated deltas in either direction
+// (stream-only-has-more for narration, result-only-has-more for a synthesized reply).
+//
+// Deltas already delivered are NOT rolled back if the round later errors: a mid-stream
+// [streamingLLM] failure surfaces from [Run] after some deltas were emitted, so the
+// caller owns how a partially-streamed-then-failed turn finalizes (these contracts are
+// consumed by the Slack delivery layer; see qurl-integrations#663).
 func WithStreamSink(sink func(delta string)) Option {
 	return func(a *Agent) { a.streamSink = sink }
 }
