@@ -172,7 +172,9 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // and returns the qURL API key minted for that binding. qurl-service retains
 // successful binding responses in its idempotency store for the 24h setup-retry
 // window, so identical retries recover the same plaintext key instead of
-// returning already_exists.
+// returning already_exists. After that replay window, the existing binding
+// owns recovery: qurl-service returns already_exists until the binding is
+// rotated or revoked.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
@@ -386,9 +388,10 @@ func shouldFallbackToLegacyMint(status int, body []byte) bool {
 		// During rollout, an older qurl-service has no route and returns a
 		// 404 that is not a qURL error envelope. Intentionally treat any 404
 		// without a qURL envelope code as legacy-compatible while the new
-		// endpoint rolls out. TODO(#705): remove this path after rollout.
-		// If a deployed route returns a structured qURL error envelope, surface
-		// it instead of minting a legacy key.
+		// endpoint rolls out, even though that can also catch an infra 404.
+		// TODO(#705): remove this path as soon as the binding route is live
+		// everywhere. If a deployed route returns a structured qURL error
+		// envelope, surface it instead of minting a legacy key.
 		return errorEnvelopeCode(body) == ""
 	}
 	if status != http.StatusServiceUnavailable {
