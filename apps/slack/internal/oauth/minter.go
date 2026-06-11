@@ -319,6 +319,9 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		// Preserve the legacy endpoint's historical code-only limit
+		// classification; the binding endpoint uses stricter status+code
+		// pairing because its error contract is new and controlled.
 		if apiKeyLimitError(rb) {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
@@ -437,6 +440,8 @@ func errorEnvelopeCode(body []byte) string {
 			Code string `json:"code"`
 		}
 		if err := json.Unmarshal(env.Error, &problem); err != nil {
+			// Treat {"error":"..."} as a generic, non-qURL-envelope 404 so
+			// the rollout bridge still covers old route-missing JSON bodies.
 			return ""
 		}
 		if problem.Code != "" {
