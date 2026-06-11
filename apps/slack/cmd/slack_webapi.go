@@ -226,6 +226,7 @@ const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
 const (
 	slackAssistantSetTitleURL            = "https://slack.com/api/assistant.threads.setTitle"
 	slackAssistantSetSuggestedPromptsURL = "https://slack.com/api/assistant.threads.setSuggestedPrompts"
+	slackAssistantSetStatusURL           = "https://slack.com/api/assistant.threads.setStatus"
 )
 
 // slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
@@ -463,15 +464,16 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 }
 
 // slackAssistantThreadsPort implements [internal.AssistantThreadsPort] over
-// assistant.threads.setTitle / setSuggestedPrompts. Each verb has its own
+// assistant.threads.setTitle / setSuggestedPrompts / setStatus. Each verb has its own
 // shared-transport poster (token lookup + Grid fallback + parse), like the reactions
-// port — it drives the Assistants-container first-run UX.
+// port — it drives the Assistants-container UX (first-run title/prompts + per-turn status).
 type slackAssistantThreadsPort struct {
 	setTitle   *slackWebAPIPoster
 	setPrompts *slackWebAPIPoster
+	setStatus  *slackWebAPIPoster
 }
 
-func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, setTitleURL, setSuggestedPromptsURL string, httpClient *http.Client) internal.AssistantThreadsPort {
+func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, setTitleURL, setSuggestedPromptsURL, setStatusURL string, httpClient *http.Client) internal.AssistantThreadsPort {
 	if httpClient == nil {
 		httpClient = defaultSlackPostMessageClient()
 	}
@@ -483,7 +485,11 @@ func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, use
 		func(s int, h http.Header, raw []byte) error {
 			return slackWebAPIResponseError("assistant.threads.setSuggestedPrompts", nil, s, h, raw)
 		}, httpClient)
-	return &slackAssistantThreadsPort{setTitle: setTitle, setPrompts: setPrompts}
+	setStatus := newSlackWebAPIPoster(lookup, userAgent, setStatusURL, "assistant.threads.setStatus",
+		func(s int, h http.Header, raw []byte) error {
+			return slackWebAPIResponseError("assistant.threads.setStatus", nil, s, h, raw)
+		}, httpClient)
+	return &slackAssistantThreadsPort{setTitle: setTitle, setPrompts: setPrompts, setStatus: setStatus}
 }
 
 func (p *slackAssistantThreadsPort) SetTitle(ctx context.Context, teamID, enterpriseID, channelID, threadTS, title string) error {
@@ -512,6 +518,18 @@ func (p *slackAssistantThreadsPort) SetSuggestedPrompts(ctx context.Context, tea
 		return fmt.Errorf("assistant.threads.setSuggestedPrompts request marshal: %w", err)
 	}
 	return p.setPrompts.post(ctx, teamID, enterpriseID, body)
+}
+
+func (p *slackAssistantThreadsPort) SetStatus(ctx context.Context, teamID, enterpriseID, channelID, threadTS, status string) error {
+	body, err := json.Marshal(struct {
+		ChannelID string `json:"channel_id"`
+		ThreadTS  string `json:"thread_ts"`
+		Status    string `json:"status"`
+	}{ChannelID: channelID, ThreadTS: threadTS, Status: status})
+	if err != nil {
+		return fmt.Errorf("assistant.threads.setStatus request marshal: %w", err)
+	}
+	return p.setStatus.post(ctx, teamID, enterpriseID, body)
 }
 
 // assistantPromptBody is the Slack assistant.threads.setSuggestedPrompts prompt

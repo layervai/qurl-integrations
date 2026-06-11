@@ -9,11 +9,14 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
-// fakeAssistantThreads records SetTitle / SetSuggestedPrompts calls.
+// fakeAssistantThreads records SetTitle / SetSuggestedPrompts / SetStatus calls.
+// statusErr, when set, makes SetStatus fail (to prove the turn is best-effort).
 type fakeAssistantThreads struct {
-	mu      sync.Mutex
-	titles  []assistantTitleCall
-	prompts []assistantPromptsCall
+	mu        sync.Mutex
+	titles    []assistantTitleCall
+	prompts   []assistantPromptsCall
+	statuses  []assistantStatusCall
+	statusErr error
 }
 
 type assistantTitleCall struct{ channelID, threadTS, title string }
@@ -21,6 +24,7 @@ type assistantPromptsCall struct {
 	channelID, threadTS string
 	prompts             []SuggestedPrompt
 }
+type assistantStatusCall struct{ channelID, threadTS, status string }
 
 func (f *fakeAssistantThreads) SetTitle(_ context.Context, _, _, channelID, threadTS, title string) error {
 	f.mu.Lock()
@@ -34,6 +38,19 @@ func (f *fakeAssistantThreads) SetSuggestedPrompts(_ context.Context, _, _, chan
 	defer f.mu.Unlock()
 	f.prompts = append(f.prompts, assistantPromptsCall{channelID, threadTS, prompts})
 	return nil
+}
+
+func (f *fakeAssistantThreads) SetStatus(_ context.Context, _, _, channelID, threadTS, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statuses = append(f.statuses, assistantStatusCall{channelID, threadTS, status})
+	return f.statusErr
+}
+
+func (f *fakeAssistantThreads) statusCalls() []assistantStatusCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]assistantStatusCall(nil), f.statuses...)
 }
 
 func assistantThreadStartedBody(channelID, threadTS string) string {
