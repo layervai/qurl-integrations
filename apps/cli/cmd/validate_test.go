@@ -15,6 +15,7 @@ func TestValidateURL(t *testing.T) {
 		{"ftp scheme", "ftp://example.com", true},
 		{"empty", "", true},
 		{"just scheme", "https://", true},
+		{"empty hostname with port separator", "http://:", true},
 	}
 
 	for _, tt := range tests {

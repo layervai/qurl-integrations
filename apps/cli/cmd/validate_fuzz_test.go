@@ -1,10 +1,12 @@
 package main
 
 import (
-	"net/url"
+	"context"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func FuzzValidateURL(f *testing.F) {
@@ -14,6 +16,7 @@ func FuzzValidateURL(f *testing.F) {
 	f.Add("example.com")
 	f.Add("ftp://example.com")
 	f.Add("https://")
+	f.Add("http://:")
 	f.Add("https://example.com\nHost:evil.test")
 	f.Add("https://exa mple.com")
 
@@ -21,16 +24,7 @@ func FuzzValidateURL(f *testing.F) {
 		if err := validateURL(raw); err != nil {
 			return
 		}
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("accepted unparsable URL %q: %v", raw, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			t.Fatalf("accepted URL with scheme %q: %q", u.Scheme, raw)
-		}
-		if u.Host == "" {
-			t.Fatalf("accepted URL without host: %q", raw)
-		}
+		assertAcceptedURLIsHTTPClientSafe(t, raw)
 	})
 }
 
@@ -102,5 +96,29 @@ func assertAcceptedPrefixedMinimum(t *testing.T, kind, value, prefix string, min
 	}
 	if len(value) < minLen {
 		t.Fatalf("accepted %s shorter than %d bytes: %q", kind, minLen, value)
+	}
+}
+
+func assertAcceptedURLIsHTTPClientSafe(t *testing.T, raw string) {
+	t.Helper()
+	if strings.IndexFunc(raw, unicode.IsControl) != -1 {
+		t.Fatalf("accepted URL with raw control character: %q", raw)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, raw, http.NoBody)
+	if err != nil {
+		t.Fatalf("accepted URL that net/http cannot request: %q: %v", raw, err)
+	}
+	if req.URL == nil || !req.URL.IsAbs() {
+		t.Fatalf("accepted non-absolute URL: %q", raw)
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		t.Fatalf("accepted URL with non-HTTP scheme %q: %q", req.URL.Scheme, raw)
+	}
+	if req.URL.Hostname() == "" || req.Host == "" {
+		t.Fatalf("accepted URL without request host: %q", raw)
+	}
+	if strings.ContainsAny(req.URL.String(), "\r\n") {
+		t.Fatalf("accepted URL normalizes with header-breaking bytes: %q", raw)
 	}
 }
