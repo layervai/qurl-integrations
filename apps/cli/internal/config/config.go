@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -61,7 +62,7 @@ func (c *Config) Get(key string) string {
 // Set sets a config value by key.
 func (c *Config) Set(key, value string) error {
 	if !validKeys[key] {
-		return fmt.Errorf("unknown key %q (valid: api_key, endpoint, output)", key)
+		return fmt.Errorf("unknown key %q (valid: %s)", key, strings.Join(ValidKeys(), ", "))
 	}
 	switch key {
 	case keyAPIKey:

@@ -23,6 +23,9 @@ func isolateCLIEnv(t *testing.T, apiKey ...string) string {
 	t.Helper()
 	home := t.TempDir()
 	key := ""
+	if len(apiKey) > 1 {
+		t.Fatalf("isolateCLIEnv accepts at most one API key override, got %d", len(apiKey))
+	}
 	if len(apiKey) > 0 {
 		key = apiKey[0]
 	}
