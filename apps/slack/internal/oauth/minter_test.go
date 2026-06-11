@@ -142,7 +142,7 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	if strings.Join(paths, ",") != testBindingPath+","+testAPIKeysPath {
 		t.Errorf("paths = %v", paths)
 	}
-	if legacyIdempotency != bindingIdempotencyKey(testTeamID) {
+	if legacyIdempotency != legacyFallbackIdempotencyKey(testTeamID) {
 		t.Errorf("legacy fallback Idempotency-Key = %q", legacyIdempotency)
 	}
 }
@@ -155,7 +155,7 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingsDisabled(t *testing.T
 			w.Header().Set("Retry-After", bindingUnavailableRetrySec)
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = io.WriteString(w, `{"error":{"code":"service_unavailable","detail":"External identity bindings are not enabled in this environment."}}`)
+			_, _ = io.WriteString(w, `{"error":{"code":"bindings_disabled","detail":"External identity bindings are not enabled in this environment."}}`)
 		case testAPIKeysPath:
 			legacyCalled = true
 			writeLegacyMintSuccess(t, w)
@@ -171,6 +171,28 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingsDisabled(t *testing.T
 	}
 	if !legacyCalled {
 		t.Fatal("expected legacy fallback when bindings are disabled")
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnDisabledProseWithoutCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == testAPIKeysPath {
+			t.Fatal("must not fall back to legacy mint without the stable bindings_disabled code")
+		}
+		w.Header().Set("Retry-After", bindingUnavailableRetrySec)
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"code":"service_unavailable","detail":"External identity bindings are not enabled in this environment."}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil {
+		t.Fatal("expected error when disabled response lacks bindings_disabled code")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("expected status code in error, got %q", err.Error())
 	}
 }
 

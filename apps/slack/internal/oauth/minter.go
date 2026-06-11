@@ -31,7 +31,7 @@ const (
 	// code alone can't disambiguate — the body `code` is the only signal.
 	errCodeAPIKeyLimit         = "api_key_limit"
 	errCodeAlreadyExists       = "already_exists"
-	errCodeServiceUnavailable  = "service_unavailable"
+	errCodeBindingsDisabled    = "bindings_disabled"
 	bindingUnavailableRetrySec = "60"
 )
 
@@ -218,7 +218,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if shouldFallbackToLegacyMint(resp.StatusCode, resp.Header, rb) {
-			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), idempotencyKey)
+			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
 		}
 		switch errorEnvelopeCode(rb) {
 		case errCodeAPIKeyLimit:
@@ -296,6 +296,9 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 	if mr.Data.APIKey == "" || mr.Data.KeyID == "" {
 		return "", "", "", errors.New("qurl-service returned empty api_key or key_id")
 	}
+	if mr.Data.KeyPrefix == "" {
+		mr.Data.KeyPrefix = storedAPIKeyPrefix(mr.Data.APIKey)
+	}
 	return mr.Data.APIKey, mr.Data.KeyID, mr.Data.KeyPrefix, nil
 }
 
@@ -330,8 +333,17 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 }
 
 func bindingIdempotencyKey(teamID string) string {
+	// qurl-service requires a 32+ character idempotency key. Slack team IDs
+	// are shorter, so hash to a stable fixed-width key with a readable prefix.
 	sum := sha256.Sum256([]byte(strings.TrimSpace(teamID)))
 	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
+}
+
+func legacyFallbackIdempotencyKey(teamID string) string {
+	// Keep the legacy fallback idempotency domain separate from the binding
+	// domain even if qurl-service stores idempotency keys globally.
+	sum := sha256.Sum256([]byte(strings.TrimSpace(teamID)))
+	return "slack-workspace-legacy-v1-" + hex.EncodeToString(sum[:])
 }
 
 func shouldFallbackToLegacyMint(status int, header http.Header, body []byte) bool {
@@ -344,8 +356,7 @@ func shouldFallbackToLegacyMint(status int, header http.Header, body []byte) boo
 	if header.Get("Retry-After") != bindingUnavailableRetrySec {
 		return false
 	}
-	return errorEnvelopeCode(body) == errCodeServiceUnavailable &&
-		strings.Contains(string(body), "not enabled")
+	return errorEnvelopeCode(body) == errCodeBindingsDisabled
 }
 
 // apiKeyLimitError reports whether body is a qurl-service error envelope
