@@ -17,10 +17,11 @@ import (
 
 // Slack Events API event types this handler reacts to.
 const (
-	slackEventTypeAppMention             = "app_mention"
-	slackEventTypeMessage                = "message"
-	slackEventTypeAssistantThreadStarted = "assistant_thread_started"
-	slackChannelTypeIM                   = "im"
+	slackEventTypeAppMention                    = "app_mention"
+	slackEventTypeMessage                       = "message"
+	slackEventTypeAssistantThreadStarted        = "assistant_thread_started"
+	slackEventTypeAssistantThreadContextChanged = "assistant_thread_context_changed"
+	slackChannelTypeIM                          = "im"
 )
 
 // agentProposalPreviewPrefix prefixes a proposed-mutation reply while
@@ -83,7 +84,8 @@ type slackEventEnvelope struct {
 }
 
 // slackInnerEvent is the inner `event` object for app_mention / message events,
-// plus the assistant_thread object on assistant_thread_started.
+// plus the assistant_thread object on the container events (assistant_thread_started
+// and assistant_thread_context_changed).
 type slackInnerEvent struct {
 	Type        string `json:"type"`
 	User        string `json:"user"`
@@ -94,15 +96,15 @@ type slackInnerEvent struct {
 	ChannelType string `json:"channel_type"`
 	TS          string `json:"ts"`
 	ThreadTS    string `json:"thread_ts"`
-	// AssistantThread is set only on assistant_thread_started (the container
-	// first-run event), which carries a nested object rather than the flat fields.
+	// AssistantThread is set on the container events (assistant_thread_started and
+	// assistant_thread_context_changed), which carry a nested object, not the flat fields.
 	AssistantThread *assistantThread `json:"assistant_thread,omitempty"`
 }
 
-// assistantThread is the assistant_thread object on an assistant_thread_started
-// event: the assistant DM channel + thread the user just opened, plus the context
-// (the channel they were viewing). Context is modeled now for later DM-scoped reads
-// but is unused in this first-run slice.
+// assistantThread is the assistant_thread object on a container event: the assistant DM
+// channel + thread the user opened, plus the context (the channel they were viewing).
+// Context.ChannelID is persisted by the container handlers for a later turn to scope its
+// reads to.
 type assistantThread struct {
 	UserID    string                 `json:"user_id"`
 	ChannelID string                 `json:"channel_id"`
@@ -261,10 +263,16 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 	if !h.agentEnabled() {
 		return
 	}
-	// The Assistants-container first-run event is additive and UX-only (no turn) —
-	// handle it before the turn-dispatch filter, which only admits app_mention/message.
-	if env.Event.Type == slackEventTypeAssistantThreadStarted {
+	// Assistants-container events are additive (no conversation turn) — handle them
+	// before the turn-dispatch filter, which only admits app_mention/message. Both carry
+	// the pane's context.channel_id (the channel the user opened it from); the started
+	// event also sets the first-run title + prompts.
+	switch env.Event.Type {
+	case slackEventTypeAssistantThreadStarted:
 		h.handleAssistantThreadStarted(env)
+		return
+	case slackEventTypeAssistantThreadContextChanged:
+		h.handleAssistantThreadContextChanged(env)
 		return
 	}
 	if !shouldDispatchAgentEvent(env) {
@@ -358,9 +366,18 @@ func agentEventRootTS(e *slackInnerEvent) string {
 	return e.TS
 }
 
+// agentThreadKey identifies one thread — channel + thread root — and is the single
+// format for both the conversation-history key and (for an assistant pane) the stored
+// context key. The container events persist context under agentThreadKey(at.ChannelID,
+// at.ThreadTS); a pane turn reads it under agentEventThreadKey(env), which delegates
+// here — so the two can't drift out of alignment.
+func agentThreadKey(channelID, threadRootTS string) string {
+	return channelID + ":" + threadRootTS
+}
+
 // agentEventThreadKey identifies one conversation: channel + thread root.
 func agentEventThreadKey(env *slackEventEnvelope) string {
-	return env.Event.Channel + ":" + agentEventRootTS(&env.Event)
+	return agentThreadKey(env.Event.Channel, agentEventRootTS(&env.Event))
 }
 
 // agentEventDedupeKey identifies the inbound MESSAGE — channel + the message's

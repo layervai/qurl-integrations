@@ -32,6 +32,9 @@ const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
 //     proposal snapshot awaiting an Approve/Reject click.
 //   - pending-action claim markers: sk = "pendclaim#<id>", existence-only — the
 //     consume-once latch so a proposal executes at most once.
+//   - assistant pane context: sk = "actx#<thread_key>", carries the channel id a
+//     user opened the assistant pane FROM, so a later pane turn (which carries no
+//     context of its own) can scope its reads to that channel. Last write wins.
 //
 // Every item carries a `ttl` epoch the table's DynamoDB TTL reaps. `conv_version`
 // is a deliberately non-reserved attribute name (DDB reserves "VERSION") so the
@@ -43,6 +46,9 @@ const (
 	attrAgentVersion  = "conv_version"
 	attrAgentTTL      = "ttl"
 	attrPendPayload   = "pend_payload"
+	// attrContextChannel is the channel id a user opened the assistant pane FROM,
+	// stored on an "actx#<thread_key>" item for the pane turn to scope its reads to.
+	attrContextChannel = "ctx_channel"
 	// attrTurnCount is the running tally on a fixed-window turn-rate counter item
 	// (sk = "rate#<scope>#<window-start>"), incremented atomically per agent turn.
 	attrTurnCount = "turn_count"
@@ -51,6 +57,7 @@ const (
 	eventSKPrefix     = "evt#"
 	pendSKPrefix      = "pend#"
 	pendClaimSKPrefix = "pendclaim#"
+	threadCtxSKPrefix = "actx#"
 	// rateSKPrefix namespaces the per-window turn-rate counters; the full sk is
 	// "rate#<scope>#<window-start-unix>" where scope is "team" or "user#<id>".
 	rateSKPrefix = "rate#"
@@ -309,6 +316,69 @@ func (s *AgentStore) SaveConversation(ctx context.Context, partition, threadKey 
 		return ddbToError("SaveConversation", err)
 	}
 	return nil
+}
+
+// PutThreadContext records the channel a user opened the assistant pane FROM
+// (assistant_thread.context.channel_id), keyed by the pane thread, so a later pane
+// turn — which carries no context of its own — can scope its reads to that channel.
+// Last write wins (no create-condition): an assistant_thread_context_changed event,
+// fired when the user switches the channel they're viewing, overwrites it. TTL'd via
+// conversationTTL so the context lives exactly as long as the conversation it scopes;
+// the turn path refreshes it like SaveConversation refreshes the transcript.
+//
+// partition is the SLACK TEAM id, not the enterprise-grid-aware conversation
+// partition. The context is WRITTEN on assistant_thread_started /
+// assistant_thread_context_changed and READ on the message.im turn — three distinct
+// event types — and only the team id is guaranteed identical across all of them (the
+// enterprise field can vary by event type on Grid), so keying on team id is what lets
+// the turn find what the container events stored. The thread key is globally unique,
+// so org-grain partitioning would buy nothing.
+func (s *AgentStore) PutThreadContext(ctx context.Context, partition, threadKey, channelID string) error {
+	if partition == "" || threadKey == "" || channelID == "" {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "PutThreadContext: partition, thread_key and channel_id are required"}
+	}
+	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(s.TableName),
+		Item: map[string]ddbtypes.AttributeValue{
+			attrAgentPK:        stringAttr(partition),
+			attrAgentSK:        stringAttr(threadCtxSKPrefix + threadKey),
+			attrContextChannel: stringAttr(channelID),
+			attrAgentTTL:       numberAttr(s.now().Add(s.conversationTTL()).Unix()),
+		},
+	})
+	if err != nil {
+		return ddbToError("PutThreadContext", err)
+	}
+	return nil
+}
+
+// GetThreadContext returns the channel the assistant pane was opened from for a
+// thread, or ("", false, nil) when none was stored (never written, TTL-reaped, or a
+// thread that predates context-scoping). A pane turn uses it to scope its reads;
+// found=false means "no context — fall back to the DM". partition is the SLACK TEAM
+// id (see PutThreadContext). The TTL is enforced at read time, like LoadPendingAction,
+// so a long-stale context isn't returned past its window.
+func (s *AgentStore) GetThreadContext(ctx context.Context, partition, threadKey string) (channelID string, found bool, err error) {
+	if partition == "" || threadKey == "" {
+		return "", false, &Error{StatusCode: http.StatusBadRequest, Title: "GetThreadContext: partition and thread_key are required"}
+	}
+	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrAgentPK: stringAttr(partition),
+			attrAgentSK: stringAttr(threadCtxSKPrefix + threadKey),
+		},
+	})
+	if err != nil {
+		return "", false, ddbToError("GetThreadContext", err)
+	}
+	if len(out.Item) == 0 {
+		return "", false, nil
+	}
+	if ttl := readNumber(out.Item, attrAgentTTL); ttl > 0 && s.now().Unix() >= ttl {
+		return "", false, nil
+	}
+	return readString(out.Item, attrContextChannel), true, nil
 }
 
 // PutPendingAction stores a proposed-mutation snapshot under partition, keyed by

@@ -224,6 +224,86 @@ func TestConversation_TTLRefreshedOnSave(t *testing.T) {
 	}
 }
 
+func TestThreadContext_RoundTripAndTTL(t *testing.T) {
+	fake := newAgentFakeDDB()
+	s := newTestAgentStore(fake)
+	ctx := context.Background()
+
+	// No context stored → not found, no error (a pane turn falls back to the DM).
+	if ch, found, err := s.GetThreadContext(ctx, "T1", "D1:100.1"); err != nil || found || ch != "" {
+		t.Fatalf("missing get: ch=%q found=%v err=%v", ch, found, err)
+	}
+
+	if err := s.PutThreadContext(ctx, "T1", "D1:100.1", "C9"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	ch, found, err := s.GetThreadContext(ctx, "T1", "D1:100.1")
+	if err != nil || !found || ch != "C9" {
+		t.Fatalf("roundtrip: ch=%q found=%v err=%v", ch, found, err)
+	}
+	// now=1_700_000_000, conversation TTL default 30m → 1_700_001_800: the context
+	// tracks the lifetime of the conversation it scopes.
+	if got := fake.lastPutAt[threadCtxSKPrefix+"D1:100.1"]; got != "1700001800" {
+		t.Fatalf("context ttl = %q, want 1700001800", got)
+	}
+}
+
+func TestThreadContext_LatestWins(t *testing.T) {
+	// assistant_thread_context_changed overwrites the context as the user switches the
+	// channel they're viewing — an unconditional Put, last write wins.
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+	if err := s.PutThreadContext(ctx, "T1", "D1:100.1", "C1"); err != nil {
+		t.Fatalf("put C1: %v", err)
+	}
+	if err := s.PutThreadContext(ctx, "T1", "D1:100.1", "C2"); err != nil {
+		t.Fatalf("put C2: %v", err)
+	}
+	if ch, found, _ := s.GetThreadContext(ctx, "T1", "D1:100.1"); !found || ch != "C2" {
+		t.Fatalf("latest write must win: ch=%q found=%v", ch, found)
+	}
+}
+
+func TestGetThreadContext_ReadTimeExpiry(t *testing.T) {
+	// Like LoadPendingAction, the TTL is enforced at read time so a long-stale context
+	// (the reaper lags) reads as gone and the turn falls back to the DM.
+	fake := newAgentFakeDDB()
+	now := time.Unix(1_700_000_000, 0)
+	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, ConversationTTL: 30 * time.Minute}
+	ctx := context.Background()
+
+	if err := s.PutThreadContext(ctx, "T1", "D1:100.1", "C9"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if _, found, _ := s.GetThreadContext(ctx, "T1", "D1:100.1"); !found {
+		t.Fatal("should be found within the TTL window")
+	}
+	now = now.Add(31 * time.Minute) // advance past the 30m TTL
+	if _, found, _ := s.GetThreadContext(ctx, "T1", "D1:100.1"); found {
+		t.Fatal("a past-TTL context must read as expired")
+	}
+}
+
+func TestThreadContext_Validation(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+	if err := s.PutThreadContext(ctx, "", "k", "C1"); err == nil {
+		t.Error("expected validation error for empty partition")
+	}
+	if err := s.PutThreadContext(ctx, "T1", "", "C1"); err == nil {
+		t.Error("expected validation error for empty thread key")
+	}
+	if err := s.PutThreadContext(ctx, "T1", "k", ""); err == nil {
+		t.Error("expected validation error for empty channel id")
+	}
+	if _, _, err := s.GetThreadContext(ctx, "", "k"); err == nil {
+		t.Error("expected validation error for empty partition")
+	}
+	if _, _, err := s.GetThreadContext(ctx, "T1", ""); err == nil {
+		t.Error("expected validation error for empty thread key")
+	}
+}
+
 func TestPendingAction_RoundTripAndTTL(t *testing.T) {
 	fake := newAgentFakeDDB()
 	s := newTestAgentStore(fake)

@@ -54,10 +54,20 @@ func (f *fakeAssistantThreads) statusCalls() []assistantStatusCall {
 }
 
 func assistantThreadStartedBody(channelID, threadTS string) string {
-	return `{"type":"event_callback","team_id":"T1","event_id":"EvAssist",` +
-		`"event":{"type":"assistant_thread_started","assistant_thread":{"user_id":"U2",` +
-		`"channel_id":"` + channelID + `","thread_ts":"` + threadTS + `",` +
-		`"context":{"channel_id":"C9","team_id":"T1"}}}}`
+	return assistantEventBody(slackEventTypeAssistantThreadStarted, "EvAssist", channelID, threadTS, "C9")
+}
+
+// assistantEventBody builds an assistant_thread_started / _context_changed event_callback
+// for the given pane channel + thread and context channel. An empty contextChannel omits
+// context.channel_id (a pane opened with no channel in view).
+func assistantEventBody(eventType, eventID, channelID, threadTS, contextChannel string) string {
+	ctx := ""
+	if contextChannel != "" {
+		ctx = `,"context":{"channel_id":"` + contextChannel + `","team_id":"T1"}`
+	}
+	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+		`"event":{"type":"` + eventType + `","assistant_thread":{"user_id":"U2",` +
+		`"channel_id":"` + channelID + `","thread_ts":"` + threadTS + `"` + ctx + `}}}`
 }
 
 func newAssistantHandler(t *testing.T, seam AssistantThreadsPort) *Handler {
