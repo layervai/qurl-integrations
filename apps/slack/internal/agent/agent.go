@@ -225,9 +225,13 @@ type Agent struct {
 	llm           LLM
 	backend       Backend
 	maxIterations int
-	// streamSink, when non-nil and the LLM implements [streamingLLM], receives the
-	// assistant's text deltas as they stream. Per-turn: the handler constructs a
-	// fresh Agent for each turn, so the sink never outlives the turn it serves.
+	// streamLLM is llm if it implements [streamingLLM], else nil — the streaming
+	// capability is detected once in [New] so [roundTrip] is a single nil check per
+	// round rather than a per-round type assertion.
+	streamLLM streamingLLM
+	// streamSink, when non-nil and streamLLM is set, receives the assistant's text
+	// deltas as they stream. Per-turn: the handler constructs a fresh Agent for each
+	// turn, so the sink never outlives the turn it serves.
 	streamSink func(delta string)
 }
 
@@ -275,6 +279,7 @@ func WithStreamSink(sink func(delta string)) Option {
 // New constructs an Agent. llm and backend are required.
 func New(llm LLM, backend Backend, opts ...Option) *Agent {
 	a := &Agent{llm: llm, backend: backend, maxIterations: defaultMaxIterations}
+	a.streamLLM, _ = llm.(streamingLLM) // detect the streaming capability once
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -308,7 +313,9 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	for range a.maxIterations {
 		resp, err := a.roundTrip(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
 		if err != nil {
-			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm complete: %w", err)
+			// Path-neutral: roundTrip fans out to Complete or StreamComplete, so don't
+			// hardcode "complete" (the streaming error already says "messages stream").
+			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm round-trip: %w", err)
 		}
 		usage.add(resp.Usage)
 
@@ -361,13 +368,12 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 }
 
 // roundTrip runs one model round-trip, routing to the streaming path when a per-turn
-// sink is set and the LLM implements [streamingLLM], else the plain [LLM.Complete].
-// Centralizing the choice here keeps [Run]'s loop identical for both paths.
+// sink is set and the LLM supports streaming (streamLLM, detected in [New]), else the
+// plain [LLM.Complete]. Centralizing the choice here keeps [Run]'s loop identical for
+// both paths.
 func (a *Agent) roundTrip(ctx context.Context, req *Request) (Response, error) {
-	if a.streamSink != nil {
-		if s, ok := a.llm.(streamingLLM); ok {
-			return s.StreamComplete(ctx, req, a.streamSink)
-		}
+	if a.streamSink != nil && a.streamLLM != nil {
+		return a.streamLLM.StreamComplete(ctx, req, a.streamSink)
 	}
 	return a.llm.Complete(ctx, req)
 }

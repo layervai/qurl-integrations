@@ -57,6 +57,24 @@ func (s *streamingFakeLLM) StreamComplete(_ context.Context, _ *Request, onText 
 	return r, nil
 }
 
+// streamingErrLLM emits one text delta to the sink, then fails the round — modeling a
+// stream that breaks mid-flight after the caller has already received text.
+type streamingErrLLM struct {
+	partial string
+	err     error
+}
+
+func (s *streamingErrLLM) Complete(context.Context, *Request) (Response, error) {
+	return Response{}, s.err
+}
+
+func (s *streamingErrLLM) StreamComplete(_ context.Context, _ *Request, onText func(string)) (Response, error) {
+	if onText != nil && s.partial != "" {
+		onText(s.partial)
+	}
+	return Response{}, s.err
+}
+
 // chunkText splits s into fixed-size rune chunks so the fake emits several deltas for
 // any multi-character text; the concatenation of the chunks is exactly s.
 func chunkText(s string, size int) []string {
@@ -239,6 +257,28 @@ func TestRun_Streaming_IntermediateNarrationThenReply_StreamsBoth(t *testing.T) 
 	// the persisted reply when an intermediate round narrates.
 	if res.Reply != reply {
 		t.Fatalf("Result.Reply = %q, want the terminal round's text %q", res.Reply, reply)
+	}
+}
+
+// A stream that emits text then fails surfaces the error from Run, but the deltas it
+// already delivered stay with the sink — pinning the documented "deltas already
+// delivered are NOT rolled back on a later stream error" contract that PR2's
+// finalization builds on (it owns how a partially-streamed-then-failed turn finalizes).
+func TestRun_Streaming_ErrorAfterPartialDeltas_RetainsDeltas(t *testing.T) {
+	const partial = "Here's what I fou"
+	llm := &streamingErrLLM{partial: partial, err: errors.New("stream blew up mid-flight")}
+	sink := &recordingSink{}
+	ctx, tc := testCtx()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(sink.fn)).Run(ctx, tc, nil, "what's here?")
+	if err == nil {
+		t.Fatal("Run must surface the mid-stream error")
+	}
+	if sink.joined() != partial {
+		t.Fatalf("partial deltas must NOT be rolled back on error, got %q want %q", sink.joined(), partial)
+	}
+	if res.Reply != "" {
+		t.Fatalf("an errored turn must not carry a reply, got %q", res.Reply)
 	}
 }
 
