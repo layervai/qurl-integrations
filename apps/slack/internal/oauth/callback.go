@@ -48,8 +48,10 @@ const (
 	// mintTimeout bounds qurl-service provisioning from mintAndPersist.
 	// Keep one tight budget across binding + optional legacy fallback:
 	// fallback only runs for fast route-missing/dark-launch responses,
-	// while slow or transient binding failures are surfaced. A larger
-	// budget widens the post-timeout orphan-key window described below.
+	// while slow or transient binding failures are surfaced. If a fallback-
+	// eligible 404/503 arrives late, the legacy retry inherits only the
+	// remaining budget and may fail once; the admin can rerun setup rather
+	// than widening the post-timeout orphan-key window described below.
 	// Same fresh-context rationale as persistTimeout: TimeoutHandler
 	// canceling mid-mint would orphan a key the bot can no longer revoke
 	// (no keyID to DELETE against).

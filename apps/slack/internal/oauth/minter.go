@@ -416,12 +416,24 @@ func apiKeyLimitError(body []byte) bool {
 
 func errorEnvelopeCode(body []byte) string {
 	var env struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(body, &env); err == nil {
-		return env.Error.Code
+		if len(env.Error) == 0 {
+			return ""
+		}
+		var problem struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(env.Error, &problem); err != nil {
+			return ""
+		}
+		if problem.Code != "" {
+			return problem.Code
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(env.Error), []byte("{")) {
+			return structuredErrorEnvelopeCode
+		}
 	}
 	return partialErrorEnvelopeCode(body)
 }

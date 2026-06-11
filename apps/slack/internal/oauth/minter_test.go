@@ -267,6 +267,27 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackOnJSON404WithoutQURLErrorCode(t *
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnStructured404WithoutCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == testAPIKeysPath {
+			t.Fatal("must not fall back to legacy mint on object-shaped qurl-service 404 without code")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"detail":"not found"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil {
+		t.Fatal("expected error on structured 404 without code")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected status code in error, got %q", err.Error())
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnOversizedStructured404(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == testAPIKeysPath {
