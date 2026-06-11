@@ -417,6 +417,15 @@ type Config struct {
 	// are enabled), so the surface stays dark until both the seam is wired and the
 	// manifest is updated. Best-effort: a failure is logged, never surfaced.
 	AppHomePublish AppHomePublishFunc
+
+	// AgentStream drives Slack's native AI-app reply streaming (chat.startStream /
+	// appendStream / stopStream) in the assistant pane, so a DM (pane) turn's reply
+	// renders token-by-token instead of as one posted message. Nil (the default) keeps
+	// the agent on the non-streaming post path; even when wired it only engages for a
+	// pane turn and requires the assistant:write scope, so the surface stays dark until
+	// the manifest enables it. Best-effort: any failure falls back to / leaves the
+	// normal post path.
+	AgentStream AgentStreamPort
 }
 
 // PostMessageFunc posts a Slack message via chat.postMessage on the
@@ -443,6 +452,19 @@ type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, chann
 // caller renders untrusted action fields through escapeMrkdwn*), so no further
 // sanitization is needed here.
 type AppHomePublishFunc func(ctx context.Context, teamID, enterpriseID, userID string, blocks []any) error
+
+// AgentStreamPort drives Slack's native AI-app streaming over the per-workspace bot
+// token (enterpriseID for Grid token resolution). StartStream opens a stream on a
+// thread and returns the stream message's ts — the handle AppendStream/StopStream
+// address; recipientUserID is the pane user (Slack requires it on a streamed reply).
+// AppendStream appends a markdown chunk; StopStream finalizes the message. A nil port
+// keeps the agent on the non-streaming post path; all three require the assistant:write
+// scope.
+type AgentStreamPort interface {
+	StartStream(ctx context.Context, teamID, enterpriseID, channelID, threadTS, recipientUserID string) (streamTS string, err error)
+	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
+	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
+}
 
 // ResolveChannelNameFunc resolves a channel id to its human name via
 // conversations.info on the per-workspace bot token (enterpriseID for Grid token

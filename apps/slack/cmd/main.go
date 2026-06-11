@@ -178,6 +178,11 @@ func run() error {
 	// feature + app_home_opened subscription are set — the event doesn't arrive, and the
 	// view would no-op, until then.
 	agentAppHomePublish := newSlackAppHomePublishFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsPublishURL, nil)
+	// chat.startStream/appendStream/stopStream seam for native AI-app reply streaming in
+	// the assistant pane. Always wired (same token lookup + Grid fallback); inert until the
+	// assistant:write scope + the pane (Agents & AI Apps) are enabled, and only engaged for
+	// a pane turn — otherwise the agent posts the reply normally.
+	agentStream := newSlackAgentStreamPortWithTokenLookup(workspaceTokenLookup, userAgent, slackChatStartStreamURL, slackChatAppendStreamURL, slackChatStopStreamURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
@@ -253,6 +258,7 @@ func run() error {
 		ChannelMembership:           agentChannelMembership,
 		AssistantThreads:            agentAssistantThreads,
 		AppHomePublish:              agentAppHomePublish,
+		AgentStream:                 agentStream,
 	})
 
 	// Alias reads and writes must go through the same slackdata facade so
