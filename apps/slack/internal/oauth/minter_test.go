@@ -26,6 +26,22 @@ func mintWorkspaceOnlyErr(m *HTTPAPIKeyMinter) error {
 	return err
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func textResponse(req *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
 func writeBindingSuccess(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
@@ -378,6 +394,41 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	}
 	if legacyIdempotency != "" {
 		t.Errorf("legacy fallback Idempotency-Key = %q, want empty so revoked persist-failure retries mint fresh keys", legacyIdempotency)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceFallbackUsesCallerContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var paths []string
+	m := &HTTPAPIKeyMinter{
+		BaseURL: "https://qurl.example",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.URL.Path)
+			switch req.URL.Path {
+			case testBindingPath:
+				cancel()
+				return textResponse(req, http.StatusNotFound, "404 page not found"), nil
+			case testAPIKeysPath:
+				if !errors.Is(req.Context().Err(), context.Canceled) {
+					t.Fatalf("legacy fallback context error = %v, want context.Canceled", req.Context().Err())
+				}
+				return nil, req.Context().Err()
+			default:
+				t.Fatalf("unexpected path %s", req.URL.Path)
+			}
+			return textResponse(req, http.StatusInternalServerError, ""), nil
+		})},
+	}
+
+	_, err := m.MintWorkspaceAPIKey(ctx, "tok", testTeamID)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("MintWorkspaceAPIKey error = %v, want context.Canceled", err)
+	}
+	wantPaths := testBindingPath + "," + testAPIKeysPath
+	if strings.Join(paths, ",") != wantPaths {
+		t.Fatalf("paths = %v, want %s", paths, wantPaths)
 	}
 }
 
