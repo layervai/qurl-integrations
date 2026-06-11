@@ -225,3 +225,45 @@ func TestStreamTextDelta_ExtractsTextDeltasOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamAccumulate_MergesUsageAndContent verifies the production claim that the
+// streaming path yields the same Response a non-streaming Complete would: that rests
+// on the SDK's Accumulate merging input/cache tokens (from message_start) with the
+// final output tokens (from message_delta) and reassembling the text — exactly what
+// StreamComplete relies on. The fake-LLM loop tests (stream_test.go) bypass Accumulate,
+// so it's driven here directly with a real message_start → delta → message_delta event
+// sequence (closing the coverage gap the byte-identical-usage guarantee otherwise has).
+func TestStreamAccumulate_MergesUsageAndContent(t *testing.T) {
+	events := []string{
+		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":42,"output_tokens":1,"cache_creation_input_tokens":7,"cache_read_input_tokens":5}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi "}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"there"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":13}}`,
+		`{"type":"message_stop"}`,
+	}
+	var msg anthropic.Message
+	for _, w := range events {
+		var event anthropic.MessageStreamEventUnion
+		if err := json.Unmarshal([]byte(w), &event); err != nil {
+			t.Fatalf("unmarshal %q: %v", w, err)
+		}
+		if err := msg.Accumulate(event); err != nil {
+			t.Fatalf("accumulate %q: %v", w, err)
+		}
+	}
+	resp := fromSDKMessage(&msg)
+	// Input + cache counters come from message_start; output is the final message_delta
+	// value (not message_start's placeholder 1).
+	want := Usage{InputTokens: 42, OutputTokens: 13, CacheCreationInputTokens: 7, CacheReadInputTokens: 5}
+	if resp.Usage != want {
+		t.Fatalf("accumulated usage = %+v, want %+v", resp.Usage, want)
+	}
+	if resp.Text != "hi there" {
+		t.Fatalf("accumulated text = %q, want %q", resp.Text, "hi there")
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("accumulated stop reason = %q, want %q", resp.StopReason, "end_turn")
+	}
+}
