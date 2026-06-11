@@ -178,3 +178,50 @@ func TestToSDKTools_NilSchemaBecomesEmptyObject(t *testing.T) {
 		t.Errorf("expected an object input schema, got %s", raw)
 	}
 }
+
+// TestStreamTextDelta_ExtractsTextDeltasOnly pins the streaming hot-path tap against
+// real stream-event wire shapes. The fake-LLM loop tests (stream_test.go) drive the
+// sink directly and never exercise anthropicLLM's SDK decode, so the extraction that
+// turns raw events into live tokens is verified here by unmarshaling the SDK union —
+// the same wire-shape approach TestToSDKMessages uses for the request seam. The
+// load-bearing case is input_json_delta: it IS a content_block_delta, so the type
+// guard passes, but it carries tool-call JSON (not assistant text) and must yield "".
+func TestStreamTextDelta_ExtractsTextDeltasOnly(t *testing.T) {
+	cases := []struct {
+		name string
+		wire string
+		want string
+	}{
+		{
+			name: "text delta is forwarded",
+			wire: `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}`,
+			want: "Hello ",
+		},
+		{
+			name: "tool-args (input_json) delta is not assistant text",
+			wire: `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"token\""}}`,
+			want: "",
+		},
+		{
+			name: "message_delta carries a stop reason, not text",
+			wire: `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`,
+			want: "",
+		},
+		{
+			name: "content_block_start is not a delta",
+			wire: `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var event anthropic.MessageStreamEventUnion
+			if err := json.Unmarshal([]byte(tc.wire), &event); err != nil {
+				t.Fatalf("unmarshal stream event: %v", err)
+			}
+			if got := streamTextDelta(&event); got != tc.want {
+				t.Fatalf("streamTextDelta = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

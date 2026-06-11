@@ -44,6 +44,52 @@ func (l *anthropicLLM) Complete(ctx context.Context, req *Request) (Response, er
 	return fromSDKMessage(msg), nil
 }
 
+// StreamComplete implements [streamingLLM]: it issues the same request as
+// [anthropicLLM.Complete] but over the streaming endpoint, forwarding each text
+// delta to onText as the model emits it, and returns the fully-assembled
+// [Response] once the stream ends. The request params ([buildParams]) and the
+// final flattening ([fromSDKMessage]) are shared with Complete, so a streamed turn
+// and a non-streamed turn produce identical text, tool calls, and usage — only the
+// delivery timing differs. onText may be nil (then this is just a streaming Complete).
+func (l *anthropicLLM) StreamComplete(ctx context.Context, req *Request, onText func(delta string)) (Response, error) {
+	stream := l.client.Messages.NewStreaming(ctx, l.buildParams(req))
+	defer func() { _ = stream.Close() }() // best-effort cleanup; the read error is reported via stream.Err below
+
+	// Accumulate rebuilds the full Message from the SSE events; we additionally tap
+	// the text deltas as they pass so the caller can render them live.
+	var msg anthropic.Message
+	for stream.Next() {
+		event := stream.Current()
+		if err := msg.Accumulate(event); err != nil {
+			return Response{}, fmt.Errorf("anthropic stream accumulate: %w", err)
+		}
+		if onText != nil {
+			if delta := streamTextDelta(&event); delta != "" {
+				onText(delta)
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return Response{}, fmt.Errorf("anthropic messages stream: %w", err)
+	}
+	return fromSDKMessage(&msg), nil
+}
+
+// streamTextDelta returns the assistant text a streaming event carries, or "" for
+// any non-text event. It reads the flattened [anthropic.MessageStreamEventUnion]
+// fields (Type + Delta.Text) the SDK already populates at decode time, rather than
+// the typed .AsAny() accessors, which re-parse the event JSON on every call — this
+// runs once per token on the streaming hot path. Delta.Text is non-empty only for a
+// content_block_delta's text delta (an input_json / stop / thinking delta fills a
+// different field), and the explicit type guard keeps that intent legible. Taken by
+// pointer: the event union is a large struct, so per-token copies would add up.
+func streamTextDelta(event *anthropic.MessageStreamEventUnion) string {
+	if event.Type == "content_block_delta" {
+		return event.Delta.Text
+	}
+	return ""
+}
+
 // buildParams assembles the Messages API request. Pure (no network) so the
 // cache-breakpoint placement is unit-testable.
 func (l *anthropicLLM) buildParams(req *Request) anthropic.MessageNewParams {

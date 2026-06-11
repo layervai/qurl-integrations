@@ -164,6 +164,18 @@ type LLM interface {
 	Complete(ctx context.Context, req *Request) (Response, error)
 }
 
+// streamingLLM is the optional streaming extension to [LLM]. When the configured
+// LLM implements it AND a per-turn stream sink is set ([WithStreamSink]), [Run]
+// forwards the assistant's text deltas to the sink as the model generates them,
+// instead of waiting for the whole round-trip. It's a separate interface (asserted
+// at the seam, like io.WriterTo) so every existing non-streaming [LLM] fake stays
+// valid — they simply take the [LLM.Complete] path. onText receives only non-empty
+// text deltas; the full [Response] (text, tool calls, usage) is still returned when
+// the round-trip ends, identical to [LLM.Complete].
+type streamingLLM interface {
+	StreamComplete(ctx context.Context, req *Request, onText func(delta string)) (Response, error)
+}
+
 // Backend is the port to qURL read operations, each scoped by the
 // implementation to what the caller (in [TurnContext]) may see in their channel.
 // Every method returns a model-readable summary string (the tool_result the LLM
@@ -213,6 +225,10 @@ type Agent struct {
 	llm           LLM
 	backend       Backend
 	maxIterations int
+	// streamSink, when non-nil and the LLM implements [streamingLLM], receives the
+	// assistant's text deltas as they stream. Per-turn: the handler constructs a
+	// fresh Agent for each turn, so the sink never outlives the turn it serves.
+	streamSink func(delta string)
 }
 
 // Option configures an [Agent].
@@ -225,6 +241,23 @@ func WithMaxIterations(n int) Option {
 			a.maxIterations = n
 		}
 	}
+}
+
+// WithStreamSink wires a per-turn sink that receives the assistant's text deltas
+// as they stream. nil (the default) keeps [Run] on the non-streaming
+// [LLM.Complete] path; a non-nil sink only takes effect when the configured LLM
+// also implements [streamingLLM]. The sink is called from the loop goroutine, in
+// order, with each non-empty text delta.
+//
+// The sink observes EVERY round's text, not just the final reply's. A tool-calling
+// round's text (rare — the system prompt leads with the answer, not preamble) and a
+// propose_* round's narration both stream before [Run] decides the turn's outcome:
+// there's no lookahead to suppress them, and the stream is append-only. So a turn
+// that ends in a [Proposal] may still have streamed narration first — [Run] returns
+// the [Proposal] regardless (the streamed text is the agent "speaking" before the
+// confirm card follows). The caller's stream finalization handles that case.
+func WithStreamSink(sink func(delta string)) Option {
+	return func(a *Agent) { a.streamSink = sink }
 }
 
 // New constructs an Agent. llm and backend are required.
@@ -261,7 +294,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 
 	var usage Usage
 	for range a.maxIterations {
-		resp, err := a.llm.Complete(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
+		resp, err := a.complete(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
 		if err != nil {
 			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm complete: %w", err)
 		}
@@ -313,4 +346,16 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	}
 
 	return Result{Reply: iterationCapMessage, Usage: usage}, msgs, nil
+}
+
+// complete runs one model round-trip, routing to the streaming path when a per-turn
+// sink is set and the LLM implements [streamingLLM], else the plain [LLM.Complete].
+// Centralizing the choice here keeps [Run]'s loop identical for both paths.
+func (a *Agent) complete(ctx context.Context, req *Request) (Response, error) {
+	if a.streamSink != nil {
+		if s, ok := a.llm.(streamingLLM); ok {
+			return s.StreamComplete(ctx, req, a.streamSink)
+		}
+	}
+	return a.llm.Complete(ctx, req)
 }
