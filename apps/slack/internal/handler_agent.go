@@ -507,19 +507,33 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		CallerIsAdmin: h.callerIsAdmin(log, env.TeamID, env.Event.User),
 	}
 
-	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log))
+	replyTS := agentEventRootTS(&env.Event)
+	// Native reply streaming for a pane (DM) turn: when the AgentStream seam is wired and
+	// this is an im turn, the reply renders token-by-token instead of as one posted message.
+	// nil otherwise — the agent keeps the normal post path. Per-turn (a fresh streamer/Run).
+	streamer := h.newAgentReplyStreamer(ctx, log, env, replyTS)
+	var streamOpts []agent.Option
+	if streamer != nil {
+		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
+	}
+	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
 	result, newHistory, err := a.Run(ctx, &tc, history, stripBotMention(env.Event.Text))
 
-	replyTS := agentEventRootTS(&env.Event)
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)
-		reply := agentErrorReply
-		if ctx.Err() != nil {
-			// The turn ctx is done (agentTurnTimeout elapsed, or baseCtx canceled on
-			// shutdown): a transient timeout, not a capability limit — invite a retry.
-			reply = agentTransientReply
+		// A HEALTHY live stream owns the (partial) outcome — deltas already delivered aren't
+		// rolled back — so finalize the partial rather than double-posting an error over it.
+		// finalizeError returns false (→ post the error below) when no stream opened, or when the
+		// stream BROKE mid-flight and left a truncated partial the user shouldn't read as final.
+		if streamer == nil || !streamer.finalizeError() {
+			reply := agentErrorReply
+			if ctx.Err() != nil {
+				// The turn ctx is done (agentTurnTimeout elapsed, or baseCtx canceled on
+				// shutdown): a transient timeout, not a capability limit — invite a retry.
+				reply = agentTransientReply
+			}
+			h.postAgentReply(log, env, replyTS, reply)
 		}
-		h.postAgentReply(log, env, replyTS, reply)
 		return
 	}
 
@@ -556,6 +570,14 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	}
 	h.saveAgentHistory(log, partition, threadKey, newHistory, delta, version)
 
+	// A live stream delivers the reply itself (finalizeReply flushes + stops it), so the
+	// caller skips the post — the no-double-post invariant. It returns false when no stream
+	// opened (no deltas), when the stream broke mid-flight (the caller posts the full reply
+	// over the truncated partial), or for a proposal, whose streamed text was only the agent's
+	// narration; the confirm card is still delivered below as a separate message.
+	if streamer != nil && streamer.finalizeReply(&result) {
+		return
+	}
 	// Deliver: an interactive confirm card for an executable proposal once the
 	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
 	h.deliverAgentResult(log, env, replyTS, &result)
