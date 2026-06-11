@@ -221,7 +221,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		rb = rb[:minterBodyLimit]
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		if shouldFallbackToLegacyMint(resp.StatusCode, rb, resp.Header.Get("Content-Type")) {
+		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
 			drainAndCloseResponse(resp)
 			bindingBodyClosed = true
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
@@ -382,16 +382,14 @@ func workspaceIdempotencyKey(prefix, teamID string) string {
 	return prefix + hex.EncodeToString(sum[:])
 }
 
-func shouldFallbackToLegacyMint(status int, body []byte, contentType string) bool {
+func shouldFallbackToLegacyMint(status int, body []byte) bool {
 	if status == http.StatusNotFound {
-		// During rollout, an older qurl-service has no route and returns an
-		// unstructured 404. Intentionally treat that as legacy-compatible
-		// while the new endpoint rolls out. TODO(#705): remove this path
-		// after rollout. If a deployed route returns a structured qURL error
-		// envelope, surface it instead of minting a legacy key.
-		if strings.Contains(strings.ToLower(contentType), "json") {
-			return false
-		}
+		// During rollout, an older qurl-service has no route and returns a
+		// 404 that is not a qURL error envelope. Intentionally treat any 404
+		// without a qURL envelope code as legacy-compatible while the new
+		// endpoint rolls out. TODO(#705): remove this path after rollout.
+		// If a deployed route returns a structured qURL error envelope, surface
+		// it instead of minting a legacy key.
 		return errorEnvelopeCode(body) == ""
 	}
 	if status != http.StatusServiceUnavailable {
@@ -418,8 +416,75 @@ func errorEnvelopeCode(body []byte) string {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(body, &env); err != nil {
+	if err := json.Unmarshal(body, &env); err == nil {
+		return env.Error.Code
+	}
+	return partialErrorEnvelopeCode(body)
+}
+
+func partialErrorEnvelopeCode(body []byte) string {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if !consumeJSONObjectStart(dec) {
 		return ""
 	}
-	return env.Error.Code
+	for dec.More() {
+		key, ok := nextJSONKey(dec)
+		if !ok {
+			return ""
+		}
+		if key == "error" {
+			return partialErrorCodeFromObject(dec)
+		}
+		if err := skipJSONValue(dec); err != nil {
+			return ""
+		}
+	}
+	return ""
+}
+
+func partialErrorCodeFromObject(dec *json.Decoder) string {
+	if !consumeJSONObjectStart(dec) {
+		return ""
+	}
+	for dec.More() {
+		key, ok := nextJSONKey(dec)
+		if !ok {
+			return ""
+		}
+		if key != "code" {
+			if err := skipJSONValue(dec); err != nil {
+				return ""
+			}
+			continue
+		}
+		var code string
+		if err := dec.Decode(&code); err != nil {
+			return ""
+		}
+		return code
+	}
+	return ""
+}
+
+func consumeJSONObjectStart(dec *json.Decoder) bool {
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	delim, ok := tok.(json.Delim)
+	return ok && delim == '{'
+}
+
+func nextJSONKey(dec *json.Decoder) (string, bool) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "", false
+	}
+	key, ok := tok.(string)
+	return key, ok
+}
+
+func skipJSONValue(dec *json.Decoder) error {
+	var raw json.RawMessage
+	return dec.Decode(&raw)
 }

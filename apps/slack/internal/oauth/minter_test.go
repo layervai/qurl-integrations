@@ -237,6 +237,36 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnStructured404(t *testing.
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceFallsBackOnJSON404WithoutQURLErrorCode(t *testing.T) {
+	var legacyCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case testBindingPath:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"message":"not found"}`)
+		case testAPIKeysPath:
+			legacyCalled = true
+			writeLegacyMintSuccess(t, w)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	if err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if !legacyCalled {
+		t.Fatal("expected legacy fallback for JSON 404 without qURL error code")
+	}
+	if minted.BindingBacked {
+		t.Error("JSON route-missing fallback must not mark the key binding-backed")
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnOversizedStructured404(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == testAPIKeysPath {
