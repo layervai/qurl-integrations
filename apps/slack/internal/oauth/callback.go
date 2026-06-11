@@ -690,7 +690,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		// and can leak an orphaned legacy fallback key. Closes when #265's
 		// ConditionExpression shift lets us detect the lost-race case
 		// end-to-end.
-		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again", http.StatusInternalServerError)
+		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again soon", http.StatusInternalServerError)
 		return "", false
 	}
 	return keyPrefix, true
