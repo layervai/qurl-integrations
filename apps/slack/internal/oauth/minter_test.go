@@ -37,6 +37,17 @@ func writeBindingSuccess(t *testing.T, w http.ResponseWriter) {
 	})
 }
 
+func writeBindingSuccessWithoutPrefix(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"api_key": map[string]string{
+			"plaintext": testAPIKey,
+			"key_id":    testKeyID,
+		},
+	})
+}
+
 func writeLegacyMintSuccess(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
@@ -45,6 +56,17 @@ func writeLegacyMintSuccess(t *testing.T, w http.ResponseWriter) {
 			"api_key":    testAPIKey,
 			"key_id":     testKeyID,
 			"key_prefix": testKeyPrefix,
+		},
+	})
+}
+
+func writeLegacyMintSuccessWithoutPrefix(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data": map[string]string{
+			"api_key": testAPIKey,
+			"key_id":  testKeyID,
 		},
 	})
 }
@@ -97,6 +119,22 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceDerivesBindingKeyPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeBindingSuccessWithoutPrefix(t, w)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, _, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	if err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if keyPrefix != testKeyPrefix {
+		t.Fatalf("derived keyPrefix = %q, want %q", keyPrefix, testKeyPrefix)
+	}
+}
+
 func TestHTTPAPIKeyMinterTolerateBaseURLTrailingSlash(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify the path doesn't get the double-slash treatment ("//v1").
@@ -111,6 +149,27 @@ func TestHTTPAPIKeyMinterTolerateBaseURLTrailingSlash(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL + "/", HTTPClient: srv.Client()}
 	if _, _, _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID); err != nil {
 		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnStructured404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == testAPIKeysPath {
+			t.Fatal("must not fall back to legacy mint on structured qurl-service 404")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"code":"not_found","detail":"not found"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil {
+		t.Fatal("expected error on structured 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected status code in error, got %q", err.Error())
 	}
 }
 
@@ -147,12 +206,34 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceDerivesLegacyKeyPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case testBindingPath:
+			http.NotFound(w, r)
+		case testAPIKeysPath:
+			writeLegacyMintSuccessWithoutPrefix(t, w)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, _, keyPrefix, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
+	if err != nil {
+		t.Fatalf("MintWorkspaceAPIKey: %v", err)
+	}
+	if keyPrefix != testKeyPrefix {
+		t.Fatalf("derived legacy keyPrefix = %q, want %q", keyPrefix, testKeyPrefix)
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingsDisabled(t *testing.T) {
 	var legacyCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case testBindingPath:
-			w.Header().Set("Retry-After", bindingUnavailableRetrySec)
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = io.WriteString(w, `{"error":{"code":"bindings_disabled","detail":"External identity bindings are not enabled in this environment."}}`)

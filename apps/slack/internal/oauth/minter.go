@@ -92,6 +92,9 @@ type mintResponse struct {
 	} `json:"data"`
 }
 
+// bindingResponse is the POST /v1/external-identity-bindings success shape.
+// Unlike the legacy /v1/api-keys response, the API key fields are top-level
+// under api_key rather than nested in data.
 type bindingResponse struct {
 	APIKey struct {
 		Plaintext string `json:"plaintext"`
@@ -217,7 +220,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		return "", "", "", fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		if shouldFallbackToLegacyMint(resp.StatusCode, resp.Header, rb) {
+		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
 		}
 		switch errorEnvelopeCode(rb) {
@@ -346,14 +349,14 @@ func legacyFallbackIdempotencyKey(teamID string) string {
 	return "slack-workspace-legacy-v1-" + hex.EncodeToString(sum[:])
 }
 
-func shouldFallbackToLegacyMint(status int, header http.Header, body []byte) bool {
+func shouldFallbackToLegacyMint(status int, body []byte) bool {
 	if status == http.StatusNotFound {
-		return true
+		// During rollout, an older qurl-service has no route and returns an
+		// unstructured 404. If a deployed route returns a structured qURL
+		// error envelope, surface it instead of minting a legacy key.
+		return errorEnvelopeCode(body) == ""
 	}
 	if status != http.StatusServiceUnavailable {
-		return false
-	}
-	if header.Get("Retry-After") != bindingUnavailableRetrySec {
 		return false
 	}
 	return errorEnvelopeCode(body) == errCodeBindingsDisabled
