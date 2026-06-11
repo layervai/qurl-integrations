@@ -613,16 +613,16 @@ func storedAPIKeyPrefix(apiKey string) string {
 // revoke. With BindWorkspace running BEFORE this step (see Callback), no
 // bind-failure path needs the keyID either.
 //
-// Post-timeout-completion footgun: the mint + persist contexts are
-// fresh (decoupled from the request context) so a TimeoutHandler
-// cancel doesn't desync row state from what we tell the user. The
-// flip side: if oauthHandlerTimeout (60s) fires after we already
-// started the mint, the goroutine continues for up to
-// mintTimeout + persistTimeout (up to 30s) after we've returned an error
-// to the user. The user retries, mints K2, and the eventual
-// completion of K1 races K2's persist as a row overwrite. K1 then
-// becomes an orphan in qurl-service (no revoke wired for this case).
-// Tracked at #265 alongside the lost-PutItem-race orphan path.
+// Post-timeout-completion footgun: the mint + persist contexts are fresh
+// (decoupled from the request context) so a TimeoutHandler cancel doesn't
+// desync row state from what we tell the user. The flip side: if
+// oauthHandlerTimeout (60s) fires after a legacy fallback mint starts, that
+// goroutine continues for up to mintTimeout + persistTimeout (up to 30s) after
+// we've returned an error to the user. A retry can mint K2, and the eventual
+// completion of K1 races K2's persist as a row overwrite. K1 then becomes an
+// orphan in qurl-service (no revoke wired for this case). Binding-backed
+// retries use a stable idempotency key, so they replay K1 rather than minting
+// a distinct K2. Tracked at #265 alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {

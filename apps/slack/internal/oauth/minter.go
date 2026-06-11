@@ -169,7 +169,10 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 }
 
 // MintWorkspaceAPIKey creates the Slack workspace external identity binding
-// and returns the qURL API key minted for that binding.
+// and returns the qURL API key minted for that binding. qurl-service retains
+// successful binding responses in its idempotency store for the 24h setup-retry
+// window, so identical retries recover the same plaintext key instead of
+// returning already_exists.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
