@@ -236,6 +236,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 	}
+	// Success bodies never participate in fallback; reject oversized responses
+	// before parsing the api_key payload.
 	if bodyOversized {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 	}
@@ -417,8 +419,9 @@ func errorEnvelopeCode(body []byte) string {
 }
 
 func partialErrorEnvelopeCode(body []byte) string {
-	// Preserve structured qURL error handling when a large response is
-	// truncated at minterBodyLimit.
+	// Fallback classification runs on a bounded body. Keep a streaming parser
+	// so a structured qURL error with its code near the front is not mistaken
+	// for a route-missing 404 just because the response was truncated.
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if !consumeJSONObjectStart(dec) {
 		return ""
