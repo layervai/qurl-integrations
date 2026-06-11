@@ -84,9 +84,13 @@ describe('Location Variants', () => {
       expires_in: '1h',
       description: `E2E location variant: ${id}`,
     });
+    // Track before the assertions so a successfully-minted resource is always
+    // revoked in afterAll even if an expect() below throws — otherwise it leaks
+    // past cleanup, reintroducing the exact uncleaned-prod-state class this fix
+    // closes. (Matches google-maps.test.ts, which tracks before validating.)
+    createdResourceIds.push(result.resource_id);
     expect(result.qurl_link).toBeDefined();
     expect(result.resource_id).toMatch(/^r_/);
-    createdResourceIds.push(result.resource_id);
     console.log(`${id}: ${result.qurl_link}`);
   });
 
