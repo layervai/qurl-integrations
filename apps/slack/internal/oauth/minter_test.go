@@ -381,16 +381,14 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	}
 }
 
-func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenRouteMissingBodyTooLarge(t *testing.T) {
-	var legacyCalled bool
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackWhenRouteMissingBodyTooLarge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case testBindingPath:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, strings.Repeat("route missing\n", minterBodyLimit))
 		case testAPIKeysPath:
-			legacyCalled = true
-			writeLegacyMintSuccess(t, w)
+			t.Fatal("must not fall back to legacy mint on oversized route-missing body")
 		default:
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
 		}
@@ -398,15 +396,9 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenRouteMissingBodyTooLarge(t *t
 	t.Cleanup(srv.Close)
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
-	minted, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
-	if err != nil {
-		t.Fatalf("MintWorkspaceAPIKey: %v", err)
-	}
-	if !legacyCalled {
-		t.Fatal("expected legacy fallback for oversized unstructured 404")
-	}
-	if minted.BindingBacked {
-		t.Error("oversized route-missing fallback must not mark the key binding-backed")
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("expected oversized route-missing error, got %v", err)
 	}
 }
 

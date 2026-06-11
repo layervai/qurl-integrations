@@ -234,14 +234,14 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		rb = rb[:minterBodyLimit]
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		if bodyOversized {
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+		}
 		code := errorEnvelopeCode(rb)
 		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
 			// Legacy fallback keys are revoked on local persist failure, so omit
 			// Idempotency-Key and preserve mint-fresh retry behavior.
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), "")
-		}
-		if bodyOversized {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 		}
 		if code == errCodeAPIKeyLimit && resp.StatusCode == http.StatusForbidden {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
@@ -418,9 +418,6 @@ func apiKeyLimitError(body []byte) bool {
 }
 
 func errorEnvelopeCode(body []byte) string {
-	// Normal error envelopes parse completely. The partial parser below exists
-	// only for bounded reads where a truncated-but-structured qURL error must
-	// still fail closed instead of looking like a route-missing fallback.
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
 		return ""
@@ -452,75 +449,5 @@ func errorEnvelopeCode(body []byte) string {
 		}
 		return ""
 	}
-	return partialErrorEnvelopeCode(trimmed)
-}
-
-func partialErrorEnvelopeCode(body []byte) string {
-	// Fallback classification runs on a bounded body. Keep a streaming parser
-	// so a structured qURL error is not mistaken for a route-missing 404 just
-	// because the response was truncated before full JSON unmarshalling.
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if !consumeJSONObjectStart(dec) {
-		return ""
-	}
-	for dec.More() {
-		key, ok := nextJSONKey(dec)
-		if !ok {
-			return ""
-		}
-		if key == "error" {
-			return partialErrorCodeFromObject(dec)
-		}
-		if err := skipJSONValue(dec); err != nil {
-			return ""
-		}
-	}
 	return ""
-}
-
-func partialErrorCodeFromObject(dec *json.Decoder) string {
-	if !consumeJSONObjectStart(dec) {
-		return ""
-	}
-	for dec.More() {
-		key, ok := nextJSONKey(dec)
-		if !ok {
-			return structuredErrorEnvelopeCode
-		}
-		if key != "code" {
-			if err := skipJSONValue(dec); err != nil {
-				return structuredErrorEnvelopeCode
-			}
-			continue
-		}
-		var code string
-		if err := dec.Decode(&code); err != nil {
-			return structuredErrorEnvelopeCode
-		}
-		return code
-	}
-	return structuredErrorEnvelopeCode
-}
-
-func consumeJSONObjectStart(dec *json.Decoder) bool {
-	tok, err := dec.Token()
-	if err != nil {
-		return false
-	}
-	delim, ok := tok.(json.Delim)
-	return ok && delim == '{'
-}
-
-func nextJSONKey(dec *json.Decoder) (string, bool) {
-	tok, err := dec.Token()
-	if err != nil {
-		return "", false
-	}
-	key, ok := tok.(string)
-	return key, ok
-}
-
-func skipJSONValue(dec *json.Decoder) error {
-	var raw json.RawMessage
-	return dec.Decode(&raw)
 }
