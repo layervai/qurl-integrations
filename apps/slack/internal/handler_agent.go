@@ -21,6 +21,7 @@ const (
 	slackEventTypeMessage                       = "message"
 	slackEventTypeAssistantThreadStarted        = "assistant_thread_started"
 	slackEventTypeAssistantThreadContextChanged = "assistant_thread_context_changed"
+	slackEventTypeAppHomeOpened                 = "app_home_opened"
 	slackChannelTypeIM                          = "im"
 )
 
@@ -96,6 +97,9 @@ type slackInnerEvent struct {
 	ChannelType string `json:"channel_type"`
 	TS          string `json:"ts"`
 	ThreadTS    string `json:"thread_ts"`
+	// Tab is the App Home tab a user opened ("home" / "messages") on an
+	// app_home_opened event; empty on every other event type.
+	Tab string `json:"tab,omitempty"`
 	// AssistantThread is set on the container events (assistant_thread_started and
 	// assistant_thread_context_changed), which carry a nested object, not the flat fields.
 	AssistantThread *assistantThread `json:"assistant_thread,omitempty"`
@@ -273,6 +277,11 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 		return
 	case slackEventTypeAssistantThreadContextChanged:
 		h.handleAssistantThreadContextChanged(env)
+		return
+	case slackEventTypeAppHomeOpened:
+		// App Home tab opened — publish the viewer's own agent-action review surface.
+		// Additive (no conversation turn), like the container events above.
+		h.handleAppHomeOpened(env)
 		return
 	}
 	if !shouldDispatchAgentEvent(env) {
