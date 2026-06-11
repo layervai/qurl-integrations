@@ -278,3 +278,69 @@ func TestJSONFormatResolve(t *testing.T) {
 		t.Errorf("got TargetURL %q", parsed.TargetURL)
 	}
 }
+
+func TestJSONFormatterVariants(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := JSONFormatter{}.FormatCreate(&buf, &client.CreateOutput{
+			ResourceID: testResourceID,
+			QURLLink:   "https://qurl.link/at_json",
+		})
+		if err != nil {
+			t.Fatalf("FormatCreate: %v", err)
+		}
+		assertJSONContains(t, buf.Bytes(), "resource_id", testResourceID)
+	})
+
+	t.Run("list", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := JSONFormatter{}.FormatList(&buf, &client.ListOutput{
+			QURLs:      []client.QURL{{ResourceID: testResourceID, TargetURL: testExampleURL}},
+			NextCursor: "cursor_next",
+			HasMore:    true,
+		})
+		if err != nil {
+			t.Fatalf("FormatList: %v", err)
+		}
+		assertJSONContains(t, buf.Bytes(), "next_cursor", "cursor_next")
+	})
+
+	t.Run("mint", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := JSONFormatter{}.FormatMint(&buf, &client.MintOutput{QURLLink: "https://qurl.link/at_json"})
+		if err != nil {
+			t.Fatalf("FormatMint: %v", err)
+		}
+		assertJSONContains(t, buf.Bytes(), "qurl_link", "https://qurl.link/at_json")
+	})
+
+	t.Run("quota", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := JSONFormatter{}.FormatQuota(&buf, &client.QuotaOutput{
+			Plan:        "growth",
+			PeriodStart: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+			PeriodEnd:   time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("FormatQuota: %v", err)
+		}
+		assertJSONContains(t, buf.Bytes(), "plan", "growth")
+	})
+}
+
+func TestFormatExpiryExpired(t *testing.T) {
+	if got := formatExpiry(time.Now().Add(-time.Minute)); got != "expired" {
+		t.Errorf("formatExpiry(past) = %q, want expired", got)
+	}
+}
+
+func assertJSONContains(t *testing.T, raw []byte, key string, want any) {
+	t.Helper()
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal JSON: %v\n%s", err, raw)
+	}
+	if got := parsed[key]; got != want {
+		t.Errorf("JSON %s = %#v, want %#v\n%s", key, got, want, raw)
+	}
+}

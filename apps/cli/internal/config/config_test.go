@@ -3,7 +3,13 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+)
+
+const (
+	testAPIKeyDefault = "default-key"
+	testProfileName   = "staging"
 )
 
 func TestLoadSaveRoundTrip(t *testing.T) {
@@ -128,7 +134,7 @@ func TestProfileNameValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{"default", false},
-		{"staging", false},
+		{testProfileName, false},
 		{"my-profile", false},
 		{"test_123", false},
 		{"../../etc/passwd", true},
@@ -148,9 +154,9 @@ func TestProfileIsolation(t *testing.T) {
 	dir := t.TempDir()
 	// Override configDir for testing by using saveFile/loadFile directly
 	pDefault := filepath.Join(dir, "config.yaml")
-	pStaging := filepath.Join(dir, "profiles", "staging.yaml")
+	pStaging := filepath.Join(dir, "profiles", testProfileName+".yaml")
 
-	defaultCfg := &Config{APIKey: "default-key"}
+	defaultCfg := &Config{APIKey: testAPIKeyDefault}
 	stagingCfg := &Config{APIKey: "staging-key"}
 
 	if err := saveFile(pDefault, defaultCfg); err != nil {
@@ -164,8 +170,8 @@ func TestProfileIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.APIKey != "default-key" {
-		t.Errorf("default APIKey = %q, want %q", loaded.APIKey, "default-key")
+	if loaded.APIKey != testAPIKeyDefault {
+		t.Errorf("default APIKey = %q, want %q", loaded.APIKey, testAPIKeyDefault)
 	}
 
 	loadedStaging, err := loadFile(pStaging)
@@ -174,5 +180,91 @@ func TestProfileIsolation(t *testing.T) {
 	}
 	if loadedStaging.APIKey != "staging-key" {
 		t.Errorf("staging APIKey = %q, want %q", loadedStaging.APIKey, "staging-key")
+	}
+}
+
+func TestPathAndProfilePathUseHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	wantDefault := filepath.Join(home, ".config", "qurl", "config.yaml")
+	if got := Path(); got != wantDefault {
+		t.Errorf("Path() = %q, want %q", got, wantDefault)
+	}
+
+	wantProfile := filepath.Join(home, ".config", "qurl", "profiles", testProfileName+".yaml")
+	gotProfile, err := ProfilePath(testProfileName)
+	if err != nil {
+		t.Fatalf("ProfilePath: %v", err)
+	}
+	if gotProfile != wantProfile {
+		t.Errorf("ProfilePath() = %q, want %q", gotProfile, wantProfile)
+	}
+
+	if _, err := ProfilePath("../prod"); err == nil {
+		t.Fatal("expected invalid profile path error")
+	}
+}
+
+func TestLoadSaveDefaultAndProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	defaultCfg := &Config{APIKey: testAPIKeyDefault, Endpoint: "https://api.example.test", Output: "json"}
+	if err := Save(defaultCfg); err != nil {
+		t.Fatalf("Save default: %v", err)
+	}
+	loadedDefault, err := Load()
+	if err != nil {
+		t.Fatalf("Load default: %v", err)
+	}
+	if *loadedDefault != *defaultCfg {
+		t.Errorf("Load default = %#v, want %#v", loadedDefault, defaultCfg)
+	}
+
+	profileCfg := &Config{APIKey: "profile-key", Endpoint: "https://staging.example.test", Output: "table"}
+	if err := SaveProfile(testProfileName, profileCfg); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+	loadedProfile, err := LoadProfile(testProfileName)
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if *loadedProfile != *profileCfg {
+		t.Errorf("LoadProfile = %#v, want %#v", loadedProfile, profileCfg)
+	}
+
+	profiles, err := ListProfiles()
+	if err != nil {
+		t.Fatalf("ListProfiles: %v", err)
+	}
+	if !reflect.DeepEqual(profiles, []string{testProfileName}) {
+		t.Errorf("profiles = %v, want [staging]", profiles)
+	}
+}
+
+func TestListProfilesFiltersYAMLFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	profileDir := filepath.Join(home, ".config", "qurl", "profiles")
+	if err := os.MkdirAll(filepath.Join(profileDir, "directory.yaml"), 0o700); err != nil {
+		t.Fatalf("create profile dir: %v", err)
+	}
+	files := map[string]string{
+		"prod.yml":                "api_key: prod\n",
+		testProfileName + ".yaml": "api_key: staging\n",
+		"notes.txt":               "ignored\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(profileDir, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	profiles, err := ListProfiles()
+	if err != nil {
+		t.Fatalf("ListProfiles: %v", err)
+	}
+	if !reflect.DeepEqual(profiles, []string{"prod", testProfileName}) {
+		t.Errorf("profiles = %v, want [prod staging]", profiles)
 	}
 }

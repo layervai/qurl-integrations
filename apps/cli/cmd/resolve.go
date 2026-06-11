@@ -13,6 +13,11 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+var (
+	statStdin    = func() (os.FileInfo, error) { return os.Stdin.Stat() }
+	readPassword = term.ReadPassword
+)
+
 func resolveCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resolve [ACCESS_TOKEN]",
@@ -64,7 +69,7 @@ func readToken(cmd *cobra.Command, args []string) (string, error) {
 	}
 
 	// From stdin (piped)
-	stat, _ := os.Stdin.Stat()
+	stat, _ := statStdin()
 	if stat != nil && (stat.Mode()&os.ModeCharDevice) == 0 {
 		scanner := bufio.NewScanner(cmd.InOrStdin())
 		if scanner.Scan() {
@@ -80,7 +85,7 @@ func readToken(cmd *cobra.Command, args []string) (string, error) {
 	if _, err := fmt.Fprint(cmd.ErrOrStderr(), "Access token: "); err != nil {
 		return "", err
 	}
-	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	tokenBytes, err := readPassword(int(os.Stdin.Fd()))
 	if _, printErr := fmt.Fprintln(cmd.ErrOrStderr()); printErr != nil {
 		return "", printErr
 	}

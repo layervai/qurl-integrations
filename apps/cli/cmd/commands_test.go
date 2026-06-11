@@ -27,10 +27,10 @@ func newMockServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testRouteQURLs:
 			apiEnvelope(t, w, map[string]any{
 				testFieldResource: "r_test123",
-				"qurl_link":       "https://qurl.link/at_abc",
+				testFieldQURLLink: "https://qurl.link/at_abc",
 				"qurl_site":       "https://r_test123.qurl.site",
 			})
 
@@ -53,7 +53,7 @@ func newMockServer(t *testing.T) *httptest.Server {
 				testFieldCreated:  testCreatedAt,
 			})
 
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/qurls":
+		case r.Method == http.MethodGet && r.URL.Path == testRouteQURLs:
 			if err := json.NewEncoder(w).Encode(map[string]any{
 				testFieldData: []map[string]any{
 					{
@@ -86,8 +86,8 @@ func newMockServer(t *testing.T) *httptest.Server {
 
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/mint_link"):
 			apiEnvelope(t, w, map[string]any{
-				"qurl_link":  "https://qurl.link/at_minted",
-				"expires_at": "2026-04-01T00:00:00Z",
+				testFieldQURLLink: "https://qurl.link/at_minted",
+				"expires_at":      "2026-04-01T00:00:00Z",
 			})
 
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/quota":
@@ -349,8 +349,8 @@ func TestJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		t.Fatalf("expected valid JSON output: %v\n%s", err, out)
 	}
-	if parsed[testFieldResource] != "r_abc" {
-		t.Errorf("got resource_id %q, want %q", parsed[testFieldResource], "r_abc")
+	if parsed[testFieldResource] != testResourceABC {
+		t.Errorf("got resource_id %q, want %q", parsed[testFieldResource], testResourceABC)
 	}
 }
 

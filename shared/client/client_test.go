@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,14 @@ const (
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
 	return New(url, key, WithRetry(0))
+}
+
+type recordingLogger struct {
+	messages []string
+}
+
+func (l *recordingLogger) Printf(format string, args ...any) {
+	l.messages = append(l.messages, fmt.Sprintf(format, args...))
 }
 
 // withDelaysForTest collapses retry/backoff delays to 1ns. Reaches into
@@ -342,6 +351,81 @@ func TestUpdate(t *testing.T) {
 	}
 	if got.Description != testDescription {
 		t.Errorf("got Description %q, want %q", got.Description, testDescription)
+	}
+}
+
+func TestExtend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/qurls/r_abc123test" {
+			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
+		}
+
+		var input ExtendInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.ExtendBy != "24h" {
+			t.Errorf("ExtendBy = %q, want 24h", input.ExtendBy)
+		}
+
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+			"target_url":  testTargetURL,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.Extend(context.Background(), "r_abc123test", ExtendInput{ExtendBy: "24h"})
+	if err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if got.ResourceID != testResourceID {
+		t.Errorf("ResourceID = %q, want %q", got.ResourceID, testResourceID)
+	}
+}
+
+func TestOptionsWithHTTPClientAndLogger(t *testing.T) {
+	httpClient := &http.Client{}
+	logger := &recordingLogger{}
+	c := New("https://api.example.test", "test-key", WithHTTPClient(httpClient), WithLogger(logger))
+
+	if c.httpClient != httpClient {
+		t.Fatal("WithHTTPClient did not install provided client")
+	}
+	c.logf("request %s", "started")
+	if len(logger.messages) != 1 || logger.messages[0] != "request started" {
+		t.Fatalf("logger messages = %v", logger.messages)
+	}
+}
+
+func TestAPIErrorErrorString(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *APIError
+		want string
+	}{
+		{
+			name: "title and status",
+			err:  &APIError{Title: "Not Found", StatusCode: http.StatusNotFound},
+			want: "Not Found (404)",
+		},
+		{
+			name: "detail included",
+			err:  &APIError{Title: "Bad Request", StatusCode: http.StatusBadRequest, Detail: "invalid target_url"},
+			want: "Bad Request (400): invalid target_url",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

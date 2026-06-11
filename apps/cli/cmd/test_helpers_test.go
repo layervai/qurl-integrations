@@ -8,6 +8,7 @@ const (
 	testCreatedAt     = "2026-03-01T00:00:00Z"
 	testEndpointFlag  = "--endpoint"
 	testExampleURL    = "https://example.com"
+	testFieldQURLLink = "qurl_link"
 	testFieldData     = "data"
 	testFieldCreated  = "created_at"
 	testFieldMeta     = "meta"
@@ -16,6 +17,8 @@ const (
 	testFieldStatus   = "status"
 	testFieldTarget   = "target_url"
 	testRequestID     = "req_test"
+	testResourceABC   = "r_abc"
+	testRouteQURLs    = "/v1/qurls"
 	testStatusActive  = "active"
 )
 
