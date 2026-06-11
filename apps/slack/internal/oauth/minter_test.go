@@ -355,8 +355,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testin
 	if strings.Join(paths, ",") != testBindingPath+","+testAPIKeysPath {
 		t.Errorf("paths = %v", paths)
 	}
-	if legacyIdempotency != legacyFallbackIdempotencyKey(testTeamID) {
-		t.Errorf("legacy fallback Idempotency-Key = %q", legacyIdempotency)
+	if legacyIdempotency != "" {
+		t.Errorf("legacy fallback Idempotency-Key = %q, want empty so revoked persist-failure retries mint fresh keys", legacyIdempotency)
 	}
 }
 

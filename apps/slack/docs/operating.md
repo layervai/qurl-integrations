@@ -61,6 +61,11 @@ at the OAuth-callback bind layer.
   operator tooling for rotation and admin hand-off. Keys are field-level
   encrypted at rest using KMS envelope encryption, with `workspace_id` bound as
   AAD.
+  Rollout order: the Slack app may deploy before the qURL API binding route is
+  enabled; route-missing or dark-launch responses fall back to legacy key
+  provisioning. Avoid rolling the qURL API binding route back during an active
+  setup persist-failure retry window, because that retry can no longer replay
+  the binding key and will mint through the legacy fallback instead.
 - **Slack app install:** customer workspaces install qURL through
   `/oauth/slack/install`, which redirects to Slack OAuth with the bot scopes
   needed by the slash command and modal surfaces. The callback stores Slack's

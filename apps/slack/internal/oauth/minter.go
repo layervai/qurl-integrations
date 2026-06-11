@@ -228,7 +228,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		code := errorEnvelopeCode(rb)
 		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
-			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
+			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), "")
 		}
 		if bodyOversized {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
@@ -370,12 +370,6 @@ func bindingIdempotencyKey(teamID string) string {
 	// qurl-service requires a 32+ character idempotency key. Slack team IDs
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
 	return workspaceIdempotencyKey("slack-workspace-binding-v1-", teamID)
-}
-
-func legacyFallbackIdempotencyKey(teamID string) string {
-	// Keep the legacy fallback idempotency domain separate from the binding
-	// domain even if qurl-service stores idempotency keys globally.
-	return workspaceIdempotencyKey("slack-workspace-legacy-v1-", teamID)
 }
 
 func workspaceIdempotencyKey(prefix, teamID string) string {
