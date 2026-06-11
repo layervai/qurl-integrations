@@ -32,6 +32,13 @@ const (
 	errCodeAPIKeyLimit      = "api_key_limit"
 	errCodeAlreadyExists    = "already_exists"
 	errCodeBindingsDisabled = "bindings_disabled"
+
+	// structuredErrorEnvelopeCode is an internal sentinel for a bounded
+	// qurl-service `{"error":{...}}` body whose concrete code could not be
+	// recovered. Treat it as structured so a truncated detail-first envelope
+	// cannot be misclassified as a route-missing 404 and fall back to legacy
+	// minting.
+	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 )
 
 // ErrAPIKeyLimitReached is returned when qurl-service refuses provisioning
@@ -420,8 +427,8 @@ func errorEnvelopeCode(body []byte) string {
 
 func partialErrorEnvelopeCode(body []byte) string {
 	// Fallback classification runs on a bounded body. Keep a streaming parser
-	// so a structured qURL error with its code near the front is not mistaken
-	// for a route-missing 404 just because the response was truncated.
+	// so a structured qURL error is not mistaken for a route-missing 404 just
+	// because the response was truncated before full JSON unmarshalling.
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if !consumeJSONObjectStart(dec) {
 		return ""
@@ -448,21 +455,21 @@ func partialErrorCodeFromObject(dec *json.Decoder) string {
 	for dec.More() {
 		key, ok := nextJSONKey(dec)
 		if !ok {
-			return ""
+			return structuredErrorEnvelopeCode
 		}
 		if key != "code" {
 			if err := skipJSONValue(dec); err != nil {
-				return ""
+				return structuredErrorEnvelopeCode
 			}
 			continue
 		}
 		var code string
 		if err := dec.Decode(&code); err != nil {
-			return ""
+			return structuredErrorEnvelopeCode
 		}
 		return code
 	}
-	return ""
+	return structuredErrorEnvelopeCode
 }
 
 func consumeJSONObjectStart(dec *json.Decoder) bool {

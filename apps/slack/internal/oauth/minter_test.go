@@ -285,6 +285,24 @@ func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnOversizedStructured404(t 
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceDoesNotFallbackOnOversizedDetailFirstStructured404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == testAPIKeysPath {
+			t.Fatal("must not fall back to legacy mint when structured qurl-service 404 truncates before code")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"detail":"`+strings.Repeat("x", minterBodyLimit)+`","code":"not_found"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("expected oversized structured error, got %v", err)
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceFallsBackWhenBindingRouteMissing(t *testing.T) {
 	var paths []string
 	var legacyIdempotency string
