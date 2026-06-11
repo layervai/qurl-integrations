@@ -157,9 +157,7 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 	if err != nil {
 		return fmt.Errorf("do request: %w", err)
 	}
-	defer func() {
-		drainAndCloseResponse(resp)
-	}()
+	defer drainAndCloseResponse(resp)
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return fmt.Errorf("%w (status %d)", ErrStoredAPIKeyInvalid, resp.StatusCode)
@@ -293,9 +291,7 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
 	}
-	defer func() {
-		drainAndCloseResponse(resp)
-	}()
+	defer drainAndCloseResponse(resp)
 	// Read limit+1 so an exact-cap legitimate body isn't misclassified
 	// as truncated — see exchangeAuth0Code for the rationale.
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
@@ -350,9 +346,7 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 	if err != nil {
 		return fmt.Errorf("do request: %w", err)
 	}
-	defer func() {
-		drainAndCloseResponse(resp)
-	}()
+	defer drainAndCloseResponse(resp)
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
 	}
@@ -423,6 +417,8 @@ func errorEnvelopeCode(body []byte) string {
 }
 
 func partialErrorEnvelopeCode(body []byte) string {
+	// Preserve structured qURL error handling when a large response is
+	// truncated at minterBodyLimit.
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if !consumeJSONObjectStart(dec) {
 		return ""
