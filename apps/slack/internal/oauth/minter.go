@@ -219,7 +219,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		rb = rb[:minterBodyLimit]
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		if shouldFallbackToLegacyMint(resp.StatusCode, rb) {
+		if shouldFallbackToLegacyMint(resp.StatusCode, rb, resp.Header.Get("Content-Type")) {
 			drainAndCloseResponse(resp)
 			bindingBodyClosed = true
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), legacyFallbackIdempotencyKey(teamID))
@@ -376,17 +376,20 @@ func legacyFallbackIdempotencyKey(teamID string) string {
 }
 
 func workspaceIdempotencyKey(prefix, teamID string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(teamID)))
+	sum := sha256.Sum256([]byte(teamID))
 	return prefix + hex.EncodeToString(sum[:])
 }
 
-func shouldFallbackToLegacyMint(status int, body []byte) bool {
+func shouldFallbackToLegacyMint(status int, body []byte, contentType string) bool {
 	if status == http.StatusNotFound {
 		// During rollout, an older qurl-service has no route and returns an
 		// unstructured 404. Intentionally treat that as legacy-compatible
 		// while the new endpoint rolls out. TODO(#705): remove this path
 		// after rollout. If a deployed route returns a structured qURL error
 		// envelope, surface it instead of minting a legacy key.
+		if strings.Contains(strings.ToLower(contentType), "json") {
+			return false
+		}
 		return errorEnvelopeCode(body) == ""
 	}
 	if status != http.StatusServiceUnavailable {
