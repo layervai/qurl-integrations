@@ -147,12 +147,12 @@ func TestFormatError_InvalidFields(t *testing.T) {
 		StatusCode: 422,
 		Title:      "Validation Error",
 		InvalidFields: map[string]string{
-			"target_url": "must be a valid URL",
-			"expires_in": "invalid format",
+			testFieldTarget: "must be a valid URL",
+			"expires_in":    "invalid format",
 		},
 	}
 	got := formatError(err)
-	if !strings.Contains(got, "target_url") || !strings.Contains(got, "expires_in") {
+	if !strings.Contains(got, testFieldTarget) || !strings.Contains(got, "expires_in") {
 		t.Errorf("expected field names in output: %s", got)
 	}
 }

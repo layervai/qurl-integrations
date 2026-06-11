@@ -13,8 +13,8 @@ import (
 func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
 	if err := json.NewEncoder(w).Encode(map[string]any{
-		"data": data,
-		"meta": map[string]any{"request_id": "req_test"},
+		testFieldData: data,
+		testFieldMeta: map[string]any{testFieldRequest: testRequestID},
 	}); err != nil {
 		t.Fatalf("encode response: %v", err)
 	}
@@ -29,43 +29,43 @@ func newMockServer(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurls":
 			apiEnvelope(t, w, map[string]any{
-				"resource_id": "r_test123",
-				"qurl_link":   "https://qurl.link/at_abc",
-				"qurl_site":   "https://r_test123.qurl.site",
+				testFieldResource: "r_test123",
+				"qurl_link":       "https://qurl.link/at_abc",
+				"qurl_site":       "https://r_test123.qurl.site",
 			})
 
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
 			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
 			apiEnvelope(t, w, map[string]any{
-				"resource_id": id,
-				"target_url":  "https://example.com",
-				"status":      "active",
-				"description": "updated",
-				"created_at":  "2026-03-01T00:00:00Z",
+				testFieldResource: id,
+				testFieldTarget:   testExampleURL,
+				testFieldStatus:   testStatusActive,
+				"description":     "updated",
+				testFieldCreated:  testCreatedAt,
 			})
 
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
 			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
 			apiEnvelope(t, w, map[string]any{
-				"resource_id": id,
-				"target_url":  "https://example.com",
-				"status":      "active",
-				"created_at":  "2026-03-01T00:00:00Z",
+				testFieldResource: id,
+				testFieldTarget:   testExampleURL,
+				testFieldStatus:   testStatusActive,
+				testFieldCreated:  testCreatedAt,
 			})
 
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/qurls":
 			if err := json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{
+				testFieldData: []map[string]any{
 					{
-						"resource_id": "r_1",
-						"target_url":  "https://example.com",
-						"status":      "active",
-						"created_at":  "2026-03-01T00:00:00Z",
+						testFieldResource: "r_1",
+						testFieldTarget:   testExampleURL,
+						testFieldStatus:   testStatusActive,
+						testFieldCreated:  testCreatedAt,
 					},
 				},
-				"meta": map[string]any{
-					"request_id": "req_test",
-					"has_more":   false,
+				testFieldMeta: map[string]any{
+					testFieldRequest: testRequestID,
+					"has_more":       false,
 				},
 			}); err != nil {
 				t.Fatalf("encode response: %v", err)
@@ -76,8 +76,8 @@ func newMockServer(t *testing.T) *httptest.Server {
 
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/resolve":
 			apiEnvelope(t, w, map[string]any{
-				"target_url":  "https://api.example.com",
-				"resource_id": "r_test",
+				testFieldTarget:   "https://api.example.com",
+				testFieldResource: "r_test",
 				"access_grant": map[string]any{
 					"expires_in": 305,
 					"src_ip":     "127.0.0.1",
@@ -112,14 +112,13 @@ func newMockServer(t *testing.T) *httptest.Server {
 // runCmd executes a CLI command with the given args and returns stdout output.
 func runCmd(t *testing.T, srv *httptest.Server, args ...string) string {
 	t.Helper()
-	isolateCLIEnv(t)
-	t.Setenv("QURL_API_KEY", "test-key")
+	isolateCLIEnv(t, testAPIKey)
 
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs(append([]string{"--endpoint", srv.URL}, args...))
+	cmd.SetArgs(append([]string{testEndpointFlag, srv.URL}, args...))
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute %v: %v\noutput: %s", args, err, buf.String())
@@ -130,14 +129,13 @@ func runCmd(t *testing.T, srv *httptest.Server, args ...string) string {
 // runCmdErr executes a CLI command expecting an error, returns the error.
 func runCmdErr(t *testing.T, srv *httptest.Server, args ...string) error {
 	t.Helper()
-	isolateCLIEnv(t)
-	t.Setenv("QURL_API_KEY", "test-key")
+	isolateCLIEnv(t, testAPIKey)
 
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs(append([]string{"--endpoint", srv.URL}, args...))
+	cmd.SetArgs(append([]string{testEndpointFlag, srv.URL}, args...))
 
 	return cmd.Execute()
 }
@@ -146,7 +144,7 @@ func TestCreateCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	out := runCmd(t, srv, "create", "https://example.com")
+	out := runCmd(t, srv, "create", testExampleURL)
 	if !strings.Contains(out, "r_test123") {
 		t.Errorf("expected r_test123 in output:\n%s", out)
 	}
@@ -166,7 +164,7 @@ func TestCreateCommandInvalidDuration(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	err := runCmdErr(t, srv, "create", "https://example.com", "--expires", "forever")
+	err := runCmdErr(t, srv, "create", testExampleURL, "--expires", "forever")
 	if err == nil {
 		t.Fatal("expected error for invalid duration")
 	}
@@ -210,15 +208,15 @@ func TestListCommandWithCursor(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{
+			testFieldData: []map[string]any{
 				{
-					"resource_id": "r_page2",
-					"target_url":  "https://example.com",
-					"status":      "active",
-					"created_at":  "2026-03-01T00:00:00Z",
+					testFieldResource: "r_page2",
+					testFieldTarget:   testExampleURL,
+					testFieldStatus:   testStatusActive,
+					testFieldCreated:  testCreatedAt,
 				},
 			},
-			"meta": map[string]any{"request_id": "req_test"},
+			testFieldMeta: map[string]any{testFieldRequest: testRequestID},
 		}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
@@ -258,14 +256,13 @@ func TestDeleteCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	isolateCLIEnv(t)
-	t.Setenv("QURL_API_KEY", "test-key")
+	isolateCLIEnv(t, testAPIKey)
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetIn(strings.NewReader("y\n"))
-	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "r_123"})
+	cmd.SetArgs([]string{testEndpointFlag, srv.URL, "delete", "r_123"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute delete: %v\noutput: %s", err, buf.String())
@@ -304,14 +301,13 @@ func TestDeleteCommandCanceled(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	isolateCLIEnv(t)
-	t.Setenv("QURL_API_KEY", "test-key")
+	isolateCLIEnv(t, testAPIKey)
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetIn(strings.NewReader("n\n"))
-	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "r_123"})
+	cmd.SetArgs([]string{testEndpointFlag, srv.URL, "delete", "r_123"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute delete: %v\noutput: %s", err, buf.String())
@@ -353,8 +349,8 @@ func TestJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		t.Fatalf("expected valid JSON output: %v\n%s", err, out)
 	}
-	if parsed["resource_id"] != "r_abc" {
-		t.Errorf("got resource_id %q, want %q", parsed["resource_id"], "r_abc")
+	if parsed[testFieldResource] != "r_abc" {
+		t.Errorf("got resource_id %q, want %q", parsed[testFieldResource], "r_abc")
 	}
 }
 
@@ -370,8 +366,7 @@ func TestMissingAPIKey(t *testing.T) {
 }
 
 func TestVersionCommand(t *testing.T) {
-	isolateCLIEnv(t)
-	t.Setenv("QURL_API_KEY", "test-key")
+	isolateCLIEnv(t, testAPIKey)
 	cmd := rootCmd("1.2.3")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -465,7 +460,6 @@ func TestInvalidOutputFormat(t *testing.T) {
 func runConfigCmd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	isolateCLIEnv(t)
-	t.Setenv("QURL_API_KEY", "test-key")
 
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
@@ -478,17 +472,14 @@ func runConfigCmd(t *testing.T, args ...string) (string, error) {
 }
 
 func TestConfigSetAndGet(t *testing.T) {
-	home := t.TempDir()
 	isolateCLIEnv(t)
-	t.Setenv("HOME", home)
-	t.Setenv("QURL_API_KEY", "test-key")
 
 	// Set a value
 	setCmd := rootCmd("test")
 	var setBuf bytes.Buffer
 	setCmd.SetOut(&setBuf)
 	setCmd.SetErr(&setBuf)
-	setCmd.SetArgs([]string{"config", "set", "endpoint", "https://test.example.com"})
+	setCmd.SetArgs([]string{testCommandConfig, "set", "endpoint", "https://test.example.com"})
 	if err := setCmd.Execute(); err != nil {
 		t.Fatalf("config set: %v", err)
 	}
@@ -501,7 +492,7 @@ func TestConfigSetAndGet(t *testing.T) {
 	var getBuf bytes.Buffer
 	getCmd.SetOut(&getBuf)
 	getCmd.SetErr(&getBuf)
-	getCmd.SetArgs([]string{"config", "get", "endpoint"})
+	getCmd.SetArgs([]string{testCommandConfig, "get", "endpoint"})
 	if err := getCmd.Execute(); err != nil {
 		t.Fatalf("config get: %v", err)
 	}
@@ -511,7 +502,7 @@ func TestConfigSetAndGet(t *testing.T) {
 }
 
 func TestConfigSetAPIKeyWarning(t *testing.T) {
-	out, err := runConfigCmd(t, "config", "set", "api_key", "lv_live_test")
+	out, err := runConfigCmd(t, testCommandConfig, "set", "api_key", "lv_live_test")
 	if err != nil {
 		t.Fatalf("config set: %v", err)
 	}
@@ -521,14 +512,14 @@ func TestConfigSetAPIKeyWarning(t *testing.T) {
 }
 
 func TestConfigGetInvalidKey(t *testing.T) {
-	_, err := runConfigCmd(t, "config", "get", "nonexistent")
+	_, err := runConfigCmd(t, testCommandConfig, "get", "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for invalid key")
 	}
 }
 
 func TestConfigPath(t *testing.T) {
-	out, err := runConfigCmd(t, "config", "path")
+	out, err := runConfigCmd(t, testCommandConfig, "path")
 	if err != nil {
 		t.Fatalf("config path: %v", err)
 	}
@@ -538,7 +529,7 @@ func TestConfigPath(t *testing.T) {
 }
 
 func TestConfigProfiles(t *testing.T) {
-	out, err := runConfigCmd(t, "config", "profiles")
+	out, err := runConfigCmd(t, testCommandConfig, "profiles")
 	if err != nil {
 		t.Fatalf("config profiles: %v", err)
 	}
@@ -553,7 +544,7 @@ func TestCreateCommandQuiet(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	out := runCmd(t, srv, "--quiet", "create", "https://example.com")
+	out := runCmd(t, srv, "--quiet", "create", testExampleURL)
 	// Quiet mode should output just the link, not the full table
 	if !strings.Contains(out, "qurl.link") {
 		t.Errorf("expected link in quiet output: %s", out)

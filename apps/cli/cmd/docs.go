@@ -11,6 +11,11 @@ import (
 	"github.com/spf13/cobra/doc"
 )
 
+const (
+	docModeMan      = "man"
+	docModeMarkdown = "markdown"
+)
+
 func docsCmd() *cobra.Command {
 	var outDir string
 
@@ -21,7 +26,7 @@ func docsCmd() *cobra.Command {
 		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := args[0]
-			if mode != "man" && mode != "markdown" {
+			if mode != docModeMan && mode != docModeMarkdown {
 				return cmd.Usage()
 			}
 
@@ -40,7 +45,7 @@ func docsCmd() *cobra.Command {
 			defer restoreAutoGen()
 
 			switch mode {
-			case "man":
+			case docModeMan:
 				// Man-page section headers are conventionally uppercase
 				// (CURL(1), GIT(1), etc.). Keep "QURL" here even though the
 				// brand is "qURL" — system references follow the convention,
@@ -58,7 +63,7 @@ func docsCmd() *cobra.Command {
 				return trimMarkdownDocs(dir)
 			}
 		},
-		ValidArgs: []string{"man", "markdown"},
+		ValidArgs: []string{docModeMan, docModeMarkdown},
 	}
 
 	cmd.Flags().StringVarP(&outDir, "output-dir", "d", ".", "Output directory for generated docs")
@@ -66,8 +71,18 @@ func docsCmd() *cobra.Command {
 	return cmd
 }
 
-func trimMarkdownDocs(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+func trimMarkdownDocs(dir string) (err error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := root.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+
+	return fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -75,7 +90,7 @@ func trimMarkdownDocs(dir string) error {
 			return nil
 		}
 
-		content, err := os.ReadFile(path)
+		content, err := root.ReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -88,7 +103,7 @@ func trimMarkdownDocs(dir string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(path, trimmed, info.Mode())
+		return root.WriteFile(path, trimmed, info.Mode())
 	})
 }
 

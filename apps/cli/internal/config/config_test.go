@@ -66,7 +66,7 @@ func TestSetInvalidKey(t *testing.T) {
 
 func TestSetValidKeys(t *testing.T) {
 	cfg := &Config{}
-	keys := map[string]string{"api_key": "k1", "endpoint": "e1", "output": "o1"}
+	keys := map[string]string{keyAPIKey: "k1", keyEndpoint: "e1", keyOutput: "o1"}
 	for key, val := range keys {
 		if err := cfg.Set(key, val); err != nil {
 			t.Errorf("Set(%q) unexpected error: %v", key, err)
@@ -83,9 +83,9 @@ func TestGetValues(t *testing.T) {
 		key  string
 		want string
 	}{
-		{"api_key", "k"},
-		{"endpoint", "e"},
-		{"output", "o"},
+		{keyAPIKey, "k"},
+		{keyEndpoint, "e"},
+		{keyOutput, "o"},
 		{"unknown", ""},
 	}
 	for _, tt := range tests {
@@ -96,7 +96,7 @@ func TestGetValues(t *testing.T) {
 }
 
 func TestIsValidKey(t *testing.T) {
-	for _, key := range []string{"api_key", "endpoint", "output"} {
+	for _, key := range []string{keyAPIKey, keyEndpoint, keyOutput} {
 		if !IsValidKey(key) {
 			t.Errorf("IsValidKey(%q) = false, want true", key)
 		}

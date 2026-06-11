@@ -18,6 +18,8 @@ import (
 const (
 	FormatTable = "table"
 	FormatJSON  = "json"
+
+	relativeTimeJustNow = "just now"
 )
 
 // Formatter is the interface for output formatters.
@@ -257,7 +259,7 @@ func formatDuration(d time.Duration) string {
 func formatRelativeTime(t time.Time) string {
 	d := time.Since(t)
 	if d < time.Minute {
-		return "just now"
+		return relativeTimeJustNow
 	}
 	if d < time.Hour {
 		return fmt.Sprintf("%dm ago", int(d.Minutes()))

@@ -10,6 +10,12 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+const (
+	testAPIDataURL = "https://api.example.com/data"
+	testExampleURL = "https://example.com"
+	testResourceID = "r_abc123test"
+)
+
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		name string
@@ -44,7 +50,7 @@ func TestFormatRelativeTime(t *testing.T) {
 		t    time.Time
 		want string
 	}{
-		{"just now", now, "just now"},
+		{relativeTimeJustNow, now, relativeTimeJustNow},
 		{"minutes ago", now.Add(-5 * time.Minute), "5m ago"},
 		{"hours ago", now.Add(-3 * time.Hour), "3h ago"},
 		{"days ago", now.Add(-2 * 24 * time.Hour), "2d ago"},
@@ -62,11 +68,11 @@ func TestFormatRelativeTime(t *testing.T) {
 
 func TestTableFormatQURL(t *testing.T) {
 	q := &client.QURL{
-		ResourceID:  "r_abc123test",
-		TargetURL:   "https://example.com",
-		Status:      "active",
+		ResourceID:  testResourceID,
+		TargetURL:   testExampleURL,
+		Status:      client.StatusActive,
 		Description: "Test QURL",
-		QURLSite:    "https://r_abc123test.qurl.site",
+		QURLSite:    "https://" + testResourceID + ".qurl.site",
 		CreatedAt:   time.Now().Add(-1 * time.Hour),
 		OneTimeUse:  true,
 		MaxSessions: 5,
@@ -79,7 +85,7 @@ func TestTableFormatQURL(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"r_abc123test", "https://example.com", "active", "Test QURL", "yes", "5"} {
+	for _, want := range []string{testResourceID, testExampleURL, client.StatusActive, "Test QURL", "yes", "5"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -88,9 +94,9 @@ func TestTableFormatQURL(t *testing.T) {
 
 func TestTableFormatCreate(t *testing.T) {
 	result := &client.CreateOutput{
-		ResourceID: "r_abc123test",
+		ResourceID: testResourceID,
 		QURLLink:   "https://qurl.link/at_abc123",
-		QURLSite:   "https://r_abc123test.qurl.site",
+		QURLSite:   "https://" + testResourceID + ".qurl.site",
 	}
 
 	var buf bytes.Buffer
@@ -100,7 +106,7 @@ func TestTableFormatCreate(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"created", "r_abc123test", "https://qurl.link/at_abc123"} {
+	for _, want := range []string{"created", testResourceID, "https://qurl.link/at_abc123"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -111,8 +117,8 @@ func TestTableFormatList(t *testing.T) {
 	future := time.Now().Add(2 * time.Hour)
 	output := &client.ListOutput{
 		QURLs: []client.QURL{
-			{ResourceID: "r_1", TargetURL: "https://example.com", Status: "active", CreatedAt: time.Now().Add(-1 * time.Hour), ExpiresAt: &future},
-			{ResourceID: "r_2", TargetURL: "https://example.com", Status: "expired", CreatedAt: time.Now().Add(-48 * time.Hour)},
+			{ResourceID: "r_1", TargetURL: testExampleURL, Status: client.StatusActive, CreatedAt: time.Now().Add(-1 * time.Hour), ExpiresAt: &future},
+			{ResourceID: "r_2", TargetURL: testExampleURL, Status: client.StatusExpired, CreatedAt: time.Now().Add(-48 * time.Hour)},
 		},
 		NextCursor: "cursor_abc",
 	}
@@ -149,7 +155,7 @@ func TestTableFormatListEmpty(t *testing.T) {
 func TestTableFormatListTruncatesLongURL(t *testing.T) {
 	output := &client.ListOutput{
 		QURLs: []client.QURL{
-			{ResourceID: "r_1", TargetURL: "https://example.com/very/long/path/that/exceeds/forty/characters/easily", Status: "active", CreatedAt: time.Now()},
+			{ResourceID: "r_1", TargetURL: testExampleURL + "/very/long/path/that/exceeds/forty/characters/easily", Status: client.StatusActive, CreatedAt: time.Now()},
 		},
 	}
 
@@ -165,8 +171,8 @@ func TestTableFormatListTruncatesLongURL(t *testing.T) {
 
 func TestTableFormatResolve(t *testing.T) {
 	output := &client.ResolveOutput{
-		TargetURL:  "https://api.example.com/data",
-		ResourceID: "r_abc123test",
+		TargetURL:  testAPIDataURL,
+		ResourceID: testResourceID,
 		AccessGrant: &client.AccessGrant{
 			ExpiresIn: 305,
 			SrcIP:     "203.0.113.42",
@@ -180,7 +186,7 @@ func TestTableFormatResolve(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"https://api.example.com/data", "r_abc123test", "305", "203.0.113.42", "granted"} {
+	for _, want := range []string{testAPIDataURL, testResourceID, "305", "203.0.113.42", "granted"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -232,9 +238,9 @@ func TestTableFormatQuota(t *testing.T) {
 
 func TestJSONFormatQURL(t *testing.T) {
 	q := &client.QURL{
-		ResourceID: "r_abc123test",
-		TargetURL:  "https://example.com",
-		Status:     "active",
+		ResourceID: testResourceID,
+		TargetURL:  testExampleURL,
+		Status:     client.StatusActive,
 	}
 
 	var buf bytes.Buffer
@@ -247,15 +253,15 @@ func TestJSONFormatQURL(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if parsed.ResourceID != "r_abc123test" {
-		t.Errorf("got ResourceID %q, want %q", parsed.ResourceID, "r_abc123test")
+	if parsed.ResourceID != testResourceID {
+		t.Errorf("got ResourceID %q, want %q", parsed.ResourceID, testResourceID)
 	}
 }
 
 func TestJSONFormatResolve(t *testing.T) {
 	output := &client.ResolveOutput{
-		TargetURL:  "https://api.example.com/data",
-		ResourceID: "r_abc123test",
+		TargetURL:  testAPIDataURL,
+		ResourceID: testResourceID,
 	}
 
 	var buf bytes.Buffer
@@ -268,7 +274,7 @@ func TestJSONFormatResolve(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if parsed.TargetURL != "https://api.example.com/data" {
+	if parsed.TargetURL != testAPIDataURL {
 		t.Errorf("got TargetURL %q", parsed.TargetURL)
 	}
 }

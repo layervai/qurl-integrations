@@ -8,7 +8,7 @@ func TestValidateURL(t *testing.T) {
 		url     string
 		wantErr bool
 	}{
-		{"https valid", "https://example.com", false},
+		{"https valid", testExampleURL, false},
 		{"http valid", "http://example.com", false},
 		{"https with path", "https://example.com/data?q=1", false},
 		{"no scheme", "example.com", true},

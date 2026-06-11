@@ -9,9 +9,11 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 )
 
+const configCmdName = "config"
+
 func configCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "config",
+		Use:   configCmdName,
 		Short: "Manage CLI configuration",
 		Long: fmt.Sprintf(`Manage CLI configuration stored at ~/.config/qurl/config.yaml.
 
