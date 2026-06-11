@@ -15,7 +15,7 @@ import (
 
 func resolveCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
-		Use:   "resolve [access-token]",
+		Use:   "resolve [ACCESS_TOKEN]",
 		Short: "Resolve a qURL access token (headless)",
 		Long: `Resolve a qURL access token to get the target URL and grant network access.
 After resolution, the target URL is accessible from your IP for the duration

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -34,6 +36,8 @@ func docsCmd() *cobra.Command {
 			}
 
 			root := cmd.Root()
+			restoreAutoGen := setDisableAutoGen(root, true)
+			defer restoreAutoGen()
 
 			switch mode {
 			case "man":
@@ -48,7 +52,10 @@ func docsCmd() *cobra.Command {
 				}
 				return doc.GenManTree(root, header, dir)
 			default:
-				return doc.GenMarkdownTree(root, dir)
+				if err := doc.GenMarkdownTree(root, dir); err != nil {
+					return err
+				}
+				return trimMarkdownDocs(dir)
 			}
 		},
 		ValidArgs: []string{"man", "markdown"},
@@ -57,4 +64,49 @@ func docsCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&outDir, "output-dir", "d", ".", "Output directory for generated docs")
 
 	return cmd
+}
+
+func trimMarkdownDocs(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".md" {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		trimmed := append(bytes.TrimRight(content, "\n"), '\n')
+		if bytes.Equal(content, trimmed) {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, trimmed, info.Mode())
+	})
+}
+
+func setDisableAutoGen(cmd *cobra.Command, value bool) func() {
+	previous := map[*cobra.Command]bool{}
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		previous[c] = c.DisableAutoGenTag
+		c.DisableAutoGenTag = value
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(cmd)
+
+	return func() {
+		for c, v := range previous {
+			c.DisableAutoGenTag = v
+		}
+	}
 }

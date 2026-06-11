@@ -112,6 +112,7 @@ func newMockServer(t *testing.T) *httptest.Server {
 // runCmd executes a CLI command with the given args and returns stdout output.
 func runCmd(t *testing.T, srv *httptest.Server, args ...string) string {
 	t.Helper()
+	isolateCLIEnv(t)
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	cmd := rootCmd("test")
@@ -129,6 +130,7 @@ func runCmd(t *testing.T, srv *httptest.Server, args ...string) string {
 // runCmdErr executes a CLI command expecting an error, returns the error.
 func runCmdErr(t *testing.T, srv *httptest.Server, args ...string) error {
 	t.Helper()
+	isolateCLIEnv(t)
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	cmd := rootCmd("test")
@@ -256,6 +258,7 @@ func TestDeleteCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
+	isolateCLIEnv(t)
 	t.Setenv("QURL_API_KEY", "test-key")
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
@@ -301,6 +304,7 @@ func TestDeleteCommandCanceled(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
+	isolateCLIEnv(t)
 	t.Setenv("QURL_API_KEY", "test-key")
 	cmd := rootCmd("test")
 	var buf bytes.Buffer
@@ -355,7 +359,7 @@ func TestJSONOutput(t *testing.T) {
 }
 
 func TestMissingAPIKey(t *testing.T) {
-	t.Setenv("QURL_API_KEY", "")
+	isolateCLIEnv(t)
 	cmd := rootCmd("test")
 	cmd.SetArgs([]string{"list"})
 
@@ -366,6 +370,7 @@ func TestMissingAPIKey(t *testing.T) {
 }
 
 func TestVersionCommand(t *testing.T) {
+	isolateCLIEnv(t)
 	t.Setenv("QURL_API_KEY", "test-key")
 	cmd := rootCmd("1.2.3")
 	var buf bytes.Buffer
@@ -459,7 +464,7 @@ func TestInvalidOutputFormat(t *testing.T) {
 // runConfigCmd executes a config CLI command with HOME redirected to a temp dir.
 func runConfigCmd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	isolateCLIEnv(t)
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	cmd := rootCmd("test")
@@ -474,6 +479,7 @@ func runConfigCmd(t *testing.T, args ...string) (string, error) {
 
 func TestConfigSetAndGet(t *testing.T) {
 	home := t.TempDir()
+	isolateCLIEnv(t)
 	t.Setenv("HOME", home)
 	t.Setenv("QURL_API_KEY", "test-key")
 

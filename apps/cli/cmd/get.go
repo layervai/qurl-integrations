@@ -8,7 +8,7 @@ import (
 
 func getCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "get <resource-id>",
+		Use:               "get RESOURCE_ID",
 		Short:             "Get qURL details",
 		Example:           "  qurl get r_k8xqp9h2sj9",
 		Args:              cobra.ExactArgs(1),

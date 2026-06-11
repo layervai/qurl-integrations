@@ -122,6 +122,10 @@ Run `qurl <command> --help` for the full flag list. Frequently used flags:
 | `-v, --verbose` | Show HTTP request/response details |
 | `--profile <name>` | Use a named config profile (`~/.config/qurl/profiles/<name>.yaml`) |
 
+The generated command reference is committed under
+[`docs/cli`](../../docs/cli/qurl.md). Regenerate it after CLI help changes with
+`make docs`. Release packaging generates man pages with `make man` / GoReleaser.
+
 `--output json` makes every command emit machine-readable JSON, so the CLI drops
 cleanly into scripts and CI:
 

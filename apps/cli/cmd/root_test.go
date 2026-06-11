@@ -47,7 +47,7 @@ func TestResolveValue(t *testing.T) {
 }
 
 func TestNewClient_MissingAPIKey(t *testing.T) {
-	t.Setenv("QURL_API_KEY", "")
+	isolateCLIEnv(t)
 	opts := &globalOpts{}
 	_, err := opts.newClient()
 	if err == nil {

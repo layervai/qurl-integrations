@@ -44,12 +44,12 @@ func rootCmd(version string) *cobra.Command {
 Authentication (in order of precedence):
   1. --api-key flag (visible in process list — prefer env var)
   2. QURL_API_KEY environment variable (recommended)
-  3. ~/.config/qurl/config.yaml (or --profile <name>)
+  3. ~/.config/qurl/config.yaml (or --profile NAME)
 
 Get started:
   qurl create https://example.com        Create a qURL
   qurl list                              List active qURLs
-  qurl resolve <access-token>            Resolve a token (headless)
+  qurl resolve ACCESS_TOKEN              Resolve a token (headless)
   qurl quota                             Check your usage
   qurl completion bash                   Generate shell completions`,
 		Version:       version,
@@ -68,7 +68,7 @@ Get started:
 	cmd.PersistentFlags().StringVarP(&opts.format, "output", "o", output.FormatTable, "Output format: table or json")
 	cmd.PersistentFlags().BoolVarP(&opts.quiet, "quiet", "q", false, "Minimal output (just the essential value)")
 	cmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "Show HTTP request/response details")
-	cmd.PersistentFlags().StringVar(&opts.profile, "profile", "", "Config profile name (reads ~/.config/qurl/profiles/<name>.yaml)")
+	cmd.PersistentFlags().StringVar(&opts.profile, "profile", "", "Config profile name (reads ~/.config/qurl/profiles/NAME.yaml)")
 
 	cmd.AddCommand(
 		createCmd(opts),
