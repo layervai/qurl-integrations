@@ -116,9 +116,15 @@ jobs:
           cache: true
 
       - name: Verify generated docs
+        shell: bash
         run: |
           make docs
-          git diff --exit-code -- docs/cli
+          docs_status="$(git status --porcelain -- docs/cli)"
+          if [ -n "$docs_status" ]; then
+            echo "$docs_status"
+            git diff -- docs/cli
+            exit 1
+          fi
 
   vulnerability-scan:
     name: cli / govulncheck
