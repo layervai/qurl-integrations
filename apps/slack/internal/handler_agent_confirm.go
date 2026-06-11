@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -451,6 +452,12 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		return
 	}
 	res := h.executeAgentAction(ctx, log, &pa, payload)
+	// Best-effort: record an EXECUTED mutation for the App Home review surface, keyed
+	// to the approver who ran it. Only attributed results invoked a mutation core — a
+	// pre-execution rejection records nothing. A store failure never affects the click.
+	if res.attributed {
+		h.recordAgentAudit(ctx, log, payload, &pa, res.cardText)
+	}
 	if res.ephemeralText != "" {
 		// Sensitive output (a one-time link) goes PRIVATELY to the clicker — an
 		// ephemeral on the same response_url — never on the public card. No
@@ -693,5 +700,46 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 	default:
 		log.Warn("agent confirm: unknown action kind", "action", pa.Action)
 		return actionResult{cardText: agentConfirmUnsupportedReply}
+	}
+}
+
+// recordAgentAudit persists an executed mutation to the App Home review log, keyed by
+// the APPROVER (payload.User.ID) — the actor whose click ran it — so it surfaces only
+// in that user's own App Home and never aggregates across viewers (the per-viewer
+// boundary that keeps the surface from leaking cross-channel topology). Best-effort: a
+// nil store (pre-enablement) or a write error is swallowed after logging, since the
+// mutation already happened and the audit log is never an authority. outcome is the
+// NEUTRAL public card text, never the ephemeral one-time credential.
+func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, outcome string) {
+	if h.cfg.AgentStore == nil {
+		return
+	}
+	if err := h.cfg.AgentStore.PutAuditEntry(ctx, payload.Team.ID, &slackdata.AuditEntry{
+		Actor:   payload.User.ID,
+		Action:  string(pa.Action),
+		Target:  auditTargetFor(pa),
+		Channel: payload.Channel.ID,
+		Reason:  pa.Reason,
+		Outcome: outcome,
+	}); err != nil {
+		log.Warn("agent: record audit entry failed", "error", err)
+	}
+}
+
+// auditTargetFor picks the human-meaningful resource identifier for an action's audit
+// entry from the pending action's per-kind fields. The value is stored raw and treated
+// as untrusted echo by the render surface (see [slackdata.AuditEntry]).
+func auditTargetFor(pa *pendingAction) string {
+	switch pa.Action {
+	case agent.ActionGet, agent.ActionRevoke, agent.ActionProtectConnector:
+		return pa.Token
+	case agent.ActionSetAlias:
+		return pa.Alias + " → " + pa.Target
+	case agent.ActionUnsetAlias:
+		return pa.Alias
+	case agent.ActionProtectURL:
+		return pa.URL
+	default:
+		return pa.Token
 	}
 }

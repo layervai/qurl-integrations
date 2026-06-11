@@ -35,6 +35,9 @@ const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
 //   - assistant pane context: sk = "actx#<thread_key>", carries the channel id a
 //     user opened the assistant pane FROM, so a later pane turn (which carries no
 //     context of its own) can scope its reads to that channel. Last write wins.
+//   - executed-action audit log: sk = "audit#<user_id>#<unix_nanos>", one item per
+//     mutation a user confirmed, carrying a serialized [AuditEntry]. Queried
+//     newest-first by user for the App Home review surface (see agentaudit.go).
 //
 // Every item carries a `ttl` epoch the table's DynamoDB TTL reaps. `conv_version`
 // is a deliberately non-reserved attribute name (DDB reserves "VERSION") so the
@@ -98,11 +101,12 @@ type AgentStore struct {
 
 	// Now is injected so tests can pin the clock. Defaults to time.Now.
 	Now func() time.Time
-	// ConversationTTL / DedupeTTL / PendingActionTTL default to the package
-	// defaults when zero.
+	// ConversationTTL / DedupeTTL / PendingActionTTL / AuditTTL default to the
+	// package defaults when zero.
 	ConversationTTL  time.Duration
 	DedupeTTL        time.Duration
 	PendingActionTTL time.Duration
+	AuditTTL         time.Duration
 }
 
 // NewAgentStore constructs an [AgentStore]. The table name falls back to
