@@ -36,12 +36,12 @@ const createdResourceIds: string[] = [];
 // existing query. Deliberately NOT a `new URL()` round-trip — that would
 // percent-encode the raw unicode / special chars the `unicode-path` and
 // `special-chars` fixtures exist to exercise.
-function withRunNonce(url: string, nonce: string): string {
+function withRunNonce(url: string): string {
   const hashIdx = url.indexOf('#');
   const base = hashIdx === -1 ? url : url.slice(0, hashIdx);
   const fragment = hashIdx === -1 ? '' : url.slice(hashIdx);
   const sep = base.includes('?') ? '&' : '?';
-  return `${base}${sep}_e2e_nonce=${nonce}${fragment}`;
+  return `${base}${sep}_e2e_nonce=${RUN_NONCE}${fragment}`;
 }
 
 afterAll(async () => {
@@ -68,8 +68,8 @@ const LOCATION_VARIANTS = [
   { id: 'url-encoded', url: 'https://example.com/path%20with%20spaces?q=%E4%B8%AD%E6%96%87' },
   { id: 'unicode-path', url: 'https://example.com/日本語/パス' },
   // Kept well under qurl-service's 2048-char MaxTargetURLLength so the appended
-  // run nonce still fits — this exercises the long-path mint, not the length
-  // rejection boundary.
+  // run nonce (~38 chars: `?_e2e_nonce=` + RUN_NONCE) still fits — this exercises
+  // the long-path mint, not the length rejection boundary.
   { id: 'long-url', url: 'https://example.com/' + 'a'.repeat(1900) },
   { id: 'special-chars', url: 'https://example.com/path?a=1&b=<>&c="quotes"' },
   { id: 'ipv4', url: 'https://93.184.216.34/test' },
@@ -80,7 +80,7 @@ const LOCATION_VARIANTS = [
 describe('Location Variants', () => {
   test.each(LOCATION_VARIANTS)('mint link for $id', async ({ id, url }) => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
-      target_url: withRunNonce(url, RUN_NONCE),
+      target_url: withRunNonce(url),
       expires_in: '1h',
       description: `E2E location variant: ${id}`,
     });
@@ -108,7 +108,7 @@ describe('Location Variants', () => {
 
   test('access a minted location link returns 200', async () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
-      target_url: withRunNonce('https://example.com/access-location-test', RUN_NONCE),
+      target_url: withRunNonce('https://example.com/access-location-test'),
       expires_in: '1h',
     });
     createdResourceIds.push(result.resource_id);
