@@ -148,6 +148,60 @@ func TestToSDKMessages_SkipsEmptyAssistantTurn(t *testing.T) {
 	}
 }
 
+// TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal pins the
+// proposal-followup transcript shape. A turn that ends in a proposal (or hits the
+// iteration cap) is persisted ending in a user{tool_results} message, and the next
+// turn prepends a fresh user{Text} ([Agent.Run]) — so a follow-up @mention produces
+// two consecutive user-role messages: assistant{tool_use}, user{tool_result},
+// user{text}. toSDKMessages must emit one MessageParam per domain Message WITHOUT
+// coalescing that consecutive-user pair: the Messages API combines consecutive
+// same-role turns into one well-formed turn (see MessageNewParams.Messages in the
+// pinned anthropic-sdk-go), so the translation layer must leave them distinct. If a
+// future edit "fixes" the consecutive-user pair by merging it here, this fails.
+func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
+	// Full cross-turn shape: turn 1 (user ask → assistant propose tool_use →
+	// persisted propose ack tool_result) followed by turn 2's prepended user text.
+	history := []Message{
+		{Role: roleUser, Text: "protect the staging connector"},
+		{Role: roleAssistant, ToolCalls: []ToolCall{
+			{ID: "tu_propose", Name: toolProposeProtectConnector, Input: json.RawMessage(`{}`)},
+		}},
+		{Role: roleUser, ToolResults: []ToolResult{
+			{ToolUseID: "tu_propose", Content: proposalAckResult},
+		}},
+		{Role: roleUser, Text: "actually, revoke it instead"},
+	}
+
+	params := toSDKMessages(history)
+
+	// One MessageParam per domain Message — no coalescing of the consecutive user
+	// turns at positions 2 and 3 (the property the API's same-role merge relies on).
+	if len(params) != len(history) {
+		t.Fatalf("expected %d SDK messages (one per domain message, no coalescing), got %d", len(history), len(params))
+	}
+	// The trailing pair are both user-role: the persisted propose ack and the next
+	// turn's prepended user text. These are what the API merges into one turn.
+	if params[2].Role != anthropic.MessageParamRoleUser || params[3].Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("trailing messages must both be user-role, got [2]=%q [3]=%q", params[2].Role, params[3].Role)
+	}
+
+	// Both turns' content must survive the translation — the tool_result AND the
+	// follow-up text — so the merged turn carries everything the model needs.
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wire := string(raw)
+	for _, want := range []string{
+		`"tool_result"`, proposalAckResult, // persisted propose ack (first user turn)
+		"actually, revoke it instead", // next turn's prepended user text (second user turn)
+	} {
+		if !strings.Contains(wire, want) {
+			t.Errorf("wire history missing %q\n%s", want, wire)
+		}
+	}
+}
+
 func TestToSDKTools_ShapeAndRequired(t *testing.T) {
 	tools := toSDKTools([]ToolSpec{{
 		Name:        toolResolveToken,
