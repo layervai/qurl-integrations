@@ -115,9 +115,9 @@ func toolSpecs() []ToolSpec {
 		},
 		{
 			Name:        toolProposeProtectURL,
-			Description: "Propose protecting an existing URL (a reachable HTTP endpoint). Admin-gated. Does NOT execute — the user must confirm.",
+			Description: "Propose creating/protecting a URL resource for a reachable HTTPS endpoint and binding it to a channel alias. Admin-gated. Does NOT execute — the user must confirm. Ask for any missing URL or alias first.",
 			Schema: map[string]any{
-				fieldURL:   stringProp("The target URL to protect."),
+				fieldURL:   stringProp("The target https:// URL to protect."),
 				fieldAlias: stringProp("Channel alias to bind the protected URL to (required — Slack users need a friendly name). Ask the user if not given."),
 			},
 			// alias is REQUIRED: exposing a URL must bind a channel alias, so an
@@ -329,7 +329,7 @@ func proposalProtectConnector(f map[string]string) (*Proposal, error) {
 
 func proposalProtectURL(f map[string]string) (*Proposal, error) {
 	// Field-PRESENCE checks only (URL + alias must be provided), which steer the LLM
-	// to re-prompt. The full GRAMMAR (absolute http(s) URL, alias charset, no
+	// to re-prompt. The full GRAMMAR (absolute https URL, alias charset, no
 	// embedded whitespace) lives in parseResourceExposeArgs in the internal package,
 	// which this agent package can't import; the confirm layer enforces it before
 	// rendering a card (Handler.confirmDeliverable → confirmValidProtectURL, the same
