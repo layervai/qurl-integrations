@@ -347,6 +347,17 @@ type Config struct {
 	// Nil disables conversation mode.
 	PostMessage PostMessageFunc
 
+	// PostMarkdownMessage posts a chat.postMessage reply whose body is the
+	// markdown_text field — standard Markdown that Slack's own parser renders,
+	// rather than the text field's mrkdwn dialect. It carries the agent's
+	// free-text answer so a channel reply renders identically to the streaming
+	// pane (chat.appendStream also takes markdown_text), without a hand-rolled
+	// mrkdwn converter. Only the agent's own answer routes here; an escaped
+	// proposal preview / error reply stays on PostMessage (see deliverAgentResult).
+	// Nil falls back to PostMessage (mrkdwn), so a turn still delivers even if this
+	// seam is unwired — it is NOT part of the agentEnabled gate.
+	PostMarkdownMessage PostMessageFunc
+
 	// AgentDisabled is the org-level kill switch. True forces conversation mode
 	// off regardless of the wiring above — the panic button independent of the
 	// per-workspace toggle. Read from Config at construction, so flipping it is a

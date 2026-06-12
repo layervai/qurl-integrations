@@ -385,6 +385,29 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	}
 }
 
+// newSlackPostMarkdownMessageFuncWithTokenLookup builds the
+// [internal.PostMarkdownMessage] seam: a threaded chat.postMessage whose body is
+// the markdown_text field, so Slack renders standard Markdown (the dialect the
+// streaming pane's chat.appendStream also takes) instead of the text field's
+// mrkdwn. markdown_text must not be combined with text/blocks, so the body carries
+// markdown_text alone. Shares the poster (token lookup + Grid fallback) with the
+// text seam — only the JSON body field differs.
+func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
+		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
+		body, err := json.Marshal(struct {
+			Channel      string `json:"channel"`
+			ThreadTS     string `json:"thread_ts,omitempty"`
+			MarkdownText string `json:"markdown_text"`
+		}{Channel: channelID, ThreadTS: threadTS, MarkdownText: markdownText})
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request marshal: %w", err)
+		}
+		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
 // newSlackPostMessageBlocksFuncWithTokenLookup builds the
 // [internal.PostMessageBlocksFunc] seam: a threaded Block Kit chat.postMessage (the
 // conversation-mode Approve/Reject confirm card). text is the notification /
