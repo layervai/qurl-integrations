@@ -148,6 +148,70 @@ func TestToSDKMessages_SkipsEmptyAssistantTurn(t *testing.T) {
 	}
 }
 
+// TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal pins the no-coalescing
+// invariant documented on toSDKMessages: a proposal/iteration-cap turn ends in a
+// user{tool_results} message and the next turn prepends a fresh user{Text}, so the
+// translation layer must emit that consecutive-user pair as two distinct messages
+// (the Messages API merges same-role turns server-side — see toSDKMessages). If a
+// future edit "fixes" the pair by coalescing it here, this fails.
+func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
+	const proposeID = "tu_propose"
+	// Full cross-turn shape: turn 1 (user ask → assistant propose tool_use →
+	// persisted propose ack tool_result) followed by turn 2's prepended user text.
+	history := []Message{
+		{Role: roleUser, Text: "protect the staging connector"},
+		{Role: roleAssistant, ToolCalls: []ToolCall{
+			{ID: proposeID, Name: toolProposeProtectConnector, Input: json.RawMessage(`{}`)},
+		}},
+		{Role: roleUser, ToolResults: []ToolResult{
+			{ToolUseID: proposeID, Content: proposalAckResult},
+		}},
+		{Role: roleUser, Text: "actually, revoke it instead"},
+	}
+
+	params := toSDKMessages(history)
+
+	// No coalescing of the consecutive user turns at positions 2 and 3: this fixture
+	// has no empty (droppable) turns, so each domain Message maps to exactly one param
+	// — merging the user pair would drop the count below len(history).
+	if len(params) != len(history) {
+		t.Fatalf("expected %d SDK messages (one per domain message, no coalescing), got %d", len(history), len(params))
+	}
+	// The trailing pair are both user-role: the persisted propose ack and the next
+	// turn's prepended user text. These are what the API merges into one turn.
+	if params[2].Role != anthropic.MessageParamRoleUser || params[3].Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("trailing messages must both be user-role, got [2]=%q [3]=%q", params[2].Role, params[3].Role)
+	}
+
+	// The merged turn stays well-formed — assert the decoded blocks, not the marshaled
+	// bytes, so the pairing is genuinely pinned (a substring match would pass even if
+	// one half were dropped). Each asserted turn carries exactly one content block, so
+	// the Content[0] indexing below is unambiguous and fails loudly if a fixture change
+	// adds a block (e.g. giving the assistant turn Text would push tool_use off index 0).
+	if len(params[1].Content) != 1 || len(params[2].Content) != 1 || len(params[3].Content) != 1 {
+		t.Fatalf("each asserted turn should carry exactly one content block, got %d/%d/%d",
+			len(params[1].Content), len(params[2].Content), len(params[3].Content))
+	}
+	// The assistant tool_use and the user tool_result carry the SAME id, the result
+	// carries the propose ack, and the follow-up user text rides along as the second
+	// user turn.
+	toolUse := params[1].Content[0].OfToolUse
+	toolResult := params[2].Content[0].OfToolResult
+	followUp := params[3].Content[0].OfText
+	if toolUse == nil || toolResult == nil || followUp == nil {
+		t.Fatalf("unexpected block shapes: tool_use=%v tool_result=%v text=%v", toolUse, toolResult, followUp)
+	}
+	if toolUse.ID != proposeID || toolResult.ToolUseID != proposeID {
+		t.Fatalf("tool_use/tool_result pairing broken: tool_use.ID=%q tool_result.ToolUseID=%q, want both %q", toolUse.ID, toolResult.ToolUseID, proposeID)
+	}
+	if ack := toolResult.Content[0].OfText; ack == nil || ack.Text != proposalAckResult {
+		t.Fatalf("tool_result must carry the propose ack %q, got %+v", proposalAckResult, toolResult.Content)
+	}
+	if followUp.Text != "actually, revoke it instead" {
+		t.Fatalf("follow-up user text = %q, want %q", followUp.Text, "actually, revoke it instead")
+	}
+}
+
 func TestToSDKTools_ShapeAndRequired(t *testing.T) {
 	tools := toSDKTools([]ToolSpec{{
 		Name:        toolResolveToken,
