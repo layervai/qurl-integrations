@@ -27,6 +27,40 @@ first user to connect an unbound workspace can reach it (qURL is
 first-come-claims). The overwrite guard for an already-bound workspace lives
 at the OAuth-callback bind layer.
 
+## Per-user mint rate limiting
+
+`/qurl get` enforces a per-Slack-user cap on link mints
+(`slackdata.CheckRateLimit`). The budget is **30 mints per
+`slack_user_id` per hour** — the value the pre-pivot HTTP gate applied.
+Only a request that resolves to a real, channel-authorized resource
+(an actual mint attempt) spends from the budget; typo'd or
+not-authorized aliases are turned away before the gate, so a fat-finger
+never burns quota. When a user is over budget, `/qurl get` replies
+"Rate limit hit. Try again in …" with the time until their next mint.
+
+**Decision: DynamoDB-backed fixed hourly counter.** Each
+`(slack_team_id, slack_user_id)` pair has one synthetic row in
+`workspace_mappings`, keyed with a reserved rate-limit prefix. A mint
+attempt increments the current one-hour window with an atomic conditional
+`UpdateItem`; once the count reaches the configured rate, later attempts
+are denied until the next window.
+
+Tradeoffs, accepted deliberately:
+
+- **Global across tasks.** Slack slash-command routing is not sticky, so
+  the counter must be shared across every running Fargate task.
+- **Fixed window, not smoothing token bucket.** A user can spend the
+  full budget near the end of one hour and again at the start of the
+  next. The goal is a global abuse backstop, not billing-grade rolling
+  quota precision.
+- **One extra write per mint attempt.** `/qurl get` already reads DDB for
+  workspace/policy state before minting, so the additional conditional
+  write is acceptable on this path.
+
+The rate is a code-level policy (`Store.MintRatePerHour`, defaulting to
+30), **not** an environment variable — there is no operator knob to set;
+change the default in code if the policy needs to move.
+
 ## Architecture
 
 - **Runtime:** stateless HTTP service, shipped as a small container. Sits

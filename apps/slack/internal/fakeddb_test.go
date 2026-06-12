@@ -508,7 +508,7 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 				return err
 			}
 		case "ADD":
-			if err := applyAddClause(c.body, item, vals); err != nil {
+			if err := applyAddClause(c.body, item, vals, names); err != nil {
 				return err
 			}
 		case "DELETE":
@@ -581,6 +581,17 @@ func applySetClause(body string, item, vals map[string]ddbtypes.AttributeValue, 
 		}
 		attr := strings.TrimSpace(p[:eq])
 		valTok := strings.TrimSpace(p[eq+1:])
+		if strings.HasPrefix(valTok, "if_not_exists(") {
+			inner := strings.TrimSuffix(strings.TrimPrefix(valTok, "if_not_exists("), ")")
+			args := splitTopLevelCommas(inner)
+			if len(args) != 2 {
+				return fmt.Errorf("fakeDDB SET: malformed if_not_exists %q", valTok)
+			}
+			if _, ok := getAttrPath(item, args[0], names); ok {
+				continue
+			}
+			valTok = strings.TrimSpace(args[1])
+		}
 		v, ok := vals[valTok]
 		if !ok {
 			return fmt.Errorf("fakeDDB SET: unknown value %q", valTok)
@@ -600,9 +611,9 @@ func applyRemoveClause(body string, item map[string]ddbtypes.AttributeValue, nam
 	return nil
 }
 
-// applyAddClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) merge form used by AddAdmin.
-func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
+// applyAddClause handles `<attr> :v`. Supports the SS merge form used by
+// AddAdmin and numeric increments used by the mint rate-limit counter.
+func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	body = strings.TrimSpace(body)
 	parts := strings.Fields(body)
 	if len(parts) != 2 {
@@ -613,13 +624,32 @@ func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 	if !ok {
 		return fmt.Errorf("fakeDDB ADD: unknown value %q", parts[1])
 	}
-	incoming, ok := v.(*ddbtypes.AttributeValueMemberSS)
-	if !ok {
-		return fmt.Errorf("fakeDDB ADD: only string-set ADD is supported, got %T", v)
+	resolved := resolvePath(attr, names)
+	if len(resolved) != 1 {
+		return fmt.Errorf("fakeDDB ADD: unsupported attr path %q", attr)
 	}
-	existing, _ := item[attr].(*ddbtypes.AttributeValueMemberSS)
-	merged := mergeStringSet(existing, incoming.Value)
-	item[attr] = &ddbtypes.AttributeValueMemberSS{Value: merged}
+	attr = resolved[0]
+	switch incoming := v.(type) {
+	case *ddbtypes.AttributeValueMemberSS:
+		existing, _ := item[attr].(*ddbtypes.AttributeValueMemberSS)
+		merged := mergeStringSet(existing, incoming.Value)
+		item[attr] = &ddbtypes.AttributeValueMemberSS{Value: merged}
+	case *ddbtypes.AttributeValueMemberN:
+		add, err := strconv.ParseInt(incoming.Value, 10, 64)
+		if err != nil {
+			return err
+		}
+		cur := int64(0)
+		if existing, ok := item[attr].(*ddbtypes.AttributeValueMemberN); ok {
+			cur, err = strconv.ParseInt(existing.Value, 10, 64)
+			if err != nil {
+				return err
+			}
+		}
+		item[attr] = &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(cur+add, 10)}
+	default:
+		return fmt.Errorf("fakeDDB ADD: only string-set and number ADD are supported, got %T", v)
+	}
 	return nil
 }
 
@@ -733,13 +763,13 @@ func splitTopLevelCommas(s string) []string {
 //	<attr> = :val
 //	<attr> > :val
 //
-// Returns (true, nil) when every subexpression is satisfied. OR is
-// NOT parsed — no production caller emits it post-scope-cut.
+// Returns (true, nil) when every AND group is satisfied; OR groups are
+// supported for the narrow parenthesized shapes production emits.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
 	parts := strings.Split(expr, " AND ")
 	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		ok, err := evalConditionAny(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
 			return false, err
 		}
@@ -748,6 +778,29 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 		}
 	}
 	return true, nil
+}
+
+func evalConditionAny(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
+	term = trimConditionParens(term)
+	parts := strings.Split(term, " OR ")
+	for _, p := range parts {
+		ok, err := evalConditionTerm(trimConditionParens(strings.TrimSpace(p)), item, present, vals, names)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func trimConditionParens(s string) string {
+	s = strings.TrimSpace(s)
+	for strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {

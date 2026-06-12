@@ -250,8 +250,9 @@ func getTokenCommandBody(teamID, triggerID, responseURL string) string {
 // against the resource-scoped endpoint. Used by the async-infra tests
 // in this file, which construct their *Handler with a bespoke Config
 // (custom pool size, retry, or BaseContext) and so can't share
-// newAdminTestHandler. The rate-limit gate is a stubbed always-allow
-// (slackdata.CheckRateLimit), so no rate-limit seed is needed.
+// newAdminTestHandler. The wired Store carries the default per-user mint
+// rate limit (slackdata.CheckRateLimit, 30/hr); a test that drives one user
+// past that within the run must raise AdminStore.MintRatePerHour after seeding.
 func seedGetAliasBinding(t *testing.T, h *Handler, teamID string) {
 	t.Helper()
 	names := defaultTestTableNames()
@@ -434,6 +435,13 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	h.now = func() time.Time { return fixedNow }
 	h.validateResponseURLFn = url.Parse
 	seedGetAliasBinding(t, h, "T-concurrent")
+	// All `concurrency` requests are the same user (getTokenCommandBody
+	// uses a fixed user_id), so the per-user mint rate limiter
+	// (slackdata.CheckRateLimit) would otherwise cap dispatch at the
+	// default budget. Rate limiting is orthogonal to what's under test
+	// here (idempotency-key dedup + pool-sized full dispatch), so grant
+	// the user enough budget that every request reaches upstream.
+	h.cfg.AdminStore.MintRatePerHour = concurrency + 1
 	t.Cleanup(h.Wait)
 
 	body := getTokenCommandBody("T-concurrent", "trig-shared", rec.URL)
