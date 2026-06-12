@@ -153,6 +153,9 @@ func run() error {
 	// Both PostMessage seams share the per-workspace token lookup + Grid fallback with
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	// markdown_text seam for the agent's free-text answer, so a channel reply renders
+	// standard Markdown the same way the streaming pane does (see PostMarkdownMessage).
+	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
 	// wired (same token lookup as the post seams); inert until the agent surface is live
@@ -248,6 +251,7 @@ func run() error {
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
 		PostMessage:                 postMessage,
+		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,

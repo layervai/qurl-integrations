@@ -47,13 +47,12 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 // and the streamed message lands on replyTS (the status's thread), so no explicit clear is
 // needed (consistent with the non-streaming path's deliberate reliance on auto-clear).
 //
-// Rendering dialect: chat.appendStream takes markdown_text (standard Markdown) while the
-// non-streaming fallback (postAgentReply → chat.postMessage text) renders Slack mrkdwn — the
-// two differ for links/mentions/*bold*. They stay compatible only because the agent is
-// constrained to "light Slack-compatible markdown — short bullets, backticks" (agent/prompt.go):
-// backticks render identically and "- " bullets list-render under markdown_text. Keep that
-// prompt constraint aligned with this dialect; broader mrkdwn-isms would need normalizing —
-// verify rendering parity at enablement (#708).
+// Rendering dialect: chat.appendStream takes markdown_text (standard Markdown), and the
+// non-streaming reply now posts the agent's own answer through markdown_text too
+// (postAgentMarkdownReply → chat.postMessage markdown_text), so both paths render through
+// Slack's one Markdown parser — **bold**, links, and bullets render identically. The agent
+// emits standard Markdown for both; no mrkdwn normalizing is needed. (The escaped proposal
+// preview still posts as mrkdwn text, but it carries no Markdown — see deliverAgentResult.)
 type agentReplyStreamer struct {
 	// ctx is the turn ctx, used for streaming WHILE the turn runs (onDelta). baseCtx (h.baseCtx)
 	// backs deliveryCtx() for the finalize steps — see deliveryCtx for why finalize can't reuse

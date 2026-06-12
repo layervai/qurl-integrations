@@ -181,15 +181,16 @@ func TestAgentEventKeys(t *testing.T) {
 }
 
 func TestAgentReplyText(t *testing.T) {
-	if got := agentReplyText(&agent.Result{Reply: "hello"}); got != "hello" {
-		t.Errorf("reply = %q", got)
+	// agentReplyText renders the mrkdwn text-seam reply: the escaped proposal preview,
+	// else the error fallback. The agent's own free-text answer is delivered as
+	// markdown_text (see TestDeliverAgentResult_RoutesByDialect), not through here — so
+	// a non-proposal result reaching this function renders the error reply.
+	if got := agentReplyText(&agent.Result{Reply: "hello"}); got != agentErrorReply {
+		t.Errorf("non-proposal result renders the error fallback (answers go via markdown_text), got %q", got)
 	}
 	prop := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "Protect $x."}})
 	if !strings.Contains(prop, "isn't enabled yet") || !strings.Contains(prop, "Protect $x.") {
 		t.Errorf("proposal preview = %q", prop)
-	}
-	if got := agentReplyText(&agent.Result{Reply: "   "}); got != agentErrorReply {
-		t.Errorf("blank reply should fall back to the error reply, got %q", got)
 	}
 	// A proposal with a blank summary would render as a dangling bullet; it must
 	// fall back to the error reply like the blank-Reply case.
@@ -407,6 +408,9 @@ func (f *memAgentDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...fun
 
 type capturedReply struct {
 	channel, threadTS, text string
+	// markdown records whether the reply arrived on the markdown_text seam
+	// (PostMarkdownMessage) rather than the mrkdwn text seam (PostMessage).
+	markdown bool
 }
 
 // capturingPostMessage returns a PostMessageFunc that records every reply, plus
@@ -417,17 +421,29 @@ func capturingPostMessage() (PostMessageFunc, *[]capturedReply, *sync.Mutex) {
 	fn := func(_ context.Context, _, _, channel, threadTS, text string) error {
 		mu.Lock()
 		defer mu.Unlock()
-		posts = append(posts, capturedReply{channel, threadTS, text})
+		posts = append(posts, capturedReply{channel: channel, threadTS: threadTS, text: text})
 		return nil
 	}
 	return fn, &posts, &mu
+}
+
+// capturingPostMarkdownMessage records markdown_text replies into the SAME slice
+// (tagged markdown:true), so a test can assert which seam delivered a reply.
+func capturingPostMarkdownMessage(posts *[]capturedReply, mu *sync.Mutex) PostMessageFunc {
+	return func(_ context.Context, _, _, channel, threadTS, text string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		*posts = append(*posts, capturedReply{channel: channel, threadTS: threadTS, text: text, markdown: true})
+		return nil
+	}
 }
 
 func newAgentEventHandler(t *testing.T, reply string) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
-	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: reply}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: reply}, AgentStore: store, PostMessage: post, PostMarkdownMessage: mdPost, AgentDefaultEnabled: true})
 	t.Cleanup(h.Wait)
 	return h, posts, mu
 }
@@ -607,7 +623,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				posts = append(posts, capturedReply{channel, threadTS, text})
+				posts = append(posts, capturedReply{channel: channel, threadTS: threadTS, text: text})
 				return nil
 			}
 			h := NewHandler(Config{AgentLLM: c.llm, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
@@ -1058,5 +1074,56 @@ func TestHandleEvent_DisabledStaysSilent(t *testing.T) {
 	h.handleEvent(w2, []byte(`{"type":"url_verification","challenge":"abc"}`))
 	if !strings.Contains(w2.Body.String(), "abc") {
 		t.Fatalf("url_verification challenge not echoed: %s", w2.Body.String())
+	}
+}
+
+func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
+	// The agent's free-text answer delivers via markdown_text (standard Markdown,
+	// parity with the streaming pane); a proposal preview stays on the escaped mrkdwn
+	// text seam. The confirm card flow is OFF here (no PostMessageBlocks), so a
+	// proposal falls through to the text preview rather than a card.
+	textPost, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{PostMessage: textPost, PostMarkdownMessage: mdPost})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "Use **bold** here"})
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Proposal: &agent.Proposal{Summary: "Protect $x."}})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 2 {
+		t.Fatalf("want 2 posts, got %d: %+v", len(*posts), *posts)
+	}
+	// Free-text answer: markdown_text seam, body passed through verbatim (Slack's
+	// parser renders the Markdown — we must not pre-mangle it).
+	if !(*posts)[0].markdown {
+		t.Errorf("free-text answer should post on the markdown_text seam, got mrkdwn: %+v", (*posts)[0])
+	}
+	if (*posts)[0].text != "Use **bold** here" {
+		t.Errorf("free-text answer body = %q, want it verbatim", (*posts)[0].text)
+	}
+	// Proposal preview: escaped mrkdwn text seam, never markdown_text (injection defense).
+	if (*posts)[1].markdown {
+		t.Errorf("proposal preview should post on the mrkdwn text seam, got markdown_text: %+v", (*posts)[1])
+	}
+	if !strings.HasPrefix((*posts)[1].text, agentProposalPreviewPrefix) {
+		t.Errorf("proposal preview = %q, want the preview prefix", (*posts)[1].text)
+	}
+}
+
+func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
+	// With the markdown seam unwired, the free-text answer still delivers — on the
+	// mrkdwn text seam (the pre-fix behavior), not dropped.
+	textPost, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{PostMessage: textPost})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "plain answer"})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != "plain answer" {
+		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
 }

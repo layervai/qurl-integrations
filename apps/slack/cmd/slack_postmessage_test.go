@@ -383,3 +383,62 @@ func TestSlackPostMessageBlocksFuncSurfacesSlackError(t *testing.T) {
 		t.Fatalf("error = %v, want channel_not_found", err)
 	}
 }
+
+// mdTestChannel is the channel id the markdown_text builder tests post to. A
+// shared const keeps the literal out of goconst's repeated-string count.
+const mdTestChannel = "C_chan"
+
+func TestSlackPostMarkdownMessageFuncPostsMarkdownTextField(t *testing.T) {
+	t.Parallel()
+	var rawBody string
+	var gotBody struct {
+		Channel      string `json:"channel"`
+		ThreadTS     string `json:"thread_ts"`
+		MarkdownText string `json:"markdown_text"`
+		Text         string `json:"text"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	if err := post(context.Background(), "T_test", "E_test", mdTestChannel, "1700000000.000100", "Use **bold** and `code`"); err != nil {
+		t.Fatalf("chat.postMessage markdown_text: %v", err)
+	}
+	if gotBody.Channel != mdTestChannel || gotBody.ThreadTS != "1700000000.000100" {
+		t.Fatalf("body = %+v, want channel/thread_ts populated", gotBody)
+	}
+	if gotBody.MarkdownText != "Use **bold** and `code`" {
+		t.Fatalf("markdown_text = %q, want the standard-Markdown body verbatim", gotBody.MarkdownText)
+	}
+	// markdown_text must NOT be combined with text (Slack rejects the pairing); the
+	// body carries markdown_text alone.
+	if strings.Contains(rawBody, `"text"`) {
+		t.Fatalf("body %q must not carry a text field alongside markdown_text", rawBody)
+	}
+}
+
+func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
+	t.Parallel()
+	var rawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	if err := post(context.Background(), "T_test", "", mdTestChannel, "", "top-level **answer**"); err != nil {
+		t.Fatalf("chat.postMessage markdown_text: %v", err)
+	}
+	if strings.Contains(rawBody, "thread_ts") {
+		t.Fatalf("body %q should omit thread_ts when empty", rawBody)
+	}
+}

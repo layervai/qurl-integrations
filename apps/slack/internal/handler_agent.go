@@ -876,34 +876,55 @@ func (h *Handler) callerIsAdmin(log *slog.Logger, teamID, userID string) bool {
 	return isAdmin
 }
 
-// agentReplyText renders the channel reply for a turn result. A proposal is
-// surfaced as a preview while conversation mode is read-only.
+// agentReplyText renders the mrkdwn text-seam reply for a turn: the escaped
+// proposal preview while conversation mode is read-only, else the generic error
+// reply. The agent's own free-text answer does NOT come through here — it posts as
+// markdown_text (see deliverAgentResult), which intercepts a non-blank answer
+// before the fallback reaches this function. So a non-proposal result arriving here
+// is the blank-answer case, and renders the error reply.
 func agentReplyText(result *agent.Result) string {
-	if result.Proposal != nil {
-		// A blank summary would render as a dangling "• " bullet; fall back like
-		// the blank-Reply guard below rather than post an empty preview.
-		if strings.TrimSpace(result.Proposal.Summary) == "" {
-			return agentErrorReply
-		}
-		// The preview posts as mrkdwn, and the summary is LLM-distilled — escape it
-		// (consistent with the confirm card's fallback) so a prompt-injected masked
-		// link can't surface. The Reply branch below is deliberately NOT escaped: it
-		// is the agent's own answer, which is allowed light Slack formatting.
-		return agentProposalPreviewPrefix + escapeMrkdwnText(result.Proposal.Summary)
-	}
-	if strings.TrimSpace(result.Reply) == "" {
+	if result.Proposal == nil {
 		return agentErrorReply
 	}
-	return result.Reply
+	// A blank summary would render as a dangling "• " bullet; fall back to the error
+	// reply rather than post an empty preview.
+	if strings.TrimSpace(result.Proposal.Summary) == "" {
+		return agentErrorReply
+	}
+	// The preview posts as mrkdwn, and the summary is LLM-distilled — escape it
+	// (consistent with the confirm card's fallback) so a prompt-injected masked link
+	// can't surface.
+	return agentProposalPreviewPrefix + escapeMrkdwnText(result.Proposal.Summary)
 }
 
-// postAgentReply delivers the reply in-thread, logging (not surfacing) failures.
-// It derives its own context off h.baseCtx (see agentDeliveryBudget) rather than
-// the turn ctx, so a turn that spent its deadline still delivers its reply.
+// postAgentReply delivers a mrkdwn reply in-thread — the escaped proposal preview
+// or a fixed error string. (The agent's free-text answer goes via
+// postAgentMarkdownReply instead; see deliverAgentResult.)
 func (h *Handler) postAgentReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string) {
+	h.deliverAgentText(log, env, threadTS, text, h.cfg.PostMessage)
+}
+
+// postAgentMarkdownReply delivers the agent's free-text answer as markdown_text
+// (standard Markdown rendered by Slack, parity with the streaming pane). When the
+// markdown seam is unwired (PostMarkdownMessage nil) it falls back to the mrkdwn
+// PostMessage seam — the pre-fix rendering, but still a delivered answer rather
+// than a dropped one.
+func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelope, threadTS, markdown string) {
+	post := h.cfg.PostMarkdownMessage
+	if post == nil {
+		post = h.cfg.PostMessage
+	}
+	h.deliverAgentText(log, env, threadTS, markdown, post)
+}
+
+// deliverAgentText posts text to the thread via the given seam. It derives its own
+// context off h.baseCtx (see agentDeliveryBudget) rather than the turn ctx, so a
+// turn that spent its deadline still delivers its reply. Failures are logged, not
+// surfaced.
+func (h *Handler) deliverAgentText(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, post PostMessageFunc) {
 	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
 	defer cancel()
-	if err := h.cfg.PostMessage(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
+	if err := post(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, text); err != nil {
 		log.Error("agent: post reply failed", "error", err)
 	}
 }
