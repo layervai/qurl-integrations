@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -109,17 +110,24 @@ func confirmValidAlias(alias string) (canon string, ok bool) {
 // not pa.URL/pa.Alias raw — closes the validate-reconstruction-execute-raw seam,
 // and a parse failure surfaces a generic reply rather than echoing the (possibly
 // injected) value onto the PUBLIC card. An empty alias fails here, which is
-// correct: exposeURLResourceInChannel must bind a channel alias.
+// correct: every protect-url execution path must bind a channel alias.
 //
 // Reusing parseResourceExposeArgs also runs the URL through unwrapSlackURLArg,
 // whose unconditional HTML-unescape is documented as safe only for Slack-delivered
 // text. On this path the URL is LLM-distilled, so that invariant is best-effort:
-// any decoding only affects the exact-target lookup (a mismatch → benign "not
-// found"), and the value is never echoed. Keeping the single grammar source is
-// worth more than bypassing the unwrap for this caller.
+// any decoding feeds the create/find target, and the value is never echoed.
+// Keeping the single grammar source is worth more than bypassing the unwrap for
+// this caller.
 func confirmValidProtectURL(rawURL, rawAlias string) (args *resourceExposeArgs, ok bool) {
 	parsed, msg := parseResourceExposeArgs("url:" + rawURL + " as:$" + rawAlias)
 	if msg != "" {
+		return nil, false
+	}
+	// parseResourceExposeArgs still accepts http:// for the typed slash
+	// expose-existing path; conversation-mode creation intentionally narrows that
+	// shared grammar to the modal's HTTPS-only create policy.
+	target, err := url.Parse(parsed.TargetURL)
+	if err != nil || target.Scheme != resourceExposeSchemeHTTPS {
 		return nil, false
 	}
 	return parsed, true
@@ -697,15 +705,21 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// Validate the LLM-distilled URL + channel alias through the slash grammar
 		// (single source) and execute the CANONICAL args — see confirmValidProtectURL.
 		// On failure surface a generic reply rather than echo the value onto the
-		// PUBLIC card. The result echoes only the (validated) channel alias + the
-		// backend resource alias, never the raw URL, so it's safe on the card.
+		// PUBLIC card. Conversation-mode "protect this URL" means create the URL
+		// resource and bind it in the click's channel; the slash `protect-url
+		// url:<target>` path keeps its older "expose an existing dashboard resource by
+		// exact target" semantics. The result echoes only the validated channel alias,
+		// never the raw URL, so it's safe on the card.
 		args, ok := confirmValidProtectURL(pa.URL, pa.Alias)
 		if !ok {
 			return actionResult{cardText: agentConfirmInvalidProtectURLReply}
 		}
-		// Binds the URL resource as $alias in the CLICK's channel (channel-scoped,
-		// like the slash protect-url and the alias confirm path). Benign public result.
-		return actionResult{cardText: h.exposeURLResourceInChannel(ctx, log, payload.Team.ID, payload.Channel.ID, args), attributed: true}
+		// Creates (or finds) the URL resource by target URL, then binds it as $alias
+		// in the CLICK's channel. Benign public result.
+		return actionResult{cardText: h.upsertAndExposeURLResource(ctx, log, payload.Team.ID, payload.Channel.ID, &exposeURLCreateArgs{
+			TargetURL:    args.TargetURL,
+			ChannelAlias: args.ChannelAlias,
+		}), attributed: true}
 	case agent.ActionProtectConnector:
 		// Unreachable from the confirm flow: processAgentConfirm routes
 		// protect-connector to openAgentConnectorModal (the modal/OpenView path)

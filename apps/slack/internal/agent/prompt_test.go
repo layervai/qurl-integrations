@@ -48,6 +48,15 @@ func TestSystemPrompt_Invariants(t *testing.T) {
 	if !strings.Contains(p, "only see what's reachable in THIS channel") {
 		t.Error("prompt must instruct the agent to disclose its channel-scoped read boundary")
 	}
+	if !strings.Contains(p, "does not require that the URL already appears in list_resources") {
+		t.Error("prompt must distinguish URL protection from exposing an existing listed resource")
+	}
+	if !strings.Contains(p, "raw https:// endpoint") {
+		t.Error("prompt must keep conversation-mode URL protection aligned with the HTTPS-only create policy")
+	}
+	if !strings.Contains(p, "light, standard Markdown") {
+		t.Error("prompt must align free-text answers with the markdown_text delivery path")
+	}
 
 	// Per-turn context is injected.
 	if !strings.Contains(p, testChannel) || !strings.Contains(p, "U1") {

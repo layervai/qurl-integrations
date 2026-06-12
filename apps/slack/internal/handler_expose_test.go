@@ -848,10 +848,10 @@ func TestHandleExposeURLSubmission_BindsFileviewerResourceWhenReturnedByService(
 	}
 }
 
-// TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias fences the
-// first-run modal: Slack creates the URL resource, protects it under a channel
-// alias, and points the admin at the next `/qurl get $alias` step.
-func TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias(t *testing.T) {
+// TestHandleExposeURLCreateSubmission_UpsertsResourceBindsAlias fences the
+// first-run modal: Slack creates or reuses the URL resource, protects it under a
+// channel alias, and points the admin at the next `/qurl get $alias` step.
+func TestHandleExposeURLCreateSubmission_UpsertsResourceBindsAlias(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	h := newAdminTestHandler(t, ts)
@@ -869,13 +869,12 @@ func TestHandleExposeURLCreateSubmission_CreatesResourceBindsAlias(t *testing.T)
 		if input.TargetURL != testResourceExposeURL {
 			t.Errorf("target_url = %q, want %q", input.TargetURL, testResourceExposeURL)
 		}
-		if input.Alias != testResourceExposeChannelAlias {
-			t.Errorf("alias = %q, want %q", input.Alias, testResourceExposeChannelAlias)
+		if input.Alias != "" {
+			t.Errorf("create/find must not send a resource alias; Slack binds the channel alias separately, got %q", input.Alias)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID: testResourceExposeID,
 			testKeyTargetURL:  testResourceExposeURL,
-			fAttrAlias:        testResourceExposeChannelAlias,
 			testKeyType:       client.ResourceTypeURL,
 			testKeyStatus:     client.StatusActive,
 		})

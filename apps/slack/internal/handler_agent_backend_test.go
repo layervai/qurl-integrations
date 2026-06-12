@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+const testAgentCreatedURLResourceID = "r_agent_url"
+
 // qurlBackendServer is an httptest qURL API returning canned resources + quota.
 // /v1/resources honors the ?slug= filter so the ResolveToken slug branch can be
 // exercised.
@@ -27,6 +30,31 @@ func qurlBackendServer(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == testResourcesPath:
+			// Agent-confirm tests use this server to pin the URL upsert shape:
+			// qurl-service owns target-URL idempotency, while Slack binds the
+			// channel alias separately after the resource comes back.
+			var input client.CreateResourceInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Errorf("decode create resource body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if input.Type != client.ResourceTypeURL {
+				t.Errorf("resource type = %q, want %q", input.Type, client.ResourceTypeURL)
+			}
+			if input.TargetURL == "" {
+				t.Errorf("target_url must be present for agent URL protection")
+			}
+			if input.Alias != "" {
+				t.Errorf("agent URL upsert must not send a resource alias; Slack binds the channel alias separately, got %q", input.Alias)
+			}
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: testAgentCreatedURLResourceID,
+				testKeyTargetURL:  input.TargetURL,
+				testKeyType:       client.ResourceTypeURL,
+				testKeyStatus:     client.StatusActive,
+			})
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "staging":
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_2","slug":"staging","type":"tunnel","description":"Staging dashboard"}]}`))
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "ghost":

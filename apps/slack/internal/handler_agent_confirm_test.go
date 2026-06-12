@@ -512,11 +512,12 @@ func TestConfirm_UnsetAliasOnApprove(t *testing.T) {
 
 func TestConfirm_ProtectURLOnApprove(t *testing.T) {
 	// protect-url is admin-gated and direct-execute (mirrors revoke/alias). An admin
-	// approve validates the URL + channel alias through the slash grammar, resolves the
-	// existing URL resource by exact target, binds it as the channel alias in the
-	// click's channel, and replaces the public card with the benign result. Bind
-	// correctness lives in handler_resource_test; here we pin the confirm orchestration
-	// of the new case (claim, run the real core, replace).
+	// approve validates the URL + channel alias through the slash grammar, creates
+	// the URL resource, binds it as the channel alias in the click's channel, and
+	// replaces the public card with the benign result. Bind correctness lives in
+	// handler_expose_test; here we pin the confirm orchestration of the new case
+	// (claim, run the real core, replace) and ensure the agent does not use the
+	// older exact-target expose path.
 	hc := newConfirmHarness(t, "Uadmin")
 	id := hc.seedPending(t, &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
@@ -528,20 +529,32 @@ func TestConfirm_ProtectURLOnApprove(t *testing.T) {
 	if text == agentConfirmUnsupportedReply || text == agentConfirmInvalidProtectURLReply || text == "" {
 		t.Fatalf("protect-url must run the resource core, not the unsupported/invalid path; got %q", text)
 	}
-	if !strings.Contains(text, "docs") { // success: "…now available as `$docs`…"
+	if !strings.Contains(text, "URL resource is ready as `$docs`") {
 		t.Fatalf("protect-url result should mention the channel alias; got %q", text)
+	}
+	if strings.Contains(text, "exact target URL") {
+		t.Fatalf("agent protect-url must not surface the exact-target dashboard lookup failure: %q", text)
+	}
+	bound, found, err := hc.h.cfg.AdminStore.LookupChannelAlias(context.Background(), "T1", "C1", "docs")
+	if err != nil {
+		t.Fatalf("LookupChannelAlias: %v", err)
+	}
+	if !found || bound != testAgentCreatedURLResourceID {
+		t.Fatalf("channel alias = (%q, %v), want newly-created resource %q", bound, found, testAgentCreatedURLResourceID)
 	}
 }
 
 func TestConfirm_ProtectURLRejectsInvalidInput(t *testing.T) {
-	// Public card → an LLM-distilled URL/alias out of grammar (non-http target,
-	// backtick/bidi alias, missing alias) must surface the GENERIC reply, never bind
-	// and never echo the value. Exact equality proves no part of the input leaks.
+	// Public card → an LLM-distilled URL/alias out of grammar (non-URL target,
+	// backtick/bidi alias, missing alias, or non-HTTPS create target) must
+	// surface the GENERIC reply, never bind, and never echo the value. Exact
+	// equality proves no part of the input leaks.
 	cases := []struct {
 		name string
 		pa   *pendingAction
 	}{
-		{"non-http url", &pendingAction{Action: agent.ActionProtectURL, URL: "file:///etc/passwd", Alias: "docs", ChannelID: "C1"}},
+		{"non-url target", &pendingAction{Action: agent.ActionProtectURL, URL: "file:///etc/passwd", Alias: "docs", ChannelID: "C1"}},
+		{"http url", &pendingAction{Action: agent.ActionProtectURL, URL: "http://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"}},
 		{"backtick alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "ev`il", ChannelID: "C1"}},
 		{"missing alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "", ChannelID: "C1"}},
 		{"bidi-control alias", &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "do\u202ecs", ChannelID: "C1"}},
@@ -1000,10 +1013,12 @@ func TestDeliverAgentResult_GatesCardToExecutableKinds(t *testing.T) {
 		{"connector + OpenView unwired → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectConnector, Summary: "Protect a connector."}}, true, false, false},
 		// protect-url renders a card only when URL+alias pass the SAME grammar the
 		// execute path uses; a grammar-invalid proposal (whitespace in the URL splits
-		// the token stream; an out-of-charset alias) would dead-end on Approve, so it
-		// falls back to preview — closing the propose→approve gap the seed-pendingAction
-		// invalid-input tests don't exercise.
+		// the token stream; an out-of-charset alias; a non-HTTPS create target) would
+		// dead-end on Approve, so it falls back to preview — closing the
+		// propose→approve gap the seed-pendingAction invalid-input tests don't
+		// exercise.
 		{"protect-url valid → card", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/h", Alias: "docs", Summary: "Protect docs."}}, true, false, true},
+		{"protect-url http url → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "http://docs.example.com/h", Alias: "docs", Summary: "Protect docs."}}, true, false, false},
 		{"protect-url whitespace url → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/a b", Alias: "docs", Summary: "Protect docs."}}, true, false, false},
 		{"protect-url out-of-charset alias → preview", agent.Result{Proposal: &agent.Proposal{Action: agent.ActionProtectURL, URL: "https://docs.example.com/h", Alias: "MyDocs", Summary: "Protect docs."}}, true, false, false},
 	}
