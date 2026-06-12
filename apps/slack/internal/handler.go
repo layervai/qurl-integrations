@@ -206,6 +206,15 @@ const (
 	// >1 click/sec across the whole workspace.
 	defaultMaxConcurrentAsync = 50
 
+	// defaultMaxConcurrentFollowupAsync sizes the SEPARATE pool that channel thread
+	// follow-ups (the message.channels firehose) run on, so a busy channel's chatter
+	// can't saturate the main pool that @mention/DM/slash/interaction work shares
+	// (#712). Main-pool isolation holds at ANY size, so this is sized generously
+	// (mirrors the main default) to avoid head-of-line between the pool's fast gate
+	// reads and its 90s turns; tune via QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC at
+	// enablement from real saturation metrics, not a guess.
+	defaultMaxConcurrentFollowupAsync = defaultMaxConcurrentAsync
+
 	// asyncWorkTimeout caps how long a single async job may run. Slack's
 	// response_url is valid for 30 minutes, but in practice qURL API calls
 	// resolve in <1s; 25s is the deadline beyond which the user is better
@@ -266,6 +275,10 @@ type Config struct {
 	// MaxConcurrentAsync caps in-flight async goroutines. Zero or
 	// negative falls back to defaultMaxConcurrentAsync.
 	MaxConcurrentAsync int
+
+	// MaxConcurrentFollowupAsync sizes the separate channel-follow-up pool (#712). Zero or
+	// negative falls back to defaultMaxConcurrentFollowupAsync.
+	MaxConcurrentFollowupAsync int
 
 	// ResponseURLClient is the HTTP client used to POST follow-up
 	// messages to Slack's response_url. Nil means "use a default *http.Client
@@ -563,6 +576,11 @@ type Handler struct {
 	// workers to len(sem) capacity. Send-with-default-drop gives back-
 	// pressure feedback to the user as ackBusy rather than queueing.
 	sem chan struct{}
+	// followupSem is the SEPARATE bounded pool for channel thread follow-ups (#712).
+	// Routing the message.channels firehose here keeps a busy channel's chatter from
+	// saturating h.sem, which @mention/DM/slash/interaction work shares. It shares h.wg
+	// with the main pool (runOnPool), so shutdown drains both.
+	followupSem chan struct{}
 	// responseURLClient is owned per-Handler so tests can inject a
 	// transport and so the lifetime is tied to the handler (not the
 	// per-request goroutine).
@@ -665,6 +683,10 @@ func NewHandler(cfg Config) *Handler {
 	if maxAsync <= 0 {
 		maxAsync = defaultMaxConcurrentAsync
 	}
+	maxFollowupAsync := cfg.MaxConcurrentFollowupAsync
+	if maxFollowupAsync <= 0 {
+		maxFollowupAsync = defaultMaxConcurrentFollowupAsync
+	}
 	respClient := cfg.ResponseURLClient
 	if respClient == nil {
 		respClient = defaultResponseURLClient()
@@ -674,6 +696,7 @@ func NewHandler(cfg Config) *Handler {
 		now:                   time.Now,
 		baseCtx:               baseCtx,
 		sem:                   make(chan struct{}, maxAsync),
+		followupSem:           make(chan struct{}, maxFollowupAsync),
 		responseURLClient:     respClient,
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),

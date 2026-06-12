@@ -115,27 +115,40 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 		t.Fatalf("seed conversation: %v", err)
 	}
 
-	// A reply in the joined thread continues it; a reply in any other thread is dropped.
-	if h.agentChannelFollowupDropped(ctx, log, joined, part) {
-		t.Fatal("a reply in a thread the agent joined must NOT be dropped")
+	// gateDrop runs the gate and returns just the drop decision, for the cases that only
+	// care whether the reply is admitted or dropped (not the reused transcript).
+	gateDrop := func(e *slackEventEnvelope, partition string) bool {
+		dropped, _ := h.agentChannelFollowupDropped(ctx, log, e, partition)
+		return dropped
 	}
-	if !h.agentChannelFollowupDropped(ctx, log, reply("C9", "999.0"), part) {
+
+	// A reply in the joined thread continues it AND hands back the loaded transcript, so
+	// the turn reuses it instead of reading DynamoDB a second time (the #712 double-read fix).
+	switch dropped, pre := h.agentChannelFollowupDropped(ctx, log, joined, part); {
+	case dropped:
+		t.Fatal("a reply in a thread the agent joined must NOT be dropped")
+	case pre == nil:
+		t.Fatal("an admitted follow-up must return the preloaded transcript for reuse")
+	case len(pre.history) != 1:
+		t.Fatalf("preloaded history = %d msgs, want 1 (the seeded transcript)", len(pre.history))
+	}
+	if !gateDrop(reply("C9", "999.0"), part) {
 		t.Fatal("a reply in a thread the agent never joined must be dropped")
 	}
 	// Same thread_ts but a different channel is a different thread → dropped.
-	if !h.agentChannelFollowupDropped(ctx, log, reply("C-other", "100.0"), part) {
+	if !gateDrop(reply("C-other", "100.0"), part) {
 		t.Fatal("a reply in another channel's thread must be dropped")
 	}
 
 	// Non-follow-ups are never dropped here — @mentions and DMs are deliberate
-	// addresses handled without the history gate.
+	// addresses handled without the history gate (and get no preloaded transcript).
 	mention := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
-	if h.agentChannelFollowupDropped(ctx, log, mention, agentEventPartition(mention)) {
-		t.Fatal("an @mention is not a channel follow-up; must not be dropped")
+	if dropped, pre := h.agentChannelFollowupDropped(ctx, log, mention, agentEventPartition(mention)); dropped || pre != nil {
+		t.Fatal("an @mention is not a channel follow-up; must not be dropped or preloaded")
 	}
 	dm := env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi")
-	if h.agentChannelFollowupDropped(ctx, log, dm, agentEventPartition(dm)) {
-		t.Fatal("a DM is not a channel follow-up; must not be dropped")
+	if dropped, pre := h.agentChannelFollowupDropped(ctx, log, dm, agentEventPartition(dm)); dropped || pre != nil {
+		t.Fatal("a DM is not a channel follow-up; must not be dropped or preloaded")
 	}
 
 	// A joined thread whose stored transcript is corrupt/undecodable reads back as no
@@ -145,14 +158,14 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 	if err := store.SaveConversation(ctx, part, agentEventThreadKey(corrupt), []byte("not valid json"), 0); err != nil {
 		t.Fatalf("seed corrupt: %v", err)
 	}
-	if !h.agentChannelFollowupDropped(ctx, log, corrupt, part) {
+	if !gateDrop(corrupt, part) {
 		t.Fatal("a follow-up whose transcript can't be decoded must be dropped (fail closed)")
 	}
 
 	// Fail closed: when the transcript lookup itself errors we can't confirm the thread
 	// is the agent's, so the reply is dropped (and stays silent) rather than answered.
 	fake.getErr = errors.New("ddb read down")
-	if !h.agentChannelFollowupDropped(ctx, log, joined, part) {
+	if !gateDrop(joined, part) {
 		t.Fatal("a follow-up whose transcript lookup errors must be dropped (fail closed)")
 	}
 	fake.getErr = nil

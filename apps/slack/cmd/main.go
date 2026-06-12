@@ -131,6 +131,7 @@ func run() error {
 	userAgent := "qurl-slack/" + version
 
 	maxConcurrentAsync := readMaxConcurrentAsync()
+	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
 	adminStore := buildAdminStore(signalCtx)
 	tunnelImage := strings.TrimSpace(os.Getenv("QURL_CONNECTOR_IMAGE"))
 	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
@@ -227,14 +228,15 @@ func run() error {
 	// Shutdown starts refusing new connections.
 
 	handler := internal.NewHandler(internal.Config{
-		AuthProvider:       authProvider,
-		SlackSigningSecret: slackSigningSecret,
-		BaseContext:        signalCtx,
-		MaxConcurrentAsync: maxConcurrentAsync,
-		AdminStore:         adminStore,
-		OpenView:           openView,
-		TunnelImage:        tunnelImage,
-		PostFeedback:       postFeedback,
+		AuthProvider:               authProvider,
+		SlackSigningSecret:         slackSigningSecret,
+		BaseContext:                signalCtx,
+		MaxConcurrentAsync:         maxConcurrentAsync,
+		MaxConcurrentFollowupAsync: maxConcurrentFollowupAsync,
+		AdminStore:                 adminStore,
+		OpenView:                   openView,
+		TunnelImage:                tunnelImage,
+		PostFeedback:               postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;
@@ -982,30 +984,35 @@ func missingAdminStoreEnvVars() []string {
 	return missing
 }
 
-// readMaxConcurrentAsync parses QURL_SLACK_MAX_CONCURRENT_ASYNC. Empty
-// env is "use default" silently; non-empty-but-malformed env is a
-// misconfiguration surfaced at startup so it doesn't get discovered
-// during a saturation incident. Either way the value returned to
-// NewHandler may be 0, which Handler interprets as "use the built-in
-// default (50)".
-func readMaxConcurrentAsync() int {
-	raw := os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC")
+// readMaxConcurrentAsync sizes the main async pool from QURL_SLACK_MAX_CONCURRENT_ASYNC.
+func readMaxConcurrentAsync() int { return readPoolSizeEnv("QURL_SLACK_MAX_CONCURRENT_ASYNC") }
+
+// readMaxConcurrentFollowupAsync sizes the separate channel-follow-up pool (#712) from
+// QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC.
+func readMaxConcurrentFollowupAsync() int {
+	return readPoolSizeEnv("QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC")
+}
+
+// readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;
+// non-empty-but-malformed env is a misconfiguration surfaced at startup so it doesn't get
+// discovered during a saturation incident. The returned 0 tells NewHandler to use that
+// pool's built-in default. A non-positive value is more likely a typo or env-substitution
+// mishap than an intentional choice, so it's surfaced like malformed input rather than
+// silently swallowed.
+func readPoolSizeEnv(name string) int {
+	raw := os.Getenv(name)
 	if raw == "" {
 		return 0
 	}
 	parsed, err := strconv.Atoi(raw)
 	switch {
 	case err != nil:
-		slog.Warn("ignoring malformed QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-			"raw", raw, "error", err)
+		slog.Warn("ignoring malformed pool-size env var; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			"env", name, "raw", raw, "error", err)
 		return 0
 	case parsed <= 0:
-		// NewHandler treats 0/negative as "use default", but a
-		// negative value is more likely a typo or env-substitution
-		// mishap than an intentional choice — surface it the same
-		// way as malformed input so it doesn't silently swallow.
-		slog.Warn("ignoring non-positive QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-			"raw", raw)
+		slog.Warn("ignoring non-positive pool-size env var; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			"env", name, "raw", raw)
 		return 0
 	default:
 		return parsed

@@ -97,10 +97,23 @@ func (h *Handler) startAsyncWorker(log *slog.Logger, work func(ctx context.Conte
 // needs a larger budget than the slash-command default, which was sized for a
 // couple of qURL API calls.
 func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger)) bool {
+	if h.runOnPool(h.sem, log, timeout, work) {
+		return true
+	}
+	log.Warn("async pool saturated — dropping request")
+	return false
+}
+
+// runOnPool acquires a non-blocking slot on sem and runs work in a wg-tracked,
+// panic-recovered, timeout-bounded goroutine off h.baseCtx. It returns false WITHOUT
+// running if sem is full, leaving the saturation log to the caller so each pool reports
+// its own context. The shared turn pool (h.sem) and the channel-follow-up admission pool
+// (h.followupSem — see #712) both go through here and share h.wg, so http.Server.Shutdown
+// drains in-flight work on either.
+func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger)) bool {
 	select {
-	case h.sem <- struct{}{}:
+	case sem <- struct{}{}:
 	default:
-		log.Warn("async pool saturated — dropping request")
 		return false
 	}
 
@@ -115,14 +128,14 @@ func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Dur
 		// children of that ctx see cancellation before the worker
 		// frame returns.
 		defer h.wg.Done()
-		defer func() { <-h.sem }()
+		defer func() { <-sem }()
 		defer func() {
 			if rec := recover(); rec != nil {
 				// A panicking goroutine in a long-lived process is
 				// disqualifying — log + stack so the cause is in
 				// CloudWatch, then swallow so the deferred sem release
 				// and wg.Done still run.
-				log.Error("panic in async slash-command worker", "recover", rec, "stack", string(debug.Stack()))
+				log.Error("panic in async worker", "recover", rec, "stack", string(debug.Stack()))
 			}
 		}()
 
