@@ -52,9 +52,12 @@ func TestBumpTurnCount_AtomicAddRequest(t *testing.T) {
 		t.Fatalf("key = (%v, %v), want (T1, %s)", got.Key[attrAgentPK], got.Key[attrAgentSK], wantSK)
 	}
 
-	// Atomic ADD of the count + SET of the ttl, returning the new value.
-	if expr := aws.ToString(got.UpdateExpression); !strings.Contains(expr, "ADD "+attrTurnCount+" :one") || !strings.Contains(expr, "SET "+attrAgentTTL+" = :ttl") {
-		t.Errorf("UpdateExpression = %q, want ADD %s :one + SET %s = :ttl", expr, attrTurnCount, attrAgentTTL)
+	// Atomic ADD of the count + a SET of the ttl value, returning the new value. The
+	// reserved-word aliasing of the ttl attribute is pinned separately by
+	// TestBumpTurnCount_TTLReservedWordIsAliased; here we only assert the ADD and that a
+	// SET of :ttl runs.
+	if expr := aws.ToString(got.UpdateExpression); !strings.Contains(expr, "ADD "+attrTurnCount+" :one") || !strings.Contains(expr, "= :ttl") {
+		t.Errorf("UpdateExpression = %q, want ADD %s :one + a SET of = :ttl", expr, attrTurnCount)
 	}
 	if got.ReturnValues != ddbtypes.ReturnValueUpdatedNew {
 		t.Errorf("ReturnValues = %q, want UPDATED_NEW (the new count must come back)", got.ReturnValues)
@@ -65,6 +68,45 @@ func TestBumpTurnCount_AtomicAddRequest(t *testing.T) {
 	wantTTL := strconv.FormatInt(windowStart.Add(2*time.Hour).Unix(), 10)
 	if v, _ := got.ExpressionAttributeValues[":ttl"].(*ddbtypes.AttributeValueMemberN); v == nil || v.Value != wantTTL {
 		t.Errorf(":ttl = %v, want N %s (a window past the window end)", got.ExpressionAttributeValues[":ttl"], wantTTL)
+	}
+}
+
+// TestBumpTurnCount_TTLReservedWordIsAliased pins the fix for a ValidationException that
+// silently disabled the agent turn-rate cap. `ttl` is a DynamoDB reserved word, so a bare
+// `SET ttl = :ttl` in an UpdateExpression 400s ("Attribute name is a reserved keyword;
+// reserved keyword: ttl") — and because the rate gate is fail-open (handler_agent.go logs
+// a Warn and allows the turn), a 400 on every call let every turn through uncapped. The
+// attribute MUST be reached through an expression-attribute-name alias. The in-memory DDB
+// fakes don't model reserved words, which is why the original bug passed the request-shape
+// test above; this test asserts the alias directly so a revert to the bare form trips here.
+func TestBumpTurnCount_TTLReservedWordIsAliased(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	var got *dynamodb.UpdateItemInput
+	st := &AgentStore{
+		Client: &stubDDB{updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			got = in
+			return &dynamodb.UpdateItemOutput{Attributes: map[string]ddbtypes.AttributeValue{attrTurnCount: numberAttr(1)}}, nil
+		}},
+		TableName: "agent_state",
+		Now:       func() time.Time { return now },
+	}
+
+	if _, err := st.BumpTurnCount(context.Background(), "T1", "team", time.Hour); err != nil {
+		t.Fatalf("BumpTurnCount: %v", err)
+	}
+	if got == nil {
+		t.Fatal("UpdateItem was not called")
+	}
+
+	// The reserved word reaches the table only through the `#ttl` alias...
+	if got.ExpressionAttributeNames["#ttl"] != attrAgentTTL {
+		t.Errorf("ExpressionAttributeNames[#ttl] = %q, want %q (ttl must be aliased, never SET bare)", got.ExpressionAttributeNames["#ttl"], attrAgentTTL)
+	}
+	// ...and the SET targets that alias. The buggy `SET ttl = :ttl` does not contain this
+	// substring, so a revert to the bare reserved word fails here.
+	if expr := aws.ToString(got.UpdateExpression); !strings.Contains(expr, "SET #ttl = :ttl") {
+		t.Errorf("UpdateExpression = %q, want a `SET #ttl = :ttl` (reserved word aliased)", expr)
 	}
 }
 
