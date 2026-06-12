@@ -16,6 +16,7 @@ func TestValidateURL(t *testing.T) {
 		{"empty", "", true},
 		{"just scheme", "https://", true},
 		{"empty hostname with port separator", "http://:", true},
+		{"control character in fragment", "http://0#\x1f", true},
 	}
 
 	for _, tt := range tests {

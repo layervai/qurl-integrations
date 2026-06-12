@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // durationPattern matches Go-style durations and day suffixes (e.g., "1h", "24h", "7d", "30m").
@@ -14,6 +15,10 @@ var durationPattern = regexp.MustCompile(`^(\d+)([smhd])$`)
 
 // validateURL checks that the target URL is a valid HTTP(S) URL.
 func validateURL(raw string) error {
+	if strings.IndexFunc(raw, unicode.IsControl) != -1 {
+		return errors.New("invalid URL: contains control character")
+	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)

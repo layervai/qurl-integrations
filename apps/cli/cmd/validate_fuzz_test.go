@@ -17,6 +17,7 @@ func FuzzValidateURL(f *testing.F) {
 	f.Add("ftp://example.com")
 	f.Add("https://")
 	f.Add("http://:")
+	f.Add("http://0#\x1f")
 	f.Add("https://example.com\nHost:evil.test")
 	f.Add("https://exa mple.com")
 
