@@ -157,8 +157,10 @@ func toSDKTools(specs []ToolSpec) []anthropic.ToolUnionParam {
 // preserving tool_use and tool_result blocks so the model sees a valid
 // transcript across turns.
 //
-// It emits one MessageParam per domain Message and never coalesces consecutive
-// same-role messages. A proposal or iteration-cap turn is persisted ending in a
+// It emits at most one MessageParam per domain Message (empty assistant turns are
+// dropped — see TestToSDKMessages_SkipsEmptyAssistantTurn) and never merges distinct
+// messages, so consecutive same-role messages stay separate. A proposal or
+// iteration-cap turn is persisted ending in a
 // user{tool_results} message, and the next turn prepends a fresh user{Text}
 // ([Agent.Run]) — so a same-thread follow-up yields two consecutive user-role
 // messages (assistant{tool_use}, user{tool_result}, user{text}). That is

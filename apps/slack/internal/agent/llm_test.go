@@ -171,8 +171,9 @@ func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
 
 	params := toSDKMessages(history)
 
-	// One MessageParam per domain Message — no coalescing of the consecutive user
-	// turns at positions 2 and 3 (the property the API's same-role merge relies on).
+	// No coalescing of the consecutive user turns at positions 2 and 3: this fixture
+	// has no empty (droppable) turns, so each domain Message maps to exactly one param
+	// — merging the user pair would drop the count below len(history).
 	if len(params) != len(history) {
 		t.Fatalf("expected %d SDK messages (one per domain message, no coalescing), got %d", len(history), len(params))
 	}
