@@ -45,10 +45,16 @@ const (
 	// persistTimeout — the two are separate constants so a future
 	// adjustment of one doesn't accidentally retune the other.
 	bindTimeout = 15 * time.Second
-	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
-	// mintAndPersist. Same fresh-context rationale as persistTimeout:
-	// TimeoutHandler canceling mid-mint would orphan a key the bot
-	// can no longer revoke (no keyID to DELETE against).
+	// mintTimeout bounds qurl-service provisioning from mintAndPersist.
+	// Keep one tight budget across binding + optional legacy fallback:
+	// fallback only runs for fast route-missing/dark-launch responses,
+	// while slow or transient binding failures are surfaced. If a fallback-
+	// eligible 404/503 arrives late, the legacy retry inherits only the
+	// remaining budget and may fail once; the admin can rerun setup rather
+	// than widening the post-timeout orphan-key window described below.
+	// Same fresh-context rationale as persistTimeout: TimeoutHandler
+	// canceling mid-mint would orphan a key the bot can no longer revoke
+	// (no keyID to DELETE against).
 	mintTimeout         = 15 * time.Second
 	existingKeyTimeout  = 5 * time.Second
 	dmTimeout           = 5 * time.Second
@@ -208,7 +214,7 @@ type auth0TokenResponse struct {
 //     install can't overwrite the existing admin's stored API key.
 //     Same-caller re-entry is idempotent success.
 //  6. Reuse the stored workspace key when it still validates on
-//     qurl-service; otherwise POST to /v1/api-keys to mint one.
+//     qurl-service; otherwise create the workspace binding to mint one.
 //  7. For a newly minted key, upsert via WorkspaceStore.SetAPIKey; on
 //     failure, fire-and-forget revoke on qurl-service to bound the
 //     orphan-key window.
@@ -488,10 +494,10 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 		// owner_id matches the verified caller (owner-only short-circuit;
 		// added admins do NOT land here, they get AlreadyBound). We
 		// continue to the key stage, which reuses a healthy stored key
-		// or mints a replacement only when the stored key is missing or
-		// revoked. Operator-visible effect: setup succeeds, owner +
-		// admin set unchanged, and no extra key is minted for a healthy
-		// workspace.
+		// or attempts replacement provisioning only when the stored key
+		// is missing or revoked. Operator-visible effect: setup
+		// succeeds, owner + admin set unchanged, and no extra key is
+		// minted for a healthy workspace.
 		slog.Info("oauth/callback rebind idempotent (caller is the workspace owner)", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID)
 		return true
@@ -597,29 +603,31 @@ func storedAPIKeyPrefix(apiKey string) string {
 	return apiKey[:keyPrefixLength]
 }
 
-// mintAndPersist mints the API key on qurl-service and persists it via
-// WorkspaceStore. Returns (keyPrefix, true) on success; on failure
-// writes the HTTP error response and fires the orphan-key revoke
-// when a mint succeeded but the persist did not. The plaintext apiKey
-// and keyID stay internal: SetAPIKey is the only apiKey consumer and
-// keyID's only use is the persist-failure revoke. With BindWorkspace
-// running BEFORE this step (see Callback), no bind-failure path needs
-// the keyID either.
+// mintAndPersist provisions the API key on qurl-service and persists it via
+// WorkspaceStore. During rollout, provisioning can be two upstream calls: a
+// binding attempt followed by a legacy fallback mint. Returns (keyPrefix,
+// true) on success; on failure writes the HTTP error response. Legacy fallback
+// keys are revoked after a persist failure; binding-backed keys are
+// intentionally left in place so a retry can replay the qurl-service binding
+// idempotency record and recover the plaintext instead of dead-ending on
+// already_exists. The plaintext apiKey and keyID stay internal: SetAPIKey is
+// the only apiKey consumer and keyID's only use is the legacy persist-failure
+// revoke. With BindWorkspace running BEFORE this step (see Callback), no
+// bind-failure path needs the keyID either.
 //
-// Post-timeout-completion footgun: the mint + persist contexts are
-// fresh (decoupled from the request context) so a TimeoutHandler
-// cancel doesn't desync row state from what we tell the user. The
-// flip side: if oauthHandlerTimeout (60s) fires after we already
-// started the mint, the goroutine continues for up to
-// mintTimeout + persistTimeout (≈30s) after we've returned an error
-// to the user. The user retries, mints K2, and the eventual
-// completion of K1 races K2's persist as a row overwrite. K1 then
-// becomes an orphan in qurl-service (no revoke wired for this case).
-// Tracked at #265 alongside the lost-PutItem-race orphan path.
+// Post-timeout-completion footgun: the mint + persist contexts are fresh
+// (decoupled from the request context) so a TimeoutHandler cancel doesn't
+// desync row state from what we tell the user. The flip side: if
+// oauthHandlerTimeout (60s) fires after a legacy fallback mint starts, that
+// goroutine continues for up to mintTimeout + persistTimeout (up to 30s) after
+// we've returned an error to the user. A retry can mint K2, and the eventual
+// completion of K1 races K2's persist as a row overwrite. K1 then becomes an
+// orphan in qurl-service (no revoke wired for this case). Binding-backed
+// retries use a stable idempotency key, so they replay K1 rather than minting
+// a distinct K2. Tracked at #265 alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
-	keyName := "Slack workspace " + teamID
 	// Fresh bounded context for the mint, decoupled from the request
 	// context. TimeoutHandler's 60s deadline could fire mid-mint;
 	// qurl-service may have already created the key, but we'd surface
@@ -629,12 +637,16 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// distinctly, qurl-service's idempotency will eventually reconcile.
 	mintCtx, mintCancel := context.WithTimeout(context.Background(), mintTimeout)
 	defer mintCancel()
-	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(mintCtx, accessToken,
-		keyName, apiKeyScopes())
+	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
 		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
-		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID, "api_key_limit_reached", limitReached)
+		slog.Error("oauth/callback qurl-service provision failed",
+			"error", err,
+			"team_id", teamID,
+			"api_key_limit_reached", limitReached,
+			"external_identity_already_bound", alreadyBound)
 		if limitReached {
 			// Quota is a precondition the admin must clear themselves —
 			// retrying does nothing (the old "run setup again" advice was
@@ -646,10 +658,16 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Revoke one you no longer use, then run /qurl setup <email> again.")
 			return "", false
 		}
+		if alreadyBound {
+			renderOAuthErrorPage(w, http.StatusConflict, "qURL already connected",
+				"qURL is already connected for this Slack workspace, but this setup attempt could not recover the workspace key. Contact your qURL administrator for help.")
+			return "", false
+		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
 			"Something went wrong while creating your qURL API key. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
+	apiKey, keyID, keyPrefix := minted.APIKey, minted.KeyID, minted.KeyPrefix
 
 	// Persist with a fresh bounded context, not the request context.
 	// TimeoutHandler's 60s deadline could fire mid-PutItem; the write
@@ -660,24 +678,31 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 	defer persistCancel()
 	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
-		slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-			"error", perr, "team_id", teamID, "key_id", keyID)
-		scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
-		// TODO(#265): revoke is wired only for the persist-failure case.
-		// A TimeoutHandler-induced abandon (outer 60s fires after mint
-		// has started but before persist returns) escapes this branch
-		// and leaks an orphan. Closes when #265's ConditionExpression
-		// shift lets us detect the lost-race case end-to-end.
-		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again", http.StatusInternalServerError)
+		if minted.BindingBacked {
+			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+				"error", perr, "team_id", teamID, "key_id", keyID)
+		} else {
+			slog.Error("oauth/callback persist failed — revoking legacy fallback key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+				"error", perr, "team_id", teamID, "key_id", keyID)
+			scheduleOrphanRevoke(cfg, accessToken, keyID, teamID)
+		}
+		// TODO(#265): legacy revoke is wired only for the persist-failure
+		// case. A TimeoutHandler-induced abandon (outer 60s fires after
+		// mint has started but before persist returns) escapes this branch
+		// and can leak an orphaned legacy fallback key. Closes when #265's
+		// ConditionExpression shift lets us detect the lost-race case
+		// end-to-end.
+		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again soon", http.StatusInternalServerError)
 		return "", false
 	}
 	return keyPrefix, true
 }
 
-// scheduleOrphanRevoke fires a fire-and-forget revoke of a key that
-// can't be left in place — persist failure, bind failure, or any
-// other half-install state. Routed through the AsyncTracker so
-// SIGTERM drains it under handler.wg rather than cutting mid-call.
+// scheduleOrphanRevoke fires a fire-and-forget revoke of a legacy fallback
+// key that can't be left in place after persist failure. Binding-backed keys
+// keep their qurl-service binding/idempotency row so setup retry can recover.
+// Routed through the AsyncTracker so SIGTERM drains it under handler.wg
+// rather than cutting mid-call.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func scheduleOrphanRevoke(cfg Config, accessToken, keyID, teamID string) {

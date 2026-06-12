@@ -62,6 +62,7 @@ func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { r
 type fakeMinter struct {
 	apiKey, keyID, keyPrefix string
 	mintErr                  error
+	bindingBacked            bool
 	mintCalls                int
 	mintMu                   sync.Mutex
 	revoked                  bool
@@ -77,11 +78,16 @@ func (f *fakeMinter) ValidateAPIKey(_ context.Context, _ string) error {
 	f.validateCalls++
 	return f.validateErr
 }
-func (f *fakeMinter) MintAPIKey(_ context.Context, _, _ string, _ []string) (apiKey, keyID, keyPrefix string, err error) {
+func (f *fakeMinter) MintWorkspaceAPIKey(_ context.Context, _, _ string) (WorkspaceAPIKeyMint, error) {
 	f.mintMu.Lock()
 	f.mintCalls++
 	f.mintMu.Unlock()
-	return f.apiKey, f.keyID, f.keyPrefix, f.mintErr
+	return WorkspaceAPIKeyMint{
+		APIKey:        f.apiKey,
+		KeyID:         f.keyID,
+		KeyPrefix:     f.keyPrefix,
+		BindingBacked: f.bindingBacked,
+	}, f.mintErr
 }
 func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
 	f.revokeMu.Lock()
@@ -174,7 +180,7 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 	}))
 	t.Cleanup(auth0.Close)
 	store := &fakeWorkspaceStore{}
-	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix}
+	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix, bindingBacked: true}
 
 	// Re-point HTTPClient at the stub Auth0 by rewriting the request host
 	// via a custom Transport. The simplest path: a Transport that
@@ -330,7 +336,7 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on email mismatch", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on email mismatch", minter.mintCalls)
 	}
 }
 
@@ -353,7 +359,7 @@ func TestCallbackEmailSetupRequiresNonEmptyVerifiedEmail(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on empty verified email", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on empty verified email", minter.mintCalls)
 	}
 }
 
@@ -531,6 +537,8 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 // spawn earlier would silently regress.
 func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	cfg, _, minter := newCallbackCfgStoreMinter(t)
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
 	minter.mintErr = errors.New("qurl-service down")
 	state := mintTestState(t, &cfg)
 
@@ -548,8 +556,13 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 		t.Errorf("502 body should render the styled error page heading; got: %q", body)
 	}
 	assertSecurityHeaders(t, rec)
-	// Give any spurious revoke goroutine a window to fire.
-	time.Sleep(50 * time.Millisecond)
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	used := tracker.used
+	tracker.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("mint failure must not schedule async revoke work; got %d async calls", used)
+	}
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
 	if minter.revoked {
@@ -586,8 +599,34 @@ func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	}
 }
 
-func TestCallbackRevokesOnPersistFailure(t *testing.T) {
+func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.mintErr = ErrExternalIdentityAlreadyBound
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d want 409 (already-bound workspace → 409)", rec.Code)
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "already connected") || !strings.Contains(body, "administrator") {
+		t.Errorf("body should explain the existing connection and recovery path; got: %q", rec.Body.String())
+	}
+	assertSecurityHeaders(t, rec)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKey must NOT run when qurl-service reports an existing workspace binding")
+	}
+}
+
+func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
 	store.setErr = errors.New("ddb down")
 	state := mintTestState(t, &cfg)
 
@@ -597,7 +636,36 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
-	// Revoke is fire-and-forget in a goroutine — give it a moment.
+	// Binding-backed keys must stay in qurl-service so the admin can retry
+	// setup and replay the binding idempotency record into Slack storage.
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	used := tracker.used
+	tracker.mu.Unlock()
+	if used != 0 {
+		t.Fatalf("binding-backed persist failure must not schedule async revoke work; got %d async calls", used)
+	}
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if minter.revoked {
+		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
+	}
+}
+
+func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	minter.bindingBacked = false
+	store.setErr = errors.New("ddb down")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d want 500", rec.Code)
+	}
+	// Legacy fallback has no qurl-service binding replay path, so the
+	// unstored key is an orphan and should still be revoked asynchronously.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		minter.revokeMu.Lock()
@@ -608,7 +676,7 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("expected RevokeAPIKey to be called after persist failure")
+	t.Error("expected RevokeAPIKey to be called after legacy persist failure")
 }
 
 func TestCallbackRejectsMissingCode(t *testing.T) {
@@ -957,7 +1025,7 @@ func TestCallbackBindIdempotentForSameCallerReusesExistingKey(t *testing.T) {
 	store.mu.Unlock()
 	minter.mintMu.Lock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 when existing key is valid", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 when existing key is valid", minter.mintCalls)
 	}
 	minter.mintMu.Unlock()
 	minter.validateMu.Lock()
@@ -1001,7 +1069,7 @@ func TestCallbackBindIdempotentForSameCallerMintsWhenKeyMissing(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 1 {
-		t.Errorf("MintAPIKey calls: got %d want 1", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 1", minter.mintCalls)
 	}
 }
 
@@ -1028,7 +1096,7 @@ func TestCallbackInvalidStoredKeyMintsReplacement(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 1 {
-		t.Errorf("MintAPIKey calls: got %d want 1", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 1", minter.mintCalls)
 	}
 }
 
@@ -1052,7 +1120,7 @@ func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on transient validation failure", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on transient validation failure", minter.mintCalls)
 	}
 }
 
@@ -1076,7 +1144,7 @@ func TestCallbackStoredKeyForbiddenDoesNotMint(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on 403 validation failure", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on 403 validation failure", minter.mintCalls)
 	}
 }
 
@@ -1099,7 +1167,7 @@ func TestCallbackStoredKeyLookupFailureDoesNotMint(t *testing.T) {
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
-		t.Errorf("MintAPIKey calls: got %d want 0 on stored-key lookup failure", minter.mintCalls)
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on stored-key lookup failure", minter.mintCalls)
 	}
 }
 
