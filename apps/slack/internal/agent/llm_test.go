@@ -183,11 +183,18 @@ func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
 		t.Fatalf("trailing messages must both be user-role, got [2]=%q [3]=%q", params[2].Role, params[3].Role)
 	}
 
-	// The merged turn stays well-formed — assert the decoded blocks, not the
-	// marshaled bytes, so the pairing is genuinely pinned (a substring match would
-	// pass even if one half were dropped). The assistant tool_use and the user
-	// tool_result carry the SAME id, the result carries the propose ack, and the
-	// follow-up user text rides along as the second user turn.
+	// The merged turn stays well-formed — assert the decoded blocks, not the marshaled
+	// bytes, so the pairing is genuinely pinned (a substring match would pass even if
+	// one half were dropped). Each asserted turn carries exactly one content block, so
+	// the Content[0] indexing below is unambiguous and fails loudly if a fixture change
+	// adds a block (e.g. giving the assistant turn Text would push tool_use off index 0).
+	if len(params[1].Content) != 1 || len(params[2].Content) != 1 || len(params[3].Content) != 1 {
+		t.Fatalf("each asserted turn should carry exactly one content block, got %d/%d/%d",
+			len(params[1].Content), len(params[2].Content), len(params[3].Content))
+	}
+	// The assistant tool_use and the user tool_result carry the SAME id, the result
+	// carries the propose ack, and the follow-up user text rides along as the second
+	// user turn.
 	toolUse := params[1].Content[0].OfToolUse
 	toolResult := params[2].Content[0].OfToolResult
 	followUp := params[3].Content[0].OfText

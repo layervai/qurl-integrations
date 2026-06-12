@@ -159,14 +159,11 @@ func toSDKTools(specs []ToolSpec) []anthropic.ToolUnionParam {
 //
 // It emits at most one MessageParam per domain Message (empty assistant turns are
 // dropped — see TestToSDKMessages_SkipsEmptyAssistantTurn) and never merges distinct
-// messages, so consecutive same-role messages stay separate. A proposal or
-// iteration-cap turn is persisted ending in a
-// user{tool_results} message, and the next turn prepends a fresh user{Text}
-// ([Agent.Run]) — so a same-thread follow-up yields two consecutive user-role
-// messages (assistant{tool_use}, user{tool_result}, user{text}). That is
-// intentional, not a roles-must-alternate bug: the Messages API combines
-// consecutive same-role turns into one well-formed turn (MessageNewParams.Messages,
-// pinned anthropic-sdk-go v1.46.0). Pinned by
+// messages, so consecutive same-role messages stay separate — notably the two user
+// turns [Agent.Run] hands back after a proposal or iteration-cap turn. That is safe,
+// not a roles-must-alternate bug: the Messages API merges consecutive same-role turns
+// into one well-formed turn server-side (MessageNewParams.Messages, pinned
+// anthropic-sdk-go v1.46.0). Pinned by
 // TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal.
 func toSDKMessages(msgs []Message) []anthropic.MessageParam {
 	out := make([]anthropic.MessageParam, 0, len(msgs))
