@@ -357,6 +357,15 @@ type Config struct {
 	// ship enabled while the confirm flow stays staged (dark → beta).
 	AgentConfirmEnabled bool
 
+	// AgentChannelFollowups gates whether the agent answers non-@mention thread
+	// replies in channel threads it already joined (a follow-up without a re-@mention;
+	// see shouldDispatchAgentEvent). False (the default) keeps channels @mention-per-
+	// turn. True requires the manifest to subscribe message.channels/groups with
+	// channels:history/groups:history — so the bot then RECEIVES every message in
+	// channels it's a member of (and only acts on its own threads). That's a
+	// data-handling expansion: enable only after the review + a workspace re-OAuth.
+	AgentChannelFollowups bool
+
 	// AgentDefaultEnabled is the per-workspace conversation-mode default for a
 	// workspace that hasn't set the toggle (`/qurl-admin agent on|off`, stored in
 	// workspace_mappings via AdminStore). False during the staged per-workspace

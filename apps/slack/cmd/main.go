@@ -185,6 +185,7 @@ func run() error {
 	agentStream := newSlackAgentStreamPortWithTokenLookup(workspaceTokenLookup, userAgent, slackChatStartStreamURL, slackChatAppendStreamURL, slackChatStopStreamURL, nil)
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
+	agentChannelFollowups := readAgentChannelFollowups()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
@@ -250,6 +251,7 @@ func run() error {
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,
+		AgentChannelFollowups:       agentChannelFollowups,
 		AgentDefaultEnabled:         agentDefaultEnabled,
 		AgentMaxTurnsPerUserPerHour: agentMaxTurnsPerUser,
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
@@ -1072,6 +1074,16 @@ func readAgentKillSwitch() bool {
 // surface is live and PostMessageBlocks is wired (Handler.agentConfirmEnabled).
 func readAgentConfirmEnabled() bool {
 	return readBoolEnvFailSafe("QURL_AGENT_CONFIRM_ENABLED", false, false)
+}
+
+// readAgentChannelFollowups reads QURL_AGENT_CHANNEL_FOLLOWUPS — the flag that lets
+// the agent answer non-@mention thread replies in channel threads it already joined
+// (Handler.agentChannelFollowupsEnabled). Absent → off. FAILS SAFE to off: enabling
+// it means the manifest subscribes message.channels/groups, so the bot then receives
+// every message in channels it's a member of — a data-handling expansion that a typo
+// must never turn on. Only takes effect once the read-only surface is live.
+func readAgentChannelFollowups() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_CHANNEL_FOLLOWUPS", false, false)
 }
 
 // readAgentDefaultEnabled reads QURL_AGENT_DEFAULT_ENABLED — the per-workspace

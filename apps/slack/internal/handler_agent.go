@@ -130,6 +130,16 @@ func (h *Handler) agentEnabled() bool {
 		h.cfg.PostMessage != nil
 }
 
+// agentChannelFollowupsEnabled reports whether the agent answers non-@mention thread
+// replies in channel threads it already joined (see shouldDispatchAgentEvent). Gated
+// on top of agentEnabled and dark by default: turning it on means subscribing to
+// message.channels/groups (channels:history/groups:history), so the bot then RECEIVES
+// every message in channels it's a member of — a data-handling expansion that must be
+// reviewed and re-OAuth'd before enabling. Until then channels stay @mention-per-turn.
+func (h *Handler) agentChannelFollowupsEnabled() bool {
+	return h.agentEnabled() && h.cfg.AgentChannelFollowups
+}
+
 // workspaceAgentEnabled resolves the per-workspace conversation-mode toggle, on top
 // of the org-level agentEnabled gate: the stored agent_enabled flag if the workspace
 // set it (AgentEnabledFor), else Config.AgentDefaultEnabled. It FAILS CLOSED on a
@@ -284,7 +294,7 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 		h.handleAppHomeOpened(env)
 		return
 	}
-	if !shouldDispatchAgentEvent(env) {
+	if !shouldDispatchAgentEvent(env, h.agentChannelFollowupsEnabled()) {
 		return
 	}
 	log := slog.With(
@@ -322,10 +332,18 @@ const agentDeliveryBudget = 15 * time.Second
 
 // shouldDispatchAgentEvent filters out everything that isn't a human asking the
 // agent something: non-mention/DM events, bot and system/edited messages (the
-// self-loop guard), authorless events, channel messages that aren't @-mentions,
-// and empty text.
-func shouldDispatchAgentEvent(env *slackEventEnvelope) bool {
+// self-loop guard), authorless events, top-level channel messages, and empty text.
+//
+// When channelFollowupsEnabled is true, a channel message that is a thread REPLY is
+// also admitted — so a follow-up in a thread the agent is already in continues the
+// conversation without a re-@mention. processAgentEvent then confirms it's the
+// agent's OWN thread (it has saved history) before answering; a top-level channel
+// message is never admitted, so we never respond to un-addressed channel chatter.
+func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) bool {
 	e := &env.Event
+	// Drop bot posts, the agent's own messages, and any subtyped message. That subtype
+	// guard also excludes thread_broadcast (a thread reply the user also sent to the
+	// channel) — a legitimate in-thread follow-up we don't continue on in v1; tracked in #714.
 	if e.BotID != "" || e.Subtype != "" || e.User == "" {
 		return false
 	}
@@ -333,14 +351,52 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope) bool {
 	case slackEventTypeAppMention:
 		// Channel @-mention — always a deliberate address.
 	case slackEventTypeMessage:
-		// Only DMs; we don't subscribe to the channel-message firehose.
-		if e.ChannelType != slackChannelTypeIM {
+		// A DM is always a deliberate address. A channel message is admitted only when
+		// channel follow-ups are enabled AND it's a thread reply (the "is it the agent's
+		// thread?" check is in processAgentEvent, which has store access).
+		if e.ChannelType != slackChannelTypeIM && (!channelFollowupsEnabled || e.ThreadTS == "") {
 			return false
 		}
 	default:
 		return false
 	}
 	return strings.TrimSpace(stripBotMention(e.Text)) != ""
+}
+
+// isAgentChannelFollowup reports whether this event is a non-@mention reply in a
+// channel thread (vs an app_mention or a DM). When shouldDispatchAgentEvent admits a
+// channel message it is, by construction, a thread reply — so processAgentEvent uses
+// this to apply the extra "must be the agent's own thread" gate that DMs and
+// @mentions skip.
+func isAgentChannelFollowup(e *slackInnerEvent) bool {
+	return e.Type == slackEventTypeMessage && e.ChannelType != slackChannelTypeIM && e.ThreadTS != ""
+}
+
+// agentChannelFollowupDropped reports whether this event is a channel thread reply
+// the agent should NOT answer: a reply with no readable transcript for the thread — one
+// it never joined, or joined but whose blob is empty or undecodable (loadAgentHistory
+// reports a corrupt blob as no history, deliberately, so it also fail-closed-drops here),
+// or one whose lookup errored. It returns false (don't drop) for non-follow-ups —
+// @mentions and DMs are always deliberate addresses. Called before dedupe/ack so a
+// reply that isn't ours consumes no dedupe marker and gets no 👀, and (when the lookup
+// fails) we stay SILENT rather than posting an error into what may be unrelated channel
+// chatter. This adds one transcript read on the follow-up path; cutting the firehose
+// admission cost (pool slot + this read, plus the second read on the accepted path) is
+// tracked in #712, to land before broad enablement.
+func (h *Handler) agentChannelFollowupDropped(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) bool {
+	if !isAgentChannelFollowup(&env.Event) {
+		return false
+	}
+	history, _, err := h.loadAgentHistory(ctx, log, partition, agentEventThreadKey(env))
+	if err != nil {
+		log.Error("agent: thread-continuity lookup failed; dropping channel reply", "error", err)
+		return true
+	}
+	if len(history) == 0 {
+		log.Debug("agent: channel reply outside an agent thread; ignoring")
+		return true
+	}
+	return false
 }
 
 // botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
@@ -425,6 +481,12 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	}
 
 	partition := agentEventPartition(env)
+
+	// Channel thread-reply continuity gate — BEFORE dedupe/ack so a reply that isn't
+	// ours consumes nothing and is never acked (see agentChannelFollowupDropped).
+	if h.agentChannelFollowupDropped(ctx, log, env, partition) {
+		return
+	}
 
 	// Dedupe on message identity (see agentEventDedupeKey), not the per-delivery
 	// event_id: two events for one message would otherwise both win and double-reply.
