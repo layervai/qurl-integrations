@@ -148,26 +148,23 @@ func TestToSDKMessages_SkipsEmptyAssistantTurn(t *testing.T) {
 	}
 }
 
-// TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal pins the
-// proposal-followup transcript shape. A turn that ends in a proposal (or hits the
-// iteration cap) is persisted ending in a user{tool_results} message, and the next
-// turn prepends a fresh user{Text} ([Agent.Run]) — so a follow-up @mention produces
-// two consecutive user-role messages: assistant{tool_use}, user{tool_result},
-// user{text}. toSDKMessages must emit one MessageParam per domain Message WITHOUT
-// coalescing that consecutive-user pair: the Messages API combines consecutive
-// same-role turns into one well-formed turn (see MessageNewParams.Messages in the
-// pinned anthropic-sdk-go), so the translation layer must leave them distinct. If a
-// future edit "fixes" the consecutive-user pair by merging it here, this fails.
+// TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal pins the no-coalescing
+// invariant documented on toSDKMessages: a proposal/iteration-cap turn ends in a
+// user{tool_results} message and the next turn prepends a fresh user{Text}, so the
+// translation layer must emit that consecutive-user pair as two distinct messages
+// (the Messages API merges same-role turns server-side — see toSDKMessages). If a
+// future edit "fixes" the pair by coalescing it here, this fails.
 func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
+	const proposeID = "tu_propose"
 	// Full cross-turn shape: turn 1 (user ask → assistant propose tool_use →
 	// persisted propose ack tool_result) followed by turn 2's prepended user text.
 	history := []Message{
 		{Role: roleUser, Text: "protect the staging connector"},
 		{Role: roleAssistant, ToolCalls: []ToolCall{
-			{ID: "tu_propose", Name: toolProposeProtectConnector, Input: json.RawMessage(`{}`)},
+			{ID: proposeID, Name: toolProposeProtectConnector, Input: json.RawMessage(`{}`)},
 		}},
 		{Role: roleUser, ToolResults: []ToolResult{
-			{ToolUseID: "tu_propose", Content: proposalAckResult},
+			{ToolUseID: proposeID, Content: proposalAckResult},
 		}},
 		{Role: roleUser, Text: "actually, revoke it instead"},
 	}
@@ -185,14 +182,16 @@ func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
 		t.Fatalf("trailing messages must both be user-role, got [2]=%q [3]=%q", params[2].Role, params[3].Role)
 	}
 
-	// Both turns' content must survive the translation — the tool_result AND the
-	// follow-up text — so the merged turn carries everything the model needs.
+	// The merged turn stays well-formed: the propose tool_use and its ack
+	// tool_result both survive carrying the same id (so tool_result still pairs with
+	// its tool_use), and the follow-up user text rides along in the same turn.
 	raw, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	wire := string(raw)
 	for _, want := range []string{
+		proposeID,                          // tool_use id + tool_result tool_use_id: pairing preserved
 		`"tool_result"`, proposalAckResult, // persisted propose ack (first user turn)
 		"actually, revoke it instead", // next turn's prepended user text (second user turn)
 	} {

@@ -157,17 +157,15 @@ func toSDKTools(specs []ToolSpec) []anthropic.ToolUnionParam {
 // preserving tool_use and tool_result blocks so the model sees a valid
 // transcript across turns.
 //
-// It emits exactly one MessageParam per domain Message and deliberately does NOT
-// coalesce consecutive same-role messages. A turn that ends in a proposal or hits
-// the iteration cap is persisted ending in a user{tool_results} message
-// ([Agent.Run]); the next turn prepends a fresh user{Text}, so a follow-up
-// @mention in the same thread yields two consecutive user-role messages here
-// (assistant{tool_use}, user{tool_result}, user{text}). That is well-formed, not a
-// roles-must-alternate bug: the Messages API combines consecutive same-role turns
-// into one (see MessageNewParams.Messages in the pinned anthropic-sdk-go), and the
-// merged user turn is itself valid — tool_result leads it, the transcript still
-// opens with a user turn, and every tool_use keeps its matching tool_result.
-// Pinned by TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal.
+// It emits one MessageParam per domain Message and never coalesces consecutive
+// same-role messages. A proposal or iteration-cap turn is persisted ending in a
+// user{tool_results} message, and the next turn prepends a fresh user{Text}
+// ([Agent.Run]) — so a same-thread follow-up yields two consecutive user-role
+// messages (assistant{tool_use}, user{tool_result}, user{text}). That is
+// intentional, not a roles-must-alternate bug: the Messages API combines
+// consecutive same-role turns into one well-formed turn (MessageNewParams.Messages,
+// pinned anthropic-sdk-go v1.46.0). Pinned by
+// TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal.
 func toSDKMessages(msgs []Message) []anthropic.MessageParam {
 	out := make([]anthropic.MessageParam, 0, len(msgs))
 	for i := range msgs {
