@@ -182,22 +182,25 @@ func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
 		t.Fatalf("trailing messages must both be user-role, got [2]=%q [3]=%q", params[2].Role, params[3].Role)
 	}
 
-	// The merged turn stays well-formed: the propose tool_use and its ack
-	// tool_result both survive carrying the same id (so tool_result still pairs with
-	// its tool_use), and the follow-up user text rides along in the same turn.
-	raw, err := json.Marshal(params)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	// The merged turn stays well-formed — assert the decoded blocks, not the
+	// marshaled bytes, so the pairing is genuinely pinned (a substring match would
+	// pass even if one half were dropped). The assistant tool_use and the user
+	// tool_result carry the SAME id, the result carries the propose ack, and the
+	// follow-up user text rides along as the second user turn.
+	toolUse := params[1].Content[0].OfToolUse
+	toolResult := params[2].Content[0].OfToolResult
+	followUp := params[3].Content[0].OfText
+	if toolUse == nil || toolResult == nil || followUp == nil {
+		t.Fatalf("unexpected block shapes: tool_use=%v tool_result=%v text=%v", toolUse, toolResult, followUp)
 	}
-	wire := string(raw)
-	for _, want := range []string{
-		proposeID,                          // tool_use id + tool_result tool_use_id: pairing preserved
-		`"tool_result"`, proposalAckResult, // persisted propose ack (first user turn)
-		"actually, revoke it instead", // next turn's prepended user text (second user turn)
-	} {
-		if !strings.Contains(wire, want) {
-			t.Errorf("wire history missing %q\n%s", want, wire)
-		}
+	if toolUse.ID != proposeID || toolResult.ToolUseID != proposeID {
+		t.Fatalf("tool_use/tool_result pairing broken: tool_use.ID=%q tool_result.ToolUseID=%q, want both %q", toolUse.ID, toolResult.ToolUseID, proposeID)
+	}
+	if ack := toolResult.Content[0].OfText; ack == nil || ack.Text != proposalAckResult {
+		t.Fatalf("tool_result must carry the propose ack %q, got %+v", proposalAckResult, toolResult.Content)
+	}
+	if followUp.Text != "actually, revoke it instead" {
+		t.Fatalf("follow-up user text = %q, want %q", followUp.Text, "actually, revoke it instead")
 	}
 }
 
