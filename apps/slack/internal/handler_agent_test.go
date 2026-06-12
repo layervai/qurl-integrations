@@ -342,16 +342,17 @@ func memEvalSaveCond(cond string, existing map[string]ddbtypes.AttributeValue, p
 }
 
 // UpdateItem fakes only the one shape BumpTurnCount emits — "ADD turn_count :one SET
-// ttl = :ttl" — applying the number ADD and the SET, then returning UPDATED_NEW. A
-// no-op stub would make the rate-limit tests vacuously pass (count always 0), so it
-// actually mutates; anything other than that exact shape errors loudly.
+// #ttl = :ttl" (ttl is a DynamoDB reserved word, so it's aliased via #ttl) — applying
+// the number ADD and the SET, then returning UPDATED_NEW. A no-op stub would make the
+// rate-limit tests vacuously pass (count always 0), so it actually mutates; anything
+// other than that exact shape errors loudly.
 func (f *memAgentDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
-	if expr := aws.ToString(in.UpdateExpression); expr != "ADD turn_count :one SET ttl = :ttl" {
+	if expr := aws.ToString(in.UpdateExpression); expr != "ADD turn_count :one SET #ttl = :ttl" {
 		return nil, fmt.Errorf("memAgentDDB.UpdateItem: unsupported expression %q", expr)
 	}
 	k := memKey(in.Key)

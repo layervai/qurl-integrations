@@ -250,7 +250,13 @@ func (s *AgentStore) BumpTurnCount(ctx context.Context, teamID, scope string, wi
 			attrAgentPK: stringAttr(teamID),
 			attrAgentSK: stringAttr(sk),
 		},
-		UpdateExpression: aws.String("ADD " + attrTurnCount + " :one SET " + attrAgentTTL + " = :ttl"),
+		// `ttl` is a DynamoDB reserved word, so it MUST be aliased via an expression-
+		// attribute name here — a bare `SET ttl = :ttl` 400s with ValidationException
+		// "reserved keyword: ttl", which (the rate-limit gate being fail-open) silently
+		// disabled the per-user/team cap. The PutItem-based markers (putMarkerIfAbsent)
+		// set `ttl` as a raw item-map key, which is fine — only EXPRESSIONS reserve it.
+		UpdateExpression:         aws.String("ADD " + attrTurnCount + " :one SET #ttl = :ttl"),
+		ExpressionAttributeNames: map[string]string{"#ttl": attrAgentTTL},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":one": numberAttr(1),
 			":ttl": numberAttr(expiresAt),
