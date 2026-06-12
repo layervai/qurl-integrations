@@ -51,27 +51,111 @@ func env(eventType, channelType, user, botID, subtype, text string) *slackEventE
 }
 
 func TestShouldDispatchAgentEvent(t *testing.T) {
+	// chReply builds a channel message carrying a thread_ts (a thread reply); an empty
+	// threadTS is a top-level channel message.
+	chReply := func(text, threadTS string) *slackEventEnvelope {
+		e := env(slackEventTypeMessage, "channel", "U2", "", "", text)
+		e.Event.ThreadTS = threadTS
+		return e
+	}
 	tests := []struct {
-		name string
-		env  *slackEventEnvelope
-		want bool
+		name      string
+		env       *slackEventEnvelope
+		followups bool
+		want      bool
 	}{
-		{"app_mention human", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), true},
-		{"dm human", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi"), true},
-		{"channel message (not mention) ignored", env(slackEventTypeMessage, "channel", "U2", "", "", "hi"), false},
-		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U12345678> hi"), false},
-		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false},
-		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false},
-		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false},
-		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false},
+		// @mentions and DMs are deliberate addresses — admitted regardless of the flag.
+		{"app_mention human", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), false, true},
+		{"app_mention still works with followups on", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), true, true},
+		{"dm human", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi"), false, true},
+		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U12345678> hi"), false, false},
+		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false, false},
+		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false, false},
+		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
+		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
+
+		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
+		// top-level channel message is never admitted (no un-addressed chatter).
+		{"channel thread reply, followups off", chReply("hi", "100.0"), false, false},
+		{"channel thread reply, followups on", chReply("hi", "100.0"), true, true},
+		{"top-level channel message, followups off", chReply("hi", ""), false, false},
+		{"top-level channel message, followups on", chReply("hi", ""), true, false},
+		{"channel thread reply empty text, followups on", chReply("   ", "100.0"), true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldDispatchAgentEvent(tt.env); got != tt.want {
+			if got := shouldDispatchAgentEvent(tt.env, tt.followups); got != tt.want {
 				t.Fatalf("shouldDispatchAgentEvent = %v, want %v", got, tt.want)
 			}
 		})
 	}
+}
+
+func TestAgentChannelFollowupDropped(t *testing.T) {
+	fake := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
+	h := &Handler{cfg: Config{AgentStore: store}}
+	ctx, log := context.Background(), slog.Default()
+
+	reply := func(channel, threadTS string) *slackEventEnvelope {
+		e := env(slackEventTypeMessage, "channel", "U2", "", "", "follow-up")
+		e.Event.Channel = channel
+		e.Event.ThreadTS = threadTS
+		return e
+	}
+
+	// Seed a transcript for a thread the agent already joined.
+	joined := reply("C9", "100.0")
+	part := agentEventPartition(joined)
+	blob, err := json.Marshal([]agent.Message{{}})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := store.SaveConversation(ctx, part, agentEventThreadKey(joined), blob, 0); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	// A reply in the joined thread continues it; a reply in any other thread is dropped.
+	if h.agentChannelFollowupDropped(ctx, log, joined, part) {
+		t.Fatal("a reply in a thread the agent joined must NOT be dropped")
+	}
+	if !h.agentChannelFollowupDropped(ctx, log, reply("C9", "999.0"), part) {
+		t.Fatal("a reply in a thread the agent never joined must be dropped")
+	}
+	// Same thread_ts but a different channel is a different thread → dropped.
+	if !h.agentChannelFollowupDropped(ctx, log, reply("C-other", "100.0"), part) {
+		t.Fatal("a reply in another channel's thread must be dropped")
+	}
+
+	// Non-follow-ups are never dropped here — @mentions and DMs are deliberate
+	// addresses handled without the history gate.
+	mention := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+	if h.agentChannelFollowupDropped(ctx, log, mention, agentEventPartition(mention)) {
+		t.Fatal("an @mention is not a channel follow-up; must not be dropped")
+	}
+	dm := env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi")
+	if h.agentChannelFollowupDropped(ctx, log, dm, agentEventPartition(dm)) {
+		t.Fatal("a DM is not a channel follow-up; must not be dropped")
+	}
+
+	// A joined thread whose stored transcript is corrupt/undecodable reads back as no
+	// history (loadAgentHistory starts fresh on a decode error), so the follow-up
+	// fail-closed drops — "no DECODABLE transcript", not merely "never joined".
+	corrupt := reply("C-corrupt", "300.0")
+	if err := store.SaveConversation(ctx, part, agentEventThreadKey(corrupt), []byte("not valid json"), 0); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+	if !h.agentChannelFollowupDropped(ctx, log, corrupt, part) {
+		t.Fatal("a follow-up whose transcript can't be decoded must be dropped (fail closed)")
+	}
+
+	// Fail closed: when the transcript lookup itself errors we can't confirm the thread
+	// is the agent's, so the reply is dropped (and stays silent) rather than answered.
+	fake.getErr = errors.New("ddb read down")
+	if !h.agentChannelFollowupDropped(ctx, log, joined, part) {
+		t.Fatal("a follow-up whose transcript lookup errors must be dropped (fail closed)")
+	}
+	fake.getErr = nil
 }
 
 func TestAgentEventKeys(t *testing.T) {
