@@ -305,9 +305,26 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 		"event_id", env.EventID,
 	)
 	envCopy := *env
-	if !h.startAsyncWorkerWithTimeout(log, agentTurnTimeout, func(ctx context.Context, log *slog.Logger) {
+	turn := func(ctx context.Context, log *slog.Logger) {
 		h.processAgentEvent(ctx, log, &envCopy)
-	}) {
+	}
+	// Channel thread follow-ups ride a SEPARATE bounded pool (h.followupSem) so a busy
+	// channel's message.channels firehose — every delivery does a gate read before the
+	// non-agent-thread ones are dropped — can't saturate the main pool that @mention/DM,
+	// slash commands, and interactions share. @mention/DM stay on the main pool. The
+	// follow-up pool's saturation is logged distinctly so it can be watched separately
+	// during the staged enablement (#712).
+	if isAgentChannelFollowup(&envCopy.Event) {
+		if !h.runOnPool(h.followupSem, log, agentTurnTimeout, turn) {
+			log.Warn("agent: follow-up admission pool saturated — dropping channel reply")
+		}
+		return
+	}
+	// Main pool, via runOnPool directly (not startAsyncWorkerWithTimeout) so this path
+	// logs its drop exactly once — symmetric with the follow-up branch above. (The
+	// startAsyncWorkerWithTimeout wrapper keeps its own saturation log for runAsync/slash
+	// callers, which have no caller-side log.)
+	if !h.runOnPool(h.sem, log, agentTurnTimeout, turn) {
 		log.Warn("agent: async pool saturated — dropping event")
 	}
 }
@@ -372,31 +389,62 @@ func isAgentChannelFollowup(e *slackInnerEvent) bool {
 	return e.Type == slackEventTypeMessage && e.ChannelType != slackChannelTypeIM && e.ThreadTS != ""
 }
 
+// loadedHistory carries a thread's transcript plus its store version from the channel-
+// follow-up gate to the turn, so the accepted-follow-up path reads DynamoDB once (the
+// gate's read is reused as the turn's load) instead of twice. A nil *loadedHistory means
+// "not preloaded" — the @mention/DM path skips the gate and loads at the turn. Reusing the
+// gate's read snapshots version slightly earlier (before dedupe/ack), so the read→save
+// window is marginally wider on this path; a concurrent save is then no worse than a
+// version conflict, which saveAgentHistory already resolves by reload-and-merge.
+type loadedHistory struct {
+	history []agent.Message
+	version int64
+}
+
 // agentChannelFollowupDropped reports whether this event is a channel thread reply
 // the agent should NOT answer: a reply with no readable transcript for the thread — one
 // it never joined, or joined but whose blob is empty or undecodable (loadAgentHistory
 // reports a corrupt blob as no history, deliberately, so it also fail-closed-drops here),
-// or one whose lookup errored. It returns false (don't drop) for non-follow-ups —
-// @mentions and DMs are always deliberate addresses. Called before dedupe/ack so a
-// reply that isn't ours consumes no dedupe marker and gets no 👀, and (when the lookup
-// fails) we stay SILENT rather than posting an error into what may be unrelated channel
-// chatter. This adds one transcript read on the follow-up path; cutting the firehose
-// admission cost (pool slot + this read, plus the second read on the accepted path) is
-// tracked in #712, to land before broad enablement.
-func (h *Handler) agentChannelFollowupDropped(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) bool {
+// or one whose lookup errored. It returns dropped=false for non-follow-ups — @mentions
+// and DMs are always deliberate addresses. Called before dedupe/ack so a reply that isn't
+// ours consumes no dedupe marker and gets no 👀, and (when the lookup fails) we stay
+// SILENT rather than posting an error into what may be unrelated channel chatter. On an
+// ADMITTED follow-up it returns the loaded transcript so processAgentEvent reuses it
+// instead of re-reading — one DynamoDB read per accepted follow-up, not two. The firehose
+// admission load this read sits on is isolated to a separate pool in handleAgentEvent
+// (both halves of #712).
+func (h *Handler) agentChannelFollowupDropped(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) (dropped bool, pre *loadedHistory) {
 	if !isAgentChannelFollowup(&env.Event) {
-		return false
+		return false, nil
 	}
-	history, _, err := h.loadAgentHistory(ctx, log, partition, agentEventThreadKey(env))
+	history, version, err := h.loadAgentHistory(ctx, log, partition, agentEventThreadKey(env))
 	if err != nil {
 		log.Error("agent: thread-continuity lookup failed; dropping channel reply", "error", err)
-		return true
+		return true, nil
 	}
 	if len(history) == 0 {
 		log.Debug("agent: channel reply outside an agent thread; ignoring")
-		return true
+		return true, nil
 	}
-	return false
+	return false, &loadedHistory{history: history, version: version}
+}
+
+// resolveTurnHistory returns the transcript for this turn: the follow-up gate's preloaded
+// read on an accepted follow-up (pre != nil — one DynamoDB read, not two), else a fresh
+// load for the @mention/DM path. On a load error it posts the generic reply — the dedupe
+// marker is already committed, so Slack won't retry and we own the reply rather than
+// leaving the @-mention silently unanswered (already logged in loadAgentHistory) — and
+// returns ok=false so the caller stops.
+func (h *Handler) resolveTurnHistory(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition, threadKey string, pre *loadedHistory) (history []agent.Message, version int64, ok bool) {
+	if pre != nil {
+		return pre.history, pre.version, true
+	}
+	history, version, err := h.loadAgentHistory(ctx, log, partition, threadKey)
+	if err != nil {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentErrorReply)
+		return nil, 0, false
+	}
+	return history, version, true
 }
 
 // botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
@@ -483,8 +531,10 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	partition := agentEventPartition(env)
 
 	// Channel thread-reply continuity gate — BEFORE dedupe/ack so a reply that isn't
-	// ours consumes nothing and is never acked (see agentChannelFollowupDropped).
-	if h.agentChannelFollowupDropped(ctx, log, env, partition) {
+	// ours consumes nothing and is never acked (see agentChannelFollowupDropped). On an
+	// admitted follow-up it returns the loaded transcript so the turn below reuses it.
+	dropped, pre := h.agentChannelFollowupDropped(ctx, log, env, partition)
+	if dropped {
 		return
 	}
 
@@ -528,12 +578,8 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	h.setAgentThinkingStatus(ctx, log, env)
 
 	threadKey := agentEventThreadKey(env)
-	history, version, err := h.loadAgentHistory(ctx, log, partition, threadKey)
-	if err != nil {
-		// Dedupe already committed, so Slack won't retry and we own the reply:
-		// tell the user something went wrong rather than leaving their @-mention
-		// silently unanswered (already logged in loadAgentHistory).
-		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentErrorReply)
+	history, version, ok := h.resolveTurnHistory(ctx, log, env, partition, threadKey, pre)
+	if !ok {
 		return
 	}
 
