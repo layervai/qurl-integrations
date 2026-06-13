@@ -312,7 +312,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", fmt.Errorf("DDBProvider.APIKey: %w", err)
 	}
 
 	sharedContextErrorRetries := 0
@@ -331,7 +331,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 				}
 				return start.call.apiKey, start.call.err
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
 			}
 		}
 
