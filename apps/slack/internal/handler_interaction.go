@@ -260,14 +260,6 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		args:         args,
 		agentAudit:   agentAudit,
 	}
-	if !agentActionOK {
-		// Agent metadata was present and signed by Slack, but it was not for this
-		// modal action. Treat that as a verified modal rejection, not a slash-like
-		// setup attempt, so App Home keeps the approver/target accountability row.
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
-		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
-		return
-	}
 	// The Slack request signature covers the full form body, including the
 	// view_submission payload and its private_metadata, so CreatedAtUnix is
 	// tamper-resistant once Slack submits the modal. It is still only freshness
@@ -297,6 +289,16 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
 		// Keep the App Home row scoped to the legitimate modal opener/approver
 		// from signed metadata; the mismatched submitter stays in the warning log.
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
+		return
+	}
+	if !agentActionOK {
+		// Agent metadata was present and signed by Slack, but it was not for this
+		// modal action. Treat that as a verified modal rejection, not a slash-like
+		// setup attempt, so App Home keeps the approver/target accountability row.
+		// The same-workspace/same-user checks above run first so this durable row
+		// is still scoped to the verified modal opener.
+		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
