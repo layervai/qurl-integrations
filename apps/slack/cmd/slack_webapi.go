@@ -513,7 +513,7 @@ func slackMarkdownFallbackText(markdownText string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "`", "", "*", "")
+var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "", "*", "")
 
 func trimMarkdownFallbackOrderedListMarker(line string) string {
 	i := 0
