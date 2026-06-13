@@ -553,7 +553,7 @@ func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 
 func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t *testing.T) {
 	t.Parallel()
-	for _, code := range []string{"invalid_blocks", "invalid_block_type", "invalid_arguments"} {
+	for _, code := range []string{"invalid_blocks", "invalid_blocks_format", "invalid_block_type", "invalid_arguments"} {
 		t.Run(code, func(t *testing.T) {
 			t.Parallel()
 			var bodies []string
