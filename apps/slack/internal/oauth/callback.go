@@ -74,40 +74,56 @@ const (
 	keyPrefixLength = len("lv_live_abcd")
 )
 
-// successPageTemplate mirrors the Discord-side success page
-// (apps/discord/src/routes/qurl-oauth.js renderSuccess). Plain HTML with
-// no external assets so it renders in the strictest CSP / no-JS
-// environments. html/template auto-escapes every {{.Field}} interpolation
-// — that's the load-bearing XSS defense for keyPrefix (qurl-service
-// JSON response) and email (JWKS-verified id_token). teamID is
-// HMAC-recovered from the signed state so it's already a trusted
-// input, but the same auto-escape applies uniformly.
+// oauthPageStyle is a self-contained LayerV-inspired shell for browser-facing
+// OAuth pages. It mirrors the public site's dark surface, lime/cyan accents,
+// fine grid, and translucent cards without loading external fonts, images, or
+// stylesheets. That keeps setOAuthPageSecurityHeaders' strict CSP/no-asset
+// posture intact for setup pages opened from Slack.
+const oauthPageStyle = `<style>
+:root{color-scheme:dark;--bg:#030712;--panel:rgba(255,255,245,.035);--panel-strong:rgba(255,255,245,.055);--hairline:rgba(255,255,245,.13);--text:#f5f5f0;--muted:#b8c0cc;--tertiary:#7d8794;--lime:#7ec800;--cyan:#38bdf8;--danger:#f87171}
+*{box-sizing:border-box}
+body{min-height:100vh;margin:0;display:grid;place-items:center;padding:2rem 1rem;background:radial-gradient(900px 600px at 78% 18%,rgba(255,255,245,.035),transparent 70%),radial-gradient(700px 500px at 22% 88%,rgba(126,200,0,.075),transparent 70%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(90deg,rgba(255,255,245,.035) 1px,transparent 1px),linear-gradient(180deg,rgba(255,255,245,.035) 1px,transparent 1px);background-size:88px 88px;mask-image:linear-gradient(90deg,transparent 0,#000 12%,#000 88%,transparent),linear-gradient(180deg,transparent 0,#000 8%,#000 78%,transparent);mask-composite:intersect}
+.card{position:relative;width:100%;max-width:480px;border:1px solid var(--hairline);border-radius:14px;padding:2rem;background:linear-gradient(180deg,var(--panel-strong),var(--panel));box-shadow:0 0 0 1px rgba(255,255,245,.04),0 24px 60px -18px rgba(0,0,0,.65);overflow:hidden}
+.card:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:linear-gradient(90deg,var(--lime),var(--cyan))}
+.brand{display:flex;align-items:center;gap:.65rem;margin-bottom:1.5rem;font-size:.75rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--lime)}
+.brand-mark{width:.7rem;height:.7rem;border-radius:50%;background:var(--lime);box-shadow:0 0 20px rgba(126,200,0,.55)}
+h1{margin:0 0 .75rem;font-size:1.5rem;line-height:1.15;font-weight:700;letter-spacing:-.02em}
+p{margin:.75rem 0 0;color:var(--muted);font-size:.95rem;line-height:1.55}
+.kv{margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--hairline);font-size:.875rem;color:var(--muted)}
+.kv div{display:flex;justify-content:space-between;gap:1rem;margin-top:.5rem}
+.status{display:inline-flex;align-items:center;justify-content:center;width:1.5rem;height:1.5rem;margin-right:.35rem;border:1px solid currentColor;border-radius:999px;font-size:.85rem;vertical-align:.08em}
+.ok{color:var(--lime)}
+.warn{color:var(--danger)}
+code{background:rgba(255,255,245,.08);border:1px solid rgba(255,255,245,.10);padding:.12rem .35rem;border-radius:5px;color:var(--text);font-size:.875em}
+.footer{margin-top:1.5rem;color:var(--tertiary);font-size:.875rem}
+@media (max-width:520px){.card{padding:1.5rem;border-radius:12px}h1{font-size:1.35rem}.kv div{display:block}}
+</style>`
+
+// successPageTemplate renders the Slack OAuth success page. html/template
+// auto-escapes every {{.Field}} interpolation — that's the load-bearing XSS
+// defense for keyPrefix (qurl-service JSON response) and email
+// (JWKS-verified id_token). teamID is HMAC-recovered from the signed state so
+// it's already a trusted input, but the same auto-escape applies uniformly.
 var successPageTemplate = template.Must(template.New("oauth-success").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>qURL Connected</title>
 <meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#f9fafb}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-.kv{margin-top:1rem;font-size:.875rem;color:#374151}
-.kv div{margin-top:.25rem}
-.ok{color:#059669;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
-</style>
+` + oauthPageStyle + `
 </head>
 <body>
 <div class="card">
-<h1><span class="ok">&#10003;</span> qURL Connected</h1>
+<div class="brand"><span class="brand-mark"></span><span>LayerV</span></div>
+<h1><span class="status ok">&#10003;</span> qURL Connected</h1>
 <p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl get</code> and <code>/qurl list</code>.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 {{if .KeyPrefix}}<div>API key prefix: <code>{{.KeyPrefix}}</code></div>{{end}}
 {{if .Email}}<div>qURL account: <code>{{.Email}}</code></div>{{end}}
 </div>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
+<p class="footer">You can close this tab and return to Slack.</p>
 </div>
 </body>
 </html>`))
@@ -135,24 +151,18 @@ var rebindRefusedPageTemplate = template.Must(template.New("oauth-rebind-refused
 <meta charset="utf-8">
 <title>qURL setup blocked</title>
 <meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-.kv{margin-top:1rem;font-size:.875rem;color:#374151}
-.warn{color:#b91c1c;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
-</style>
+` + oauthPageStyle + `
 </head>
 <body>
 <div class="card">
-<h1><span class="warn">&#9888;</span> qURL setup blocked</h1>
+<div class="brand"><span class="brand-mark"></span><span>LayerV</span></div>
+<h1><span class="status warn">&#9888;</span> qURL setup blocked</h1>
 <p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup &lt;email&gt;</code> was not applied.</p>
 <p>Please ask the existing qURL admin in your workspace to add you, or contact LayerV support if the original admin is no longer reachable.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 </div>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab.</p>
+<p class="footer">You can close this tab.</p>
 </div>
 </body>
 </html>`))
@@ -175,19 +185,14 @@ var oauthErrorPageTemplate = template.Must(template.New("oauth-error").Parse(`<!
 <meta charset="utf-8">
 <title>qURL setup</title>
 <meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-p{color:#374151;font-size:.95rem;line-height:1.5}
-.warn{color:#b91c1c;font-weight:600}
-</style>
+` + oauthPageStyle + `
 </head>
 <body>
 <div class="card">
-<h1><span class="warn">&#9888;</span> {{.Heading}}</h1>
+<div class="brand"><span class="brand-mark"></span><span>LayerV</span></div>
+<h1><span class="status warn">&#9888;</span> {{.Heading}}</h1>
 {{range .Messages}}<p>{{.}}</p>{{end}}
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
+<p class="footer">You can close this tab and return to Slack.</p>
 </div>
 </body>
 </html>`))

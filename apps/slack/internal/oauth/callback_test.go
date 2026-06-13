@@ -317,12 +317,36 @@ func assertSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 func assertOAuthErrorPage(t *testing.T, rec *httptest.ResponseRecorder, heading string) {
 	t.Helper()
 	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 	body := rec.Body.String()
 	if !strings.Contains(body, "<title>qURL setup</title>") {
 		t.Errorf("body should render the styled qURL setup page; got: %s", body)
 	}
 	if escapedHeading := html.EscapeString(heading); !strings.Contains(body, escapedHeading) {
 		t.Errorf("body missing heading %q; got: %s", heading, body)
+	}
+}
+
+func assertLayerVOAuthChrome(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<div class="brand"><span class="brand-mark"></span><span>LayerV</span></div>`,
+		`color-scheme:dark`,
+		`--bg:#030712`,
+		`--lime:#7ec800`,
+		`--cyan:#38bdf8`,
+		`background:radial-gradient`,
+		`class="card"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing LayerV OAuth chrome marker %q; got: %s", want, body)
+		}
+	}
+	for _, oldColor := range []string{"#f9fafb", "#fef2f2", "#d1d5db", "#b91c1c"} {
+		if strings.Contains(body, oldColor) {
+			t.Errorf("body still contains old light-card palette color %s: %s", oldColor, body)
+		}
 	}
 }
 
@@ -352,6 +376,7 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 	// Defense-in-depth headers are required on the success page.
 	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1381,6 +1406,7 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
 		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
 	}
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1414,6 +1440,7 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
 		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
 	}
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
