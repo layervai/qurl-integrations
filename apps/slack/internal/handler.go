@@ -1657,6 +1657,8 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 }
 
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
+	// Reuse the sync admin-verb budget for the single DeleteAPIKey write: after
+	// the owner/admin gate, total upstream work stays inside the 2s ack envelope.
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
