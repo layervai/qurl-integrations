@@ -68,7 +68,8 @@ const agentAckReaction = "eyes"
 // turn it's meant to make feel responsive.
 // On a very fast turn with a still-running add, deferred clear can spend one budget
 // joining the add before spending a fresh budget on remove; both happen after reply
-// delivery, so the user-visible turn stays unblocked.
+// delivery, so the user-visible turn stays unblocked, but the agent worker slot stays
+// occupied until the deferred clear returns.
 const agentAckTimeout = 2 * time.Second
 
 // agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
@@ -227,11 +228,10 @@ func (h *Handler) agentAckContext() (context.Context, context.CancelFunc) {
 // is load-bearing: clearAgentAck waits for it before removing so reactions.remove can
 // never race ahead of an in-flight reactions.add and strand the 👀.
 func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) <-chan struct{} {
-	done := make(chan struct{})
 	if h.cfg.Reactions == nil {
-		close(done)
-		return done
+		return nil
 	}
+	done := make(chan struct{})
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -255,10 +255,11 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) <-chan 
 // runs on EVERY exit (reply posted, error, panic). Best-effort and nil-safe like
 // addAgentAck. It waits on addDone before removing so even a very fast turn cannot
 // remove before the async add lands. The wait is bounded too: if a future seam ignores
-// its add context, clear abandons the best-effort remove rather than recreating the
-// remove-before-add race. The remove uses a FRESH ctx off baseCtx: by defer time the
-// turn ctx is spent (agentTurnTimeout elapsed, or shutdown), so removing on it would
-// fail instantly and strand the 👀 — the same spent-ctx lesson as postAgentReply.
+// its add context, or the add goroutine starts late enough that the join budget wins,
+// clear abandons the best-effort remove rather than recreating the remove-before-add
+// race. The remove uses a FRESH ctx off baseCtx: by defer time the turn ctx is spent
+// (agentTurnTimeout elapsed, or shutdown), so removing on it would fail instantly and
+// strand the 👀 — the same spent-ctx lesson as postAgentReply.
 func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, addDone <-chan struct{}) {
 	if h.cfg.Reactions == nil || addDone == nil {
 		return
