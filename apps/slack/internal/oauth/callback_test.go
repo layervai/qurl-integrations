@@ -30,7 +30,8 @@ const (
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
 	t.Helper()
-	// Mutates process-global slog state; keep tests that use this helper serial.
+	// Mutates process-global slog state; keep this package serial while this
+	// helper exists, because any sibling t.Parallel test can race the swap.
 	var buf lockedLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -720,7 +721,7 @@ func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]a
 		if rec["cleanup_after_window_hours"] != float64(setupBindingCleanupAfterWindowHours) {
 			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], setupBindingCleanupAfterWindowHours)
 		}
-		if rec["operator_action"] != "rerun_setup_within_retry_window_then_cleanup_after_window" {
+		if rec["operator_action"] != setupBindingPersistFailureOperatorAction {
 			t.Errorf("operator_action = %v", rec["operator_action"])
 		}
 	}
