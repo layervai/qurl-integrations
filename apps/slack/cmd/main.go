@@ -1061,6 +1061,11 @@ func readSetupBindingReplayWindowHours() (int, error) {
 	if !ok || hoursText == "" || strings.HasPrefix(hoursText, "0") {
 		return 0, fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)
 	}
+	for i := range hoursText {
+		if hoursText[i] < '0' || hoursText[i] > '9' {
+			return 0, fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)
+		}
+	}
 	hours, err := strconv.Atoi(hoursText)
 	if err != nil || hours <= 0 {
 		return 0, fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)

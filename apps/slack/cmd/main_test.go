@@ -363,6 +363,7 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 		{name: "malformed", raw: "24", wantErrText: "canonical Nh form"},
 		{name: "zero", raw: "0h", wantErrText: "canonical Nh form"},
 		{name: "leading zero", raw: "01h", wantErrText: "canonical Nh form"},
+		{name: "leading plus", raw: "+24h", wantErrText: "canonical Nh form"},
 		{name: "negative", raw: "-1h", wantErrText: "canonical Nh form"},
 		{name: "minutes unit rejected", raw: "90m", wantErrText: "canonical Nh form"},
 		{name: "compound duration rejected", raw: "2h0m0s", wantErrText: "canonical Nh form"},
