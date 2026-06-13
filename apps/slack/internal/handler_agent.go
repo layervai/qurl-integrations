@@ -23,6 +23,7 @@ const (
 	slackEventTypeAssistantThreadContextChanged = "assistant_thread_context_changed"
 	slackEventTypeAppHomeOpened                 = "app_home_opened"
 	slackChannelTypeIM                          = "im"
+	slackMessageSubtypeThreadBroadcast          = "thread_broadcast"
 )
 
 // agentProposalPreviewPrefix prefixes a proposed-mutation reply while
@@ -358,21 +359,33 @@ const agentDeliveryBudget = 15 * time.Second
 // message is never admitted, so we never respond to un-addressed channel chatter.
 func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) bool {
 	e := &env.Event
-	// Drop bot posts, the agent's own messages, and any subtyped message. That subtype
-	// guard also excludes thread_broadcast (a thread reply the user also sent to the
-	// channel) — a legitimate in-thread follow-up we don't continue on in v1; tracked in #714.
-	if e.BotID != "" || e.Subtype != "" || e.User == "" {
+	// Drop bot posts and the agent's own messages before considering event shape.
+	if e.BotID != "" || e.User == "" {
 		return false
 	}
 	switch e.Type {
 	case slackEventTypeAppMention:
 		// Channel @-mention — always a deliberate address.
-	case slackEventTypeMessage:
-		// A DM is always a deliberate address. A channel message is admitted only when
-		// channel follow-ups are enabled AND it's a thread reply (the "is it the agent's
-		// thread?" check is in processAgentEvent, which has store access).
-		if e.ChannelType != slackChannelTypeIM && (!channelFollowupsEnabled || e.ThreadTS == "") {
+		if e.Subtype != "" {
 			return false
+		}
+	case slackEventTypeMessage:
+		if e.ChannelType == slackChannelTypeIM {
+			// DMs are deliberate only when they are ordinary human messages. A subtyped
+			// DM remains system/bot/edit-like noise from this surface's perspective.
+			if e.Subtype != "" {
+				return false
+			}
+		} else {
+			if e.Subtype != "" && e.Subtype != slackMessageSubtypeThreadBroadcast {
+				return false
+			}
+			// A channel message is admitted only when channel follow-ups are enabled AND
+			// it's a thread reply (the "is it the agent's thread?" check is in
+			// processAgentEvent, which has store access).
+			if !channelFollowupsEnabled || e.ThreadTS == "" {
+				return false
+			}
 		}
 	default:
 		return false

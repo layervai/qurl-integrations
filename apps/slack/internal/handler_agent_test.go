@@ -58,6 +58,11 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.ThreadTS = threadTS
 		return e
 	}
+	chReplySubtype := func(text, threadTS, subtype string) *slackEventEnvelope {
+		e := chReply(text, threadTS)
+		e.Event.Subtype = subtype
+		return e
+	}
 	tests := []struct {
 		name      string
 		env       *slackEventEnvelope
@@ -81,6 +86,11 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"top-level channel message, followups off", chReply("hi", ""), false, false},
 		{"top-level channel message, followups on", chReply("hi", ""), true, false},
 		{"channel thread reply empty text, followups on", chReply("   ", "100.0"), true, false},
+		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), false, false},
+		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), true, true},
+		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
+		{"thread_broadcast dm ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeThreadBroadcast, "hi"), true, false},
+		{"other channel thread subtype ignored", chReplySubtype("hi", "100.0", "message_changed"), true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -485,6 +495,13 @@ func appMentionBody(eventID string) string {
 		`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"100.1","text":"<@U12345678> what can I reach?"}}`
 }
 
+func threadBroadcastBody(eventID, ts, threadTS string) string {
+	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+		`"event":{"type":"message","subtype":"` + slackMessageSubtypeThreadBroadcast + `",` +
+		`"channel_type":"channel","user":"U2","channel":"C1","ts":"` + ts + `",` +
+		`"thread_ts":"` + threadTS + `","text":"more please"}}`
+}
+
 func TestHandleEvent_AgentReplies(t *testing.T) {
 	h, posts, mu := newAgentEventHandler(t, "You can reach staging.")
 	w := httptest.NewRecorder()
@@ -502,6 +519,38 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 	got := (*posts)[0]
 	if got.channel != "C1" || got.threadTS != "100.1" || got.text != "You can reach staging." {
 		t.Fatalf("reply = %+v", got)
+	}
+}
+
+func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
+	mem := newMemAgentDDB()
+	seedAgentThread(t, mem, "C1", "100.0")
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:              fakeAgentLLM{reply: "still here"},
+		AgentStore:            store,
+		PostMessage:           post,
+		AgentChannelFollowups: true,
+		AgentDefaultEnabled:   true,
+	})
+	t.Cleanup(h.Wait)
+
+	w := httptest.NewRecorder()
+	h.handleEvent(w, []byte(threadBroadcastBody("EvBroadcast", "101.0", "100.0")))
+	if w.Code != 200 {
+		t.Fatalf("ack code = %d", w.Code)
+	}
+	h.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 {
+		t.Fatalf("expected exactly one reply, got %d", len(*posts))
+	}
+	got := (*posts)[0]
+	if got.channel != "C1" || got.threadTS != "100.0" || got.text != "still here" {
+		t.Fatalf("thread_broadcast follow-up reply = %+v", got)
 	}
 }
 
