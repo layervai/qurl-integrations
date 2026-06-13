@@ -47,7 +47,7 @@ const (
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
 
-const replaceOriginalRetryDelay = 250 * time.Millisecond
+const responseURLRetryDelay = 250 * time.Millisecond
 
 // runAsync acks the request synchronously with ackWorkingOnIt and runs
 // `work` in a bounded-pool goroutine. Returns after the ack is written.
@@ -197,10 +197,7 @@ func withRequestIDAttr(requestID string, attrs ...any) []any {
 // kill while still bounding the goroutine's lifetime.
 // handler.Wait()/WaitTimeout in main blocks process exit.
 func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool {
-	body, err := json.Marshal(map[string]string{
-		respFieldResponseType: respTypeEphemeral,
-		respFieldText:         text,
-	})
+	body, err := responseURLTextBody(text)
 	if err != nil {
 		// json.Marshal of a map[string]string can't fail in practice; log
 		// and bail rather than POSTing a half-baked body.
@@ -208,6 +205,27 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) bool 
 		return false
 	}
 	return h.postResponseBody(log, responseURL, body)
+}
+
+// postResponseWithRetry is the opt-in shape for follow-ups where a false
+// delivery negative changes security behavior. Ordinary responses stay
+// single-attempt so non-idempotent Slack blips do not duplicate user-visible
+// messages; sensitive callers such as tunnel install delivery retry once before
+// treating delivery as unconfirmed and revoking freshly minted material.
+func (h *Handler) postResponseWithRetry(log *slog.Logger, responseURL, text, operation string) bool {
+	body, err := responseURLTextBody(text)
+	if err != nil {
+		log.Error("marshal response_url payload failed", "error", err)
+		return false
+	}
+	return h.postResponseBodyWithRetry(log, responseURL, body, operation)
+}
+
+func responseURLTextBody(text string) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         text,
+	})
 }
 
 // postResponseBlocks POSTs an ephemeral Block Kit follow-up to Slack's
@@ -259,25 +277,38 @@ func (h *Handler) replaceOriginalResponse(log *slog.Logger, responseURL, message
 	if h.postResponseBody(log, responseURL, body) {
 		return true
 	}
-	// Retry only this replace: a stale "Working on it" ack is uniquely confusing
-	// after a modal opens, while ordinary async replies are safer as single-
-	// attempt deliveries with explicit failure logging. The short delay makes the
-	// retry useful for transient Slack blips without materially extending the
-	// async worker's lifetime.
-	log.Warn("response_url replace_original failed; retrying once")
-	if !h.waitForReplaceOriginalRetry() {
-		log.Warn("response_url replace_original retry skipped because handler is shutting down")
-		return false
-	}
-	return h.postResponseBody(log, responseURL, body)
+	// Retry only this replace: a stale "Working on it" ack is uniquely
+	// confusing after a modal opens, while ordinary async replies are safer as
+	// single-attempt deliveries with explicit failure logging.
+	return h.postResponseBodyRetryAfterFailure(log, responseURL, body, "replace_original")
 }
 
-func (h *Handler) waitForReplaceOriginalRetry() bool {
+func (h *Handler) postResponseBodyWithRetry(log *slog.Logger, responseURL string, body []byte, operation string) bool {
+	result := h.postResponseBodyResult(log, responseURL, body)
+	if result == responseURLDeliveryConfirmed {
+		return true
+	}
+	if result == responseURLDeliveryPermanentFailure {
+		return false
+	}
+	return h.postResponseBodyRetryAfterFailure(log, responseURL, body, operation)
+}
+
+func (h *Handler) postResponseBodyRetryAfterFailure(log *slog.Logger, responseURL string, body []byte, operation string) bool {
+	log.Warn("response_url delivery failed; retrying once", "operation", operation)
+	if !h.waitForResponseURLRetry() {
+		log.Warn("response_url delivery retry skipped because handler is shutting down", "operation", operation)
+		return false
+	}
+	return h.postResponseBodyResult(log, responseURL, body) == responseURLDeliveryConfirmed
+}
+
+func (h *Handler) waitForResponseURLRetry() bool {
 	ctx := h.baseCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	timer := time.NewTimer(replaceOriginalRetryDelay)
+	timer := time.NewTimer(responseURLRetryDelay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -288,14 +319,26 @@ func (h *Handler) waitForReplaceOriginalRetry() bool {
 }
 
 func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []byte) bool {
+	return h.postResponseBodyResult(log, responseURL, body) == responseURLDeliveryConfirmed
+}
+
+type responseURLDeliveryResult int
+
+const (
+	responseURLDeliveryConfirmed responseURLDeliveryResult = iota
+	responseURLDeliveryRetryableFailure
+	responseURLDeliveryPermanentFailure
+)
+
+func (h *Handler) postResponseBodyResult(log *slog.Logger, responseURL string, body []byte) responseURLDeliveryResult {
 	if responseURL == "" {
 		log.Warn("missing response_url — async result has nowhere to go")
-		return false
+		return responseURLDeliveryPermanentFailure
 	}
 	target, err := h.validateResponseURLFn(responseURL)
 	if err != nil {
 		log.Warn("invalid response_url — refusing to dial", "error", err)
-		return false
+		return responseURLDeliveryPermanentFailure
 	}
 
 	deliverCtx, cancel := context.WithTimeout(context.Background(), responseURLTimeout)
@@ -311,14 +354,14 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 	req, err := http.NewRequestWithContext(deliverCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("build response_url request failed", "error", err)
-		return false
+		return responseURLDeliveryPermanentFailure
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.responseURLClient.Do(req)
 	if err != nil {
 		log.Error("response_url POST failed", "error", err)
-		return false
+		return responseURLDeliveryRetryableFailure
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -336,11 +379,15 @@ func (h *Handler) postResponseBody(log *slog.Logger, responseURL string, body []
 		// read only to detect overflow.
 		respBody = respBody[:respBodyCap]
 	}
-	if resp.StatusCode >= 400 {
-		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
-		return false
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		log.Warn("response_url returned retryable non-2xx", "status", resp.StatusCode, "body", string(respBody))
+		return responseURLDeliveryRetryableFailure
 	}
-	return true
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
+		return responseURLDeliveryPermanentFailure
+	}
+	return responseURLDeliveryConfirmed
 }
 
 // validateResponseURL fences the response_url POST destination to

@@ -176,7 +176,34 @@ func TestReplaceOriginalResponseRetryHonorsBaseContextCancellation(t *testing.T)
 	}
 }
 
-func TestWaitForReplaceOriginalRetryReturnsImmediatelyWhenCanceled(t *testing.T) {
+func TestPostResponseWithRetrySkipsPermanentHTTPFailure(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_blocks"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	h := &Handler{
+		baseCtx:               context.Background(),
+		responseURLClient:     srv.Client(),
+		validateResponseURLFn: url.Parse,
+	}
+
+	ok := h.postResponseWithRetry(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.URL, "msg", "test_permanent")
+
+	if ok {
+		t.Fatal("postResponseWithRetry returned true for HTTP 400")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("response_url hits = %d, want 1 because HTTP 400 is permanent", got)
+	}
+}
+
+func TestWaitForResponseURLRetryReturnsImmediatelyWhenCanceled(t *testing.T) {
 	t.Parallel()
 
 	baseCtx, cancel := context.WithCancel(context.Background())
@@ -185,16 +212,16 @@ func TestWaitForReplaceOriginalRetryReturnsImmediatelyWhenCanceled(t *testing.T)
 
 	done := make(chan bool, 1)
 	go func() {
-		done <- h.waitForReplaceOriginalRetry()
+		done <- h.waitForResponseURLRetry()
 	}()
 
 	select {
 	case got := <-done:
 		if got {
-			t.Fatal("waitForReplaceOriginalRetry returned true for canceled baseCtx")
+			t.Fatal("waitForResponseURLRetry returned true for canceled baseCtx")
 		}
-	case <-time.After(replaceOriginalRetryDelay / 2):
-		t.Fatal("waitForReplaceOriginalRetry slept despite canceled baseCtx")
+	case <-time.After(responseURLRetryDelay / 2):
+		t.Fatal("waitForResponseURLRetry slept despite canceled baseCtx")
 	}
 }
 

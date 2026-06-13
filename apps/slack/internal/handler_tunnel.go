@@ -121,10 +121,7 @@ func parseTunnelInstall(text string) (args *tunnelInstallArgs, userMsg string) {
 			return nil, msg
 		}
 	}
-	if msg := tunnelWebRefValidationMessage(args.Environment, args.WebRef); msg != "" {
-		return nil, msg + "\n\n" + tunnelInstallUsage()
-	}
-	if msg := tunnelWebRefKindValidationMessage(args.Environment, args.WebRefKind); msg != "" {
+	if msg := validateTunnelInstallArgs(args); msg != "" {
 		return nil, msg + "\n\n" + tunnelInstallUsage()
 	}
 	return args, ""
@@ -1091,10 +1088,11 @@ func installMessageBlocks(msg string) ([]any, bool) {
 
 // postInstallInstructions delivers the rendered install message, preferring the
 // Block Kit rendering (copyable rich_text_preformatted snippets) and falling
-// back to the plain-text post on any block-path miss. Returns whether SOME
-// rendering was delivered — the caller revokes the bootstrap key only when
-// delivery is unconfirmed, so this reports false only when neither the blocks
-// NOR the text post landed.
+// back to the plain-text post on any block-path miss. The final text delivery
+// retries once before reporting failure because a false negative revokes a
+// freshly minted bootstrap key. Returns whether SOME rendering was delivered,
+// so the caller revokes only when delivery remains unconfirmed after the
+// fallback and retry.
 //
 // The text post is the same single-call delivery the install flow used before
 // blocks existed, so this path is never worse than that baseline: a Slack-side
@@ -1112,5 +1110,5 @@ func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg str
 		}
 		log.Warn("tunnel install: Block Kit follow-up delivery failed; retrying as plain text")
 	}
-	return h.postResponse(log, responseURL, msg)
+	return h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text")
 }

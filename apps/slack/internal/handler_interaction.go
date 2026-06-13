@@ -360,18 +360,19 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	if len(fieldErrors) > 0 {
 		return nil, fieldErrors
 	}
-	// Re-check at the construction boundary so a future edit cannot carry a
-	// stale Docker/Compose web ref after relaxing the earlier field-error path.
-	if msg := tunnelWebRefValidationMessage(env, webRef); msg != "" {
-		fieldErrors[tunnelInstallBlockWebRef] = msg
-		return nil, fieldErrors
-	}
 	args = &tunnelInstallArgs{
 		Slug:        slug,
 		Alias:       alias,
 		LocalPort:   port,
 		Environment: env,
 		WebRef:      webRef,
+	}
+	// Re-check at the shared construction boundary so a future edit cannot
+	// carry stale or cross-field-invalid values after relaxing the earlier
+	// field-error path.
+	if msg := validateTunnelInstallArgs(args); msg != "" {
+		fieldErrors[tunnelInstallBlockWebRef] = msg
+		return nil, fieldErrors
 	}
 	return args, nil
 }
@@ -470,6 +471,16 @@ func tunnelWebRefKindValidationMessage(env tunnelInstallEnvironment, kind tunnel
 		return "Use `container:<name>` or `web_container:<name>` only with Docker container installs."
 	}
 	return ""
+}
+
+func validateTunnelInstallArgs(args *tunnelInstallArgs) string {
+	if args == nil {
+		return "qURL Connector setup is missing install arguments."
+	}
+	if msg := tunnelWebRefValidationMessage(args.Environment, args.WebRef); msg != "" {
+		return msg
+	}
+	return tunnelWebRefKindValidationMessage(args.Environment, args.WebRefKind)
 }
 
 // interactionPayload is the subset of Slack's view_submission and
