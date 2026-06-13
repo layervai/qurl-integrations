@@ -37,6 +37,9 @@ func TestMintAndVerifyStateRoundTrip(t *testing.T) {
 	if got.Email != "" {
 		t.Errorf("legacy state email: got %q want empty", got.Email)
 	}
+	if got.Mode != SetupModeReuse {
+		t.Errorf("legacy state mode: got %q want reuse", got.Mode)
+	}
 }
 
 func TestMintAndVerifyStateWithEmailRoundTrip(t *testing.T) {
@@ -57,6 +60,40 @@ func TestMintAndVerifyStateWithEmailRoundTrip(t *testing.T) {
 	}
 	if got.Email != "admin+setup@example.com" {
 		t.Errorf("email round-trip: got %q want normalized email", got.Email)
+	}
+	if got.Mode != SetupModeReuse {
+		t.Errorf("email state mode: got %q want reuse", got.Mode)
+	}
+}
+
+func TestMintAndVerifyStateWithEmailRotateModeRoundTrip(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	tok, err := MintStateWithEmailMode(testSecret, testStateTeamID, testStateUserID, "Admin+Setup@Example.COM", SetupModeRotate, now)
+	if err != nil {
+		t.Fatalf("MintStateWithEmailMode: %v", err)
+	}
+	got, err := VerifyState(testSecret, tok, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("VerifyState: %v", err)
+	}
+	if got.TeamID != testStateTeamID {
+		t.Errorf("teamID round-trip: got %q want %q", got.TeamID, testStateTeamID)
+	}
+	if got.UserID != testStateUserID {
+		t.Errorf("userID round-trip: got %q want %q", got.UserID, testStateUserID)
+	}
+	if got.Email != "admin+setup@example.com" {
+		t.Errorf("email round-trip: got %q want normalized email", got.Email)
+	}
+	if got.Mode != SetupModeRotate {
+		t.Errorf("mode round-trip: got %q want rotate", got.Mode)
+	}
+}
+
+func TestMintStateRejectsInvalidSetupMode(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	if _, err := MintStateWithEmailMode(testSecret, testStateTeamID, testStateUserID, "admin@example.com", SetupMode("bad"), now); !errors.Is(err, errStateBadMode) {
+		t.Fatalf("want errStateBadMode, got %v", err)
 	}
 }
 

@@ -40,6 +40,7 @@ const (
 	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
+	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -948,6 +949,10 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if err != nil {
 		return oauth.Config{}, false, err
 	}
+	apiKeyMintReplayWindowHours, err := readAPIKeyMintReplayWindowHours()
+	if err != nil {
+		return oauth.Config{}, false, err
+	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch
 	// (bounded inside NewJWKSVerifier). The callback uses the verifier
@@ -982,6 +987,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		Auth0EmailConnection:          emailConnection,
 		SlackBaseURL:                  baseURL,
 		SetupBindingReplayWindowHours: setupBindingReplayWindowHours,
+		APIKeyMintReplayWindowHours:   apiKeyMintReplayWindowHours,
 		OAuthStateSecret:              []byte(stateSecret),
 		Provider:                      provider,
 		IDTokenVerifier:               verifier,
@@ -1163,11 +1169,23 @@ func readMaxConcurrentFollowupGateAsync() int {
 // upstream default; an explicit value must use the canonical Nh form because
 // the emitted event fields are named *_hours.
 func readSetupBindingReplayWindowHours() (int, error) {
-	raw := strings.TrimSpace(os.Getenv(envQURLBindingTTLContract))
+	return readWholeHourDurationEnv(envQURLBindingTTLContract, oauth.DefaultSetupBindingReplayWindowHours)
+}
+
+// readAPIKeyMintReplayWindowHours mirrors qurl-service's API-key mint
+// idempotency TTL for operator-facing rotation retry logs. Empty preserves the
+// upstream default; an explicit value must use the canonical Nh form because
+// the emitted event fields are named *_hours.
+func readAPIKeyMintReplayWindowHours() (int, error) {
+	return readWholeHourDurationEnv(envQURLAPIKeyMintTTLContract, oauth.DefaultAPIKeyMintReplayWindowHours)
+}
+
+func readWholeHourDurationEnv(envName string, defaultHours int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(envName))
 	if raw == "" {
-		return oauth.DefaultSetupBindingReplayWindowHours, nil
+		return defaultHours, nil
 	}
-	invalidReplayWindowErr := fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)
+	invalidReplayWindowErr := fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envName, raw)
 	hoursText, ok := strings.CutSuffix(raw, "h")
 	if !ok || hoursText == "" || strings.HasPrefix(hoursText, "0") {
 		return 0, invalidReplayWindowErr
@@ -1182,7 +1200,7 @@ func readSetupBindingReplayWindowHours() (int, error) {
 	// Slack-only limit could become another drift source.
 	hours, err := strconv.Atoi(hoursText)
 	if err != nil {
-		return 0, fmt.Errorf("%s=%q is too large to fit in an hour value", envQURLBindingTTLContract, raw)
+		return 0, fmt.Errorf("%s=%q is too large to fit in an hour value", envName, raw)
 	}
 	return hours, nil
 }

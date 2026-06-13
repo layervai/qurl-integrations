@@ -307,6 +307,19 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	}
 }
 
+func TestUserHelpGatesRotateOnAdminStore(t *testing.T) {
+	sandbox := newTestHandler(t, noopQURLServer(t))
+	if help := sandbox.userHelpMessage(commandUser); strings.Contains(help, "setup <email> --rotate") {
+		t.Fatalf("sandbox help must not advertise owner-gated rotation: %q", help)
+	}
+
+	ts := newAdminTestServers(t)
+	prod := newAdminTestHandler(t, ts)
+	if help := prod.userHelpMessage(commandUser); !strings.Contains(help, "setup <email> --rotate") {
+		t.Fatalf("AdminStore-backed help must advertise rotation: %q", help)
+	}
+}
+
 // TestDispatchSplit_WrongSurfaceRedirects fences the friendly redirects:
 // an admin verb typed on `/qurl` points the user at `/qurl-admin`, and a
 // user verb typed on `/qurl-admin` points the user at `/qurl`. Without
@@ -1274,7 +1287,7 @@ func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 		t.Errorf("response_type: got %q want ephemeral", result["response_type"])
 	}
 	text := result["text"]
-	if !strings.Contains(text, "Usage: `/qurl setup <email>`.") {
+	if !strings.Contains(text, "Usage: `/qurl setup <email> [--rotate|--repoint]`.") {
 		t.Fatalf("missing setup email usage in setup reply: %q", text)
 	}
 	if strings.Contains(text, "/oauth/qurl/start?state=") {
@@ -1331,6 +1344,202 @@ func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T
 	if verified.Email != "admin+setup@example.com" {
 		t.Errorf("state email: got %q want normalized command email", verified.Email)
 	}
+	if verified.Mode != oauth.SetupModeReuse {
+		t.Errorf("state mode: got %q want reuse", verified.Mode)
+	}
+}
+
+func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup --rotate Admin+Setup@Example.COM"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text := result["text"]
+	if !strings.Contains(text, "Continue key rotation") {
+		t.Fatalf("missing rotation copy: %q", text)
+	}
+	if !strings.Contains(text, "|Continue key rotation>") {
+		t.Fatalf("missing rotation link anchor: %q", text)
+	}
+	start := strings.Index(text, "state=")
+	if start < 0 {
+		t.Fatalf("no state= in reply: %q", text)
+	}
+	rest := text[start+len("state="):]
+	end := strings.IndexAny(rest, "|>")
+	if end >= 0 {
+		rest = rest[:end]
+	}
+	stateRaw, err := url.QueryUnescape(rest)
+	if err != nil {
+		t.Fatalf("unescape state: %v", err)
+	}
+	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("minted state failed VerifyState: %v", err)
+	}
+	if verified.Email != "admin+setup@example.com" {
+		t.Errorf("state email: got %q want normalized command email", verified.Email)
+	}
+	if verified.Mode != oauth.SetupModeRotate {
+		t.Errorf("state mode: got %q want rotate", verified.Mode)
+	}
+}
+
+func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup --repoint Admin+Setup@Example.COM"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text := result["text"]
+	if !strings.Contains(text, "key rotation is not available") || !strings.Contains(text, "without `--rotate`") {
+		t.Fatalf("missing rotation-unavailable copy: %q", text)
+	}
+	if strings.Contains(text, "state=") || strings.Contains(text, "Continue key rotation") {
+		t.Fatalf("sandbox rotate should not mint a rotation state URL: %q", text)
+	}
+}
+
+func TestSlashCommandSetupWithRotate_NonOwnerDeniedBeforeStateMint(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedNonAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup --rotate Admin+Setup@Example.COM"},
+		"team_id": {testAdminTeamID},
+		"user_id": {testAdminUserID},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text := result["text"]
+	if !strings.Contains(text, "can only be re-run") || !strings.Contains(text, "<@"+testAdminOwnerID+">") {
+		t.Fatalf("missing owner-gate copy: %q", text)
+	}
+	if strings.Contains(text, "state=") || strings.Contains(text, "Continue key rotation") {
+		t.Fatalf("non-owner rotate should not mint a rotation state URL: %q", text)
+	}
+}
+
+func TestSlashCommandSetupWithShapeBadLegacyOwner_AllowsPlainSetupReclaim(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
+	h := newAdminTestHandler(t, ts)
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
+	text := resp[respFieldText]
+	if !strings.Contains(text, "Continue setup") {
+		t.Fatalf("shape-bad owner plain setup should mint reclaim URL: %q", text)
+	}
+	start := strings.Index(text, "state=")
+	if start < 0 {
+		t.Fatalf("no state= in reply: %q", text)
+	}
+	rest := text[start+len("state="):]
+	if end := strings.IndexAny(rest, "|>"); end >= 0 {
+		rest = rest[:end]
+	}
+	stateRaw, err := url.QueryUnescape(rest)
+	if err != nil {
+		t.Fatalf("unescape state: %v", err)
+	}
+	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("minted state failed VerifyState: %v", err)
+	}
+	if verified.Mode != oauth.SetupModeReuse {
+		t.Errorf("state mode: got %q want reuse", verified.Mode)
+	}
+}
+
+func TestSlashCommandSetupWithRotate_RejectsShapeBadLegacyOwnerBeforeStateMint(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
+	h := newAdminTestHandler(t, ts)
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
+	text := resp[respFieldText]
+	if !strings.Contains(text, "legacy workspace ownership record") || !strings.Contains(text, "without `--rotate`") {
+		t.Fatalf("missing legacy-owner rotate refusal copy: %q", text)
+	}
+	if strings.Contains(text, "state=") || strings.Contains(text, "Continue key rotation") {
+		t.Fatalf("shape-bad owner rotate should not mint a rotation state URL: %q", text)
+	}
+}
+
+func TestParseSetupSubcommandModes(t *testing.T) {
+	cases := []struct {
+		text      string
+		wantEmail string
+		wantMode  oauth.SetupMode
+	}{
+		{text: "setup admin@example.com", wantEmail: "admin@example.com", wantMode: oauth.SetupModeReuse},
+		{text: "setup --rotate admin@example.com", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRotate},
+		{text: "setup admin@example.com --repoint", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRotate},
+	}
+	for _, tc := range cases {
+		cmd, matched, err := parseSetupSubcommand(tc.text)
+		if err != nil {
+			t.Fatalf("%q: parseSetupSubcommand returned error: %v", tc.text, err)
+		}
+		if !matched {
+			t.Fatalf("%q: parseSetupSubcommand did not match", tc.text)
+		}
+		if cmd.email != tc.wantEmail || cmd.mode != tc.wantMode {
+			t.Errorf("%q: got email/mode %q/%q want %q/%q", tc.text, cmd.email, cmd.mode, tc.wantEmail, tc.wantMode)
+		}
+	}
 }
 
 func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
@@ -1359,6 +1568,35 @@ func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 	}
 }
 
+func TestSlashCommandSetupWithEmail_RejectsUnknownFlagAsUsage(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup admin@example.com --rotte"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "Usage: `/qurl setup <email> [--rotate|--repoint]`") {
+		t.Errorf("expected setup usage reply for unknown flag, got %q", result["text"])
+	}
+	if strings.Contains(result["text"], "doesn't look like a valid email") {
+		t.Errorf("unknown flag should not be reported as an invalid email: %q", result["text"])
+	}
+}
+
 func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
@@ -1380,7 +1618,7 @@ func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !strings.Contains(result["text"], "Usage: `/qurl setup <email>`") {
+	if !strings.Contains(result["text"], "Usage: `/qurl setup <email> [--rotate|--repoint]`") {
 		t.Errorf("expected setup usage reply, got %q", result["text"])
 	}
 }

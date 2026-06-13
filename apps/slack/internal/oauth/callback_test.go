@@ -26,6 +26,7 @@ const (
 	testKeyID         = "k_1"
 	testKeyPrefix     = "lv_live_abcd"
 	testAPIKey        = "lv_live_abcd1234"
+	testOldAPIKey     = "lv_live_oldkey1234"
 	testAdminEmail    = "admin@example.com"
 )
 
@@ -71,14 +72,15 @@ func (b *lockedLogBuffer) String() string {
 	return b.buf.String()
 }
 
-// fakeWorkspaceStore captures SetAPIKey calls.
+// fakeWorkspaceStore captures SetAPIKeyWithMetadata calls.
 type fakeWorkspaceStore struct {
-	mu          sync.Mutex
-	existingKey string
-	apiKeyErr   error
-	apiKeyCalls int
-	setArgs     *struct {
-		WorkspaceID, APIKey, ConfiguredBy string
+	mu            sync.Mutex
+	existingKey   string
+	existingKeyID string
+	apiKeyErr     error
+	apiKeyCalls   int
+	setArgs       *struct {
+		WorkspaceID, APIKey, KeyID, KeyPrefix, ConfiguredBy string
 	}
 	setErr error
 }
@@ -95,10 +97,22 @@ func (f *fakeWorkspaceStore) APIKey(_ context.Context, _ string) (string, error)
 	}
 	return f.existingKey, nil
 }
-func (f *fakeWorkspaceStore) SetAPIKey(_ context.Context, ws, key, by string) error {
+func (f *fakeWorkspaceStore) APIKeyID(_ context.Context, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.setArgs = &struct{ WorkspaceID, APIKey, ConfiguredBy string }{ws, key, by}
+	f.apiKeyCalls++
+	if f.apiKeyErr != nil {
+		return "", f.apiKeyErr
+	}
+	if f.existingKey == "" {
+		return "", auth.ErrWorkspaceNotConfigured
+	}
+	return f.existingKeyID, nil
+}
+func (f *fakeWorkspaceStore) SetAPIKeyWithMetadata(_ context.Context, ws, key, keyID, keyPrefix, by string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setArgs = &struct{ WorkspaceID, APIKey, KeyID, KeyPrefix, ConfiguredBy string }{ws, key, keyID, keyPrefix, by}
 	return f.setErr
 }
 func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { return nil }
@@ -107,11 +121,21 @@ func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { r
 type fakeMinter struct {
 	apiKey, keyID, keyPrefix string
 	mintErr                  error
+	replacementMintErr       error
 	bindingBacked            bool
 	mintCalls                int
+	replacementMintOldKeyID  string
+	replacementMintCalls     int
 	mintMu                   sync.Mutex
-	revoked                  bool
+	revokedKeys              []string
+	revokeErr                error
 	revokeMu                 sync.Mutex
+	apiKeyRevoked            bool
+	apiKeyRevokedErr         error
+	apiKeyRevokedCalls       int
+	apiKeyRevokedHasDeadline bool
+	apiKeyRevokedDeadline    time.Duration
+	apiKeyRevokedMu          sync.Mutex
 	validateErr              error
 	validateCalls            int
 	validateMu               sync.Mutex
@@ -134,11 +158,32 @@ func (f *fakeMinter) MintWorkspaceAPIKey(_ context.Context, _, _ string) (Worksp
 		BindingBacked: f.bindingBacked,
 	}, f.mintErr
 }
-func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, _ string) error {
+func (f *fakeMinter) MintWorkspaceReplacementAPIKey(_ context.Context, _, _, oldKeyID string) (WorkspaceAPIKeyMint, error) {
+	f.mintMu.Lock()
+	defer f.mintMu.Unlock()
+	f.replacementMintCalls++
+	f.replacementMintOldKeyID = oldKeyID
+	return WorkspaceAPIKeyMint{
+		APIKey:    f.apiKey,
+		KeyID:     f.keyID,
+		KeyPrefix: f.keyPrefix,
+	}, f.replacementMintErr
+}
+func (f *fakeMinter) RevokeAPIKey(_ context.Context, _, keyID string) error {
 	f.revokeMu.Lock()
 	defer f.revokeMu.Unlock()
-	f.revoked = true
-	return nil
+	f.revokedKeys = append(f.revokedKeys, keyID)
+	return f.revokeErr
+}
+func (f *fakeMinter) APIKeyRevoked(ctx context.Context, _, _ string) (bool, error) {
+	f.apiKeyRevokedMu.Lock()
+	defer f.apiKeyRevokedMu.Unlock()
+	f.apiKeyRevokedCalls++
+	if deadline, ok := ctx.Deadline(); ok {
+		f.apiKeyRevokedHasDeadline = true
+		f.apiKeyRevokedDeadline = time.Until(deadline)
+	}
+	return f.apiKeyRevoked, f.apiKeyRevokedErr
 }
 
 // fakeIDTokenVerifier always returns the configured email/sub or err.
@@ -283,6 +328,15 @@ func mintTestStateWithEmail(t *testing.T, cfg *Config, email string) string {
 	return state
 }
 
+func mintTestStateWithMode(t *testing.T, cfg *Config, mode SetupMode) string {
+	t.Helper()
+	state, err := MintStateWithEmailMode(cfg.OAuthStateSecret, testTeamID, testUserID, testAdminEmail, mode, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStateWithEmailMode: %v", err)
+	}
+	return state
+}
+
 func callbackRequest(state string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
@@ -415,7 +469,7 @@ func TestCallbackHappyPath(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey not called")
+		t.Fatal("SetAPIKeyWithMetadata not called")
 	}
 	if store.setArgs.WorkspaceID != testTeamID {
 		t.Errorf("workspaceID: got %q", store.setArgs.WorkspaceID)
@@ -423,12 +477,18 @@ func TestCallbackHappyPath(t *testing.T) {
 	if store.setArgs.APIKey != testAPIKey {
 		t.Errorf("apiKey: got %q", store.setArgs.APIKey)
 	}
+	if store.setArgs.KeyID != testKeyID {
+		t.Errorf("keyID: got %q want %q", store.setArgs.KeyID, testKeyID)
+	}
+	if store.setArgs.KeyPrefix != testKeyPrefix {
+		t.Errorf("keyPrefix: got %q want %q", store.setArgs.KeyPrefix, testKeyPrefix)
+	}
 	// configuredBy must come from the verified state's userID — never
 	// from an unsigned query parameter.
 	if store.setArgs.ConfiguredBy != testUserID {
 		t.Errorf("configuredBy: got %q want %q (must be recovered from signed state)", store.setArgs.ConfiguredBy, testUserID)
 	}
-	if minter.revoked {
+	if len(minter.revokedKeys) != 0 {
 		t.Error("happy path should not revoke")
 	}
 }
@@ -448,7 +508,7 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when the Auth0 email does not match setup state")
+		t.Error("SetAPIKeyWithMetadata must not run when the Auth0 email does not match setup state")
 	}
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
@@ -472,7 +532,7 @@ func TestCallbackEmailSetupRequiresNonEmptyVerifiedEmail(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when Auth0 does not return a verified setup email")
+		t.Error("SetAPIKeyWithMetadata must not run when Auth0 does not return a verified setup email")
 	}
 	minter.mintMu.Lock()
 	defer minter.mintMu.Unlock()
@@ -495,7 +555,7 @@ func TestCallbackEmailSetupAcceptsCaseInsensitiveVerifiedEmail(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey not called")
+		t.Fatal("SetAPIKeyWithMetadata not called")
 	}
 }
 
@@ -686,7 +746,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey should NOT have been called on CSRF reject")
+		t.Error("SetAPIKeyWithMetadata should NOT have been called on CSRF reject")
 	}
 }
 
@@ -754,7 +814,7 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	}
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
-	if minter.revoked {
+	if len(minter.revokedKeys) != 0 {
 		t.Error("RevokeAPIKey must NOT be called when mint itself failed (no keyID exists)")
 	}
 }
@@ -784,7 +844,7 @@ func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must NOT run when the mint hit the API-key limit")
+		t.Error("SetAPIKeyWithMetadata must NOT run when the mint hit the API-key limit")
 	}
 }
 
@@ -808,7 +868,7 @@ func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must NOT run when qurl-service reports an existing workspace binding")
+		t.Error("SetAPIKeyWithMetadata must NOT run when qurl-service reports an existing workspace binding")
 	}
 }
 
@@ -839,10 +899,10 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	}
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
-	if minter.revoked {
+	if len(minter.revokedKeys) != 0 {
 		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
 	}
-	assertSetupBindingPersistFailureLogged(t, logs(), setupBindingReplayWindowHours(cfg.SetupBindingReplayWindowHours))
+	assertSetupBindingPersistFailureLogged(t, logs(), replayWindowHoursOrDefault(cfg.SetupBindingReplayWindowHours, DefaultSetupBindingReplayWindowHours))
 }
 
 func TestCallbackLogsConfiguredBindingReplayWindowOnPersistFailure(t *testing.T) {
@@ -914,7 +974,7 @@ func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		minter.revokeMu.Lock()
-		revoked := minter.revoked
+		revoked := len(minter.revokedKeys) > 0
 		minter.revokeMu.Unlock()
 		if revoked {
 			return
@@ -1243,7 +1303,7 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
+		t.Error("SetAPIKeyWithMetadata must not run when BindWorkspace failed (would overwrite an existing admin's key row with one we can't even prove ownership of)")
 	}
 }
 
@@ -1274,7 +1334,7 @@ func TestCallbackBindIdempotentForSameCallerReusesExistingKey(t *testing.T) {
 	}
 	store.mu.Lock()
 	if store.setArgs != nil {
-		t.Fatal("SetAPIKey must not run when a valid existing key can be reused")
+		t.Fatal("SetAPIKeyWithMetadata must not run when a valid existing key can be reused")
 	}
 	if store.apiKeyCalls != 1 {
 		t.Errorf("APIKey calls: got %d want 1", store.apiKeyCalls)
@@ -1292,8 +1352,396 @@ func TestCallbackBindIdempotentForSameCallerReusesExistingKey(t *testing.T) {
 	minter.validateMu.Unlock()
 	minter.revokeMu.Lock()
 	defer minter.revokeMu.Unlock()
-	if minter.revoked {
+	if len(minter.revokedKeys) != 0 {
 		t.Error("idempotent reuse must not revoke")
+	}
+}
+
+func TestCallbackExplicitRotationRevokesOldKeyBeforeReplacementMint(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (rotation, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run after explicit rotation")
+	}
+	if store.setArgs.APIKey != testAPIKey || store.setArgs.KeyID != testKeyID || store.setArgs.KeyPrefix != testKeyPrefix {
+		t.Errorf("stored replacement = %#v, want key/key_id/prefix %q/%q/%q", store.setArgs, testAPIKey, testKeyID, testKeyPrefix)
+	}
+	if store.apiKeyCalls != 1 {
+		t.Errorf("APIKeyID calls: got %d want 1", store.apiKeyCalls)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on explicit rotation", minter.mintCalls)
+	}
+	if minter.replacementMintCalls != 1 {
+		t.Errorf("MintWorkspaceReplacementAPIKey calls: got %d want 1", minter.replacementMintCalls)
+	}
+	if minter.replacementMintOldKeyID != oldKeyID {
+		t.Errorf("replacement oldKeyID: got %q want %q", minter.replacementMintOldKeyID, oldKeyID)
+	}
+	minter.mintMu.Unlock()
+	minter.validateMu.Lock()
+	if minter.validateCalls != 0 {
+		t.Errorf("ValidateAPIKey calls: got %d want 0 on explicit rotation", minter.validateCalls)
+	}
+	minter.validateMu.Unlock()
+}
+
+func TestCallbackExplicitRotationRequiresStoredKeyID(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (missing key_id, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run without a stored key_id")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("revoke must not run without key_id, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationValidatesReplacementIdempotencyBeforeRevoke(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = "k_" + strings.Repeat("x", 240)
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (unsafe replacement idempotency key, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "No key was revoked") {
+		t.Fatalf("body should say rotation stopped before revoke, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when replacement idempotency key is invalid")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("revoke must not run after preflight idempotency validation failure, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationStopsWhenOldKeyRevokeFails(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = errors.New("qurl-service denied revoke")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (revoke failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Run /qurl setup &lt;email&gt; with --rotate or --repoint again") {
+		t.Fatalf("body should give retry guidance for transient revoke failures, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when old-key revoke failed")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 0 {
+		t.Errorf("replacement mint calls: got %d want 0 after revoke failure", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 0 {
+		t.Errorf("APIKeyRevoked calls: got %d want 0 for generic revoke failure", minter.apiKeyRevokedCalls)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+}
+
+func TestCallbackExplicitRotationContinuesWhenOldKeyAlreadyRevokedByOwner(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = ErrAPIKeyNotFound
+	minter.apiKeyRevoked = true
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (already-revoked retry, body=%s)", rec.Code, rec.Body.String())
+	}
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 1 {
+		t.Errorf("APIKeyRevoked calls: got %d want 1", minter.apiKeyRevokedCalls)
+	}
+	if !minter.apiKeyRevokedHasDeadline {
+		t.Fatal("APIKeyRevoked context should have a deadline")
+	}
+	if minter.apiKeyRevokedDeadline <= existingKeyTimeout {
+		t.Errorf("APIKeyRevoked deadline = %s, want larger than existingKeyTimeout %s", minter.apiKeyRevokedDeadline, existingKeyTimeout)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 1 {
+		t.Errorf("replacement mint calls: got %d want 1", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationStopsWhenAlreadyRevokedCheckFails(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = ErrAPIKeyNotFound
+	minter.apiKeyRevokedErr = errors.New("qurl-service unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (revoked check failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "could not confirm") {
+		t.Fatalf("body should distinguish revoke-status uncertainty, got: %s", rec.Body.String())
+	}
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 1 {
+		t.Errorf("APIKeyRevoked calls: got %d want 1", minter.apiKeyRevokedCalls)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 0 {
+		t.Errorf("replacement mint calls: got %d want 0", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationStopsWhenNotFoundIsNotRevokedByOwner(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.revokeErr = ErrAPIKeyNotFound
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (not confirmed revoked, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "stored key identity may be stale") || !strings.Contains(body, "qURL account/API-key management") {
+		t.Fatalf("body should include stale-identity and dashboard recovery guidance, got: %s", body)
+	}
+	if !strings.Contains(rec.Body.String(), "deleted at qURL") {
+		t.Fatalf("body should name deleted-key recovery, got: %s", rec.Body.String())
+	}
+	minter.apiKeyRevokedMu.Lock()
+	if minter.apiKeyRevokedCalls != 1 {
+		t.Errorf("APIKeyRevoked calls: got %d want 1", minter.apiKeyRevokedCalls)
+	}
+	minter.apiKeyRevokedMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 0 {
+		t.Errorf("replacement mint calls: got %d want 0", minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationKeepsReplacementOnPersistFailure(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	store.setErr = errors.New("ddb down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (persist failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "same replacement key") {
+		t.Fatalf("body should tell admin the retry recovers the same replacement, got: %s", rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want only old key [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	assertRotationReplacementPersistFailureLogged(t, logs())
+}
+
+func TestCallbackExplicitRotationPersistFailureLogsConfiguredReplayWindow(t *testing.T) {
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	cfg.APIKeyMintReplayWindowHours = 18
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	store.setErr = errors.New("ddb down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (persist failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	assertRotationReplacementPersistFailureLogged(t, logs(), 18)
+}
+
+func assertRotationReplacementPersistFailureLogged(t *testing.T, records []map[string]any, wantReplayWindowHours ...int) {
+	t.Helper()
+	wantReplayWindowHour := replayWindowHoursOrDefault(0, DefaultAPIKeyMintReplayWindowHours)
+	if len(wantReplayWindowHours) > 0 {
+		wantReplayWindowHour = wantReplayWindowHours[0]
+	}
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != rotationReplacementPersistFailureEvent {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
+		}
+		if rec["key_id"] != testKeyID {
+			t.Errorf("key_id = %v, want %q", rec["key_id"], testKeyID)
+		}
+		if got, ok := rec["error"].(string); !ok || got == "" {
+			t.Errorf("error = %v, want non-empty string", rec["error"])
+		}
+		if rec["retry_window_hours"] != float64(wantReplayWindowHour) {
+			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], wantReplayWindowHour)
+		}
+		if rec["operator_action"] != rotationReplacementPersistFailureAction {
+			t.Errorf("operator_action = %v, want %q", rec["operator_action"], rotationReplacementPersistFailureAction)
+		}
+	}
+	if matches == 0 {
+		t.Fatalf("missing %q log event in records: %#v", rotationReplacementPersistFailureEvent, records)
+	}
+	if matches > 1 {
+		t.Errorf("found %d %q log events, want 1", matches, rotationReplacementPersistFailureEvent)
+	}
+}
+
+func TestCallbackExplicitRotationMintsWhenWorkspaceNotConfigured(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (unconfigured rotation fallback, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run for unconfigured rotation fallback")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("unconfigured rotation must not revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 1 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 1/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackExplicitRotationReplacementMintLimitRendersGuidance(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.replacementMintErr = ErrAPIKeyLimitReached
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (replacement limit, body=%s)", rec.Code, rec.Body.String())
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
+		t.Errorf("body should name the key limit and revoke recovery, got: %q", rec.Body.String())
+	}
+}
+
+func TestCallbackExplicitRotationReplacementMintFailureRendersRetry(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	const oldKeyID = "k_old"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	minter.replacementMintErr = errors.New("qurl-service down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502 (replacement mint failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Couldn&#39;t rotate qURL key") {
+		t.Errorf("body should render rotation retry heading, got: %q", rec.Body.String())
 	}
 }
 
@@ -1317,10 +1765,10 @@ func TestCallbackBindIdempotentForSameCallerMintsWhenKeyMissing(t *testing.T) {
 	}
 	store.mu.Lock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey must run when no stored workspace key exists")
+		t.Fatal("SetAPIKeyWithMetadata must run when no stored workspace key exists")
 	}
 	if store.setArgs.APIKey != testAPIKey {
-		t.Errorf("SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+		t.Errorf("SetAPIKeyWithMetadata APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
 	}
 	store.mu.Unlock()
 	minter.mintMu.Lock()
@@ -1344,10 +1792,10 @@ func TestCallbackInvalidStoredKeyMintsReplacement(t *testing.T) {
 	}
 	store.mu.Lock()
 	if store.setArgs == nil {
-		t.Fatal("SetAPIKey must run after replacing an invalid stored key")
+		t.Fatal("SetAPIKeyWithMetadata must run after replacing an invalid stored key")
 	}
 	if store.setArgs.APIKey != testAPIKey {
-		t.Errorf("SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+		t.Errorf("SetAPIKeyWithMetadata APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
 	}
 	store.mu.Unlock()
 	minter.mintMu.Lock()
@@ -1355,6 +1803,37 @@ func TestCallbackInvalidStoredKeyMintsReplacement(t *testing.T) {
 	if minter.mintCalls != 1 {
 		t.Errorf("MintWorkspaceAPIKey calls: got %d want 1", minter.mintCalls)
 	}
+}
+
+func TestCallbackInvalidMetadataBearingStoredKeyRequiresExplicitRotation(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = "lv_live_revoked"
+	store.existingKeyID = "k_old"
+	minter.validateErr = ErrStoredAPIKeyInvalid
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (metadata-bearing invalid key should require rotation, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "--rotate") || !strings.Contains(body, "plain setup") {
+		t.Fatalf("body should tell admin to use explicit rotation and avoid plain setup, got: %s", body)
+	}
+	if !strings.Contains(rec.Body.String(), "deleted at qURL") {
+		t.Fatalf("body should name deleted-key recovery, got: %s", rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Fatal("SetAPIKeyWithMetadata must not run when invalid metadata-bearing key requires rotation")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
 }
 
 func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
@@ -1372,7 +1851,7 @@ func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
 	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
-		t.Fatal("SetAPIKey must not run when stored-key validation had a transient failure")
+		t.Fatal("SetAPIKeyWithMetadata must not run when stored-key validation had a transient failure")
 	}
 	store.mu.Unlock()
 	minter.mintMu.Lock()
@@ -1397,7 +1876,7 @@ func TestCallbackStoredKeyForbiddenDoesNotMint(t *testing.T) {
 	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
-		t.Fatal("SetAPIKey must not run when stored-key validation returned 403")
+		t.Fatal("SetAPIKeyWithMetadata must not run when stored-key validation returned 403")
 	}
 	store.mu.Unlock()
 	minter.mintMu.Lock()
@@ -1421,7 +1900,7 @@ func TestCallbackStoredKeyLookupFailureDoesNotMint(t *testing.T) {
 	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
-		t.Fatal("SetAPIKey must not run when stored-key lookup failed")
+		t.Fatal("SetAPIKeyWithMetadata must not run when stored-key lookup failed")
 	}
 	store.mu.Unlock()
 	minter.mintMu.Lock()
@@ -1482,7 +1961,7 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run on rebind-refused — would overwrite the existing admin's encrypted key")
+		t.Error("SetAPIKeyWithMetadata must not run on rebind-refused — would overwrite the existing admin's encrypted key")
 	}
 }
 
@@ -1519,7 +1998,7 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run on unverified-rebind — same posture as the cross-admin arm")
+		t.Error("SetAPIKeyWithMetadata must not run on unverified-rebind — same posture as the cross-admin arm")
 	}
 }
 
@@ -1552,7 +2031,7 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
-		t.Error("SetAPIKey must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
+		t.Error("SetAPIKeyWithMetadata must not run when sub is unavailable — bind-before-mint reorder gates the mint on bind eligibility")
 	}
 }
 
@@ -1588,7 +2067,7 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	admin.mu.Unlock()
 	store.mu.Lock()
 	if store.setArgs != nil {
-		t.Error("first attempt: SetAPIKey must NOT run when mint failed")
+		t.Error("first attempt: SetAPIKeyWithMetadata must NOT run when mint failed")
 	}
 	store.mu.Unlock()
 
@@ -1609,10 +2088,10 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Fatal("retry: SetAPIKey must run after bind classifies as same-caller and mint succeeds")
+		t.Fatal("retry: SetAPIKeyWithMetadata must run after bind classifies as same-caller and mint succeeds")
 	}
 	if store.setArgs.APIKey != testAPIKey {
-		t.Errorf("retry: SetAPIKey APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
+		t.Errorf("retry: SetAPIKeyWithMetadata APIKey: got %q want %q", store.setArgs.APIKey, testAPIKey)
 	}
 }
 
@@ -1636,6 +2115,6 @@ func TestCallbackSkipsBindWhenAdminStoreNil(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
-		t.Error("SetAPIKey must still run in the sandbox path so the API-key surface is functional")
+		t.Error("SetAPIKeyWithMetadata must still run in the sandbox path so the API-key surface is functional")
 	}
 }

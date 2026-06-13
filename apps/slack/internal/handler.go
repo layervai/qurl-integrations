@@ -45,6 +45,11 @@ var ErrSlackMissingScope = errors.New("slack missing_scope")
 
 var errSetupUsage = errors.New("setup usage")
 
+type setupCommand struct {
+	email string
+	mode  oauth.SetupMode
+}
+
 // SlackRateLimitError preserves Slack's Retry-After hint while still matching
 // [ErrSlackRateLimited] through errors.Is. OpenView implementations return it
 // when Slack includes a concrete retry delay.
@@ -1244,7 +1249,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	text := strings.TrimSpace(values.Get(fieldText))
 	// Parse before dispatch so setup emails are redacted even when a user types
 	// the setup verb on the admin slash-command surface.
-	setupEmail, setupMatched, setupErr := parseSetupSubcommand(text)
+	setupCmd, setupMatched, setupErr := parseSetupSubcommand(text)
 
 	logText := text
 	if setupMatched && text != setupVerb {
@@ -1287,7 +1292,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// command from a valid non-prod env command (`/qurl-sandbox`)
 		// without a registry, so this is left as-is; it's unreachable given
 		// Slack only dispatches registered commands.
-		h.dispatchUserCommand(w, command, text, values, setupEmail, setupMatched, setupErr)
+		h.dispatchUserCommand(w, command, text, values, setupCmd, setupMatched, setupErr)
 	}
 }
 
@@ -1295,22 +1300,22 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 // list, aliases, feedback, help. Admin verbs typed on `/qurl` get a redirect to
 // `/qurl-admin` instead of the generic unknown-subcommand reply, so an
 // admin who fat-fingers the command gets a direct correction.
-func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values, setupEmail string, setupMatched bool, setupErr error) {
+func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text string, values url.Values, setupCmd setupCommand, setupMatched bool, setupErr error) {
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, h.userHelpMessage(command))
 	case setupMatched:
 		if setupErr != nil {
 			if errors.Is(setupErr, errSetupUsage) {
-				respondSlack(w, fmt.Sprintf("Usage: `%s setup <email>`.", command))
+				respondSlack(w, fmt.Sprintf("Usage: `%s setup <email> [--rotate|--repoint]`.", command))
 				return
 			}
-			respondSlack(w, fmt.Sprintf("That doesn't look like a valid email address. Use `%s setup <email>`.", command))
+			respondSlack(w, fmt.Sprintf("That doesn't look like a valid email address. Use `%s setup <email> [--rotate|--repoint]`.", command))
 			return
 		}
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
 		// see handleSetup for why it lives on the open user surface.
-		h.handleSetup(w, values, setupEmail)
+		h.handleSetup(w, values, setupCmd)
 	case text == uninstallVerb:
 		// uninstall stays on the user command as a lifecycle sibling of setup,
 		// but gates to the recorded workspace owner or explicit qURL admins
@@ -1468,24 +1473,45 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 	}
 }
 
-func parseSetupSubcommand(text string) (email string, matched bool, err error) {
+func parseSetupSubcommand(text string) (setupCommand, bool, error) {
 	rest, matched := setupVerbRest(text)
 	if !matched {
-		return "", false, nil
+		return setupCommand{}, false, nil
 	}
 	// strings.Fields("") returns an empty slice, so the bare-setup case folds
-	// into the len != 1 check — same errSetupUsage either way.
+	// into the len check — same errSetupUsage either way.
 	parts := strings.Fields(rest)
-	if len(parts) != 1 {
-		return "", true, errSetupUsage
+	if len(parts) == 0 || len(parts) > 2 {
+		return setupCommand{}, true, errSetupUsage
 	}
-	// Normalize here for user-facing copy. MintStateWithEmail validates again
-	// at the state boundary so callers outside this handler cannot bypass it.
-	email, err = oauth.NormalizeEmail(parts[0])
-	if err != nil {
-		return "", true, err
+	cmd := setupCommand{mode: oauth.SetupModeReuse}
+	seenMode := false
+	for _, part := range parts {
+		switch part {
+		case "--rotate", "--repoint":
+			if seenMode {
+				return setupCommand{}, true, errSetupUsage
+			}
+			seenMode = true
+			cmd.mode = oauth.SetupModeRotate
+		default:
+			if strings.HasPrefix(part, "-") {
+				return setupCommand{}, true, errSetupUsage
+			}
+			if cmd.email != "" {
+				return setupCommand{}, true, errSetupUsage
+			}
+			email, err := oauth.NormalizeEmail(part)
+			if err != nil {
+				return setupCommand{}, true, err
+			}
+			cmd.email = email
+		}
 	}
-	return email, true, nil
+	if cmd.email == "" {
+		return setupCommand{}, true, errSetupUsage
+	}
+	return cmd, true, nil
 }
 
 func setupVerbRest(text string) (rest string, matched bool) {
@@ -1531,13 +1557,13 @@ func setupVerbRest(text string) (rest string, matched bool) {
 // non-owners don't get a setup URL minted in their name at all (cleaner
 // audit, no half-completed OAuth flows).
 //
-// AdminStore=nil (sandbox / no-DDB) skips the owner gate — same posture
-// as every other admin verb; the caller falls through to the OAuth
-// callback's normal key reuse/replacement path. That is a separate
-// short-circuit from the oauthSetup==nil check below, which is the branch
-// that returns "qURL OAuth is not configured" (and which fires first,
-// before AdminStore is consulted).
-func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEmail string) {
+// AdminStore=nil (sandbox / no-DDB) permits first-time setup but rejects
+// explicit rotation because rotation must prove the caller is the workspace
+// owner before revoking a stored key. That is a separate short-circuit from
+// the oauthSetup==nil check below, which is the branch that returns "qURL
+// OAuth is not configured" (and which fires first, before AdminStore is
+// consulted).
+func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd setupCommand) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
@@ -1548,9 +1574,14 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 		respondSlack(w, "Could not read your Slack workspace or user ID from the command payload.")
 		return
 	}
-	// Owner gate. AdminStore==nil skips entirely (sandbox/no-DDB);
-	// otherwise check whether the workspace has an owner and whether
-	// it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
+	if setupCmd.mode == oauth.SetupModeRotate && h.cfg.AdminStore == nil {
+		respondSlack(w, "qURL workspace key rotation is not available on this Secure Access Agent deployment. Run `/qurl setup <email>` without `--rotate`, or contact the operator.")
+		return
+	}
+	// Owner gate. AdminStore==nil only reaches here for first-time/reuse setup
+	// (sandbox/no-DDB); explicit rotation was rejected above because it cannot
+	// skip the owner check. Otherwise check whether the workspace has an owner
+	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
 	// is irrelevant for /setup specifically (added admins can't rerun
 	// /setup, only the owner can). Times the read off h.baseCtx (not the
@@ -1615,17 +1646,26 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 			// callback by reclaiming the orphaned row for this caller
 			// (first-come-claims, the same posture as an unbound
 			// workspace). Log loudly so the legacy reclaim is grep-able.
+			if setupCmd.mode == oauth.SetupModeRotate {
+				slog.Warn("/qurl setup: rotation refused for shape-bad legacy owner_id — require plain setup reclaim first", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
+				respondSlack(w, "`/qurl setup <email> --rotate` cannot run until this legacy workspace ownership record is reclaimed. Run `/qurl setup <email>` without `--rotate` first, then the recorded workspace owner can rotate the key.")
+				return
+			}
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	state, err := oauth.MintStateWithEmail(h.oauthSetup.StateSecret, teamID, userID, setupEmail, h.now())
+	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
 	if err != nil {
-		slog.Error("/qurl setup: MintStateWithEmail failed", "error", err)
+		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
-	respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
+	action := "setup"
+	if setupCmd.mode == oauth.SetupModeRotate {
+		action = "key rotation"
+	}
+	respondSlack(w, "Continue "+action+" for `"+echoText(setupCmd.email)+"`: <"+setupURL+"|Continue "+action+">\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
 func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
@@ -1829,6 +1869,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
+			"• `/qurl setup <email> --rotate` / `--repoint` — Replace the workspace qURL key",
 			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",

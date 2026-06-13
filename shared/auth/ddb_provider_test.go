@@ -20,6 +20,8 @@ const (
 	testSlackBotToken = "xoxb-123456789012345678901234567890"
 	testOldAPIKey     = "lv_live_old"
 	testNewAPIKey     = "lv_live_new"
+	testKeyID         = "key_123"
+	testKeyPrefix     = "lv_live_abcd"
 )
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
@@ -966,7 +968,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	}
 
-	t.Run("SetAPIKey seeds new cached value", func(t *testing.T) {
+	t.Run("SetAPIKeyWithMetadata seeds new cached value", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
 		}
@@ -984,8 +986,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			t.Fatalf("got %q want %q", got, testOldAPIKey)
 		}
 
-		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
-			t.Fatalf("SetAPIKey: %v", err)
+		if err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, testNewAPIKey, testKeyID, testKeyPrefix, "U_ADMIN"); err != nil {
+			t.Fatalf("SetAPIKeyWithMetadata: %v", err)
 		}
 		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 			if getItemUsesCacheValidationProjection(in) {
@@ -995,7 +997,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 		got, err = p.APIKey(context.Background(), testTeamID)
 		if err != nil {
-			t.Fatalf("APIKey after SetAPIKey: %v", err)
+			t.Fatalf("APIKey after SetAPIKeyWithMetadata: %v", err)
 		}
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
@@ -1115,7 +1117,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	})
 
-	t.Run("sibling SetAPIKey refreshes warm cache via validation", func(t *testing.T) {
+	t.Run("sibling SetAPIKeyWithMetadata refreshes warm cache via validation", func(t *testing.T) {
 		now := time.Unix(1700000000, 0)
 		encryptor := &passthroughEncryptor{}
 		ddb := &fakeDDBClient{
@@ -1159,7 +1161,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	})
 
-	t.Run("SetAPIKey prevents in-flight stale read from repopulating cache", func(t *testing.T) {
+	t.Run("SetAPIKeyWithMetadata prevents in-flight stale read from repopulating cache", func(t *testing.T) {
 		releaseGet := make(chan struct{})
 		getStarted := make(chan struct{})
 		ddb := &fakeDDBClient{
@@ -1188,8 +1190,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			result <- got
 		}()
 		<-getStarted
-		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
-			t.Fatalf("SetAPIKey: %v", err)
+		if err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, testNewAPIKey, testKeyID, testKeyPrefix, "U_ADMIN"); err != nil {
+			t.Fatalf("SetAPIKeyWithMetadata: %v", err)
 		}
 		close(releaseGet)
 
@@ -1210,7 +1212,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 		got, err := p.APIKey(context.Background(), testTeamID)
 		if err != nil {
-			t.Fatalf("APIKey after SetAPIKey: %v", err)
+			t.Fatalf("APIKey after SetAPIKeyWithMetadata: %v", err)
 		}
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
@@ -1379,8 +1381,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			if getItemUsesCacheValidationProjection(in) {
 				validationAttempts++
 				if validationAttempts == 1 {
-					if err := p.SetAPIKey(ctx, testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
-						t.Fatalf("SetAPIKey during validation: %v", err)
+					if err := p.SetAPIKeyWithMetadata(ctx, testTeamID, testNewAPIKey, testKeyID, testKeyPrefix, "U_ADMIN"); err != nil {
+						t.Fatalf("SetAPIKeyWithMetadata during validation: %v", err)
 					}
 					return nil, validationErr
 				}
@@ -1389,7 +1391,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 		got, err := p.APIKey(context.Background(), testTeamID)
 		if err != nil {
-			t.Fatalf("APIKey after validation outage racing SetAPIKey: %v", err)
+			t.Fatalf("APIKey after validation outage racing SetAPIKeyWithMetadata: %v", err)
 		}
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want new cached key %q", got, testNewAPIKey)
@@ -1446,7 +1448,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	})
 
-	t.Run("SetAPIKey racing cache validation prevents stale return", func(t *testing.T) {
+	t.Run("SetAPIKeyWithMetadata racing cache validation prevents stale return", func(t *testing.T) {
 		now := time.Unix(1700000000, 0)
 		encryptor := &passthroughEncryptor{}
 		ddb := &fakeDDBClient{
@@ -1467,8 +1469,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			if getItemUsesCacheValidationProjection(in) {
 				validationCalls++
 				if validationCalls == 1 {
-					if err := p.SetAPIKey(ctx, testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
-						t.Fatalf("SetAPIKey during validation: %v", err)
+					if err := p.SetAPIKeyWithMetadata(ctx, testTeamID, testNewAPIKey, testKeyID, testKeyPrefix, "U_ADMIN"); err != nil {
+						t.Fatalf("SetAPIKeyWithMetadata during validation: %v", err)
 					}
 					return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
 				}
@@ -1478,7 +1480,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 		got, err := p.APIKey(context.Background(), testTeamID)
 		if err != nil {
-			t.Fatalf("APIKey racing SetAPIKey: %v", err)
+			t.Fatalf("APIKey racing SetAPIKeyWithMetadata: %v", err)
 		}
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
@@ -1522,8 +1524,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 				}
 				nextKey := replacements[validationCalls]
 				validationCalls++
-				if err := p.SetAPIKey(ctx, testTeamID, nextKey, "U_ADMIN"); err != nil {
-					t.Fatalf("SetAPIKey during validation %d: %v", validationCalls, err)
+				if err := p.SetAPIKeyWithMetadata(ctx, testTeamID, nextKey, testKeyID, testKeyPrefix, "U_ADMIN"); err != nil {
+					t.Fatalf("SetAPIKeyWithMetadata during validation %d: %v", validationCalls, err)
 				}
 				validatedKey = nextKey
 				return &dynamodb.GetItemOutput{Item: itemForKey(currentKey)}, nil
@@ -1574,7 +1576,59 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 	})
 }
 
-func TestDDBProviderSetAPIKey(t *testing.T) {
+func TestDDBProviderAPIKeyID(t *testing.T) {
+	const (
+		apiKey = "lv_live_abcd1234"
+		keyID  = "key_123"
+	)
+	ddb := &fakeDDBClient{
+		getOutput: &dynamodb.GetItemOutput{
+			Item: map[string]ddbtypes.AttributeValue{
+				attrTeamID:           &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+				attrQURLAPIKey:       &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+				attrDataKeyCT:        &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+				attrQURLAPIKeyID:     &ddbtypes.AttributeValueMemberS{Value: keyID},
+				attrQURLAPIKeyPrefix: &ddbtypes.AttributeValueMemberS{Value: "lv_live_abcd"},
+			},
+		},
+	}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+	}
+	gotID, err := p.APIKeyID(context.Background(), testTeamID)
+	if err != nil {
+		t.Fatalf("APIKeyID: %v", err)
+	}
+	if gotID != keyID {
+		t.Fatalf("APIKeyID = %q, want %q", gotID, keyID)
+	}
+	if ddb.getCalls != 1 {
+		t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+	}
+	if !getItemConsistentRead(ddb.getInputs[0]) {
+		t.Fatal("APIKeyID must use ConsistentRead for rotation")
+	}
+}
+
+func TestDDBProviderAPIKeyIDLabelsGetItemErrors(t *testing.T) {
+	ddb := &fakeDDBClient{getErr: errors.New("boom")}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+	}
+	_, err := p.APIKeyID(context.Background(), testTeamID)
+	if err == nil {
+		t.Fatal("APIKeyID error = nil, want GetItem failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "DDBProvider.APIKeyID: GetItem:") || strings.Contains(got, "DDBProvider.APIKey: GetItem:") {
+		t.Fatalf("APIKeyID error = %q, want APIKeyID operation label", got)
+	}
+}
+
+func TestDDBProviderSetAPIKeyWithMetadataUpdatesKeyAndPreservesSlackAttrs(t *testing.T) {
 	ddb := &fakeDDBClient{}
 	fixedNow := time.Unix(1700000000, 0).UTC()
 	p := &DDBProvider{
@@ -1583,9 +1637,9 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 		Encryptor: &passthroughEncryptor{},
 		Now:       func() time.Time { return fixedNow },
 	}
-	err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_xxx", "U_ADMIN")
+	err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, "lv_live_xxx", testKeyID, testKeyPrefix, "U_ADMIN")
 	if err != nil {
-		t.Fatalf("SetAPIKey: %v", err)
+		t.Fatalf("SetAPIKeyWithMetadata: %v", err)
 	}
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
@@ -1603,6 +1657,12 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	if v, ok := values[":by"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "U_ADMIN" {
 		t.Errorf("configured_by wrong: %v", values[":by"])
 	}
+	if v, ok := values[":key_id"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testKeyID {
+		t.Errorf("qurl_api_key_id wrong: %v", values[":key_id"])
+	}
+	if v, ok := values[":key_prefix"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testKeyPrefix {
+		t.Errorf("qurl_api_key_prefix wrong: %v", values[":key_prefix"])
+	}
 	wantTS := fixedNow.Format(time.RFC3339)
 	if v, ok := values[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantTS {
 		t.Errorf("timestamp wrong: got %v want %q", values[":now"], wantTS)
@@ -1610,6 +1670,9 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	got := *ddb.updateInput.UpdateExpression
 	if !strings.Contains(got, "configured_at = if_not_exists(configured_at, :now)") {
 		t.Errorf("UpdateExpression should preserve configured_at with if_not_exists, got %q", got)
+	}
+	if !strings.Contains(got, attrQURLAPIKeyID+" = :key_id") || !strings.Contains(got, attrQURLAPIKeyPrefix+" = :key_prefix") {
+		t.Errorf("UpdateExpression should store key metadata, got %q", got)
 	}
 	for _, attr := range []string{
 		attrSlackBotToken,
@@ -1623,7 +1686,7 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 		attrSlackBotScopes,
 	} {
 		if strings.Contains(got, attr) {
-			t.Errorf("SetAPIKey UpdateExpression should not touch Slack attr %s, got %q", attr, got)
+			t.Errorf("SetAPIKeyWithMetadata UpdateExpression should not touch Slack attr %s, got %q", attr, got)
 		}
 	}
 	if ddb.updateInput.ReturnValues != ddbtypes.ReturnValueUpdatedOld {
@@ -1631,29 +1694,77 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	}
 }
 
-func TestDDBProviderSetAPIKeySurfacesUpdateError(t *testing.T) {
+func TestDDBProviderSetAPIKeyWithMetadata(t *testing.T) {
+	const (
+		apiKey    = "lv_live_abcd1234"
+		keyID     = "key_123"
+		keyPrefix = "lv_live_abcd"
+	)
+	ddb := &fakeDDBClient{}
+	fixedNow := time.Unix(1700000000, 0).UTC()
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return fixedNow },
+	}
+	if err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, apiKey, keyID, keyPrefix, "U_ADMIN"); err != nil {
+		t.Fatalf("SetAPIKeyWithMetadata: %v", err)
+	}
+	if ddb.updateInput == nil {
+		t.Fatal("expected UpdateItem called")
+	}
+	values := ddb.updateInput.ExpressionAttributeValues
+	if v, ok := values[":key_id"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != keyID {
+		t.Errorf("qurl_api_key_id wrong: %v", values[":key_id"])
+	}
+	if v, ok := values[":key_prefix"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != keyPrefix {
+		t.Errorf("qurl_api_key_prefix wrong: %v", values[":key_prefix"])
+	}
+	got := *ddb.updateInput.UpdateExpression
+	if !strings.Contains(got, attrQURLAPIKeyID+" = :key_id") || !strings.Contains(got, attrQURLAPIKeyPrefix+" = :key_prefix") {
+		t.Errorf("UpdateExpression should store key metadata, got %q", got)
+	}
+	if strings.Contains(got, " REMOVE ") {
+		t.Errorf("SetAPIKeyWithMetadata should not clear metadata, got %q", got)
+	}
+}
+
+func TestDDBProviderSetAPIKeyWithMetadataRequiresKeyID(t *testing.T) {
+	p := &DDBProvider{Client: &fakeDDBClient{}, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+	err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, "lv_live_abcd1234", "", "lv_live_abcd", "U_ADMIN")
+	if err == nil || !strings.Contains(err.Error(), "keyID") {
+		t.Fatalf("expected keyID error, got %v", err)
+	}
+}
+
+func TestDDBProviderSetAPIKeyWithMetadataRequiresKeyPrefix(t *testing.T) {
+	p := &DDBProvider{Client: &fakeDDBClient{}, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+	err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, "lv_live_abcd1234", "key_123", "", "U_ADMIN")
+	if err == nil || !strings.Contains(err.Error(), "keyPrefix") {
+		t.Fatalf("expected keyPrefix error, got %v", err)
+	}
+}
+
+func TestDDBProviderSetAPIKeyWithMetadataSurfacesOperationName(t *testing.T) {
 	ddb := &fakeDDBClient{updateErr: errors.New("ddb transient")}
 	p := &DDBProvider{
 		Client:    ddb,
 		TableName: "ws",
 		Encryptor: &passthroughEncryptor{},
-		Now:       func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	}
-	err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_xxx", "U_ADMIN")
-	if err == nil || !strings.Contains(err.Error(), "UpdateItem") {
-		t.Fatalf("expected UpdateItem error, got %v", err)
-	}
-	if ddb.putInput != nil {
-		t.Error("PutItem must NOT run on the SetAPIKey path")
+	err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, "lv_live_abcd1234", "key_123", "lv_live_abcd", "U_ADMIN")
+	if err == nil || !strings.HasPrefix(err.Error(), "DDBProvider.SetAPIKeyWithMetadata: UpdateItem:") {
+		t.Fatalf("expected SetAPIKeyWithMetadata UpdateItem error, got %v", err)
 	}
 }
 
-// TestDDBProviderSetAPIKeyPreservesConfiguredAt locks the rotation
+// TestDDBProviderSetAPIKeyWithMetadataPreservesConfiguredAt locks the rotation
 // contract: when a row already exists, configured_at retains its
 // original value (the install timestamp) while updated_at moves to
 // "now". A rotation that wiped configured_at would silently destroy
 // audit trail.
-func TestDDBProviderSetAPIKeyPreservesConfiguredAt(t *testing.T) {
+func TestDDBProviderSetAPIKeyWithMetadataPreservesConfiguredAt(t *testing.T) {
 	ddb := &fakeDDBClient{}
 	rotatedAt := time.Unix(1800000000, 0).UTC()
 	p := &DDBProvider{
@@ -1662,8 +1773,8 @@ func TestDDBProviderSetAPIKeyPreservesConfiguredAt(t *testing.T) {
 		Encryptor: &passthroughEncryptor{},
 		Now:       func() time.Time { return rotatedAt },
 	}
-	if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_new", "U_ADMIN2"); err != nil {
-		t.Fatalf("SetAPIKey: %v", err)
+	if err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, "lv_live_new", testKeyID, testKeyPrefix, "U_ADMIN2"); err != nil {
+		t.Fatalf("SetAPIKeyWithMetadata: %v", err)
 	}
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
@@ -1677,12 +1788,12 @@ func TestDDBProviderSetAPIKeyPreservesConfiguredAt(t *testing.T) {
 	}
 }
 
-// TestDDBProviderSetAPIKeyNilNowDoesNotPanic locks the contract that
+// TestDDBProviderSetAPIKeyWithMetadataNilNowDoesNotPanic locks the contract that
 // a bare-struct DDBProvider (no Now field set) doesn't nil-deref on
-// SetAPIKey. NewDDBProvider always sets Now, but tests / unusual
+// SetAPIKeyWithMetadata. NewDDBProvider always sets Now, but tests / unusual
 // constructions can produce a DDBProvider{} that previously crashed
 // the moment a write path executed.
-func TestDDBProviderSetAPIKeyNilNowDoesNotPanic(t *testing.T) {
+func TestDDBProviderSetAPIKeyWithMetadataNilNowDoesNotPanic(t *testing.T) {
 	ddb := &fakeDDBClient{}
 	p := &DDBProvider{
 		Client:    ddb,
@@ -1690,8 +1801,8 @@ func TestDDBProviderSetAPIKeyNilNowDoesNotPanic(t *testing.T) {
 		Encryptor: &passthroughEncryptor{},
 		// Now deliberately unset.
 	}
-	if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live", "U_x"); err != nil {
-		t.Fatalf("SetAPIKey with nil Now should fall through to time.Now, got err: %v", err)
+	if err := p.SetAPIKeyWithMetadata(context.Background(), testTeamID, "lv_live", testKeyID, testKeyPrefix, "U_x"); err != nil {
+		t.Fatalf("SetAPIKeyWithMetadata with nil Now should fall through to time.Now, got err: %v", err)
 	}
 }
 
@@ -1844,21 +1955,23 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
 			t.Errorf("delete key wrong: %v", ddb.updateInput.Key)
 		}
-		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at"; got != want {
+		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #configured_by, #configured_at"; got != want {
 			t.Errorf("UpdateExpression = %q, want %q", got, want)
 		}
-		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)"; got != want {
+		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)"; got != want {
 			t.Errorf("ConditionExpression = %q, want %q", got, want)
 		}
 		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "2026-06-13T12:34:56Z" {
 			t.Errorf("ExpressionAttributeValues[:now] = %v, want timestamp", ddb.updateInput.ExpressionAttributeValues[":now"])
 		}
 		wantNames := map[string]string{
-			"#qurl_api_key":    attrQURLAPIKey,
-			"#qurl_api_key_dk": attrDataKeyCT,
-			"#configured_by":   attrConfiguredBy,
-			"#configured_at":   attrConfiguredAt,
-			"#updated_at":      attrUpdatedAt,
+			"#qurl_api_key":        attrQURLAPIKey,
+			"#qurl_api_key_dk":     attrDataKeyCT,
+			"#qurl_api_key_id":     attrQURLAPIKeyID,
+			"#qurl_api_key_prefix": attrQURLAPIKeyPrefix,
+			"#configured_by":       attrConfiguredBy,
+			"#configured_at":       attrConfiguredAt,
+			"#updated_at":          attrUpdatedAt,
 		}
 		for name, want := range wantNames {
 			if got := ddb.updateInput.ExpressionAttributeNames[name]; got != want {
@@ -1869,13 +1982,15 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 
 	t.Run("preserves Slack install metadata", func(t *testing.T) {
 		row := map[string]ddbtypes.AttributeValue{
-			attrTeamID:          &ddbtypes.AttributeValueMemberS{Value: testTeamID},
-			attrQURLAPIKey:      &ddbtypes.AttributeValueMemberB{Value: []byte(testOldAPIKey)},
-			attrDataKeyCT:       &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
-			attrConfiguredBy:    &ddbtypes.AttributeValueMemberS{Value: "U_ADMIN"},
-			attrConfiguredAt:    &ddbtypes.AttributeValueMemberS{Value: "2026-06-13T00:00:00Z"},
-			attrSlackBotToken:   &ddbtypes.AttributeValueMemberB{Value: []byte(testSlackBotToken)},
-			attrSlackBotTokenDK: &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+			attrTeamID:           &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+			attrQURLAPIKey:       &ddbtypes.AttributeValueMemberB{Value: []byte(testOldAPIKey)},
+			attrDataKeyCT:        &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+			attrQURLAPIKeyID:     &ddbtypes.AttributeValueMemberS{Value: testKeyID},
+			attrQURLAPIKeyPrefix: &ddbtypes.AttributeValueMemberS{Value: testKeyPrefix},
+			attrConfiguredBy:     &ddbtypes.AttributeValueMemberS{Value: "U_ADMIN"},
+			attrConfiguredAt:     &ddbtypes.AttributeValueMemberS{Value: "2026-06-13T00:00:00Z"},
+			attrSlackBotToken:    &ddbtypes.AttributeValueMemberB{Value: []byte(testSlackBotToken)},
+			attrSlackBotTokenDK:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
 		}
 		ddb := &fakeDDBClient{
 			updateFunc: func(_ context.Context, in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
@@ -1906,6 +2021,12 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		}
 		if _, ok := row[attrDataKeyCT]; ok {
 			t.Fatal("qURL API key data-key column survived DeleteAPIKey")
+		}
+		if _, ok := row[attrQURLAPIKeyID]; ok {
+			t.Fatal("qURL API key ID column survived DeleteAPIKey")
+		}
+		if _, ok := row[attrQURLAPIKeyPrefix]; ok {
+			t.Fatal("qURL API key prefix column survived DeleteAPIKey")
 		}
 		if got := row[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB).Value; string(got) != testSlackBotToken {
 			t.Fatalf("Slack bot token = %q, want %q", got, testSlackBotToken)
