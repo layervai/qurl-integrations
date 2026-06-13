@@ -324,10 +324,10 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 // right next to a live Approve button. plain_text shows them literally.
 func buildAgentConfirmBlocks(summary, reason, id string) []any {
 	blocks := []any{
-		map[string]any{"type": "section", "text": plainTextObj(summary)},
+		plainTextSectionBlock(summary),
 	}
 	if reason = strings.TrimSpace(reason); reason != "" {
-		blocks = append(blocks, map[string]any{"type": "section", "text": plainTextObj("Reason: " + reason)})
+		blocks = append(blocks, plainTextSectionBlock("Reason: "+reason))
 	}
 	blocks = append(blocks, actionsBlock(
 		primaryButtonElement("Approve", agentConfirmApproveActionID, id),
