@@ -584,6 +584,57 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
+	t.Run("owner cancellation is shared with coalesced waiter", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getFunc: func(ctx context.Context, _ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return nil, ctx.Err()
+			},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		owner := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if !owner.owner {
+			t.Fatal("first lookup should own the fill")
+		}
+		waiter := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if waiter.owner || waiter.call != owner.call {
+			t.Fatal("second lookup should wait on the owner fill")
+		}
+
+		waiterErr := make(chan error, 1)
+		go func() {
+			<-waiter.call.done
+			waiterErr <- waiter.call.err
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := p.fetchAndFinishAPIKeyLookup(ctx, testTeamID, owner.call, now, owner.generation)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner err = %v, want context.Canceled", err)
+		}
+		select {
+		case err := <-waiterErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("waiter err = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not receive owner cancellation")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if _, ok := p.apiKeyCache[testTeamID]; ok {
+			t.Fatal("owner cancellation should not populate the cache")
+		}
+	})
+
 	t.Run("waiter cancellation leaves owner fill active", func(t *testing.T) {
 		releaseGet := make(chan struct{})
 		getStarted := make(chan struct{})
