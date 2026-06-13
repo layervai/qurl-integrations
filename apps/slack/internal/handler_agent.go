@@ -59,15 +59,13 @@ const agentTurnRateWindow = time.Hour
 const agentAckReaction = "eyes"
 
 // agentAckTimeout bounds each cosmetic working-on-it round-trip. Channel turns
-// use reactions.add/remove; exclusive pane mode uses assistant-pane setStatus.
-// Default pre-pane mode still attempts both the reaction fallback and setStatus
-// for im turns, so a hung pair can add up to 2x this timeout until the pane
-// rollout flag flips. It's deliberately tight and decoupled from the 4s
-// chat.postMessage budget: a "working on it" ack that hasn't landed in ~2s is
-// already too late to feel responsive, so giving up (no eyes reaction, and a
-// later no_reaction on remove is benign) beats delaying the turn it's meant to
-// make feel responsive. Taking the add off the critical path entirely (async add
-// + clear-joins-add) is tracked as a follow-up.
+// use async reactions.add plus deferred reactions.remove; exclusive pane mode
+// uses assistant-pane setStatus; default pre-pane mode still attempts both the
+// reaction fallback and setStatus for im turns. It's deliberately tight and
+// decoupled from the 4s chat.postMessage budget: a "working on it" ack that
+// hasn't landed in ~2s is already too late to feel responsive, so giving up (no
+// 👀 — the deferred remove then hits no_reaction → benign) beats delaying the
+// turn it's meant to make feel responsive.
 const agentAckTimeout = 2 * time.Second
 
 // agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
@@ -211,33 +209,82 @@ func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, s
 	return false
 }
 
+type agentAckHandle struct {
+	done <-chan struct{}
+}
+
+func (a agentAckHandle) wait(ctx context.Context) bool {
+	if a.done == nil {
+		return true
+	}
+	select {
+	case <-a.done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (h *Handler) agentAckContext() (context.Context, context.CancelFunc) {
+	baseCtx := h.baseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	return context.WithTimeout(baseCtx, agentAckTimeout)
+}
+
 // addAgentAck reacts agentAckReaction (👀) on the triggering message to acknowledge
 // the turn is being worked. Best-effort: a failed ack never fails the turn, and a nil
-// Reactions seam is a no-op (the ack is simply absent). It runs SYNCHRONOUSLY on the
-// live turn ctx — one short round-trip before the LLM call — and must STAY
-// synchronous: firing it in a goroutine would let the deferred clearAgentAck race
-// ahead of an in-flight reactions.add and strand the 👀 on the message forever.
-func (h *Handler) addAgentAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+// Reactions seam is a no-op (the ack is simply absent). The add runs asynchronously so
+// Slack reaction latency stays off the LLM turn's critical path. The returned handle
+// is load-bearing: clearAgentAck waits for it before removing so reactions.remove can
+// never race ahead of an in-flight reactions.add and strand the 👀.
+func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) agentAckHandle {
+	done := make(chan struct{})
 	if h.cfg.Reactions == nil {
-		return
+		close(done)
+		return agentAckHandle{done: done}
 	}
-	ctx, cancel := context.WithTimeout(ctx, agentAckTimeout)
-	defer cancel()
-	if err := h.cfg.Reactions.Add(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
-		log.Warn("agent: ack reaction add failed (best-effort)", "error", err)
-	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		defer close(done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("panic in agent ack add", "recover", rec, "stack", string(debug.Stack()))
+			}
+		}()
+
+		ctx, cancel := h.agentAckContext()
+		defer cancel()
+		if err := h.cfg.Reactions.Add(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
+			log.Warn("agent: ack reaction add failed (best-effort)", "error", err)
+		}
+	}()
+	return agentAckHandle{done: done}
 }
 
 // clearAgentAck removes the working-on-it reaction when the turn ends — deferred so it
 // runs on EVERY exit (reply posted, error, panic). Best-effort and nil-safe like
-// addAgentAck, but on a FRESH ctx off baseCtx: by defer time the turn ctx is spent
-// (agentTurnTimeout elapsed, or shutdown), so removing on it would fail instantly and
-// strand the 👀 — the same spent-ctx lesson as postAgentReply.
-func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
-	if h.cfg.Reactions == nil {
+// addAgentAck. It joins the add handle before removing so even a very fast turn cannot
+// remove before the async add lands. The join is bounded too: if a future seam ignores
+// its add context, clear abandons the best-effort remove rather than recreating the
+// remove-before-add race. The remove uses a FRESH ctx off baseCtx: by defer time the
+// turn ctx is spent (agentTurnTimeout elapsed, or shutdown), so removing on it would
+// fail instantly and strand the 👀 — the same spent-ctx lesson as postAgentReply.
+func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, ack agentAckHandle) {
+	if h.cfg.Reactions == nil || ack.done == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentAckTimeout)
+	joinCtx, joinCancel := h.agentAckContext()
+	if !ack.wait(joinCtx) {
+		joinCancel()
+		log.Warn("agent: ack reaction add still in flight; skipping remove to avoid racing add")
+		return
+	}
+	joinCancel()
+
+	ctx, cancel := h.agentAckContext()
 	defer cancel()
 	if err := h.cfg.Reactions.Remove(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
 		log.Warn("agent: ack reaction remove failed (best-effort)", "error", err)
@@ -248,13 +295,13 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
 // DM (message.im) turn — the pane-native counterpart to addAgentAck's 👀 reaction.
 // Best-effort behind the AssistantThreads seam (nil = no-op) and ONLY for im turns:
 // app_mention is a channel, not an assistant thread, so setStatus has nothing to scope
-// to. Set SYNCHRONOUSLY on the live turn ctx before the LLM call (like addAgentAck) so
-// it's visible while the turn runs, under its own agentAckTimeout cap. There is NO
-// deferred clear: Slack auto-clears the status when the agent posts its reply (every
-// turn exit posts one), and a 2-minute server-side timeout backstops the no-reply case.
-// The auto-clear only fires when the reply lands on the SAME thread the status was set
-// on, so the thread_ts here MUST equal the reply's — both derive from
-// agentEventRootTS(&env.Event); keep them coupled.
+// to. Set SYNCHRONOUSLY on the live turn ctx before the LLM call so it's visible while
+// the turn runs, under its own agentAckTimeout cap. There is NO deferred clear: Slack
+// auto-clears the status when the agent posts its reply (every turn exit posts one),
+// and a 2-minute server-side timeout backstops the no-reply case. The auto-clear only
+// fires when the reply lands on the SAME thread the status was set on, so the thread_ts
+// here MUST equal the reply's — both derive from agentEventRootTS(&env.Event); keep
+// them coupled.
 //
 // Post-enablement exclusive mode treats a pane setStatus failure as evidence the
 // native status path is broken (scope, rate limit, malformed thread, etc.), so it logs
@@ -280,12 +327,11 @@ func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, 
 // startAgentReactionAck marks an admitted turn with the reaction indicator when
 // this surface still uses one, and reports whether reaction cleanup must be registered
 // when the turn exits. The add is best-effort; cleanup is also nil-/no-reaction-safe.
-func (h *Handler) startAgentReactionAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
+func (h *Handler) startAgentReactionAck(log *slog.Logger, env *slackEventEnvelope) agentAckHandle {
 	if env.Event.ChannelType == slackChannelTypeIM && h.cfg.AgentSurfaceExclusiveAcks {
-		return false
+		return agentAckHandle{}
 	}
-	h.addAgentAck(ctx, log, env)
-	return true
+	return h.addAgentAck(log, env)
 }
 
 // agentOperatingChannel is the channel the agent OPERATES on for this turn (scopes
@@ -690,10 +736,10 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// reaction fallback plus best-effort native status; after it flips, pane turns use
 	// only Slack's native assistant status. Channel turns always use the eyes reaction.
 	// Register reaction cleanup before attempting native status so a status-path panic
-	// cannot strand the fallback reaction.
-	if h.startAgentReactionAck(ctx, log, env) {
-		defer h.clearAgentAck(log, env)
-	}
+	// cannot strand the fallback reaction. The add runs async, but clear joins its
+	// handle before removing so the remove can't race ahead.
+	ack := h.startAgentReactionAck(log, env)
+	defer h.clearAgentAck(log, env, ack)
 	h.setAgentThinkingStatus(ctx, log, env)
 
 	threadKey := agentEventThreadKey(env)

@@ -1,15 +1,17 @@
 package internal
 
 // Tests for the agent "working on it" reaction ack (#661): added 👀 on the triggering
-// message once the turn is committed, cleared on EVERY exit (success / error / panic),
-// best-effort (a reaction failure never fails the turn), nil-seam no-op, and NOT added
-// for turns dropped at the disabled/rate-limit gates (the ack means "I'm working on
-// this", so it must only appear for turns that actually run).
+// message once the turn is committed without blocking the model turn, cleared on EVERY
+// exit (success / error / panic), best-effort (a reaction failure never fails the
+// turn), nil-seam no-op, and NOT added for turns dropped at the disabled/rate-limit
+// gates (the ack means "I'm working on this", so it must only appear for turns that
+// actually run).
 
 import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -47,6 +49,63 @@ func (r *recordingReactions) snapshot() (adds, removes []reactionCall) {
 	return append([]reactionCall(nil), r.adds...), append([]reactionCall(nil), r.removes...)
 }
 
+type blockingOrderedReactions struct {
+	mu         sync.Mutex
+	events     []string
+	addStarted chan struct{}
+	releaseAdd chan struct{}
+	release    sync.Once
+}
+
+func newBlockingOrderedReactions() *blockingOrderedReactions {
+	return &blockingOrderedReactions{
+		addStarted: make(chan struct{}),
+		releaseAdd: make(chan struct{}),
+	}
+}
+
+func (r *blockingOrderedReactions) Add(ctx context.Context, _, _, _, _, _ string) error {
+	close(r.addStarted)
+	select {
+	case <-r.releaseAdd:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	r.record("add")
+	return nil
+}
+
+func (r *blockingOrderedReactions) Remove(_ context.Context, _, _, _, _, _ string) error {
+	r.record("remove")
+	return nil
+}
+
+func (r *blockingOrderedReactions) releaseAddCall() {
+	r.release.Do(func() { close(r.releaseAdd) })
+}
+
+func (r *blockingOrderedReactions) snapshotEvents() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+func (r *blockingOrderedReactions) record(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+type signalingAgentLLM struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *signalingAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+	s.once.Do(func() { close(s.started) })
+	return agent.Response{Text: "ack does not block me", StopReason: "end_turn"}, nil
+}
+
 func newAckHandler(t *testing.T, rec ReactionPort, llm agent.LLM) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
@@ -80,6 +139,34 @@ func TestAgentAck_AddedAndClearedOnSuccess(t *testing.T) {
 	}
 	if len(removes) != 1 || removes[0] != wantAck {
 		t.Fatalf("remove = %+v, want one %+v (cleared when the reply posts)", removes, wantAck)
+	}
+}
+
+func TestAgentAck_AddIsAsyncAndClearWaitsBeforeRemove(t *testing.T) {
+	rec := newBlockingOrderedReactions()
+	defer rec.releaseAddCall()
+
+	llmStarted := make(chan struct{})
+	h, _, _ := newAckHandler(t, rec, &signalingAgentLLM{started: llmStarted})
+	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvAsyncAck")))
+
+	select {
+	case <-rec.addStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reaction add did not start")
+	}
+
+	select {
+	case <-llmStarted:
+	case <-time.After(time.Second):
+		t.Fatal("LLM turn did not start while reactions.add was still blocked")
+	}
+
+	rec.releaseAddCall()
+	h.Wait()
+
+	if got, want := rec.snapshotEvents(), []string{"add", "remove"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reaction order = %v, want %v", got, want)
 	}
 }
 
