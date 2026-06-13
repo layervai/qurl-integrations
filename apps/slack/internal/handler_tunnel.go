@@ -97,6 +97,7 @@ const (
 )
 
 const (
+	// Keep this enum in lockstep with tunnelInstallAgentAuditResult.outcome.
 	agentProtectConnectorAuditSuccessResult tunnelInstallAgentAuditResult = iota
 	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
 	agentProtectConnectorAuditInstructionsDeliveryFailedResult
@@ -699,7 +700,8 @@ func tunnelInstallAgentAuditFromMetadata(meta *TunnelInstallModalMetadata, args 
 	// confirm-side half is tunnelInstallAgentMetadata.
 	// Reason is untrusted proposal provenance; target is the submitted/enforced
 	// connector identity from the modal, so an edited slug is recorded as the
-	// setup the approver actually submitted.
+	// setup the approver actually submitted. Re-normalize after the Slack
+	// private_metadata round-trip rather than trusting confirm-side truncation.
 	return &tunnelInstallAgentAudit{
 		target: args.Slug,
 		reason: normalizeTunnelInstallAgentReason(meta.Agent.Reason),
@@ -732,19 +734,7 @@ func (r tunnelInstallAgentAuditResult) outcome() string {
 }
 
 func (r tunnelInstallAgentAuditResult) success() bool {
-	switch r {
-	case agentProtectConnectorAuditSuccessResult:
-		return true
-	case agentProtectConnectorAuditBootstrapDMDeliveryFailedResult,
-		agentProtectConnectorAuditInstructionsDeliveryFailedResult,
-		agentProtectConnectorAuditBuildFailedResult,
-		agentProtectConnectorAuditAdminVerificationFailedResult,
-		agentProtectConnectorAuditAdminDeniedResult,
-		agentProtectConnectorAuditWorkerUnavailableResult:
-		return false
-	default:
-		return false
-	}
+	return r == agentProtectConnectorAuditSuccessResult
 }
 
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
