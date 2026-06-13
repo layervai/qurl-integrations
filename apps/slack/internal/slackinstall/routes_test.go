@@ -21,7 +21,7 @@ const testStateSecret = "0123456789abcdef0123456789abcdef"
 const (
 	testClientID        = "111.222"
 	testClientSecret    = "secret"
-	testScopeCSV        = "commands,chat:write,im:write"
+	testScopeCSV        = "commands,chat:write"
 	testWorkspaceID     = "T_WORKSPACE"
 	testEnterpriseID    = "E_GRID"
 	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
@@ -81,13 +81,13 @@ func TestConfigValidateRequiresDefaultBotScopes(t *testing.T) {
 		t.Fatalf("Validate error = %v, want nil for default scopes", err)
 	}
 	// Missing any default scope is rejected.
-	cfg.BotScopes = []string{botScopeChatWrite, botScopeIMWrite}
+	cfg.BotScopes = []string{botScopeChatWrite}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeCommands) {
 		t.Fatalf("Validate error = %v, want missing commands", err)
 	}
-	cfg.BotScopes = []string{botScopeCommands, botScopeChatWrite}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeIMWrite) {
-		t.Fatalf("Validate error = %v, want missing im:write", err)
+	cfg.BotScopes = []string{botScopeCommands}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeChatWrite) {
+		t.Fatalf("Validate error = %v, want missing chat:write", err)
 	}
 }
 

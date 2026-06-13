@@ -170,7 +170,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write` so the captured token can open modals and deliver private DMs for `dm:true` and qURL Connector bootstrap keys; any override must still include all default scopes. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write`; when set, those required defaults are still included so the captured token can receive slash commands and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
@@ -215,9 +215,10 @@ For customer Slack installs, configure the Slack app with:
 - Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: `commands,chat:write,im:write` (`commands` installs the slash
-  command surface; `chat:write` and `im:write` are required for private bot DMs
-  used by `dm:true`, agent replies, and qURL Connector bootstrap-key delivery)
+- Bot scopes: `commands,chat:write` plus any extra scopes from
+  `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
+  `chat:write` lets the app post private messages for `dm:true`, agent replies,
+  and qURL Connector bootstrap-key delivery)
 - Installation mode: workspace-level installs or Enterprise Grid org-level
   installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
   workspace setup and admin checks still use workspace `team_id`.

@@ -880,16 +880,17 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
-		scopes = slackinstall.NormalizeScopes([]string{raw})
+		extraScopes := slackinstall.NormalizeScopes([]string{raw})
 		// Strip unsupported scopes (see slackinstall.DropUnsupportedScopes) from
 		// operator overrides before Validate: a stale SLACK_BOT_SCOPES with
-		// surviving valid scopes then warns instead of aborting startup. (An
-		// override of only unsupported scopes strips to empty and Validate still
-		// rejects it.)
-		if kept, dropped := slackinstall.DropUnsupportedScopes(scopes); len(dropped) > 0 {
-			scopes = kept
-			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. SLACK_BOT_SCOPES must still include commands.")
+		// surviving valid scopes then warns instead of aborting startup. Required
+		// defaults are always unioned back in, so legacy overrides such as
+		// SLACK_BOT_SCOPES=commands stay deployable after new required scopes land.
+		if kept, dropped := slackinstall.DropUnsupportedScopes(extraScopes); len(dropped) > 0 {
+			extraScopes = kept
+			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. Required qURL Slack scopes are still included automatically.")
 		}
+		scopes = slackinstall.NormalizeScopes(append(scopes, extraScopes...))
 	}
 	cfg := slackinstall.Config{
 		ClientID:     clientID,

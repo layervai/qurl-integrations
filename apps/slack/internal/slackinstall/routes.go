@@ -46,7 +46,6 @@ const (
 	slackInstallFlow            = "slack-install"
 	botScopeCommands            = "commands"
 	botScopeChatWrite           = "chat:write"
-	botScopeIMWrite             = "im:write"
 	slackOAuthErrorBadRedirect  = "bad_redirect_uri"
 	slackOAuthErrorUnrecognized = "unrecognized"
 )
@@ -102,12 +101,11 @@ type TokenStore interface {
 // DefaultBotScopes returns the minimum Slack bot scopes the install flow
 // requests. `commands` installs the slash-command surface. `chat:write` lets the
 // bot deliver `dm:true`, agent replies, and qURL Connector bootstrap-key DMs via
-// chat.postMessage. `im:write` lets the bot open 1:1 IMs when Slack needs to
-// create the app-user DM before the post.
+// chat.postMessage with the Slack user id as the channel value.
 // Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
 // at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
-	return []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite}
+	return []string{botScopeCommands, botScopeChatWrite}
 }
 
 // DropUnsupportedScopes removes scope strings that are not real Slack OAuth
