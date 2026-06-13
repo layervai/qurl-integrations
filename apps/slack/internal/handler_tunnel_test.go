@@ -3145,7 +3145,7 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 	}
 }
 
-func TestTunnelInstallAgentAuditUsesBackgroundWhenBaseContextNil(t *testing.T) {
+func TestTunnelInstallAgentAuditIsIndependentOfNilBaseContext(t *testing.T) {
 	now := fixedNow
 	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
 	h := &Handler{cfg: Config{AgentStore: agentStore}}
@@ -3171,7 +3171,7 @@ func TestTunnelInstallAgentAuditUsesBackgroundWhenBaseContextNil(t *testing.T) {
 	}
 }
 
-func TestTunnelInstallAgentAuditIgnoresCanceledBaseContext(t *testing.T) {
+func TestTunnelInstallAgentAuditIsIndependentOfCanceledBaseContext(t *testing.T) {
 	now := fixedNow
 	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
 	baseCtx, cancel := context.WithCancel(context.Background())
