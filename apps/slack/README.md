@@ -55,6 +55,9 @@ workspace's Secure Access Agent supports.
 | `/qurl feedback` | Send a bug report or feature request to the qURL team. |
 | `/qurl help` | Show the user command help. |
 
+If qURL is disconnected and the recorded workspace owner is unavailable,
+contact your qURL operator to recover or reassign ownership before reconnecting.
+
 ### Admins — `/qurl-admin`
 
 Admin commands live under a separate `/qurl-admin` slash command. They're

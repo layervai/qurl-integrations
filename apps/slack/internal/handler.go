@@ -1683,6 +1683,8 @@ func respondUninstallUnsupported(w http.ResponseWriter) {
 	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
 }
 
+// respondUninstallUnavailable is the single wiring-state-to-operator-copy map
+// shared by bare uninstall and uninstall argument variants.
 func (h *Handler) respondUninstallUnavailable(w http.ResponseWriter) {
 	if h.cfg.AuthProvider == nil {
 		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
