@@ -2642,7 +2642,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
-	captureTunnelPostDMSuccess(h)
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 
 	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
@@ -2652,6 +2652,9 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 	if strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "qURL alias `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("second async reply = %q, want successful remint against existing alias", second)
+	}
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, "lv_live_retry_bootstrap") {
+		t.Fatalf("bootstrap DM posts = %+v, want one containing reminted key", *dmPosts)
 	}
 	if apiKeyHits != 2 {
 		t.Fatalf("api key hits = %d, want 2", apiKeyHits)

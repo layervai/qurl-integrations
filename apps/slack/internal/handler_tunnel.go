@@ -581,8 +581,8 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	}
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
-	if !h.postTunnelBootstrapSecret(ctx, log, teamID, enterpriseID, userID, build.secretMessage) {
-		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
+	if err := h.postTunnelInstallDM(ctx, teamID, enterpriseID, userID, build.secretMessage); err != nil {
+		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
 		_ = h.postResponse(log, responseURL, "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted. Re-run `/qurl-admin protect-connector` after DM delivery is available.")
 		return
@@ -595,24 +595,22 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
-		_ = h.postTunnelBootstrapSecret(h.baseCtx, log, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again.")
+		if err := h.postTunnelInstallDM(h.baseCtx, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again."); err != nil {
+			log.Error("tunnel install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_dm_delivery_failed")
+		}
 		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 	}
 }
 
-func (h *Handler) postTunnelBootstrapSecret(ctx context.Context, log *slog.Logger, teamID, enterpriseID, userID, msg string) bool {
+func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID, userID, msg string) error {
 	// processTunnelInstall checks this before minting; keep the helper guard so
 	// any future standalone call still fails closed instead of panicking.
 	if h.cfg.PostDM == nil {
-		return false
+		return errors.New("tunnel install DM delivery is not configured")
 	}
-	if err := h.cfg.PostDM(ctx, teamID, enterpriseID, userID, msg); err != nil {
-		log.Error("tunnel install: bootstrap-key DM delivery failed", "error", err, "team_id", teamID, "enterprise_id", enterpriseID, "user_id", userID)
-		return false
-	}
-	return true
+	return h.cfg.PostDM(ctx, teamID, enterpriseID, userID, msg)
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
