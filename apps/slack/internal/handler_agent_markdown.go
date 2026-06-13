@@ -191,10 +191,7 @@ func (h *agentMarkdownLinkHarden) consumeLinkByte(out *strings.Builder, c byte) 
 
 func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
 	label := strings.TrimSpace(h.link.label.String())
-	destination := strings.TrimSpace(h.link.destination.String())
-	if strings.HasPrefix(destination, "<") && strings.HasSuffix(destination, ">") && len(destination) > 1 {
-		destination = strings.TrimSpace(destination[1 : len(destination)-1])
-	}
+	destination := visibleMarkdownLinkDestination(h.link.destination.String())
 	switch {
 	case label != "" && destination != "":
 		out.WriteString(label)
@@ -216,4 +213,18 @@ func countByteRun(s string, b byte) int {
 		}
 	}
 	return len(s)
+}
+
+func visibleMarkdownLinkDestination(destination string) string {
+	destination = strings.TrimSpace(destination)
+	if strings.HasPrefix(destination, "<") {
+		if end := strings.IndexByte(destination, '>'); end > 0 {
+			return strings.TrimSpace(destination[1:end])
+		}
+	}
+	fields := strings.Fields(destination)
+	if len(fields) == 0 {
+		return destination
+	}
+	return fields[0]
 }

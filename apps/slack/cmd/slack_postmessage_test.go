@@ -553,30 +553,35 @@ func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 
 func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t *testing.T) {
 	t.Parallel()
-	var bodies []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(raw))
-		if len(bodies) == 1 {
-			_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_blocks"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	t.Cleanup(srv.Close)
+	for _, code := range []string{"invalid_blocks", "invalid_block_type", "invalid_arguments"} {
+		t.Run(code, func(t *testing.T) {
+			t.Parallel()
+			var bodies []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, string(raw))
+				if len(bodies) == 1 {
+					_, _ = w.Write([]byte(`{"ok":false,"error":"` + code + `"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			t.Cleanup(srv.Close)
 
-	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
-	if err := post(context.Background(), "T_test", "", mdTestChannel, "1700000000.000100", "Use **bold**"); err != nil {
-		t.Fatalf("chat.postMessage markdown fallback: %v", err)
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("requests = %d, want markdown block then markdown_text fallback: %v", len(bodies), bodies)
-	}
-	if !strings.Contains(bodies[0], `"blocks"`) || strings.Contains(bodies[0], `"markdown_text"`) {
-		t.Fatalf("first request should use markdown blocks only: %s", bodies[0])
-	}
-	if !strings.Contains(bodies[1], `"markdown_text":"Use **bold**"`) || strings.Contains(bodies[1], `"blocks"`) || strings.Contains(bodies[1], `"text":`) {
-		t.Fatalf("second request should use markdown_text only: %s", bodies[1])
+			post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+			if err := post(context.Background(), "T_test", "", mdTestChannel, "1700000000.000100", "Use **bold**"); err != nil {
+				t.Fatalf("chat.postMessage markdown fallback: %v", err)
+			}
+			if len(bodies) != 2 {
+				t.Fatalf("requests = %d, want markdown block then markdown_text fallback: %v", len(bodies), bodies)
+			}
+			if !strings.Contains(bodies[0], `"blocks"`) || strings.Contains(bodies[0], `"markdown_text"`) {
+				t.Fatalf("first request should use markdown blocks only: %s", bodies[0])
+			}
+			if !strings.Contains(bodies[1], `"markdown_text":"Use **bold**"`) || strings.Contains(bodies[1], `"blocks"`) || strings.Contains(bodies[1], `"text":`) {
+				t.Fatalf("second request should use markdown_text only: %s", bodies[1])
+			}
+		})
 	}
 }
 

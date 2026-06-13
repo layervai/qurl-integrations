@@ -4,8 +4,8 @@ import "testing"
 
 func TestHardenAgentMarkdown_RevealsMaskedLinks(t *testing.T) {
 	t.Parallel()
-	in := "Read [the setup guide](https://docs.example/setup) before clicking [go](<https://evil.example/path>)."
-	want := "Read the setup guide (https://docs.example/setup) before clicking go (https://evil.example/path)."
+	in := "Read [the setup guide](https://docs.example/setup) before clicking [go](<https://evil.example/path>). See [title](https://evil.example/t \"tooltip\")."
+	want := "Read the setup guide (https://docs.example/setup) before clicking go (https://evil.example/path). See title (https://evil.example/t)."
 	if got := hardenAgentMarkdown(in); got != want {
 		t.Fatalf("hardened markdown = %q, want %q", got, want)
 	}

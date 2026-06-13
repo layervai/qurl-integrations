@@ -452,7 +452,7 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
-		if err := poster.post(ctx, teamID, enterpriseID, body); !isSlackInvalidBlocksError(err) {
+		if err := poster.post(ctx, teamID, enterpriseID, body); !isSlackMarkdownBlockFallbackError(err) {
 			return err
 		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
@@ -479,11 +479,7 @@ type slackMarkdownBlock struct {
 }
 
 func slackMarkdownFallbackText(markdownText string) string {
-	markdownText = strings.TrimSpace(markdownText)
-	if markdownText == "" {
-		return "Secure Access Agent reply."
-	}
-	return markdownText
+	return strings.TrimSpace(markdownText)
 }
 
 func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
@@ -494,12 +490,25 @@ func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]b
 	}{Channel: channelID, ThreadTS: threadTS, MarkdownText: markdownText})
 }
 
-func isSlackInvalidBlocksError(err error) bool {
-	if err == nil {
+func isSlackMarkdownBlockFallbackError(err error) bool {
+	switch slackChatPostMessageErrorCode(err) {
+	case "invalid_arguments", "invalid_block_type", "invalid_blocks", "invalid_blocks_format":
+		return true
+	default:
 		return false
 	}
+}
+
+func slackChatPostMessageErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	const prefix = "chat.postMessage: "
 	msg := err.Error()
-	return strings.Contains(msg, "chat.postMessage: invalid_blocks") || strings.Contains(msg, "chat.postMessage: invalid_blocks_format")
+	if !strings.HasPrefix(msg, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(msg, prefix))
 }
 
 // newSlackPostMessageBlocksFuncWithTokenLookup builds the
