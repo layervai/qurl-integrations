@@ -6,6 +6,9 @@ validator="$repo_root/scripts/validate-github-actions-pins.sh"
 sha="0123456789abcdef0123456789abcdef01234567"
 tmp_parent="$(mktemp -d)"
 
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+
 trap 'rm -rf "$tmp_parent"' EXIT
 
 case_no=0
@@ -59,6 +62,12 @@ run_case valid-workflow 0 "GitHub Actions pins are SHA-pinned" \
     steps:
       - uses: actions/checkout@$sha # v1.2.3"
 
+run_case valid-yaml-workflow 0 "GitHub Actions pins are SHA-pinned" \
+  ".github/workflows/test.yaml" "jobs:
+  test:
+    steps:
+      - uses: actions/checkout@$sha # v1.2.3"
+
 run_case quoted-ref 0 "GitHub Actions pins are SHA-pinned" \
   ".github/workflows/test.yml" "jobs:
   test:
@@ -88,7 +97,7 @@ run_case composite-action-invalid 1 "external action must be pinned" \
   steps:
     - uses: actions/checkout@v4 # v4.0.0"
 
-run_case missing-at-ref 1 "external action is missing an @ ref" \
+run_case missing-at-ref 1 ".github/workflows/test.yml:4: external action is missing an @ ref" \
   ".github/workflows/test.yml" "jobs:
   test:
     steps:
@@ -99,6 +108,12 @@ run_case missing-version-comment 1 "SHA pin must include an exact version tag co
   test:
     steps:
       - uses: actions/checkout@$sha"
+
+run_case quoted-missing-version-comment 1 "SHA pin must include an exact version tag comment" \
+  ".github/workflows/test.yml" "jobs:
+  test:
+    steps:
+      - uses: \"actions/checkout@$sha\""
 
 run_case major-only-comment 1 "SHA pin must include an exact version tag comment" \
   ".github/workflows/test.yml" "jobs:
