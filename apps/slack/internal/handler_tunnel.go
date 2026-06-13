@@ -101,10 +101,11 @@ const (
 	agentProtectConnectorAuditConfigurationUnavailableOutcome   = "qURL Connector setup was not started because qURL admin configuration was unavailable."
 	agentProtectConnectorAuditUnexpectedFailureOutcome          = "qURL Connector setup stopped unexpectedly before the outcome was recorded."
 	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome was not recorded."
+	tunnelInstallUnexpectedFailureNotice                        = "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect-connector` again."
 )
 
 const (
-	// Keep this enum in lockstep with tunnelInstallAgentAuditResult.outcome.
+	// Keep this enum in lockstep with agentProtectConnectorAuditResults.
 	agentProtectConnectorAuditResultInvalid tunnelInstallAgentAuditResult = iota
 	agentProtectConnectorAuditSuccessResult
 	agentProtectConnectorAuditDegradedResult
@@ -149,6 +150,52 @@ type tunnelInstallAgentAudit struct {
 }
 
 type tunnelInstallAgentAuditResult uint8
+
+type tunnelInstallAgentAuditResultInfo struct {
+	outcome string
+	success bool
+}
+
+var agentProtectConnectorAuditResults = map[tunnelInstallAgentAuditResult]tunnelInstallAgentAuditResultInfo{
+	agentProtectConnectorAuditSuccessResult: {
+		outcome: agentProtectConnectorAuditOutcome,
+		success: true,
+	},
+	agentProtectConnectorAuditDegradedResult: {
+		outcome: agentProtectConnectorAuditDegradedOutcome,
+		success: true,
+	},
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult: {
+		outcome: agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome,
+	},
+	agentProtectConnectorAuditInstructionsDeliveryFailedResult: {
+		outcome: agentProtectConnectorAuditInstructionsDeliveryFailedOutcome,
+	},
+	agentProtectConnectorAuditBuildFailedResult: {
+		outcome: agentProtectConnectorAuditBuildFailedOutcome,
+	},
+	agentProtectConnectorAuditDMUnconfiguredResult: {
+		outcome: agentProtectConnectorAuditDMUnconfiguredOutcome,
+	},
+	agentProtectConnectorAuditAdminVerificationFailedResult: {
+		outcome: agentProtectConnectorAuditAdminVerificationFailedOutcome,
+	},
+	agentProtectConnectorAuditAdminDeniedResult: {
+		outcome: agentProtectConnectorAuditAdminDeniedOutcome,
+	},
+	agentProtectConnectorAuditWorkerUnavailableResult: {
+		outcome: agentProtectConnectorAuditWorkerUnavailableOutcome,
+	},
+	agentProtectConnectorAuditModalRejectedResult: {
+		outcome: agentProtectConnectorAuditModalRejectedOutcome,
+	},
+	agentProtectConnectorAuditConfigurationUnavailableResult: {
+		outcome: agentProtectConnectorAuditConfigurationUnavailableOutcome,
+	},
+	agentProtectConnectorAuditUnexpectedFailureResult: {
+		outcome: agentProtectConnectorAuditUnexpectedFailureOutcome,
+	},
+}
 
 type tunnelInstallInstructionsDelivery uint8
 
@@ -670,11 +717,18 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 				revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "unexpected_panic")
 			}
 			if req != nil && strings.TrimSpace(req.responseURL) != "" {
-				_ = h.postResponse(log, req.responseURL, "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect-connector` again.")
+				_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
 			}
 			result = agentProtectConnectorAuditUnexpectedFailureResult
 		}
 	}()
+	if req == nil || req.args == nil {
+		log.Error("tunnel install: setup worker missing parsed modal args")
+		if req != nil && strings.TrimSpace(req.responseURL) != "" {
+			_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
+		}
+		return agentProtectConnectorAuditUnexpectedFailureResult
+	}
 	args := req.args
 	if h.cfg.PostDM == nil {
 		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
@@ -769,42 +823,16 @@ func normalizeTunnelInstallAgentReason(reason string) string {
 }
 
 func (r tunnelInstallAgentAuditResult) outcome() (string, bool) {
-	switch r {
-	case agentProtectConnectorAuditResultInvalid:
-		return agentProtectConnectorAuditUnknownOutcome, false
-	case agentProtectConnectorAuditSuccessResult:
-		return agentProtectConnectorAuditOutcome, true
-	case agentProtectConnectorAuditDegradedResult:
-		return agentProtectConnectorAuditDegradedOutcome, true
-	case agentProtectConnectorAuditBootstrapDMDeliveryFailedResult:
-		return agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome, true
-	case agentProtectConnectorAuditInstructionsDeliveryFailedResult:
-		return agentProtectConnectorAuditInstructionsDeliveryFailedOutcome, true
-	case agentProtectConnectorAuditBuildFailedResult:
-		return agentProtectConnectorAuditBuildFailedOutcome, true
-	case agentProtectConnectorAuditDMUnconfiguredResult:
-		return agentProtectConnectorAuditDMUnconfiguredOutcome, true
-	case agentProtectConnectorAuditAdminVerificationFailedResult:
-		return agentProtectConnectorAuditAdminVerificationFailedOutcome, true
-	case agentProtectConnectorAuditAdminDeniedResult:
-		return agentProtectConnectorAuditAdminDeniedOutcome, true
-	case agentProtectConnectorAuditWorkerUnavailableResult:
-		return agentProtectConnectorAuditWorkerUnavailableOutcome, true
-	case agentProtectConnectorAuditModalRejectedResult:
-		return agentProtectConnectorAuditModalRejectedOutcome, true
-	case agentProtectConnectorAuditConfigurationUnavailableResult:
-		return agentProtectConnectorAuditConfigurationUnavailableOutcome, true
-	case agentProtectConnectorAuditUnexpectedFailureResult:
-		return agentProtectConnectorAuditUnexpectedFailureOutcome, true
-	case agentProtectConnectorAuditResultCount:
-		return agentProtectConnectorAuditUnknownOutcome, false
-	default:
+	info, ok := agentProtectConnectorAuditResults[r]
+	if !ok {
 		return agentProtectConnectorAuditUnknownOutcome, false
 	}
+	return info.outcome, true
 }
 
 func (r tunnelInstallAgentAuditResult) success() bool {
-	return r == agentProtectConnectorAuditSuccessResult || r == agentProtectConnectorAuditDegradedResult
+	info, ok := agentProtectConnectorAuditResults[r]
+	return ok && info.success
 }
 
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {

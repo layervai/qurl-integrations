@@ -3183,54 +3183,19 @@ func TestTunnelInstallAgentAuditIgnoresCanceledBaseContext(t *testing.T) {
 }
 
 func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
-	cases := map[tunnelInstallAgentAuditResult]struct {
-		outcome string
-		success bool
-	}{
-		agentProtectConnectorAuditSuccessResult: {
-			outcome: agentProtectConnectorAuditOutcome,
-			success: true,
-		},
-		agentProtectConnectorAuditDegradedResult: {
-			outcome: agentProtectConnectorAuditDegradedOutcome,
-			success: true,
-		},
-		agentProtectConnectorAuditBootstrapDMDeliveryFailedResult: {
-			outcome: agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome,
-		},
-		agentProtectConnectorAuditInstructionsDeliveryFailedResult: {
-			outcome: agentProtectConnectorAuditInstructionsDeliveryFailedOutcome,
-		},
-		agentProtectConnectorAuditBuildFailedResult: {
-			outcome: agentProtectConnectorAuditBuildFailedOutcome,
-		},
-		agentProtectConnectorAuditDMUnconfiguredResult: {
-			outcome: agentProtectConnectorAuditDMUnconfiguredOutcome,
-		},
-		agentProtectConnectorAuditAdminVerificationFailedResult: {
-			outcome: agentProtectConnectorAuditAdminVerificationFailedOutcome,
-		},
-		agentProtectConnectorAuditAdminDeniedResult: {
-			outcome: agentProtectConnectorAuditAdminDeniedOutcome,
-		},
-		agentProtectConnectorAuditWorkerUnavailableResult: {
-			outcome: agentProtectConnectorAuditWorkerUnavailableOutcome,
-		},
-		agentProtectConnectorAuditModalRejectedResult: {
-			outcome: agentProtectConnectorAuditModalRejectedOutcome,
-		},
-		agentProtectConnectorAuditConfigurationUnavailableResult: {
-			outcome: agentProtectConnectorAuditConfigurationUnavailableOutcome,
-		},
-		agentProtectConnectorAuditUnexpectedFailureResult: {
-			outcome: agentProtectConnectorAuditUnexpectedFailureOutcome,
-		},
+	if len(agentProtectConnectorAuditResults) != int(agentProtectConnectorAuditResultCount)-1 {
+		t.Fatalf("audit result cases = %d, want %d", len(agentProtectConnectorAuditResults), agentProtectConnectorAuditResultCount-1)
 	}
-	if len(cases) != int(agentProtectConnectorAuditResultCount)-1 {
-		t.Fatalf("audit result cases = %d, want %d", len(cases), agentProtectConnectorAuditResultCount-1)
+	for _, result := range []tunnelInstallAgentAuditResult{
+		agentProtectConnectorAuditResultInvalid,
+		agentProtectConnectorAuditResultCount,
+	} {
+		if _, ok := agentProtectConnectorAuditResults[result]; ok {
+			t.Fatalf("audit result %d must not have known metadata", result)
+		}
 	}
 	for result := agentProtectConnectorAuditResultInvalid + 1; result < agentProtectConnectorAuditResultCount; result++ {
-		tc, ok := cases[result]
+		info, ok := agentProtectConnectorAuditResults[result]
 		if !ok {
 			t.Fatalf("missing test case for audit result %d", result)
 		}
@@ -3238,11 +3203,11 @@ func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
 		if !known {
 			t.Fatalf("audit result %d known = false", result)
 		}
-		if outcome != tc.outcome {
-			t.Fatalf("audit result %d outcome = %q, want %q", result, outcome, tc.outcome)
+		if outcome != info.outcome {
+			t.Fatalf("audit result %d outcome = %q, want %q", result, outcome, info.outcome)
 		}
-		if result.success() != tc.success {
-			t.Fatalf("audit result %d success = %t, want %t", result, result.success(), tc.success)
+		if result.success() != info.success {
+			t.Fatalf("audit result %d success = %t, want %t", result, result.success(), info.success)
 		}
 	}
 
@@ -3267,6 +3232,28 @@ func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
 func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	now := fixedNow
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
 	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
 	var responseBodies []string
 	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3280,20 +3267,19 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	t.Cleanup(responseURL.Close)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AgentStore = agentStore
-	h.processTunnelInstall(context.Background(), slog.Default(), &tunnelInstallRequest{
-		teamID:      testAdminTeamID,
-		channelID:   testTunnelChannelID,
-		userID:      testAdminUserID,
-		responseURL: responseURL.URL,
-		agentAudit: &tunnelInstallAgentAudit{
-			target: testTunnelSlug,
-			reason: testTunnelAgentReason,
-		},
-	})
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		panic("test panic after bootstrap key mint")
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
 	if err != nil {
 		t.Fatalf("list audit entries: %v", err)
+	}
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1 after panic", revokeHits)
 	}
 	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditUnexpectedFailureOutcome {
 		t.Fatalf("audit entries = %+v, want unexpected-failure outcome", got)
