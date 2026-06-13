@@ -1240,6 +1240,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	inv := newAdminSlashInvoker(t, h)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
+		EnterpriseID:  testEnterpriseID,
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   inv.responseU.URL,
@@ -1277,6 +1278,9 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
+	}
+	if (*dmPosts)[0].enterpriseID != testEnterpriseID {
+		t.Fatalf("bootstrap DM enterpriseID = %q, want %q", (*dmPosts)[0].enterpriseID, testEnterpriseID)
 	}
 	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, modalCreatedAt)
 	if idempotencyKey != wantIdempotencyKey {

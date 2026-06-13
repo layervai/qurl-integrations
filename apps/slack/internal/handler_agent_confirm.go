@@ -543,13 +543,14 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 	}
 
 	view, err := TunnelInstallModal(&TunnelInstallModalMetadata{
-		TeamID: payload.Team.ID,
+		TeamID:       payload.Team.ID,
+		EnterpriseID: payload.Enterprise.ID,
 		// The click's channel (== the proposal's, mismatch-guarded), matching the
 		// other execute paths. The proposal's env/port/alias hints are intentionally
 		// NOT threaded in v1 — the admin completes the blank wizard.
 		ChannelID: payload.Channel.ID,
 		// The approving admin: aligns the modal's same-user-submit gate with the
-		// ephemeral key target (see the key-delivery note above).
+		// DM secret target (see the key-delivery note above).
 		UserID:        payload.User.ID,
 		ResponseURL:   responseURL,
 		CreatedAtUnix: h.now().Unix(),
