@@ -279,6 +279,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, agentConfirmGetUnsupportedSurfaceReply)
 		return
 	}
+	reason := protectConnectorConfirmReason(prop)
 	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
 	// the card fallback below and agentReplyText).
 	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
@@ -314,33 +315,58 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, preview)
 		return
 	}
-	// The card section renders the summary as plain_text (safe), but the fallback is
-	// the message's top-level text — mrkdwn by default — so the same LLM-distilled
-	// summary must be escaped there too, or a prompt-injected masked link would
-	// surface in the notification/push preview and non-block clients.
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, id), escapeMrkdwnText(summary)); err != nil {
+	// Card text renders as plain_text (safe), but the fallback is the message's
+	// top-level text — mrkdwn by default — so LLM-distilled summary/reason must be
+	// escaped there too, or prompt-injected markup would surface in push previews
+	// and non-block clients.
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, reason, id), agentConfirmFallbackText(summary, reason)); err != nil {
 		log.Error("agent confirm: post card failed", "error", err)
 		h.postAgentReply(log, env, threadTS, preview)
 		return
 	}
 }
 
-// buildAgentConfirmBlocks renders the confirm card: a summary section plus
-// Approve (primary) and Reject (danger) buttons. Both buttons carry ONLY the
-// pending-action id in their value.
+// buildAgentConfirmBlocks renders the confirm card: a summary section, optional
+// reason section, plus Approve (primary) and Reject (danger) buttons. Both
+// buttons carry ONLY the pending-action id in their value.
 //
-// The summary renders as plain_text, NOT mrkdwn: it is LLM-distilled, so mrkdwn
-// would let a prompt-injected summary surface a masked link (`<http://evil|click>`)
-// or other markup publicly, right next to a live Approve button. plain_text shows
-// it literally.
-func buildAgentConfirmBlocks(summary, id string) []any {
-	return []any{
-		map[string]any{"type": "section", "text": plainTextObj(summary)},
-		actionsBlock(
-			primaryButtonElement("Approve", agentConfirmApproveActionID, id),
-			dangerButtonElement("Reject", agentConfirmRejectActionID, id),
-		),
+// The text fields render as plain_text, NOT mrkdwn: they are LLM-distilled, so
+// mrkdwn would let prompt-injected masked links or mentions surface publicly,
+// right next to a live Approve button. plain_text shows them literally.
+func buildAgentConfirmBlocks(summary, reason, id string) []any {
+	blocks := []any{
+		plainTextSectionBlock(summary),
 	}
+	if reason = strings.TrimSpace(reason); reason != "" {
+		blocks = append(blocks, plainTextSectionBlock("Reason: "+reason))
+	}
+	blocks = append(blocks, actionsBlock(
+		primaryButtonElement("Approve", agentConfirmApproveActionID, id),
+		dangerButtonElement("Reject", agentConfirmRejectActionID, id),
+	))
+	return blocks
+}
+
+func agentConfirmFallbackText(summary, reason string) string {
+	text := escapeMrkdwnText(summary)
+	if reason = strings.TrimSpace(reason); reason != "" {
+		// The label is fixed product copy; the untrusted reason is the mrkdwn input.
+		text += "\nReason: " + escapeMrkdwnText(reason)
+	}
+	return text
+}
+
+func protectConnectorConfirmReason(prop *agent.Proposal) string {
+	// Scope this display to protect-connector: this PR newly persists that
+	// modal provenance after an additional submit step. Other reason-bearing
+	// actions audit directly from the confirm click, but this flow needs the
+	// approver to see the exact reason before it is carried through to the
+	// later modal-submit audit row. The distilled reason is non-secret, bounded,
+	// and escaped before any channel-visible rendering.
+	if prop == nil || prop.Action != agent.ActionProtectConnector {
+		return ""
+	}
+	return normalizeTunnelInstallAgentReason(prop.Reason)
 }
 
 // handleAgentConfirmClick is the block_actions entrypoint for an Approve/Reject
@@ -493,7 +519,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	// consistent: the modal submit isn't idempotent across opens, so consume-once is
 	// what stops two approvers from double-opening → double-minting a connector.
 	if confirmModalRouted(pa.Action) {
-		h.openAgentConnectorModal(ctx, log, payload, triggerReceivedAt)
+		h.openAgentConnectorModal(ctx, log, &pa, payload, triggerReceivedAt)
 		return
 	}
 	h.finalizeConfirmedAction(ctx, log, &pa, payload, responseURL)
@@ -544,8 +570,10 @@ func agentConfirmAttributedCard(cardText, asker, approver string) string {
 //
 // On trigger expiry / open failure the card goes terminal with an "ask me again"
 // prompt: the action is already claimed (consumed), so the user re-asks the agent
-// to mint a fresh proposal + trigger — there is no retry on this card.
-func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, payload *interactionPayload, triggerReceivedAt time.Time) {
+// to mint a fresh proposal + trigger — there is no retry on this card. Modal
+// open and abandon events are intentionally not audit rows; the submitted modal is
+// the first point with an enforced connector identity and setup intent.
+func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, triggerReceivedAt time.Time) {
 	responseURL := payload.ResponseURL
 	if h.cfg.OpenView == nil {
 		log.Warn("agent confirm: protect-connector approved but OpenView is not configured")
@@ -565,6 +593,7 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 		UserID:        payload.User.ID,
 		ResponseURL:   responseURL,
 		CreatedAtUnix: h.now().Unix(),
+		Agent:         tunnelInstallAgentMetadata(pa),
 	})
 	if err != nil {
 		log.Error("agent confirm: protect-connector modal render failed", "error", err)
@@ -596,6 +625,20 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 	}
 	log.Info("agent confirm: protect-connector modal opened", "channel_id", payload.Channel.ID, "user_id", payload.User.ID)
 	_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorOpenedReply)
+}
+
+func tunnelInstallAgentMetadata(pa *pendingAction) *TunnelInstallAgentMetadata {
+	if pa == nil || pa.Action != agent.ActionProtectConnector {
+		return nil
+	}
+	// Confirm-side half of the protect-connector provenance carry-through; the
+	// submit-side half is tunnelInstallAgentAuditFromMetadata.
+	// Protect-connector proposals are intentionally sparse and do not carry a
+	// proposed connector slug; the submitted modal is the first concrete target.
+	return &TunnelInstallAgentMetadata{
+		Action: string(pa.Action),
+		Reason: normalizeTunnelInstallAgentReason(pa.Reason),
+	}
 }
 
 // agentConfirmConnectorOpenErrorReply maps a views.open failure to the right
@@ -961,15 +1004,12 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 // mutation already happened and the audit log is never an authority. res.cardText is
 // the legacy public-card outcome; res.audit is the clean result App Home renders.
 func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, res actionResult) {
-	if h.cfg.AgentStore == nil {
-		return
-	}
 	var resultSuccess *bool
 	if res.audit.display != "" {
 		success := res.audit.success
 		resultSuccess = &success
 	}
-	if err := h.cfg.AgentStore.PutAuditEntry(ctx, payload.Team.ID, &slackdata.AuditEntry{
+	h.recordAgentAuditEntry(ctx, log, payload.Team.ID, &slackdata.AuditEntry{
 		Actor:         payload.User.ID,
 		Action:        string(pa.Action),
 		Target:        auditTargetFor(pa),
@@ -978,7 +1018,17 @@ func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payloa
 		Outcome:       res.cardText,
 		Result:        res.audit.display,
 		ResultSuccess: resultSuccess,
-	}); err != nil {
+	})
+}
+
+// recordAgentAuditEntry is the low-level best-effort store write shared by the
+// confirm-card and modal-submit paths. A store failure never affects the
+// already-attempted user action.
+func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, teamID string, entry *slackdata.AuditEntry) {
+	if h.cfg.AgentStore == nil || entry == nil {
+		return
+	}
+	if err := h.cfg.AgentStore.PutAuditEntry(ctx, teamID, entry); err != nil {
 		log.Warn("agent: record audit entry failed", "error", err)
 	}
 }

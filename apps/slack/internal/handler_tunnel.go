@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -80,6 +82,48 @@ const (
 	tunnelWebRefKindService   tunnelInstallWebRefKind = "service"
 )
 
+const (
+	// Connector reasons round-trip through Slack private_metadata, unlike the
+	// confirm-card audit path; keep this cap path-specific so metadata stays
+	// bounded without changing other agent audit reasons.
+	agentConnectorAuditReasonMaxRunes                           = 240
+	agentConnectorAuditWriteTimeout                             = 5 * time.Second
+	agentProtectConnectorAuditOutcome                           = "qURL Connector setup generated."
+	agentProtectConnectorAuditDegradedOutcome                   = "qURL Connector setup generated; install instructions were delivered as plain text after Block Kit delivery failed."
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome  = "qURL Connector setup generated, but Slack could not deliver the bootstrap-key DM and the bootstrap key was revoked."
+	agentProtectConnectorAuditInstructionsDeliveryFailedOutcome = "qURL Connector setup generated, but Slack could not confirm install-instructions delivery and the bootstrap key was revoked."
+	agentProtectConnectorAuditBuildFailedOutcome                = "qURL Connector setup failed before install instructions were delivered."
+	agentProtectConnectorAuditDMUnconfiguredOutcome             = "qURL Connector setup was not started because Slack DM delivery is not configured."
+	agentProtectConnectorAuditAdminVerificationFailedOutcome    = "qURL Connector setup was not started because qURL admin status could not be verified."
+	agentProtectConnectorAuditAdminDeniedOutcome                = "qURL Connector setup was not started because the modal submitter is not a qURL admin."
+	agentProtectConnectorAuditWorkerUnavailableOutcome          = "qURL Connector setup was not started because qURL was busy."
+	agentProtectConnectorAuditModalRejectedOutcome              = "qURL Connector setup was not started because the modal submission could not be verified."
+	agentProtectConnectorAuditActionMismatchOutcome             = "qURL Connector setup was not started because the agent request did not match the connector modal."
+	agentProtectConnectorAuditConfigurationUnavailableOutcome   = "qURL Connector setup was not started because qURL admin configuration was unavailable."
+	agentProtectConnectorAuditUnexpectedFailureOutcome          = "qURL Connector setup stopped unexpectedly before the outcome was recorded."
+	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome could not be determined."
+	tunnelInstallUnexpectedFailureNotice                        = "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect-connector` again."
+)
+
+const (
+	// Keep this enum in lockstep with agentProtectConnectorAuditResults.
+	agentProtectConnectorAuditResultInvalid tunnelInstallAgentAuditResult = iota
+	agentProtectConnectorAuditSuccessResult
+	agentProtectConnectorAuditDegradedResult
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
+	agentProtectConnectorAuditInstructionsDeliveryFailedResult
+	agentProtectConnectorAuditBuildFailedResult
+	agentProtectConnectorAuditDMUnconfiguredResult
+	agentProtectConnectorAuditAdminVerificationFailedResult
+	agentProtectConnectorAuditAdminDeniedResult
+	agentProtectConnectorAuditWorkerUnavailableResult
+	agentProtectConnectorAuditModalRejectedResult
+	agentProtectConnectorAuditActionMismatchResult
+	agentProtectConnectorAuditConfigurationUnavailableResult
+	agentProtectConnectorAuditUnexpectedFailureResult
+	agentProtectConnectorAuditResultCount
+)
+
 type tunnelInstallArgs struct {
 	Slug        string
 	Alias       string
@@ -90,6 +134,81 @@ type tunnelInstallArgs struct {
 	// Renderers intentionally consume only WebRef after validation succeeds.
 	WebRefKind tunnelInstallWebRefKind
 }
+
+type tunnelInstallRequest struct {
+	teamID       string
+	enterpriseID string
+	channelID    string
+	userID       string
+	responseURL  string
+	args         *tunnelInstallArgs
+	attemptID    string
+	agentAudit   *tunnelInstallAgentAudit
+}
+
+type tunnelInstallAgentAudit struct {
+	target string
+	reason string
+}
+
+type tunnelInstallAgentAuditResult uint8
+
+type tunnelInstallAgentAuditResultInfo struct {
+	outcome string
+	success bool
+}
+
+var agentProtectConnectorAuditResults = map[tunnelInstallAgentAuditResult]tunnelInstallAgentAuditResultInfo{
+	agentProtectConnectorAuditSuccessResult: {
+		outcome: agentProtectConnectorAuditOutcome,
+		success: true,
+	},
+	agentProtectConnectorAuditDegradedResult: {
+		outcome: agentProtectConnectorAuditDegradedOutcome,
+		success: true,
+	},
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult: {
+		outcome: agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome,
+	},
+	agentProtectConnectorAuditInstructionsDeliveryFailedResult: {
+		outcome: agentProtectConnectorAuditInstructionsDeliveryFailedOutcome,
+	},
+	agentProtectConnectorAuditBuildFailedResult: {
+		outcome: agentProtectConnectorAuditBuildFailedOutcome,
+	},
+	agentProtectConnectorAuditDMUnconfiguredResult: {
+		outcome: agentProtectConnectorAuditDMUnconfiguredOutcome,
+	},
+	agentProtectConnectorAuditAdminVerificationFailedResult: {
+		outcome: agentProtectConnectorAuditAdminVerificationFailedOutcome,
+	},
+	agentProtectConnectorAuditAdminDeniedResult: {
+		outcome: agentProtectConnectorAuditAdminDeniedOutcome,
+	},
+	agentProtectConnectorAuditWorkerUnavailableResult: {
+		outcome: agentProtectConnectorAuditWorkerUnavailableOutcome,
+	},
+	agentProtectConnectorAuditModalRejectedResult: {
+		outcome: agentProtectConnectorAuditModalRejectedOutcome,
+	},
+	agentProtectConnectorAuditActionMismatchResult: {
+		outcome: agentProtectConnectorAuditActionMismatchOutcome,
+	},
+	agentProtectConnectorAuditConfigurationUnavailableResult: {
+		outcome: agentProtectConnectorAuditConfigurationUnavailableOutcome,
+	},
+	agentProtectConnectorAuditUnexpectedFailureResult: {
+		outcome: agentProtectConnectorAuditUnexpectedFailureOutcome,
+	},
+}
+
+type tunnelInstallInstructionsDelivery uint8
+
+const (
+	tunnelInstallInstructionsDeliveryFailed tunnelInstallInstructionsDelivery = iota
+	tunnelInstallInstructionsDeliverySucceeded
+	tunnelInstallInstructionsDeliveryDegraded
+)
 
 // parseTunnelInstall parses the typed (power-user) form of the connector verb:
 // `/qurl-admin protect-connector <id> [env:…] [port:…] [alias:…] [container:|service:…]`.
@@ -253,7 +372,15 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 	setupStartedAt := h.now()
 	attemptID := tunnelBootstrapTypedAttemptID(values.Get(fieldTriggerID), setupStartedAt)
 	h.runAsync(w, "tunnel_install", values, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstallWithAttempt(ctx, log, teamID, enterpriseID, channelID, userID, values.Get(fieldResponseURL), args, attemptID)
+		h.processTunnelInstall(ctx, log, &tunnelInstallRequest{
+			teamID:       teamID,
+			enterpriseID: enterpriseID,
+			channelID:    channelID,
+			userID:       userID,
+			responseURL:  values.Get(fieldResponseURL),
+			args:         args,
+			attemptID:    attemptID,
+		})
 	})
 }
 
@@ -488,10 +615,23 @@ type tunnelInstallBuild struct {
 // path; a CheckAdmin re-check on the confirm path). On failure it returns the
 // user-facing message to post plus the error, revoking any bootstrap key it
 // minted if key validation or the final render fails (so a key whose install
-// block never rendered doesn't stay live). On success the caller delivers
-// build.message and, if delivery is not confirmed, revokes build.key via
-// [revokeBootstrapKeyAfterInstallFailure].
+// block never rendered doesn't stay live). The same revoke-on-build-failure
+// invariant is protected across panics between key mint and the successful
+// return. On success the caller delivers build.message and, if delivery is not
+// confirmed, revokes build.key via [revokeBootstrapKeyAfterInstallFailure].
 func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, attemptID string) (*tunnelInstallBuild, string, error) {
+	var c *client.Client
+	var mintedKey *client.APIKey
+	buildComplete := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if mintedKey != nil && !buildComplete {
+				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, mintedKey, "build_panic")
+			}
+			panic(rec)
+		}
+	}()
+
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
@@ -546,6 +686,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
 		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"), err
 	}
+	mintedKey = key
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "missing_plaintext")
@@ -570,61 +711,217 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, "qURL Connector setup could not render the bootstrap-key DM. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
 
+	buildComplete = true
 	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, secretMessage: secretMsg}, "", nil
 }
 
-// processTunnelInstall is the async-worker body for `/qurl-admin
-// protect-connector`. It runs the shared mutation core and delivers the result
-// to Slack. The secret DM is delivered first so DM failure can stop before
-// publishing install instructions that reference an unavailable secret; if the
-// later install-instructions delivery fails, the key is revoked and the admin gets
-// a best-effort discard notice.
-func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
-	h.processTunnelInstallWithAttempt(ctx, log, teamID, enterpriseID, channelID, userID, responseURL, args, tunnelBootstrapTimeAttemptID("started", setupStartedAt))
+// processTunnelInstall is the async-worker body for qURL Connector setup. It
+// runs the shared mutation core and delivers the result to Slack. The secret DM
+// is delivered first so DM failure can stop before publishing install
+// instructions that reference an unavailable secret; if the later
+// install-instructions delivery fails, the key is revoked and the admin gets a
+// best-effort discard notice. agentAudit is nil for slash-command setup because
+// that path is not an agent action.
+func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, req *tunnelInstallRequest) {
+	result := h.processTunnelInstallCore(ctx, log, req)
+	h.recordTunnelInstallAgentAudit(log, req, result)
 }
 
-func (h *Handler) processTunnelInstallWithAttempt(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, attemptID string) {
+func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger, req *tunnelInstallRequest) (result tunnelInstallAgentAuditResult) {
+	result = agentProtectConnectorAuditResultInvalid
+	var panicCleanup *tunnelInstallBuild
+	defer func() {
+		if rec := recover(); rec != nil {
+			result = agentProtectConnectorAuditUnexpectedFailureResult
+			log.Error("tunnel install: panic in setup worker", "recover", rec, "stack", string(debug.Stack()))
+			if panicCleanup != nil {
+				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "unexpected_panic")
+			}
+			h.postTunnelInstallUnexpectedFailureNotice(log, req)
+		}
+	}()
+	if req == nil || req.args == nil {
+		log.Error("tunnel install: setup worker missing parsed modal args")
+		h.postTunnelInstallUnexpectedFailureNotice(log, req)
+		return agentProtectConnectorAuditUnexpectedFailureResult
+	}
+	args := req.args
 	if h.cfg.PostDM == nil {
 		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
-		_ = h.postResponse(log, responseURL, "qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
-		return
+		_ = h.postResponse(log, req.responseURL, "qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
+		return agentProtectConnectorAuditDMUnconfiguredResult
 	}
-	build, failMsg, err := h.buildTunnelInstall(ctx, log, teamID, channelID, userID, args, attemptID)
+	build, failMsg, err := h.buildTunnelInstall(ctx, log, req.teamID, req.channelID, req.userID, args, req.attemptID)
 	if err != nil {
-		_ = h.postResponse(log, responseURL, failMsg)
-		return
+		_ = h.postResponse(log, req.responseURL, failMsg)
+		// Once the modal submit has passed validation/admin gates and reached
+		// this worker, auth/resource/key/render failures are terminal agent
+		// setup attempts too. buildTunnelInstall revokes any minted key before
+		// returning.
+		return agentProtectConnectorAuditBuildFailedResult
 	}
+	panicCleanup = build
+	// buildTunnelInstall owns revoke-on-panic before it returns; after this
+	// assignment, the process-level recover owns unexpected post-build panics.
+	// Every normal return path below must nil panicCleanup after it revokes or
+	// confirms delivery so recovery does not double-handle an already-settled key.
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
-	if err := h.postTunnelInstallDM(ctx, teamID, enterpriseID, userID, build.secretMessage); err != nil {
+	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
 		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
+		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
+		panicCleanup = nil
 		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
 		if errors.Is(err, ErrSlackMissingScope) {
 			message += " " + h.tunnelBootstrapDMSlackAppInstallMessage()
 		} else {
 			message += " Re-run `/qurl-admin protect-connector` after DM delivery is available."
 		}
-		_ = h.postResponse(log, responseURL, message)
-		return
+		_ = h.postResponse(log, req.responseURL, message)
+		return agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
 	}
-	if !h.postInstallInstructions(log, responseURL, build.message) {
+	delivery := h.postInstallInstructions(log, req.responseURL, build.message)
+
+	switch delivery {
+	case tunnelInstallInstructionsDeliverySucceeded:
+		panicCleanup = nil
+		return agentProtectConnectorAuditSuccessResult
+	case tunnelInstallInstructionsDeliveryDegraded:
+		panicCleanup = nil
+		return agentProtectConnectorAuditDegradedResult
+	case tunnelInstallInstructionsDeliveryFailed:
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
 		// revoke notice. The key is still revoked because delivery was not
 		// confirmed, and the structured logs retain the resource/key IDs for
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
+		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
+		panicCleanup = nil
 		// Intentionally notify both places: the DM reaches admins who saw the key
 		// first, while response_url covers the command surface if DM delivery fails.
-		if err := h.postTunnelInstallDM(h.baseCtx, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again."); err != nil {
+		if err := h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again."); err != nil {
 			log.Error("tunnel install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_dm_delivery_failed")
 		}
-		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
+		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
+		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
+	// Unreachable with today's enum; if a future delivery state reaches this guard
+	// before the exhaustive linter catches it, fail closed by revoking the key and
+	// surfacing the anomaly as unexpected.
+	log.Error("tunnel install: unknown Slack follow-up delivery state after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "delivery_state", uint8(delivery))
+	safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "unknown_response_url_delivery_state")
+	panicCleanup = nil
+	return agentProtectConnectorAuditUnexpectedFailureResult
+}
+
+func (h *Handler) postTunnelInstallUnexpectedFailureNotice(log *slog.Logger, req *tunnelInstallRequest) {
+	if req == nil || strings.TrimSpace(req.responseURL) == "" {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("tunnel install: panic posting unexpected-failure notice", "recover", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
+}
+
+func tunnelInstallAgentAuditFromMetadata(log *slog.Logger, meta *TunnelInstallModalMetadata, args *tunnelInstallArgs) (*tunnelInstallAgentAudit, bool) {
+	if meta == nil || meta.Agent == nil || args == nil {
+		return nil, true
+	}
+	audit := &tunnelInstallAgentAudit{
+		target: args.Slug,
+		reason: normalizeTunnelInstallAgentReason(meta.Agent.Reason),
+	}
+	if meta.Agent.Action != string(agent.ActionProtectConnector) {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("tunnel install agent metadata action mismatch", "action", meta.Agent.Action, "expected_action", agent.ActionProtectConnector)
+		return audit, false
+	}
+	// Submit-side half of the protect-connector provenance carry-through; the
+	// confirm-side half is tunnelInstallAgentMetadata.
+	// Reason is untrusted proposal provenance; target is the submitted/enforced
+	// connector identity from the modal, so an edited slug is recorded as the
+	// setup the approver actually submitted. Re-normalize after the Slack
+	// private_metadata round-trip rather than trusting confirm-side truncation.
+	return audit, true
+}
+
+func normalizeTunnelInstallAgentReason(reason string) string {
+	return truncateRunes(strings.TrimSpace(reason), agentConnectorAuditReasonMaxRunes)
+}
+
+func (r tunnelInstallAgentAuditResult) auditFields() (outcome string, resultSuccess *bool, known bool) {
+	info, ok := agentProtectConnectorAuditResults[r]
+	if !ok {
+		return agentProtectConnectorAuditUnknownOutcome, nil, false
+	}
+	success := info.success
+	return info.outcome, &success, true
+}
+
+func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
+	if req == nil || req.agentAudit == nil {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	audit := req.agentAudit
+	// Modal-submit audits intentionally do not inherit request, worker, or handler
+	// shutdown ctx: setup, Slack delivery, and possible revoke may have spent or
+	// canceled those by the time we write the review row. Keep the best-effort
+	// write independent but bounded so an already-acked submit still gets its row.
+	auditCtx, cancel := context.WithTimeout(context.Background(), agentConnectorAuditWriteTimeout)
+	defer cancel()
+	resultOutcome, resultSuccess, known := result.auditFields()
+	if !known {
+		log.Warn("tunnel install agent audit result unknown; using unknown outcome", "result", uint8(result))
+	}
+	// Modal-submit audits have no public confirm card, so the legacy Outcome
+	// and structured App Home Result intentionally share the same neutral text.
+	// success=false on known delivery failure reflects that the setup did not
+	// reach a usable user-visible state; unknown results keep ResultSuccess nil
+	// so App Home does not render them as a definite failure.
+	// The stored action names the connector modal/workflow even for the
+	// defensive signed-agent action mismatch path; the result distinguishes that
+	// rejection from other modal verification failures.
+	h.recordAgentAuditEntry(auditCtx, log, req.teamID, &slackdata.AuditEntry{
+		Actor:         req.userID,
+		Action:        string(agent.ActionProtectConnector),
+		Target:        audit.target,
+		Channel:       req.channelID,
+		Reason:        audit.reason,
+		Outcome:       resultOutcome,
+		Result:        resultOutcome,
+		ResultSuccess: resultSuccess,
+	})
+}
+
+func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
+	if req == nil || req.agentAudit == nil {
+		return
+	}
+	// Modal-submit audits are best-effort, 5s-capped, and intentionally run with
+	// h.Go instead of the saturated worker pool: rejection paths must preserve
+	// Slack's short modal response window, while accepted paths add the audit
+	// before the worker returns so shutdown cannot miss it and then let the
+	// worker slot release while the audit write completes. This path is
+	// deliberately not pool-bounded; it is behind Slack request signing plus
+	// modal metadata/admin gates, so peak concurrency is signed agent-origin
+	// submits within the audit write timeout window.
+	h.Go(func() {
+		h.recordTunnelInstallAgentAudit(log, req, result)
+	})
 }
 
 func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID, userID, msg string) error {
@@ -637,6 +934,9 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
 	if key == nil || strings.TrimSpace(key.KeyID) == "" {
 		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "event", "tunnel_bootstrap_cleanup_skipped", "reason", reason)
 		return
@@ -664,6 +964,18 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 		return
 	}
 	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
+}
+
+func safeRevokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("tunnel install: panic revoking bootstrap key after failure", "recover", rec, "reason", reason, "stack", string(debug.Stack()))
+		}
+	}()
+	revokeBootstrapKeyAfterInstallFailure(parent, log, c, key, reason)
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug, attemptID string) string {
@@ -1201,7 +1513,8 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // retries once before reporting failure because a false negative revokes a
 // freshly minted bootstrap key. Returns whether SOME rendering was delivered,
 // so the caller revokes only when delivery remains unconfirmed after the
-// fallback and retry.
+// fallback and retry. A text success after a rejected Block Kit attempt is
+// reported distinctly so agent audit rows can show the degraded delivery.
 //
 // The text post is the same single-call delivery the install flow used before
 // blocks existed, so this path is never worse than that baseline: a Slack-side
@@ -1213,12 +1526,19 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // bootstrap key, and the already-DM'd key is not revoked, so this is benign: at
 // worst the operator sees two ephemeral install messages, never a leaked or
 // stale key.
-func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) bool {
+func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) tunnelInstallInstructionsDelivery {
 	if blocks, ok := installMessageBlocks(msg); ok {
 		if h.postResponseBlocks(log, responseURL, msg, blocks) {
-			return true
+			return tunnelInstallInstructionsDeliverySucceeded
 		}
 		log.Warn("tunnel install: Block Kit follow-up delivery failed; retrying as plain text")
+		if h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text") {
+			return tunnelInstallInstructionsDeliveryDegraded
+		}
+		return tunnelInstallInstructionsDeliveryFailed
 	}
-	return h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text")
+	if h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text") {
+		return tunnelInstallInstructionsDeliverySucceeded
+	}
+	return tunnelInstallInstructionsDeliveryFailed
 }

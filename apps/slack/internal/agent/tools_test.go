@@ -103,14 +103,14 @@ func TestParseProposal(t *testing.T) {
 			},
 		},
 		{
-			name:       "protect_connector tolerates missing fields",
+			name:       "protect_connector tolerates missing fields and keeps reason",
 			tool:       toolProposeProtectConnector,
-			input:      map[string]any{fieldAlias: testChannel},
+			input:      map[string]any{fieldAlias: testChannel, fieldReason: " " + testReason + " "},
 			wantOK:     true,
 			wantAction: ActionProtectConnector,
 			wantGated:  true,
 			check: func(t *testing.T, p *Proposal) {
-				if p.Alias != testChannel || !strings.Contains(p.Summary, testChannel) {
+				if p.Alias != testChannel || p.Reason != testReason || !strings.Contains(p.Summary, testChannel) {
 					t.Errorf("got %+v", p)
 				}
 			},

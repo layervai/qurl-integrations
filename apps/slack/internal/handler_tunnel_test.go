@@ -13,9 +13,15 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -32,6 +38,8 @@ const (
 	testTunnelAPIKey       = "lv_live_test_bootstrap"
 	testTunnelAPIKeyID     = "key_tunnel_bootstrap"
 	testSlackResponseURL   = "https://hooks.slack.test/response"
+	testAgentAuditTable    = "agent_state"
+	testTunnelAgentReason  = "customer requested connector setup"
 	testTunnelDockerLine   = `CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"`
 	testTunnelModalKey     = "lv_live_modal_bootstrap"
 	testTunnelPipefailLine = "set -o pipefail"
@@ -40,6 +48,133 @@ const (
 	testSlackTriggerID     = "trigger_test"
 	testEnterpriseID       = "E_GRID"
 )
+
+type failingAuthProvider struct{ err error }
+
+func (p failingAuthProvider) APIKey(context.Context, string) (string, error) {
+	return "", p.err
+}
+
+type protectConnectorProposalLLM struct{}
+
+func (protectConnectorProposalLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+	input, err := json.Marshal(map[string]any{
+		"alias":  testTunnelAliasDash,
+		"env":    string(tunnelEnvDocker),
+		"port":   8080,
+		"reason": testTunnelAgentReason,
+	})
+	if err != nil {
+		return agent.Response{}, err
+	}
+	return agent.Response{
+		ToolCalls: []agent.ToolCall{{
+			ID:    "tool_protect_connector",
+			Name:  "propose_protect_connector",
+			Input: input,
+		}},
+		StopReason: "tool_use",
+	}, nil
+}
+
+type unusedAgentReadBackend struct{}
+
+func (unusedAgentReadBackend) ListResources(context.Context, *agent.TurnContext) (string, error) {
+	return "", nil
+}
+
+func (unusedAgentReadBackend) ListAliases(context.Context, *agent.TurnContext) (string, error) {
+	return "", nil
+}
+
+func (unusedAgentReadBackend) ResolveToken(context.Context, *agent.TurnContext, string) (string, error) {
+	return "", nil
+}
+
+func (unusedAgentReadBackend) Quota(context.Context, *agent.TurnContext) (string, error) {
+	return "", nil
+}
+
+type blockingPutAgentDDB struct {
+	*memAgentDDB
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingPutAgentDDB() *blockingPutAgentDDB {
+	return &blockingPutAgentDDB{
+		memAgentDDB: newMemAgentDDB(),
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (f *blockingPutAgentDDB) PutItem(ctx context.Context, in *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	f.once.Do(func() {
+		close(f.started)
+	})
+	select {
+	case <-f.release:
+		return f.memAgentDDB.PutItem(ctx, in, optFns...)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func protectConnectorAgentMetadataFromToolCall(t *testing.T) *TunnelInstallAgentMetadata {
+	t.Helper()
+
+	res, _, err := agent.New(protectConnectorProposalLLM{}, unusedAgentReadBackend{}).Run(context.Background(), &agent.TurnContext{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		CallerIsAdmin: true,
+	}, nil, "protect the prod connector for customer setup")
+	if err != nil {
+		t.Fatalf("agent Run: %v", err)
+	}
+	if res.Proposal == nil {
+		t.Fatalf("expected protect-connector proposal, got reply %q", res.Reply)
+	}
+	prop := res.Proposal
+	if prop.Action != agent.ActionProtectConnector || prop.Reason != testTunnelAgentReason {
+		t.Fatalf("proposal = %+v, want protect-connector reason %q", prop, testTunnelAgentReason)
+	}
+	return tunnelInstallAgentMetadata(&pendingAction{
+		Action: prop.Action,
+		Reason: prop.Reason,
+	})
+}
+
+func testTunnelInstallArgs() *tunnelInstallArgs {
+	return &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}
+}
+
+func testTunnelInstallAgentAudit() *tunnelInstallAgentAudit {
+	return &tunnelInstallAgentAudit{
+		target: testTunnelSlug,
+		reason: testTunnelAgentReason,
+	}
+}
+
+func testTunnelInstallRequest(responseURL string, now time.Time, audit *tunnelInstallAgentAudit) *tunnelInstallRequest {
+	return &tunnelInstallRequest{
+		teamID:       testAdminTeamID,
+		enterpriseID: "",
+		channelID:    testTunnelChannelID,
+		userID:       testAdminUserID,
+		responseURL:  responseURL,
+		args:         testTunnelInstallArgs(),
+		attemptID:    tunnelBootstrapTimeAttemptID("test-attempt", now),
+		agentAudit:   audit,
+	}
+}
 
 const (
 	testForbiddenResourceLabel   = "Resource:"
@@ -1433,6 +1568,227 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
+	cases := []struct {
+		name      string
+		agentMeta func(*testing.T) *TunnelInstallAgentMetadata
+		wantAudit bool
+	}{
+		{
+			name:      "agent initiated from tool call",
+			agentMeta: protectConnectorAgentMetadataFromToolCall,
+			wantAudit: true,
+		},
+		{
+			name:      "slash initiated",
+			agentMeta: func(*testing.T) *TunnelInstallAgentMetadata { return nil },
+			wantAudit: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := fixedNow
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyResourceID: testTunnelResourceID,
+					testKeyType:       client.ResourceTypeTunnel,
+					testKeySlug:       testTunnelSlug,
+					testKeyStatus:     client.StatusActive,
+				})
+			})
+			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyKeyID:      testTunnelAPIKeyID,
+					testKeyAPIKey:     testTunnelModalKey,
+					testKeyStatus:     client.StatusActive,
+					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+					testKeyTunnelSlug: testTunnelSlug,
+					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+				})
+			})
+
+			h := newAdminTestHandler(t, ts)
+			agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+			h.cfg.AgentStore = agentStore
+			freezeTunnelBootstrapNow(t, h, now)
+			h.cfg.TunnelImage = testTunnelImageRef
+			dmPosts := captureTunnelPostDMSuccess(h)
+			h.SetAliasStore(h.cfg.AdminStore)
+			inv := newAdminSlashInvoker(t, h)
+			meta := TunnelInstallModalMetadata{
+				TeamID:        testAdminTeamID,
+				ChannelID:     testTunnelChannelID,
+				UserID:        testAdminUserID,
+				ResponseURL:   inv.responseU.URL,
+				CreatedAtUnix: now.Unix(),
+				Agent:         tc.agentMeta(t),
+			}
+			body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+			}
+			async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+			if strings.Contains(async, testTunnelModalKey) {
+				t.Fatalf("async reply leaked bootstrap key after DM delivery split:\n%s", async)
+			}
+			if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
+				t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
+			}
+			h.Wait()
+
+			got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+			if err != nil {
+				t.Fatalf("list audit entries: %v", err)
+			}
+			if !tc.wantAudit {
+				if len(got) != 0 {
+					t.Fatalf("slash-initiated modal must not record agent audit, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("agent-initiated modal should record one audit entry, got %d: %+v", len(got), got)
+			}
+			entry := got[0]
+			if entry.Actor != testAdminUserID || entry.Action != string(agent.ActionProtectConnector) || entry.Target != testTunnelSlug || entry.Channel != testTunnelChannelID {
+				t.Fatalf("audit entry identity mismatch: %+v", entry)
+			}
+			if entry.Reason != testTunnelAgentReason {
+				t.Fatalf("audit reason = %q, want modal provenance reason", entry.Reason)
+			}
+			if entry.Outcome == "" || strings.Contains(entry.Outcome, testTunnelModalKey) {
+				t.Fatalf("audit outcome must be non-empty and must not store the bootstrap key: %+v", entry)
+			}
+			if entry.Result != agentProtectConnectorAuditOutcome {
+				t.Fatalf("audit result = %q, want %q", entry.Result, agentProtectConnectorAuditOutcome)
+			}
+			if entry.ResultSuccess == nil || !*entry.ResultSuccess {
+				t.Fatalf("audit result success = %v, want true", entry.ResultSuccess)
+			}
+		})
+	}
+}
+
+func TestTunnelInstallAgentAuditFromMetadataTruncatesReason(t *testing.T) {
+	longReason := strings.Repeat("r", agentConnectorAuditReasonMaxRunes+20)
+	audit, ok := tunnelInstallAgentAuditFromMetadata(slog.Default(), &TunnelInstallModalMetadata{
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: "  " + longReason + "  ",
+		},
+	}, &tunnelInstallArgs{Slug: testTunnelSlug})
+
+	if !ok {
+		t.Fatal("agent action ok = false, want true")
+	}
+	if audit == nil {
+		t.Fatal("audit = nil, want protect-connector audit")
+	}
+	if audit.target != testTunnelSlug {
+		t.Fatalf("target = %q, want submitted slug %q", audit.target, testTunnelSlug)
+	}
+	if got := len([]rune(audit.reason)); got != agentConnectorAuditReasonMaxRunes {
+		t.Fatalf("reason runes = %d, want %d", got, agentConnectorAuditReasonMaxRunes)
+	}
+	if !strings.HasSuffix(audit.reason, "…") {
+		t.Fatalf("reason = %q, want ellipsis suffix", audit.reason)
+	}
+}
+
+func TestTunnelInstallAgentAuditFromMetadataFlagsUnexpectedAction(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	audit, ok := tunnelInstallAgentAuditFromMetadata(log, &TunnelInstallModalMetadata{
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectURL),
+			Reason: testTunnelAgentReason,
+		},
+	}, &tunnelInstallArgs{Slug: testTunnelSlug})
+
+	if ok {
+		t.Fatal("agent action ok = true, want false for non-connector action")
+	}
+	if audit == nil || audit.target != testTunnelSlug || audit.reason != testTunnelAgentReason {
+		t.Fatalf("audit = %+v, want target/reason preserved for rejected metadata", audit)
+	}
+	if !strings.Contains(logs.String(), "action mismatch") || !strings.Contains(logs.String(), string(agent.ActionProtectURL)) {
+		t.Fatalf("log = %q, want action-mismatch breadcrumb", logs.String())
+	}
+}
+
+func TestTunnelInstallModalRejectsUnexpectedAgentActionBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var resourceHits atomic.Int32
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits.Add(1)
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectURL),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, testAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Could not verify this modal") {
+		t.Fatalf("modal response = %s, want verification rejection", w.Body.String())
+	}
+	h.Wait()
+	if resourceHits.Load() != 0 {
+		t.Fatalf("resource create hits = %d, want 0 before rejecting unexpected agent action", resourceHits.Load())
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %+v, want one modal-rejected row", got)
+	}
+	entry := got[0]
+	if entry.Actor != testAdminUserID || entry.Action != string(agent.ActionProtectConnector) || entry.Target != testTunnelSlug || entry.Channel != testTunnelChannelID {
+		t.Fatalf("audit entry identity mismatch: %+v", entry)
+	}
+	if entry.Reason != testTunnelAgentReason {
+		t.Fatalf("audit reason = %q, want modal provenance reason", entry.Reason)
+	}
+	if entry.Outcome != agentProtectConnectorAuditActionMismatchOutcome || entry.Result != agentProtectConnectorAuditActionMismatchOutcome {
+		t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditActionMismatchOutcome)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
+	}
+}
+
 func TestTunnelInstallModalRejectsUnsafeWebRefBeforeMintingKey(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -1516,7 +1872,9 @@ func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
 	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.cfg.AdminStore = nil
 	meta := TunnelInstallModalMetadata{
@@ -1525,6 +1883,10 @@ func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
 	}
 	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1537,19 +1899,33 @@ func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "Admin features are not configured") {
 		t.Fatalf("modal response = %s, want admin-store configuration rejection", w.Body.String())
 	}
+	h.Wait()
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditConfigurationUnavailableOutcome {
+		t.Fatalf("audit entries = %+v, want configuration-unavailable outcome", got)
+	}
 }
 
 func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
 	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
 	}
 	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1562,23 +1938,119 @@ func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "Channel alias storage is not configured") {
 		t.Fatalf("modal response = %s, want channel-shortcut store rejection", w.Body.String())
 	}
+	h.Wait()
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditConfigurationUnavailableOutcome {
+		t.Fatalf("audit entries = %+v, want configuration-unavailable outcome", got)
+	}
 }
 
 func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
+	const nonAdminUserID = "U_non_admin"
+
+	cases := []struct {
+		name      string
+		agentMeta *TunnelInstallAgentMetadata
+		wantAudit bool
+	}{
+		{
+			name:      "slash initiated",
+			wantAudit: false,
+		},
+		{
+			name: "agent initiated",
+			agentMeta: &TunnelInstallAgentMetadata{
+				Action: string(agent.ActionProtectConnector),
+				Reason: testTunnelAgentReason,
+			},
+			wantAudit: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+
+			agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+			h := newAdminTestHandler(t, ts)
+			h.cfg.AgentStore = agentStore
+			h.SetAliasStore(h.cfg.AdminStore)
+			meta := TunnelInstallModalMetadata{
+				TeamID:        testAdminTeamID,
+				ChannelID:     testTunnelChannelID,
+				UserID:        nonAdminUserID,
+				ResponseURL:   testSlackResponseURL,
+				CreatedAtUnix: fixedNow.Unix(),
+				Agent:         tc.agentMeta,
+			}
+			body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "admin-only") {
+				t.Fatalf("modal response = %s, want non-admin rejection", w.Body.String())
+			}
+			h.Wait()
+
+			got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, nonAdminUserID, 10)
+			if err != nil {
+				t.Fatalf("list audit entries: %v", err)
+			}
+			if !tc.wantAudit {
+				if len(got) != 0 {
+					t.Fatalf("slash-initiated modal must not record agent audit, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("agent-initiated modal should record one audit entry, got %d: %+v", len(got), got)
+			}
+			entry := got[0]
+			if entry.Actor != nonAdminUserID || entry.Action != string(agent.ActionProtectConnector) || entry.Target != testTunnelSlug || entry.Channel != testTunnelChannelID {
+				t.Fatalf("audit entry identity mismatch: %+v", entry)
+			}
+			if entry.Reason != testTunnelAgentReason {
+				t.Fatalf("audit reason = %q, want modal provenance reason", entry.Reason)
+			}
+			if entry.Outcome != agentProtectConnectorAuditAdminDeniedOutcome || entry.Result != agentProtectConnectorAuditAdminDeniedOutcome {
+				t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditAdminDeniedOutcome)
+			}
+			if entry.ResultSuccess == nil || *entry.ResultSuccess {
+				t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
+			}
+		})
+	}
+}
+
+func TestTunnelInstallModalAdminCheckErrorAuditsVerificationFailure(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("workspace mapping read failed"))
 
-	const nonAdminUserID = "U_non_admin"
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
 	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
 	h.SetAliasStore(h.cfg.AdminStore)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
 		ChannelID:     testTunnelChannelID,
-		UserID:        nonAdminUserID,
+		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
 	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, testAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1586,8 +2058,249 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "Could not verify admin status") {
+		t.Fatalf("modal response = %s, want admin verification failure", w.Body.String())
+	}
+	h.Wait()
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated admin verification failure should record one audit entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Outcome != agentProtectConnectorAuditAdminVerificationFailedOutcome || got[0].Result != agentProtectConnectorAuditAdminVerificationFailedOutcome {
+		t.Fatalf("audit outcome/result = %q/%q, want %q", got[0].Outcome, got[0].Result, agentProtectConnectorAuditAdminVerificationFailedOutcome)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+}
+
+func TestTunnelInstallModalNonAdminAgentAuditDoesNotDelayAck(t *testing.T) {
+	const nonAdminUserID = "U_non_admin"
+
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	ddb := newBlockingPutAgentDDB()
+	releaseAudit := func() {
+		select {
+		case <-ddb.release:
+		default:
+			close(ddb.release)
+		}
+	}
+	agentStore := &slackdata.AgentStore{Client: ddb, TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+	defer func() {
+		releaseAudit()
+		h.Wait()
+	}()
+
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        nonAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	req := newSignedRequest(t, pathSlackInteractions, body, body)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		done <- w
+	}()
+
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("modal response waited for rejected-path audit write")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
 	if !strings.Contains(w.Body.String(), "admin-only") {
 		t.Fatalf("modal response = %s, want non-admin rejection", w.Body.String())
+	}
+
+	select {
+	case <-ddb.started:
+	case <-time.After(time.Second):
+		t.Fatal("rejected-path audit write did not start")
+	}
+	releaseAudit()
+	h.Wait()
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, nonAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated modal should record one audit entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Outcome != agentProtectConnectorAuditAdminDeniedOutcome || got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit entry = %+v, want admin-rejected failure outcome", got[0])
+	}
+}
+
+func TestTunnelInstallModalWorkerSaturationAuditsAgentSubmit(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	for i := 0; i < cap(h.sem); i++ {
+		h.sem <- struct{}{}
+	}
+	defer func() {
+		for len(h.sem) > 0 {
+			<-h.sem
+		}
+	}()
+
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, testAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), modalBusyMsg) {
+		t.Fatalf("modal response = %s, want busy response", w.Body.String())
+	}
+	h.Wait()
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated saturated modal should record one audit entry, got %d: %+v", len(got), got)
+	}
+	entry := got[0]
+	if entry.Outcome != agentProtectConnectorAuditWorkerUnavailableOutcome || entry.Result != agentProtectConnectorAuditWorkerUnavailableOutcome {
+		t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditWorkerUnavailableOutcome)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
+	}
+	if entry.Actor != testAdminUserID || entry.Target != testTunnelSlug || entry.Reason != testTunnelAgentReason {
+		t.Fatalf("audit identity = %+v, want submitted agent provenance", entry)
+	}
+}
+
+func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	now := fixedNow
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelModalKey,
+			testKeyStatus:     client.StatusActive,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+		})
+	})
+
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	ddb := newBlockingPutAgentDDB()
+	releaseAudit := func() {
+		select {
+		case <-ddb.release:
+		default:
+			close(ddb.release)
+		}
+	}
+	agentStore := &slackdata.AgentStore{Client: ddb, TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h := newAdminTestHandler(t, ts)
+	h.sem = make(chan struct{}, 1)
+	h.cfg.AgentStore = agentStore
+	h.cfg.TunnelImage = testTunnelImageRef
+	freezeTunnelBootstrapNow(t, h, now)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	defer func() {
+		releaseAudit()
+		h.Wait()
+	}()
+
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   responseURL.URL,
+		CreatedAtUnix: now.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, testAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	select {
+	case <-ddb.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tail audit write did not start")
+	}
+	if got := len(h.sem); got != 0 {
+		t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", got)
+	}
+	releaseAudit()
+	h.Wait()
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditOutcome {
+		t.Fatalf("audit entries = %+v, want success outcome", got)
 	}
 }
 
@@ -1598,6 +2311,8 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h.cfg.AgentStore = agentStore
 	freezeTunnelBootstrapNow(t, h, now)
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
@@ -1607,6 +2322,10 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: now.Add(-tunnelInstallModalTTL - time.Minute).Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
 	}
 	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1619,6 +2338,14 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 	if !strings.Contains(w.Body.String(), "modal expired") {
 		t.Fatalf("modal response = %s, want stale modal rejection", w.Body.String())
 	}
+	h.Wait()
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditModalRejectedOutcome {
+		t.Fatalf("audit entries = %+v, want modal-rejected outcome", got)
+	}
 }
 
 func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing.T) {
@@ -1628,6 +2355,8 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h.cfg.AgentStore = agentStore
 	freezeTunnelBootstrapNow(t, h, now)
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
@@ -1637,6 +2366,10 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: now.Add(tunnelBootstrapSkew + time.Minute).Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
 	}
 	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -1648,6 +2381,14 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 	}
 	if !strings.Contains(w.Body.String(), "modal expired") {
 		t.Fatalf("modal response = %s, want future modal rejection", w.Body.String())
+	}
+	h.Wait()
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditModalRejectedOutcome {
+		t.Fatalf("audit entries = %+v, want modal-rejected outcome", got)
 	}
 }
 
@@ -2201,6 +2942,45 @@ func TestTunnelInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallAgentAuditRecordsDMUnconfigured(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	now := fixedNow
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+
+	if resourceHits != 0 || apiKeyHits != 0 {
+		t.Fatalf("resource/api-key hits = %d/%d, want 0/0 before DM wiring", resourceHits, apiKeyHits)
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditDMUnconfiguredOutcome {
+		t.Fatalf("audit entries = %+v, want DM-unconfigured outcome", got)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+}
+
 func TestRevokeBootstrapKeyAfterInstallFailureNoopsWithoutKeyID(t *testing.T) {
 	t.Parallel()
 
@@ -2332,6 +3112,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	now := fixedNow
 
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -2354,6 +3135,8 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		revokeHits++
 		w.WriteHeader(http.StatusNoContent)
 	})
+	processCtx, cancelProcess := context.WithCancel(context.Background())
+	defer cancelProcess()
 	var responseBodies []string
 	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -2361,20 +3144,20 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 			t.Fatalf("read response_url body: %v", err)
 		}
 		responseBodies = append(responseBodies, string(body))
+		if len(responseBodies) == 3 {
+			cancelProcess()
+		}
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	t.Cleanup(responseURL.Close)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h.cfg.AgentStore = agentStore
 	h.cfg.TunnelImage = testTunnelImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, h.now())
+	h.processTunnelInstall(processCtx, slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -2401,6 +3184,448 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	}
 	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
 		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated delivery failure should record one audit entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Outcome != agentProtectConnectorAuditInstructionsDeliveryFailedOutcome {
+		t.Fatalf("audit outcome = %q, want %q", got[0].Outcome, agentProtectConnectorAuditInstructionsDeliveryFailedOutcome)
+	}
+	if got[0].Result != agentProtectConnectorAuditInstructionsDeliveryFailedOutcome {
+		t.Fatalf("audit result = %q, want %q", got[0].Result, agentProtectConnectorAuditInstructionsDeliveryFailedOutcome)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+	if strings.Contains(got[0].Outcome, testTunnelAPIKey) {
+		t.Fatalf("audit outcome must not store the bootstrap key: %+v", got[0])
+	}
+}
+
+func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	now := fixedNow
+
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = &slackdata.AgentStore{
+		Client:    &memAgentDDB{items: map[string]map[string]ddbtypes.AttributeValue{}, putErr: errors.New("audit store unavailable")},
+		TableName: testAgentAuditTable,
+		Now:       func() time.Time { return now },
+	}
+	h.cfg.TunnelImage = testTunnelImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+
+	if len(responseBodies) == 0 {
+		t.Fatal("response_url posts = 0, want install instructions despite audit write failure")
+	}
+	if strings.Contains(strings.Join(responseBodies, "\n"), testTunnelAPIKey) {
+		t.Fatalf("response_url posts leaked bootstrap key despite DM delivery split: %v", responseBodies)
+	}
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
+		t.Fatalf("bootstrap DM posts = %+v, want delivered key despite audit write failure", *dmPosts)
+	}
+}
+
+func TestTunnelInstallAgentAuditIsIndependentOfNilBaseContext(t *testing.T) {
+	now := fixedNow
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h := &Handler{cfg: Config{AgentStore: agentStore}}
+	h.recordTunnelInstallAgentAudit(nil, &tunnelInstallRequest{
+		teamID:    testAdminTeamID,
+		channelID: testTunnelChannelID,
+		userID:    testAdminUserID,
+		agentAudit: &tunnelInstallAgentAudit{
+			target: testTunnelSlug,
+			reason: testTunnelAgentReason,
+		},
+	}, agentProtectConnectorAuditSuccessResult)
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(got))
+	}
+	if got[0].Target != testTunnelSlug || got[0].Reason != testTunnelAgentReason {
+		t.Fatalf("audit entry = %+v, want target/reason from request audit", got[0])
+	}
+}
+
+func TestTunnelInstallAgentAuditIsIndependentOfCanceledBaseContext(t *testing.T) {
+	now := fixedNow
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := &Handler{baseCtx: baseCtx, cfg: Config{AgentStore: agentStore}}
+	h.recordTunnelInstallAgentAudit(slog.Default(), &tunnelInstallRequest{
+		teamID:    testAdminTeamID,
+		channelID: testTunnelChannelID,
+		userID:    testAdminUserID,
+		agentAudit: &tunnelInstallAgentAudit{
+			target: testTunnelSlug,
+			reason: testTunnelAgentReason,
+		},
+	}, agentProtectConnectorAuditSuccessResult)
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %d, want 1 despite canceled base context", len(got))
+	}
+}
+
+func TestTunnelInstallAgentAuditUnknownResultHasNilSuccess(t *testing.T) {
+	now := fixedNow
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h := &Handler{cfg: Config{AgentStore: agentStore}}
+	h.recordTunnelInstallAgentAudit(slog.Default(), &tunnelInstallRequest{
+		teamID:    testAdminTeamID,
+		channelID: testTunnelChannelID,
+		userID:    testAdminUserID,
+		agentAudit: &tunnelInstallAgentAudit{
+			target: testTunnelSlug,
+			reason: testTunnelAgentReason,
+		},
+	}, agentProtectConnectorAuditResultInvalid)
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(got))
+	}
+	if got[0].Outcome != agentProtectConnectorAuditUnknownOutcome || got[0].Result != agentProtectConnectorAuditUnknownOutcome {
+		t.Fatalf("audit entry = %+v, want unknown outcome/result", got[0])
+	}
+	if got[0].ResultSuccess != nil {
+		t.Fatalf("audit result success = %v, want nil for unknown result", got[0].ResultSuccess)
+	}
+}
+
+func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
+	if len(agentProtectConnectorAuditResults) != int(agentProtectConnectorAuditResultCount)-1 {
+		t.Fatalf("audit result cases = %d, want %d", len(agentProtectConnectorAuditResults), agentProtectConnectorAuditResultCount-1)
+	}
+	for _, result := range []tunnelInstallAgentAuditResult{
+		agentProtectConnectorAuditResultInvalid,
+		agentProtectConnectorAuditResultCount,
+	} {
+		if _, ok := agentProtectConnectorAuditResults[result]; ok {
+			t.Fatalf("audit result %d must not have known metadata", result)
+		}
+	}
+	for result := agentProtectConnectorAuditResultInvalid + 1; result < agentProtectConnectorAuditResultCount; result++ {
+		info, ok := agentProtectConnectorAuditResults[result]
+		if !ok {
+			t.Fatalf("missing test case for audit result %d", result)
+		}
+		outcome, resultSuccess, known := result.auditFields()
+		if !known {
+			t.Fatalf("audit result %d known = false", result)
+		}
+		if outcome != info.outcome {
+			t.Fatalf("audit result %d outcome = %q, want %q", result, outcome, info.outcome)
+		}
+		if resultSuccess == nil || *resultSuccess != info.success {
+			t.Fatalf("audit result %d success = %v, want %t", result, resultSuccess, info.success)
+		}
+	}
+
+	for _, result := range []tunnelInstallAgentAuditResult{
+		agentProtectConnectorAuditResultInvalid,
+		agentProtectConnectorAuditResultCount,
+		tunnelInstallAgentAuditResult(255),
+	} {
+		outcome, resultSuccess, known := result.auditFields()
+		if known {
+			t.Fatalf("unknown audit result %d known = true", result)
+		}
+		if outcome != agentProtectConnectorAuditUnknownOutcome {
+			t.Fatalf("unknown audit result %d outcome = %q, want %q", result, outcome, agentProtectConnectorAuditUnknownOutcome)
+		}
+		if resultSuccess != nil {
+			t.Fatalf("unknown audit result %d success = %v, want nil", result, resultSuccess)
+		}
+	}
+}
+
+func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
+	now := fixedNow
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		panic("test panic after bootstrap key mint")
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1 after panic", revokeHits)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditUnexpectedFailureOutcome {
+		t.Fatalf("audit entries = %+v, want unexpected-failure outcome", got)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want unexpected-failure notice: %v", len(responseBodies), responseBodies)
+	}
+	notice := parseSlackText(t, []byte(responseBodies[0]))
+	if !strings.Contains(notice, "stopped unexpectedly") || !strings.Contains(notice, "discard it") {
+		t.Fatalf("unexpected-failure notice = %q, want retry/discard copy", notice)
+	}
+}
+
+func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
+	now := fixedNow
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		t.Fatal("PostDM must not run after a build panic")
+		return nil
+	}
+	h.now = func() time.Time {
+		panic("test build panic after bootstrap key mint")
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1 after build panic", revokeHits)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditUnexpectedFailureOutcome {
+		t.Fatalf("audit entries = %+v, want unexpected-failure outcome", got)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want unexpected-failure notice: %v", len(responseBodies), responseBodies)
+	}
+	notice := parseSlackText(t, []byte(responseBodies[0]))
+	if !strings.Contains(notice, "stopped unexpectedly") || !strings.Contains(notice, "discard it") {
+		t.Fatalf("unexpected-failure notice = %q, want retry/discard copy", notice)
+	}
+}
+
+func TestTunnelInstallAgentAuditRecordsOnlyAgentBuildFailure(t *testing.T) {
+	cases := []struct {
+		name       string
+		setup      func(*testing.T, *adminTestServers, *Handler)
+		agentAudit *tunnelInstallAgentAudit
+		wantAudit  bool
+	}{
+		{
+			name: "agent initiated resource create failure",
+			setup: func(t *testing.T, ts *adminTestServers, _ *Handler) {
+				t.Helper()
+				ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+					writeAPIError(t, w, http.StatusInternalServerError, "upstream_error", "resource create failed")
+				})
+			},
+			agentAudit: &tunnelInstallAgentAudit{
+				target: testTunnelSlug,
+				reason: testTunnelAgentReason,
+			},
+			wantAudit: true,
+		},
+		{
+			name: "slash initiated resource create failure",
+			setup: func(t *testing.T, ts *adminTestServers, _ *Handler) {
+				t.Helper()
+				ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+					writeAPIError(t, w, http.StatusInternalServerError, "upstream_error", "resource create failed")
+				})
+			},
+			agentAudit: nil,
+			wantAudit:  false,
+		},
+		{
+			name: "agent initiated auth recheck failure",
+			setup: func(_ *testing.T, _ *adminTestServers, h *Handler) {
+				h.cfg.AuthProvider = failingAuthProvider{err: errors.New("auth unavailable")}
+			},
+			agentAudit: &tunnelInstallAgentAudit{
+				target: testTunnelSlug,
+				reason: testTunnelAgentReason,
+			},
+			wantAudit: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			now := fixedNow
+
+			var responseBodies []string
+			responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read response_url body: %v", err)
+				}
+				responseBodies = append(responseBodies, string(body))
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(responseURL.Close)
+
+			h := newAdminTestHandler(t, ts)
+			agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+			h.cfg.AgentStore = agentStore
+			captureTunnelPostDMSuccess(h)
+			h.SetAliasStore(h.cfg.AdminStore)
+			tc.setup(t, ts, h)
+			h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, tc.agentAudit))
+
+			if len(responseBodies) != 1 {
+				t.Fatalf("response_url posts = %d, want build-failure message: %v", len(responseBodies), responseBodies)
+			}
+			got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+			if err != nil {
+				t.Fatalf("list audit entries: %v", err)
+			}
+			if !tc.wantAudit {
+				if len(got) != 0 {
+					t.Fatalf("slash-initiated build failure must not record agent audit, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("agent-initiated build failure should record one audit entry, got %d: %+v", len(got), got)
+			}
+			if got[0].Outcome != agentProtectConnectorAuditBuildFailedOutcome {
+				t.Fatalf("audit outcome = %q, want %q", got[0].Outcome, agentProtectConnectorAuditBuildFailedOutcome)
+			}
+			if got[0].Result != agentProtectConnectorAuditBuildFailedOutcome {
+				t.Fatalf("audit result = %q, want %q", got[0].Result, agentProtectConnectorAuditBuildFailedOutcome)
+			}
+			if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+				t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+			}
+			if strings.Contains(got[0].Outcome, testTunnelAPIKey) {
+				t.Fatalf("audit outcome must not store the bootstrap key: %+v", got[0])
+			}
+		})
 	}
 }
 
@@ -2460,12 +3685,7 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 	h.cfg.TunnelImage = testTunnelImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, h.now())
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), nil))
 
 	if revokeHits != 0 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 0 after text retry delivered the install", revokeHits)
@@ -2525,17 +3745,14 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	t.Cleanup(responseURL.Close)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable}
+	h.cfg.AgentStore = agentStore
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
 		return errors.New("dm unavailable")
 	}
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, h.now())
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), testTunnelInstallAgentAudit()))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -2551,6 +3768,22 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	}
 	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
 		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated DM failure should record one audit entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Outcome != agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome {
+		t.Fatalf("audit outcome = %q, want %q", got[0].Outcome, agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome)
+	}
+	if got[0].Result != agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome {
+		t.Fatalf("audit result = %q, want %q", got[0].Result, agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
 	}
 }
 
@@ -2598,12 +3831,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
 	}
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, h.now())
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), nil))
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -2687,8 +3915,24 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
 	}
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, args, firstAttempt)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, args, secondAttempt)
+	h.processTunnelInstall(context.Background(), slog.Default(), &tunnelInstallRequest{
+		teamID:       testAdminTeamID,
+		enterpriseID: "",
+		channelID:    testTunnelChannelID,
+		userID:       testAdminUserID,
+		responseURL:  responseURL.URL,
+		args:         args,
+		attemptID:    tunnelBootstrapTimeAttemptID("test-attempt", firstAttempt),
+	})
+	h.processTunnelInstall(context.Background(), slog.Default(), &tunnelInstallRequest{
+		teamID:       testAdminTeamID,
+		enterpriseID: "",
+		channelID:    testTunnelChannelID,
+		userID:       testAdminUserID,
+		responseURL:  responseURL.URL,
+		args:         args,
+		attemptID:    tunnelBootstrapTimeAttemptID("test-attempt", secondAttempt),
+	})
 
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
@@ -2762,15 +4006,12 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	t.Cleanup(responseURL.Close)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return h.now() }}
+	h.cfg.AgentStore = agentStore
 	h.cfg.TunnelImage = testTunnelImageRef
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, h.now())
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, h.now(), testTunnelInstallAgentAudit()))
 
 	if revokeHits != 0 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 0 (plain-text fallback delivered the install)", revokeHits)
@@ -2786,6 +4027,16 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	}
 	if strings.Contains(posts[1], testTunnelAPIKey) {
 		t.Errorf("text retry leaked the bootstrap key: %s", posts[1])
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditDegradedOutcome {
+		t.Fatalf("audit entries = %+v, want degraded-success outcome", got)
+	}
+	if got[0].ResultSuccess == nil || !*got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want true", got[0].ResultSuccess)
 	}
 }
 
