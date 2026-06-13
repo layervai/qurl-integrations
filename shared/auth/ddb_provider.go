@@ -147,18 +147,20 @@ type DDBProvider struct {
 	// expiry sweeps using Now instead of a background janitor. The cache is
 	// process-local: rotation or disconnect on one serving instance cannot evict
 	// sibling instances, so they may continue using a previously decrypted key,
-	// including a revoked key, until this TTL expires. Issue #263 explicitly
-	// accepts five minutes as the starting cross-instance staleness window; that
-	// stays human-perceptible while collapsing the common multi-command session.
-	// Slack bot-token caching stays shorter because it gates reinstall detection
-	// rather than qURL API retry pressure. The cache also keeps the decrypted
-	// key in heap memory for the TTL; that plaintext residency is the accepted
-	// KMS/latency trade-off. SetAPIKey seeds this process with the new key after
-	// a successful write, but sibling processes and post-delete refills still
-	// rely on the TTL if an eventually-consistent DDB read returns an older row;
-	// that same-process post-delete stale refill can also pin the revoked key for
-	// one fresh TTL. Stricter cross-instance/same-instance invalidation is tracked
-	// separately in #766.
+	// including a revoked key, until this TTL expires. The hot slash-command path
+	// sends that key directly to qurl-service, so sibling-process staleness can
+	// surface as a user-visible 401 until the TTL rolls over. Issue #263
+	// explicitly accepts five minutes as the starting cross-instance staleness
+	// window; that stays human-perceptible while collapsing the common
+	// multi-command session. Slack bot-token caching stays shorter because it
+	// gates reinstall detection rather than qURL API retry pressure. The cache
+	// also keeps the decrypted key in heap memory for the TTL; that plaintext
+	// residency is the accepted KMS/latency trade-off. SetAPIKey seeds this
+	// process with the new key after a successful write. DeleteAPIKey evicts this
+	// process and forces strongly-consistent refills for one TTL, so a
+	// same-process eventually-consistent post-delete read cannot re-cache the
+	// revoked key. Stricter cross-instance invalidation is tracked separately in
+	// #766.
 	apiKeyCache map[string]*cachedAPIKey
 
 	// The mutex coordinates the cache with in-flight fills and invalidation
@@ -169,6 +171,7 @@ type DDBProvider struct {
 	apiKeyCacheMu         sync.Mutex
 	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
 	apiKeyCacheGeneration map[string]uint64
+	apiKeyStrongReadUntil map[string]time.Time
 	apiKeyCacheLastSweep  time.Time
 
 	// Now is injected so tests can pin the wall clock for configured_at /
@@ -193,11 +196,12 @@ type apiKeyLookupCall struct {
 }
 
 type apiKeyLookupStart struct {
-	apiKey     string
-	hit        bool
-	call       *apiKeyLookupCall
-	owner      bool
-	generation uint64
+	apiKey         string
+	hit            bool
+	call           *apiKeyLookupCall
+	owner          bool
+	generation     uint64
+	consistentRead bool
 }
 
 // SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
@@ -333,7 +337,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		}
 	}
 
-	return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, now, start.generation)
+	return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, now, start.generation, start.consistentRead)
 }
 
 func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
@@ -344,14 +348,27 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 		p.apiKeyCache = map[string]*cachedAPIKey{}
 	}
 	p.sweepExpiredAPIKeyCacheLocked(now)
-	if entry, ok := p.apiKeyCache[workspaceID]; ok && now.Before(entry.expiresAt) {
-		return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
+	if entry, ok := p.apiKeyCache[workspaceID]; ok {
+		if now.Before(entry.expiresAt) {
+			return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
+		}
+		delete(p.apiKeyCache, workspaceID)
 	}
 
 	if p.apiKeyCacheGeneration == nil {
 		p.apiKeyCacheGeneration = map[string]uint64{}
 	}
 	generation := p.apiKeyCacheGeneration[workspaceID]
+	consistentRead := false
+	if p.apiKeyStrongReadUntil != nil {
+		if until, ok := p.apiKeyStrongReadUntil[workspaceID]; ok {
+			if now.Before(until) {
+				consistentRead = true
+			} else {
+				delete(p.apiKeyStrongReadUntil, workspaceID)
+			}
+		}
+	}
 	if p.apiKeyLookupInFlight == nil {
 		p.apiKeyLookupInFlight = map[string]*apiKeyLookupCall{}
 	}
@@ -360,40 +377,45 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 	}
 	call := &apiKeyLookupCall{done: make(chan struct{})}
 	p.apiKeyLookupInFlight[workspaceID] = call
-	return apiKeyLookupStart{call: call, owner: true, generation: generation}
+	return apiKeyLookupStart{call: call, owner: true, generation: generation, consistentRead: consistentRead}
 }
 
-func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, now time.Time, generation uint64) (string, error) {
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, now time.Time, generation uint64, consistentRead bool) (string, error) {
 	result := apiKeyLookupResult{}
 	finished := false
 	defer func() {
 		if rec := recover(); rec != nil {
 			if !finished {
 				result = apiKeyLookupResult{err: errors.New("DDBProvider.APIKey: lookup panicked")}
-				p.finishAPIKeyLookup(workspaceID, call, result, now, generation)
+				p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
 			}
 			panic(rec)
 		}
 	}()
 
-	apiKey, err := p.fetchAPIKey(ctx, workspaceID)
+	apiKey, err := p.fetchAPIKey(ctx, workspaceID, consistentRead)
 	result = apiKeyLookupResult{apiKey: apiKey, err: err}
 	finished = true
 	p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
 	return apiKey, err
 }
 
-func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string) (string, error) {
+func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consistentRead bool) (string, error) {
 	// Eventually-consistent read is correct here: the per-workspace key
 	// only changes on (re-)install, and the few-ms propagation delay is
-	// inside the same "click the setup link" window. Strong reads would
-	// double RCU cost without changing the failure modes that matter.
-	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	// inside the same "click the setup link" window. DeleteAPIKey temporarily
+	// asks for a strong read so this process cannot re-cache a just-deleted key
+	// from an eventually-consistent replica.
+	input := &dynamodb.GetItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-	})
+	}
+	if consistentRead {
+		input.ConsistentRead = aws.Bool(true)
+	}
+	out, err := p.Client.GetItem(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
 	}
@@ -459,10 +481,18 @@ func (p *DDBProvider) sweepExpiredAPIKeyCacheLocked(now time.Time) {
 			delete(p.apiKeyCache, workspaceID)
 		}
 	}
+	for workspaceID, until := range p.apiKeyStrongReadUntil {
+		if !now.Before(until) {
+			delete(p.apiKeyStrongReadUntil, workspaceID)
+		}
+	}
 	p.apiKeyCacheLastSweep = now
 }
 
-func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string) {
+func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
 	p.apiKeyCacheMu.Lock()
 	defer p.apiKeyCacheMu.Unlock()
 
@@ -474,9 +504,18 @@ func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string) {
 		p.apiKeyCacheGeneration = map[string]uint64{}
 	}
 	p.apiKeyCacheGeneration[workspaceID]++
+	if !strongReadUntil.IsZero() {
+		if p.apiKeyStrongReadUntil == nil {
+			p.apiKeyStrongReadUntil = map[string]time.Time{}
+		}
+		p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
+	}
 }
 
 func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
 	p.apiKeyCacheMu.Lock()
 	defer p.apiKeyCacheMu.Unlock()
 
@@ -487,6 +526,9 @@ func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time)
 		p.apiKeyCacheGeneration = map[string]uint64{}
 	}
 	p.apiKeyCacheGeneration[workspaceID]++
+	if p.apiKeyStrongReadUntil != nil {
+		delete(p.apiKeyStrongReadUntil, workspaceID)
+	}
 	p.cacheAPIKey(workspaceID, apiKey, now)
 }
 
@@ -584,7 +626,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
-	p.seedAPIKeyCache(workspaceID, apiKey, p.nowOrDefault())
+	p.seedAPIKeyCache(workspaceID, apiKey, now)
 	return nil
 }
 
@@ -704,7 +746,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
 	}
-	p.invalidateAPIKeyCache(workspaceID)
+	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
 	return nil
 }
 
