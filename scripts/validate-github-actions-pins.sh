@@ -8,11 +8,16 @@ shopt -s nullglob
 
 status=0
 sha_re='^[0-9a-f]{40}$'
-tag_re='^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.+-]+)?$'
+tag_re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 # This is a local format guard. It does not resolve refs over the network, so
 # reviewers still need to verify that tag comments match their pinned SHAs. It
 # intentionally enforces this repo's exact vX.Y.Z comment convention.
-action_files=(.github/workflows/*.yml .github/workflows/*.yaml .github/actions/*/action.yml .github/actions/*/action.yaml)
+action_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+if [[ -d .github/actions ]]; then
+  while IFS= read -r -d '' action_file; do
+    action_files+=("$action_file")
+  done < <(find .github/actions -type f \( -name action.yml -o -name action.yaml \) -print0)
+fi
 if (( ${#action_files[@]} == 0 )); then
   printf 'no workflow or composite-action files found\n' >&2
   exit 2

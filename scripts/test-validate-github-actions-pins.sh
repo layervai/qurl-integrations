@@ -26,6 +26,7 @@ run_case() {
   case_no=$((case_no + 1))
   local workdir="$tmp_parent/$case_no-$name"
   mkdir -p "$workdir"
+  # The validator only needs a repo root; fixtures intentionally do not commit.
   git -C "$workdir" init -q
 
   while (( $# )); do
@@ -70,6 +71,17 @@ run_case local-action 0 "GitHub Actions pins are SHA-pinned" \
     steps:
       - uses: ./local-action"
 
+run_case reusable-workflow 0 "GitHub Actions pins are SHA-pinned" \
+  ".github/workflows/test.yml" "jobs:
+  test:
+    uses: octo-org/reusable/.github/workflows/build.yml@$sha # v1.2.3"
+
+run_case composite-action-valid 0 "GitHub Actions pins are SHA-pinned" \
+  ".github/actions/nested/demo/action.yml" "runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@$sha # v1.2.3"
+
 run_case composite-action-invalid 1 "external action must be pinned" \
   ".github/actions/demo/action.yml" "runs:
   using: composite
@@ -87,6 +99,12 @@ run_case missing-version-comment 1 "SHA pin must include an exact version tag co
   test:
     steps:
       - uses: actions/checkout@$sha"
+
+run_case invalid-version-comment 1 "SHA pin must include an exact version tag comment" \
+  ".github/workflows/test.yml" "jobs:
+  test:
+    steps:
+      - uses: actions/checkout@$sha # v1.2.3.4"
 
 run_case docker-action 1 "docker:// actions are not allowed" \
   ".github/workflows/test.yml" "jobs:

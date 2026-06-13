@@ -27,7 +27,7 @@ repos:
         entry: scripts/validate-github-actions-pins.sh
         language: system
         pass_filenames: false
-        files: '^\.github/(workflows|actions)/.*\.ya?ml$|^scripts/validate-github-actions-pins\.sh$'
+        files: '^\.github/workflows/.*\.ya?ml$|^\.github/actions/(.*/)?action\.ya?ml$|^scripts/validate-github-actions-pins\.sh$'
 
       - id: go-fmt
         name: go fmt
