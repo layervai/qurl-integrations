@@ -312,6 +312,38 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
+	t.Run("cache hit ignores canceled context", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_cached_after_cancel")},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+		if got != "lv_live_cached_after_cancel" {
+			t.Fatalf("prime got %q want %q", got, "lv_live_cached_after_cancel")
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		got, err = p.APIKey(ctx, testTeamID)
+		if err != nil {
+			t.Fatalf("cached APIKey with canceled context: %v", err)
+		}
+		if got != "lv_live_cached_after_cancel" {
+			t.Fatalf("cached got %q want %q", got, "lv_live_cached_after_cancel")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+	})
+
 	t.Run("does not cache DDB transport errors", func(t *testing.T) {
 		ddb := &fakeDDBClient{getErr: errors.New("ddb down")}
 		p := &DDBProvider{
@@ -503,6 +535,52 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 		if encryptor.openCalls != 1 {
 			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
+		}
+	})
+
+	t.Run("owner error is shared with coalesced waiter", func(t *testing.T) {
+		ownerErr := errors.New("ddb down")
+		ddb := &fakeDDBClient{getErr: ownerErr}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		owner := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if !owner.owner {
+			t.Fatal("first lookup should own the fill")
+		}
+		waiter := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if waiter.owner || waiter.call != owner.call {
+			t.Fatal("second lookup should wait on the owner fill")
+		}
+
+		waiterErr := make(chan error, 1)
+		go func() {
+			<-waiter.call.done
+			waiterErr <- waiter.call.err
+		}()
+
+		_, err := p.fetchAndFinishAPIKeyLookup(context.Background(), testTeamID, owner.call, now, owner.generation)
+		if !errors.Is(err, ownerErr) {
+			t.Fatalf("owner err = %v, want %v", err, ownerErr)
+		}
+		select {
+		case err := <-waiterErr:
+			if !errors.Is(err, ownerErr) {
+				t.Fatalf("waiter err = %v, want %v", err, ownerErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not receive owner error")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if _, ok := p.apiKeyCache[testTeamID]; ok {
+			t.Fatal("owner error should not populate the cache")
 		}
 	})
 
