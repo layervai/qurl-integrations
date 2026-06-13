@@ -303,13 +303,13 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	if err != nil {
 		log.Error("tunnel install modal admin check failed", "error", err)
 		respondTunnelInstallModalError(w, "Could not verify admin status. Retry in a moment.")
-		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminVerificationFailedResult)
 		return
 	}
 	if !isAdmin {
 		log.Warn("tunnel install modal denied: non-admin")
 		respondTunnelInstallModalError(w, "This command is admin-only.")
-		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminDeniedResult)
 		return
 	}
 
