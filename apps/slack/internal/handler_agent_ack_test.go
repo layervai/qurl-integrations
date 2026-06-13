@@ -8,11 +8,14 @@ package internal
 // actually run).
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -198,6 +201,28 @@ func TestAgentAck_ClearAbandonsRemoveWhenJoinContextDone(t *testing.T) {
 	_, removes := rec.snapshot()
 	if len(removes) != 0 {
 		t.Fatalf("remove should be skipped when the add join is abandoned, got %d removes", len(removes))
+	}
+}
+
+func TestAgentAck_ClearAbandonsRemoveWhenJoinTimeoutExpires(t *testing.T) {
+	rec := &recordingReactions{}
+	h := NewHandler(Config{Reactions: rec})
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	neverAdded := make(chan struct{})
+	h.clearAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, neverAdded)
+
+	_, removes := rec.snapshot()
+	if len(removes) != 0 {
+		t.Fatalf("remove should be skipped when the non-shutdown add join times out, got %d removes", len(removes))
+	}
+	gotLogs := logBuf.String()
+	if !strings.Contains(gotLogs, "level=WARN") || !strings.Contains(gotLogs, "ack may remain") {
+		t.Fatalf("clear should log the operator-facing stale-ack warning, got logs:\n%s", gotLogs)
 	}
 }
 
