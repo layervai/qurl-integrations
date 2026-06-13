@@ -132,7 +132,7 @@ event timestamp starts the operator clock.
 Run this CloudWatch Logs Insights query against the Slack app log group with the
 time range set to the last 24 hours:
 
-```sql
+```text
 fields @timestamp, team_id, key_id, retry_window_hours, error
 | filter event = "slack_setup_binding_backed_persist_failure"
 | sort @timestamp desc
@@ -147,7 +147,7 @@ the ticket.
 For post-window cleanup, run the same event query over the older incident window
 (for example, the previous seven days with the end time set to 24 hours ago):
 
-```sql
+```text
 fields @timestamp, team_id, key_id, cleanup_after_window_hours, error
 | filter event = "slack_setup_binding_backed_persist_failure"
 | sort @timestamp asc

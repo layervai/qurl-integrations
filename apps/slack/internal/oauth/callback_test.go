@@ -30,6 +30,7 @@ const (
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
 	t.Helper()
+	// Mutates process-global slog state; keep tests that use this helper serial.
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -694,8 +695,8 @@ func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]a
 		if rec["retry_window_hours"] != float64(setupBindingRetryWindowHours) {
 			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], setupBindingRetryWindowHours)
 		}
-		if rec["cleanup_after_window_hours"] != float64(setupBindingRetryWindowHours) {
-			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], setupBindingRetryWindowHours)
+		if rec["cleanup_after_window_hours"] != float64(setupBindingCleanupAfterWindowHours) {
+			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], setupBindingCleanupAfterWindowHours)
 		}
 		if rec["operator_action"] != "rerun_setup_within_retry_window_then_cleanup_after_window" {
 			t.Errorf("operator_action = %v", rec["operator_action"])
