@@ -279,6 +279,7 @@ type memAgentDDB struct {
 	items     map[string]map[string]ddbtypes.AttributeValue
 	getErr    error // when set, GetItem (conversation load) fails
 	updateErr error // when set, UpdateItem (turn-rate counter) fails
+	getCalls  int
 	// putCalls counts PutItem calls (conversation saves) so a test can assert the
 	// conflict-retry path attempts exactly one extra write, never a loop.
 	putCalls int
@@ -302,6 +303,7 @@ func memKey(m map[string]ddbtypes.AttributeValue) string {
 func (f *memAgentDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getCalls++
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -309,6 +311,12 @@ func (f *memAgentDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ..
 		return &dynamodb.GetItemOutput{Item: item}, nil
 	}
 	return &dynamodb.GetItemOutput{}, nil
+}
+
+func (f *memAgentDDB) getItemCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getCalls
 }
 
 func (f *memAgentDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {

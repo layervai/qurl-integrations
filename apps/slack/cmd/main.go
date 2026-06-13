@@ -132,6 +132,7 @@ func run() error {
 
 	maxConcurrentAsync := readMaxConcurrentAsync()
 	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
+	maxConcurrentFollowupGateAsync := readMaxConcurrentFollowupGateAsync()
 	adminStore := buildAdminStore(signalCtx)
 	tunnelImage := strings.TrimSpace(os.Getenv("QURL_CONNECTOR_IMAGE"))
 	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
@@ -234,15 +235,16 @@ func run() error {
 	// Shutdown starts refusing new connections.
 
 	handler := internal.NewHandler(internal.Config{
-		AuthProvider:               authProvider,
-		SlackSigningSecret:         slackSigningSecret,
-		BaseContext:                signalCtx,
-		MaxConcurrentAsync:         maxConcurrentAsync,
-		MaxConcurrentFollowupAsync: maxConcurrentFollowupAsync,
-		AdminStore:                 adminStore,
-		OpenView:                   openView,
-		TunnelImage:                tunnelImage,
-		PostFeedback:               postFeedback,
+		AuthProvider:                   authProvider,
+		SlackSigningSecret:             slackSigningSecret,
+		BaseContext:                    signalCtx,
+		MaxConcurrentAsync:             maxConcurrentAsync,
+		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
+		MaxConcurrentFollowupGateAsync: maxConcurrentFollowupGateAsync,
+		AdminStore:                     adminStore,
+		OpenView:                       openView,
+		TunnelImage:                    tunnelImage,
+		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;
@@ -999,6 +1001,12 @@ func readMaxConcurrentAsync() int { return readPoolSizeEnv("QURL_SLACK_MAX_CONCU
 // QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC.
 func readMaxConcurrentFollowupAsync() int {
 	return readPoolSizeEnv("QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC")
+}
+
+// readMaxConcurrentFollowupGateAsync sizes the short channel-follow-up gate pool (#719)
+// from QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC.
+func readMaxConcurrentFollowupGateAsync() int {
+	return readPoolSizeEnv("QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC")
 }
 
 // readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;

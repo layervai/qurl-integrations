@@ -107,9 +107,8 @@ func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Dur
 // runOnPool acquires a non-blocking slot on sem and runs work in a wg-tracked,
 // panic-recovered, timeout-bounded goroutine off h.baseCtx. It returns false WITHOUT
 // running if sem is full, leaving the saturation log to the caller so each pool reports
-// its own context. The shared turn pool (h.sem) and the channel-follow-up admission pool
-// (h.followupSem — see #712) both go through here and share h.wg, so http.Server.Shutdown
-// drains in-flight work on either.
+// its own context. The shared turn pool (h.sem) goes through here; channel follow-ups use
+// runAgentFollowupPipeline so their short gate slot can be released before the long turn.
 func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger)) bool {
 	select {
 	case sem <- struct{}{}:
