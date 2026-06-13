@@ -687,6 +687,18 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
+	t.Run("shared deadline asks healthy waiter to retry", func(t *testing.T) {
+		if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), context.DeadlineExceeded) {
+			t.Fatal("healthy waiter should retry after shared deadline")
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if shouldRetryAPIKeyLookupAfterSharedError(ctx, context.DeadlineExceeded) {
+			t.Fatal("canceled waiter should not retry after shared deadline")
+		}
+	})
+
 	t.Run("APIKey waiter retries after owner cancellation", func(t *testing.T) {
 		firstGetStarted := make(chan struct{})
 		var callMu sync.Mutex
@@ -1092,6 +1104,44 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 		if _, ok := p.apiKeyCache[testTeamID]; ok {
 			t.Fatal("in-flight stale read should not populate the cache after DeleteAPIKey")
+		}
+	})
+
+	t.Run("blank private cache mutation guards are no-ops", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		call := &apiKeyLookupCall{done: make(chan struct{})}
+		p := &DDBProvider{
+			apiKeyCache: map[string]*cachedAPIKey{
+				testTeamID: {
+					apiKey:    testOldAPIKey,
+					expiresAt: now.Add(apiKeyCacheTTL),
+				},
+			},
+			apiKeyLookupInFlight: map[string]*apiKeyLookupCall{
+				testTeamID: call,
+			},
+			apiKeyCacheGeneration: map[string]uint64{
+				testTeamID: 7,
+			},
+			apiKeyStrongReadUntil: map[string]time.Time{
+				testTeamID: now.Add(apiKeyCacheTTL),
+			},
+		}
+
+		p.invalidateAPIKeyCache(" \t ", now.Add(apiKeyCacheTTL))
+		p.seedAPIKeyCache("\n", testNewAPIKey, now)
+
+		if len(p.apiKeyCache) != 1 || p.apiKeyCache[testTeamID].apiKey != testOldAPIKey {
+			t.Fatalf("blank mutation changed cache: %#v", p.apiKeyCache)
+		}
+		if len(p.apiKeyLookupInFlight) != 1 || p.apiKeyLookupInFlight[testTeamID] != call {
+			t.Fatalf("blank mutation changed in-flight map: %#v", p.apiKeyLookupInFlight)
+		}
+		if len(p.apiKeyCacheGeneration) != 1 || p.apiKeyCacheGeneration[testTeamID] != 7 {
+			t.Fatalf("blank mutation changed generation map: %#v", p.apiKeyCacheGeneration)
+		}
+		if len(p.apiKeyStrongReadUntil) != 1 || !p.apiKeyStrongReadUntil[testTeamID].Equal(now.Add(apiKeyCacheTTL)) {
+			t.Fatalf("blank mutation changed strong-read markers: %#v", p.apiKeyStrongReadUntil)
 		}
 	})
 }
