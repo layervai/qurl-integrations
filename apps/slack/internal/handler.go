@@ -1644,11 +1644,15 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 			respondSlack(w, "qURL isn't currently connected to this workspace. Run `/qurl setup <email>` to connect it.")
 			return
 		}
+		if errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported) {
+			respondSlack(w, "This Secure Access Agent deployment uses an environment-backed qURL key, so `/qurl uninstall` isn't supported here. Contact the operator.")
+			return
+		}
 		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)
 		respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
 		return
 	}
-	respondSlack(w, "qURL has been disconnected from this workspace. Run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. Run `/qurl setup <email>` to reconnect it.")
 }
 
 func (h *Handler) requireUninstallOwner(w http.ResponseWriter, teamID, userID string) bool {
@@ -1660,7 +1664,7 @@ func (h *Handler) requireUninstallOwner(w http.ResponseWriter, teamID, userID st
 	defer cancel()
 	_, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
-		slog.Error("/qurl uninstall: owner check failed", "error", err, "team_id", teamID, "user_id", userID)
+		slog.Error("/qurl uninstall: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
 		respondSlack(w, ":warning: failed to verify who connected qURL to this workspace (upstream error; see logs).")
 		return false
 	}

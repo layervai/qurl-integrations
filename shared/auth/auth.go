@@ -16,6 +16,10 @@ type Provider interface {
 	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
 
+// ErrWorkspaceAPIKeyDeleteUnsupported is returned when the configured provider
+// can read a workspace key but cannot mutate/delete it.
+var ErrWorkspaceAPIKeyDeleteUnsupported = errors.New("workspace API key deletion unsupported")
+
 // EnvProvider reads the API key from an environment variable.
 // Suitable for single-workspace deployments and development.
 type EnvProvider struct {
@@ -36,5 +40,5 @@ func (p EnvProvider) DeleteAPIKey(_ context.Context, _ string) error {
 	if os.Getenv(p.EnvVar) == "" {
 		return ErrWorkspaceNotConfigured
 	}
-	return errors.New("EnvProvider.DeleteAPIKey: deleting environment-backed API keys is unsupported")
+	return fmt.Errorf("EnvProvider.DeleteAPIKey: %w", ErrWorkspaceAPIKeyDeleteUnsupported)
 }

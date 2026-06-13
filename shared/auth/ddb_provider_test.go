@@ -1834,6 +1834,26 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 	})
 }
 
+func TestEnvProviderDeleteAPIKey(t *testing.T) {
+	const envVar = "TEST_QURL_API_KEY"
+
+	t.Run("missing key maps to not configured", func(t *testing.T) {
+		t.Setenv(envVar, "")
+		err := EnvProvider{EnvVar: envVar}.DeleteAPIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		}
+	})
+
+	t.Run("configured key maps to unsupported", func(t *testing.T) {
+		t.Setenv(envVar, "lv_live_test")
+		err := EnvProvider{EnvVar: envVar}.DeleteAPIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceAPIKeyDeleteUnsupported) {
+			t.Fatalf("want ErrWorkspaceAPIKeyDeleteUnsupported, got %v", err)
+		}
+	})
+}
+
 // KMSEncryptor itself is covered by a round-trip test that exercises
 // real AES-GCM under a fixed data key returned by a stub KMSClient.
 // See ddb_provider_kms_test.go.

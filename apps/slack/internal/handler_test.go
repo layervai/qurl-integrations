@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -491,6 +492,53 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallUnsupportedProvider(t *testing.T) {
+	provider := &recordingAuthProvider{
+		apiKey:    "test-key",
+		deleteErr: auth.ErrWorkspaceAPIKeyDeleteUnsupported,
+	}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
+		t.Fatalf("unsupported-provider reply missing deployment hint: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallDeleteFailure(t *testing.T) {
+	provider := &recordingAuthProvider{
+		apiKey:    "test-key",
+		deleteErr: errors.New("delete failed"),
+	}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "could not disconnect qURL") {
+		t.Fatalf("delete failure reply missing retry message: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallAuthProviderNotConfigured(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = nil
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if !strings.Contains(resp[respFieldText], "qURL credential storage is not configured") {
+		t.Fatalf("nil-provider reply missing operator hint: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	h := newTestHandler(t, noopQURLServer(t))
@@ -503,6 +551,40 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall`.") {
 		t.Fatalf("uninstall args reply missing usage: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallFailsClosedWithoutWorkspaceOwner(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, "", testAdminUserID, testWorkspaceConfiguredAt)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "isn't connected to a workspace owner yet") {
+		t.Fatalf("missing-owner reply missing setup recovery hint: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallFailsClosedForShapeBadOwner(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "Ask the owner to run `/qurl setup <email>`, then retry") {
+		t.Fatalf("shape-bad-owner reply missing setup recovery hint: %q", resp[respFieldText])
 	}
 }
 
