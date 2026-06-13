@@ -355,6 +355,32 @@ func TestAgentMarkdownLinkHarden_HandlesChunkSplitSlackControls(t *testing.T) {
 	}
 }
 
+func TestAgentMarkdownLinkHarden_HandlesTwoByteChunkSplitSlackControls(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Notify <@") +
+		h.write("U12345678> and <#") +
+		h.write("C12345678|ops> now") +
+		h.flush()
+	want := `Notify \<@U12345678> and \<#C12345678|ops> now`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_PreservesTwoByteChunkSplitSlackLookalikes(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Keep temp <@") +
+		h.write(" home and 5 <#") +
+		h.write(" 7 unchanged") +
+		h.flush()
+	want := `Keep temp <@ home and 5 <# 7 unchanged`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_EscapesUnclosedSlackAngleLinks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden

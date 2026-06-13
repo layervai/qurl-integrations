@@ -653,6 +653,9 @@ func shouldDeferAngleAutolinkStart(s string) bool {
 	if afterLess == "" {
 		return true
 	}
+	if afterLess == "@" || afterLess == "#" || afterLess == "!" {
+		return true
+	}
 	if len(afterLess) > maxPartialAngleAutolinkBytes {
 		return false
 	}
