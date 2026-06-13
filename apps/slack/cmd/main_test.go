@@ -34,7 +34,7 @@ func newFakeProvider() *auth.DDBProvider {
 }
 
 const validStateSecret = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
-const defaultSlackBotScopesCSV = "commands,chat:write"
+const defaultSlackBotScopesCSV = "commands,chat:write,im:write"
 
 var oauthEnvKeys = []string{
 	"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET", "AUTH0_AUDIENCE",

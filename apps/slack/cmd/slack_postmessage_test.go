@@ -15,6 +15,7 @@ import (
 )
 
 const testSlackTeamID = "T_team"
+const testEnterpriseSlackBearer = "Bearer xoxb-enterprise-token"
 
 func staticTokenLookup(token string) slackBotTokenLookup {
 	return func(context.Context, string) (string, error) { return token, nil }
@@ -100,19 +101,33 @@ func TestSlackPostMessageFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	}
 }
 
-func TestSlackPostDMFuncPostsToUserIDWithGridFallback(t *testing.T) {
+func TestSlackPostDMFuncOpensIMThenPostsWithGridFallback(t *testing.T) {
 	t.Parallel()
-	var gotAuth string
-	var gotBody struct {
+	var openAuth, postAuth string
+	var gotOpenBody struct {
+		Users string `json:"users"`
+	}
+	var gotPostBody struct {
 		Channel string `json:"channel"`
 		Text    string `json:"text"`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode body: %v", err)
+		switch r.URL.Path {
+		case "/conversations.open":
+			openAuth = r.Header.Get("Authorization")
+			if err := json.NewDecoder(r.Body).Decode(&gotOpenBody); err != nil {
+				t.Fatalf("decode open body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"channel":{"id":"D_admin"}}`))
+		case "/chat.postMessage":
+			postAuth = r.Header.Get("Authorization")
+			if err := json.NewDecoder(r.Body).Decode(&gotPostBody); err != nil {
+				t.Fatalf("decode post body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -123,18 +138,48 @@ func TestSlackPostDMFuncPostsToUserIDWithGridFallback(t *testing.T) {
 			return "", auth.ErrSlackBotTokenNotConfigured
 		}
 		return "xoxb-enterprise-token", nil
-	}, "", srv.URL, nil)
+	}, "", srv.URL+"/conversations.open", srv.URL+"/chat.postMessage", nil)
 	if err := postDM(context.Background(), testSlackTeamID, "E_org", "U_admin", "secret text"); err != nil {
 		t.Fatalf("PostDM: %v", err)
 	}
-	if len(lookups) != 2 || lookups[0] != testSlackTeamID || lookups[1] != "E_org" {
-		t.Fatalf("lookups = %v, want [T_team E_org]", lookups)
+	wantLookups := []string{testSlackTeamID, "E_org", testSlackTeamID, "E_org"}
+	if strings.Join(lookups, ",") != strings.Join(wantLookups, ",") {
+		t.Fatalf("lookups = %v, want %v", lookups, wantLookups)
 	}
-	if gotAuth != "Bearer xoxb-enterprise-token" {
-		t.Fatalf("Authorization = %q, want enterprise token", gotAuth)
+	if openAuth != testEnterpriseSlackBearer || postAuth != testEnterpriseSlackBearer {
+		t.Fatalf("Authorization open/post = %q/%q, want enterprise token", openAuth, postAuth)
 	}
-	if gotBody.Channel != "U_admin" || gotBody.Text != "secret text" {
-		t.Fatalf("body = %+v, want DM channel/text", gotBody)
+	if gotOpenBody.Users != "U_admin" {
+		t.Fatalf("open body = %+v, want Slack user", gotOpenBody)
+	}
+	if gotPostBody.Channel != "D_admin" || gotPostBody.Text != "secret text" {
+		t.Fatalf("post body = %+v, want opened DM channel/text", gotPostBody)
+	}
+}
+
+func TestSlackPostDMFuncMissingOpenScopeWrapsSentinel(t *testing.T) {
+	t.Parallel()
+	var postCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/conversations.open":
+			_, _ = w.Write([]byte(`{"ok":false,"error":"missing_scope"}`))
+		case "/chat.postMessage":
+			postCalled = true
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	postDM := newSlackPostDMFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL+"/conversations.open", srv.URL+"/chat.postMessage", nil)
+	err := postDM(context.Background(), testSlackTeamID, "", "U_admin", "secret text")
+	if !errors.Is(err, internal.ErrSlackMissingScope) {
+		t.Fatalf("PostDM error = %v, want ErrSlackMissingScope", err)
+	}
+	if postCalled {
+		t.Fatal("chat.postMessage should not run after conversations.open missing_scope")
 	}
 }
 
@@ -163,7 +208,7 @@ func TestSlackPostMessageFuncGridFallback(t *testing.T) {
 		if len(lookups) != 2 || lookups[0] != testSlackTeamID || lookups[1] != "E_org" {
 			t.Fatalf("lookups = %v, want [T_team E_org]", lookups)
 		}
-		if gotAuth != "Bearer xoxb-enterprise-token" {
+		if gotAuth != testEnterpriseSlackBearer {
 			t.Fatalf("Authorization = %q, want enterprise token", gotAuth)
 		}
 	})

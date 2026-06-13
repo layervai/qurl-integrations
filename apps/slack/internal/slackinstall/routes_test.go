@@ -21,7 +21,7 @@ const testStateSecret = "0123456789abcdef0123456789abcdef"
 const (
 	testClientID        = "111.222"
 	testClientSecret    = "secret"
-	testScopeCSV        = "commands,chat:write"
+	testScopeCSV        = "commands,chat:write,im:write"
 	testWorkspaceID     = "T_WORKSPACE"
 	testEnterpriseID    = "E_GRID"
 	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
@@ -87,7 +87,7 @@ func TestConfigValidateRequiresDefaultBotScopes(t *testing.T) {
 	}
 	cfg.BotScopes = []string{botScopeCommands}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeChatWrite) {
-		t.Fatalf("Validate error = %v, want missing chat:write", err)
+		t.Fatalf("Validate error = %v, want missing chat:write/im:write", err)
 	}
 }
 
@@ -108,7 +108,7 @@ func TestDropUnsupportedScopes(t *testing.T) {
 		wantKept    string
 		wantDropped string
 	}{
-		{"nothing unsupported", []string{"commands", "chat:write"}, "commands,chat:write", ""},
+		{"nothing unsupported", []string{"commands", "chat:write", "im:write"}, "commands,chat:write,im:write", ""},
 		{"strips views:write", []string{"commands", "views:write"}, "commands", "views:write"},
 		{"case-insensitive", []string{"commands", "Views:Write"}, "commands", "Views:Write"},
 		{"only views:write leaves empty", []string{"views:write"}, "", "views:write"},
