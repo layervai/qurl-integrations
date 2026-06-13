@@ -233,6 +233,38 @@ func TestAgentAck_ClearAbandonsRemoveWhenJoinTimeoutExpires(t *testing.T) {
 	}
 }
 
+func TestAgentAck_AbandonedAddCancellationLogsDebug(t *testing.T) {
+	rec := newBlockingOrderedReactions()
+	defer rec.releaseAddCall()
+	h := NewHandler(Config{Reactions: rec, AgentAckTimeout: 10 * time.Millisecond})
+	t.Cleanup(h.Wait)
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	add := h.addAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	})
+	select {
+	case <-rec.addStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reaction add did not start")
+	}
+	h.clearAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, add)
+	h.Wait()
+
+	gotLogs := logBuf.String()
+	if strings.Contains(gotLogs, "ack reaction add failed") {
+		t.Fatalf("intentional add cancellation should not log add-failed Warn, got logs:\n%s", gotLogs)
+	}
+	if !strings.Contains(gotLogs, "level=DEBUG") || !strings.Contains(gotLogs, "ack reaction add canceled or timed out") {
+		t.Fatalf("intentional add cancellation should log Debug, got logs:\n%s", gotLogs)
+	}
+}
+
 func TestAgentAck_RemoveCanceledDuringShutdownLogsDebug(t *testing.T) {
 	rec := &recordingReactions{removeErr: context.Canceled}
 	baseCtx, cancel := context.WithCancel(context.Background())

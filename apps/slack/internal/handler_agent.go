@@ -269,6 +269,10 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) agentAc
 
 		defer cancel()
 		if err := h.cfg.Reactions.Add(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				log.Debug("agent: ack reaction add canceled or timed out (best-effort)", "error", err)
+				return
+			}
 			log.Warn("agent: ack reaction add failed (best-effort)", "error", err)
 		}
 	}()
