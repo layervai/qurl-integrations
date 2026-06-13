@@ -117,8 +117,14 @@ func TestAgentBackend_ListAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAliases: %v", err)
 	}
-	if !strings.Contains(out, "$oncall") || !strings.Contains(out, "r_1") {
-		t.Fatalf("aliases output = %q", out)
+	if !strings.Contains(out, "$oncall") {
+		t.Fatalf("aliases output = %q, want $oncall", out)
+	}
+	// The opaque resource id the alias binds to ($oncall→r_1) must never reach the
+	// model/user. Match the exact fixture id, not the bare "r_" substring (which collides
+	// with legitimate content like a "user_data" description).
+	if strings.Contains(out, "r_1") {
+		t.Fatalf("aliases output leaked an internal resource id: %q", out)
 	}
 }
 
@@ -128,12 +134,17 @@ func TestAgentBackend_ListResources_ScopedToChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}
-	// r_1 is in the channel's allowed set; r_9 is not and must not leak.
-	if !strings.Contains(out, "r_1") {
-		t.Fatalf("expected r_1 in output: %q", out)
+	// r_1 ($oncall) is in the channel's allowed set; r_9 ($secret, "Other channel") is not
+	// and must not leak. Resources are identified by $alias/$slug — the opaque id is gone.
+	if !strings.Contains(out, "$oncall") {
+		t.Fatalf("expected the in-scope resource ($oncall) in output: %q", out)
 	}
-	if strings.Contains(out, "r_9") || strings.Contains(out, "Other channel") {
+	if strings.Contains(out, "Other channel") || strings.Contains(out, "$secret") {
 		t.Fatalf("a resource outside the channel scope leaked: %q", out)
+	}
+	// The in-scope resource's id (r_1) must not be rendered. Exact fixture id, not bare "r_".
+	if strings.Contains(out, "r_1") {
+		t.Fatalf("list output leaked an internal resource id: %q", out)
 	}
 }
 
@@ -144,7 +155,7 @@ func TestAgentBackend_ListResources_PaginatesPastFirstPage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("cursor") == "" {
-			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"},{"resource_id":"r_9","type":"tunnel"}],"meta":{"has_more":true,"next_cursor":"c2"}}`))
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"},{"resource_id":"r_9","slug":"sneaky","type":"tunnel"}],"meta":{"has_more":true,"next_cursor":"c2"}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_2","slug":"staging","type":"tunnel"}]}`))
@@ -157,11 +168,17 @@ func TestAgentBackend_ListResources_PaginatesPastFirstPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}
-	if !strings.Contains(out, "r_1") || !strings.Contains(out, "r_2") {
+	// r_1 ($oncall, page 1) and r_2 ($staging, page 2) are both reachable; finding $staging
+	// proves pagination didn't stop at page 1.
+	if !strings.Contains(out, "$oncall") || !strings.Contains(out, "$staging") {
 		t.Fatalf("pagination dropped a reachable resource on page 2: %q", out)
 	}
-	if strings.Contains(out, "r_9") {
+	if strings.Contains(out, "$sneaky") {
 		t.Fatalf("out-of-scope resource leaked: %q", out)
+	}
+	// Neither reachable resource's id (r_1, r_2) may be rendered. Exact fixture ids.
+	if strings.Contains(out, "r_1") || strings.Contains(out, "r_2") {
+		t.Fatalf("list output leaked an internal resource id: %q", out)
 	}
 }
 
@@ -169,13 +186,14 @@ func TestAgentBackend_ResolveToken(t *testing.T) {
 	b, _ := newBackendUnderTest(t, true)
 	ctx := context.Background()
 
+	// Match the exact bound fixture ids (alias→r_1, slug→r_2), not the bare "r_" substring.
 	alias, err := b.ResolveToken(ctx, backendTC(), "$oncall")
-	if err != nil || !strings.Contains(alias, "r_1") {
-		t.Fatalf("alias resolve: %q err=%v", alias, err)
+	if err != nil || !strings.Contains(alias, "$oncall") || strings.Contains(alias, "r_1") {
+		t.Fatalf("alias resolve must confirm $oncall without leaking a resource id: %q err=%v", alias, err)
 	}
 	slug, err := b.ResolveToken(ctx, backendTC(), "staging")
-	if err != nil || !strings.Contains(slug, "r_2") {
-		t.Fatalf("slug resolve: %q err=%v", slug, err)
+	if err != nil || !strings.Contains(slug, "$staging") || strings.Contains(slug, "r_2") {
+		t.Fatalf("slug resolve must name $staging without leaking a resource id: %q err=%v", slug, err)
 	}
 	ghost, err := b.ResolveToken(ctx, backendTC(), "ghost")
 	if err != nil || !strings.Contains(ghost, "doesn't resolve") {
@@ -276,7 +294,7 @@ func TestAgentBackend_StalePolicyScanMemoized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListResources: %v", err)
 		}
-		if !strings.Contains(out, "r_1") {
+		if !strings.Contains(out, "$oncall") {
 			t.Fatalf("reachable resource missing from scan: %q", out)
 		}
 	}
@@ -323,12 +341,16 @@ func TestAgentBackend_LogsReadError(t *testing.T) {
 
 func TestFormatResourceLine(t *testing.T) {
 	got := formatResourceLine(&client.Resource{ResourceID: "r_1", Alias: "oncall", Type: "url", Description: "Dash"})
-	if !strings.Contains(got, "$oncall") || !strings.Contains(got, "Dash") || !strings.Contains(got, "url") || !strings.Contains(got, "r_1") {
-		t.Fatalf("format = %q", got)
+	if !strings.Contains(got, "$oncall") || !strings.Contains(got, "Dash") || !strings.Contains(got, "url") {
+		t.Fatalf("format = %q, want $oncall/Dash/url", got)
 	}
-	// Slug fallback when no alias.
+	// The opaque internal resource id must NOT be rendered — the model echoes this verbatim.
+	if strings.Contains(got, "r_1") {
+		t.Fatalf("format leaked the internal resource id: %q", got)
+	}
+	// Slug fallback when no alias; still no id.
 	got = formatResourceLine(&client.Resource{ResourceID: "r_2", Slug: "staging", Type: "tunnel"})
-	if !strings.Contains(got, "$staging") {
-		t.Fatalf("slug fallback = %q", got)
+	if !strings.Contains(got, "$staging") || strings.Contains(got, "r_2") {
+		t.Fatalf("slug fallback = %q, want $staging without the id", got)
 	}
 }

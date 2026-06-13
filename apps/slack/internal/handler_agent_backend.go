@@ -189,7 +189,9 @@ func (b *agentBackend) ListAliases(ctx context.Context, tc *agent.TurnContext) (
 	}
 	lines := make([]string, 0, len(entries))
 	for i := range entries {
-		lines = append(lines, fmt.Sprintf("- $%s → %s", entries[i].Alias, entries[i].ResourceID))
+		// Just the alias — its bound resource id is internal plumbing the model would
+		// otherwise echo to the user. The alias IS the user-facing handle.
+		lines = append(lines, "- $"+entries[i].Alias)
 	}
 	sort.Strings(lines)
 	return "Aliases in this channel:\n" + strings.Join(lines, "\n"), nil
@@ -213,10 +215,11 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	// to a since-deleted workspace resource would resolve here while list_resources
 	// omits it, but gating on `allowed` wouldn't change that — the rid is still in
 	// the union.)
-	if rid, found, err := b.store.LookupChannelAlias(ctx, tc.TeamID, tc.ChannelID, token); err != nil {
+	if _, found, err := b.store.LookupChannelAlias(ctx, tc.TeamID, tc.ChannelID, token); err != nil {
 		return b.fail("resolve token: alias lookup", err)
 	} else if found {
-		return fmt.Sprintf("`$%s` is an alias in this channel for resource `%s`.", token, rid), nil
+		// Confirm it resolves, but don't surface the opaque resource id it binds to.
+		return fmt.Sprintf("`$%s` is an alias bound in this channel.", token), nil
 	}
 	// Otherwise a tunnel slug, but only reveal it if it's reachable here.
 	allowed, err := b.channelAllowed(ctx, tc)
@@ -234,7 +237,10 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	for i := range out.Resources {
 		r := &out.Resources[i]
 		if _, ok := allowed[r.ResourceID]; ok {
-			return fmt.Sprintf("`$%s` is a connector in this channel: %s.", token, formatResourceLine(r)), nil
+			// Symmetric with the alias branch above: confirm it resolves without echoing
+			// the token twice (embedding formatResourceLine would repeat `$token`) or
+			// coupling to that helper's bullet format. "connector" already conveys the type.
+			return fmt.Sprintf("`$%s` is a connector in this channel.", token), nil
 		}
 	}
 	return fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", token), nil
@@ -265,7 +271,11 @@ func (b *agentBackend) Quota(ctx context.Context, tc *agent.TurnContext) (string
 const listResourcesPageLimit = 100
 
 // formatResourceLine renders one resource for the model: alias-or-slug, display
-// name, type, and id. Kept compact so several fit the context cheaply.
+// name, and type. The internal resource id is deliberately OMITTED — it's opaque
+// plumbing customers don't care about, and the model echoes tool output verbatim, so
+// the only reliable way to keep `r_…` out of a user-facing reply is to keep it out of
+// the model's context. Resources are addressed by $alias/$slug everywhere else. Kept
+// compact so several fit the context cheaply.
 func formatResourceLine(r *client.Resource) string {
 	label := r.Alias
 	if label == "" {
@@ -282,12 +292,10 @@ func formatResourceLine(r *client.Resource) string {
 		b.WriteString(r.Description)
 		b.WriteString(" ")
 	}
-	b.WriteString("(")
 	if r.Type != "" {
+		b.WriteString("(")
 		b.WriteString(r.Type)
-		b.WriteString(", ")
+		b.WriteString(")")
 	}
-	b.WriteString(r.ResourceID)
-	b.WriteString(")")
-	return b.String()
+	return strings.TrimRight(b.String(), " ")
 }
