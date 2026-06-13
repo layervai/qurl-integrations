@@ -155,8 +155,10 @@ type DDBProvider struct {
 	// key in heap memory for the TTL; that plaintext residency is the accepted
 	// KMS/latency trade-off. SetAPIKey seeds this process with the new key after
 	// a successful write, but sibling processes and post-delete refills still
-	// rely on the TTL if an eventually-consistent DDB read returns an older row.
-	// Cross-instance invalidation is tracked separately in #766.
+	// rely on the TTL if an eventually-consistent DDB read returns an older row;
+	// that same-process post-delete stale refill can also pin the revoked key for
+	// one fresh TTL. Stricter cross-instance/same-instance invalidation is tracked
+	// separately in #766.
 	apiKeyCache map[string]*cachedAPIKey
 
 	// The mutex coordinates the cache with in-flight fills and invalidation
@@ -377,7 +379,7 @@ func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceI
 	apiKey, err := p.fetchAPIKey(ctx, workspaceID)
 	result = apiKeyLookupResult{apiKey: apiKey, err: err}
 	finished = true
-	p.finishAPIKeyLookup(workspaceID, call, result, now, generation)
+	p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
 	return apiKey, err
 }
 
@@ -582,7 +584,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
-	p.seedAPIKeyCache(workspaceID, apiKey, now)
+	p.seedAPIKeyCache(workspaceID, apiKey, p.nowOrDefault())
 	return nil
 }
 
