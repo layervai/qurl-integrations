@@ -756,6 +756,10 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		return agentProtectConnectorAuditBuildFailedResult
 	}
 	panicCleanup = build
+	// buildTunnelInstall owns revoke-on-panic before it returns; after this
+	// assignment, the process-level recover owns unexpected post-build panics.
+	// Every normal return path below must nil panicCleanup after it revokes or
+	// confirms delivery so recovery does not double-handle an already-settled key.
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
@@ -820,16 +824,20 @@ func (h *Handler) postTunnelInstallUnexpectedFailureNotice(log *slog.Logger, req
 	_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
 }
 
-func tunnelInstallAgentAuditFromMetadata(log *slog.Logger, meta *TunnelInstallModalMetadata, args *tunnelInstallArgs) *tunnelInstallAgentAudit {
+func tunnelInstallAgentAuditFromMetadata(log *slog.Logger, meta *TunnelInstallModalMetadata, args *tunnelInstallArgs) (*tunnelInstallAgentAudit, bool) {
 	if meta == nil || meta.Agent == nil || args == nil {
-		return nil
+		return nil, true
+	}
+	audit := &tunnelInstallAgentAudit{
+		target: args.Slug,
+		reason: normalizeTunnelInstallAgentReason(meta.Agent.Reason),
 	}
 	if meta.Agent.Action != string(agent.ActionProtectConnector) {
 		if log == nil {
 			log = slog.Default()
 		}
-		log.Warn("tunnel install agent metadata action mismatch", "action", meta.Agent.Action)
-		return nil
+		log.Warn("tunnel install agent metadata action mismatch", "action", meta.Agent.Action, "expected_action", agent.ActionProtectConnector)
+		return audit, false
 	}
 	// Submit-side half of the protect-connector provenance carry-through; the
 	// confirm-side half is tunnelInstallAgentMetadata.
@@ -837,10 +845,7 @@ func tunnelInstallAgentAuditFromMetadata(log *slog.Logger, meta *TunnelInstallMo
 	// connector identity from the modal, so an edited slug is recorded as the
 	// setup the approver actually submitted. Re-normalize after the Slack
 	// private_metadata round-trip rather than trusting confirm-side truncation.
-	return &tunnelInstallAgentAudit{
-		target: args.Slug,
-		reason: normalizeTunnelInstallAgentReason(meta.Agent.Reason),
-	}
+	return audit, true
 }
 
 func normalizeTunnelInstallAgentReason(reason string) string {

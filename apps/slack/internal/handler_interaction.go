@@ -250,7 +250,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		"user_id", meta.UserID,
 		"view_id", payload.View.ID,
 	)
-	agentAudit := tunnelInstallAgentAuditFromMetadata(log, &meta, args)
+	agentAudit, agentActionOK := tunnelInstallAgentAuditFromMetadata(log, &meta, args)
 	req := &tunnelInstallRequest{
 		teamID:       meta.TeamID,
 		enterpriseID: meta.EnterpriseID,
@@ -259,6 +259,14 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		responseURL:  meta.ResponseURL,
 		args:         args,
 		agentAudit:   agentAudit,
+	}
+	if !agentActionOK {
+		// Agent metadata was present and signed by Slack, but it was not for this
+		// modal action. Treat that as a verified modal rejection, not a slash-like
+		// setup attempt, so App Home keeps the approver/target accountability row.
+		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
+		return
 	}
 	// The Slack request signature covers the full form body, including the
 	// view_submission payload and its private_metadata, so CreatedAtUnix is

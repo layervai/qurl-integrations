@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1675,13 +1676,16 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 
 func TestTunnelInstallAgentAuditFromMetadataTruncatesReason(t *testing.T) {
 	longReason := strings.Repeat("r", agentConnectorAuditReasonMaxRunes+20)
-	audit := tunnelInstallAgentAuditFromMetadata(slog.Default(), &TunnelInstallModalMetadata{
+	audit, ok := tunnelInstallAgentAuditFromMetadata(slog.Default(), &TunnelInstallModalMetadata{
 		Agent: &TunnelInstallAgentMetadata{
 			Action: string(agent.ActionProtectConnector),
 			Reason: "  " + longReason + "  ",
 		},
 	}, &tunnelInstallArgs{Slug: testTunnelSlug})
 
+	if !ok {
+		t.Fatal("agent action ok = false, want true")
+	}
 	if audit == nil {
 		t.Fatal("audit = nil, want protect-connector audit")
 	}
@@ -1696,21 +1700,91 @@ func TestTunnelInstallAgentAuditFromMetadataTruncatesReason(t *testing.T) {
 	}
 }
 
-func TestTunnelInstallAgentAuditFromMetadataSkipsUnexpectedAction(t *testing.T) {
+func TestTunnelInstallAgentAuditFromMetadataFlagsUnexpectedAction(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
-	audit := tunnelInstallAgentAuditFromMetadata(log, &TunnelInstallModalMetadata{
+	audit, ok := tunnelInstallAgentAuditFromMetadata(log, &TunnelInstallModalMetadata{
 		Agent: &TunnelInstallAgentMetadata{
 			Action: string(agent.ActionProtectURL),
 			Reason: testTunnelAgentReason,
 		},
 	}, &tunnelInstallArgs{Slug: testTunnelSlug})
 
-	if audit != nil {
-		t.Fatalf("audit = %+v, want nil for non-connector action", audit)
+	if ok {
+		t.Fatal("agent action ok = true, want false for non-connector action")
+	}
+	if audit == nil || audit.target != testTunnelSlug || audit.reason != testTunnelAgentReason {
+		t.Fatalf("audit = %+v, want target/reason preserved for rejected metadata", audit)
 	}
 	if !strings.Contains(logs.String(), "action mismatch") || !strings.Contains(logs.String(), string(agent.ActionProtectURL)) {
 		t.Fatalf("log = %q, want action-mismatch breadcrumb", logs.String())
+	}
+}
+
+func TestTunnelInstallModalRejectsUnexpectedAgentActionBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var resourceHits atomic.Int32
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits.Add(1)
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectURL),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, testAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Could not verify this modal") {
+		t.Fatalf("modal response = %s, want verification rejection", w.Body.String())
+	}
+	h.Wait()
+	if resourceHits.Load() != 0 {
+		t.Fatalf("resource create hits = %d, want 0 before rejecting unexpected agent action", resourceHits.Load())
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %+v, want one modal-rejected row", got)
+	}
+	entry := got[0]
+	if entry.Actor != testAdminUserID || entry.Action != string(agent.ActionProtectConnector) || entry.Target != testTunnelSlug || entry.Channel != testTunnelChannelID {
+		t.Fatalf("audit entry identity mismatch: %+v", entry)
+	}
+	if entry.Reason != testTunnelAgentReason {
+		t.Fatalf("audit reason = %q, want modal provenance reason", entry.Reason)
+	}
+	if entry.Outcome != agentProtectConnectorAuditModalRejectedOutcome || entry.Result != agentProtectConnectorAuditModalRejectedOutcome {
+		t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditModalRejectedOutcome)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
 	}
 }
 
