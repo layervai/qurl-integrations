@@ -233,6 +233,30 @@ func TestAgentAck_ClearAbandonsRemoveWhenJoinTimeoutExpires(t *testing.T) {
 	}
 }
 
+func TestAgentAck_RemoveCanceledDuringShutdownLogsDebug(t *testing.T) {
+	rec := &recordingReactions{removeErr: context.Canceled}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	h := NewHandler(Config{BaseContext: baseCtx, Reactions: rec})
+	cancel()
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	addDone := make(chan struct{})
+	close(addDone)
+	h.clearAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, agentAckAdd{done: addDone})
+
+	gotLogs := logBuf.String()
+	if strings.Contains(gotLogs, "level=WARN") {
+		t.Fatalf("shutdown-canceled remove should not log Warn, got logs:\n%s", gotLogs)
+	}
+	if !strings.Contains(gotLogs, "level=DEBUG") || !strings.Contains(gotLogs, "remove canceled during shutdown") {
+		t.Fatalf("shutdown-canceled remove should log Debug, got logs:\n%s", gotLogs)
+	}
+}
+
 func TestAgentAck_ClearedOnTurnError(t *testing.T) {
 	rec := &recordingReactions{}
 	h, _, _ := newAckHandler(t, rec, fakeAgentLLM{err: errors.New("model 500")})

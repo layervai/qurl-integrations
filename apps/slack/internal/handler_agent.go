@@ -319,6 +319,10 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, add a
 	ctx, cancel := h.agentAckContext()
 	defer cancel()
 	if err := h.cfg.Reactions.Remove(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, env.Event.TS, agentAckReaction); err != nil {
+		if h.baseCtx != nil && h.baseCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			log.Debug("agent: ack reaction remove canceled during shutdown; ack may remain", "error", err)
+			return
+		}
 		log.Warn("agent: ack reaction remove failed (best-effort)", "error", err)
 	}
 }
