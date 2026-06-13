@@ -2047,6 +2047,67 @@ func TestTunnelInstallModalNonAdminAgentAuditDoesNotDelayAck(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallModalWorkerSaturationAuditsAgentSubmit(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	for i := 0; i < cap(h.sem); i++ {
+		h.sem <- struct{}{}
+	}
+	defer func() {
+		for len(h.sem) > 0 {
+			<-h.sem
+		}
+	}()
+
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, testAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), modalBusyMsg) {
+		t.Fatalf("modal response = %s, want busy response", w.Body.String())
+	}
+	h.Wait()
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated saturated modal should record one audit entry, got %d: %+v", len(got), got)
+	}
+	entry := got[0]
+	if entry.Outcome != agentProtectConnectorAuditWorkerUnavailableOutcome || entry.Result != agentProtectConnectorAuditWorkerUnavailableOutcome {
+		t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditWorkerUnavailableOutcome)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
+	}
+	if entry.Actor != testAdminUserID || entry.Target != testTunnelSlug || entry.Reason != testTunnelAgentReason {
+		t.Fatalf("audit identity = %+v, want submitted agent provenance", entry)
+	}
+}
+
 func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) {
 	now := fixedNow
 

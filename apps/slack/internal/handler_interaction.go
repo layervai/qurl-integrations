@@ -289,9 +289,10 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	}
 	// Validation, configuration, and request-identity rejections above are
 	// pre-execution and unaudited. This submitted-modal admin re-check is the
-	// first denied path with a concrete connector identity; accepted submits
-	// that reach the worker are recorded there. Slash-origin submits carry no
-	// agentAudit and no-op.
+	// first denied path with a concrete connector identity; worker-pool
+	// saturation is also recorded because the submit had a concrete target.
+	// Accepted submits that reach the worker are recorded there. Slash-origin
+	// submits carry no agentAudit and no-op.
 
 	// Slack expects modal submissions to be acknowledged quickly; keep this
 	// synchronous admin re-check bounded so a slow store fails closed. Use the
@@ -319,6 +320,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		h.processTunnelInstall(ctx, log, req)
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditWorkerUnavailableResult)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{})

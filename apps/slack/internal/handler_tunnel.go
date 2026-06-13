@@ -93,15 +93,17 @@ const (
 	agentProtectConnectorAuditBuildFailedOutcome                = "qURL Connector setup failed before install instructions were delivered."
 	agentProtectConnectorAuditAdminVerificationFailedOutcome    = "qURL Connector setup was not started because qURL admin status could not be verified."
 	agentProtectConnectorAuditAdminDeniedOutcome                = "qURL Connector setup was not started because the modal submitter is not a qURL admin."
+	agentProtectConnectorAuditWorkerUnavailableOutcome          = "qURL Connector setup was not started because qURL was busy."
 )
 
 const (
-	agentProtectConnectorAuditSuccessResult                    tunnelInstallAgentAuditResult = agentProtectConnectorAuditOutcome
-	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult  tunnelInstallAgentAuditResult = agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome
-	agentProtectConnectorAuditInstructionsDeliveryFailedResult tunnelInstallAgentAuditResult = agentProtectConnectorAuditInstructionsDeliveryFailedOutcome
-	agentProtectConnectorAuditBuildFailedResult                tunnelInstallAgentAuditResult = agentProtectConnectorAuditBuildFailedOutcome
-	agentProtectConnectorAuditAdminVerificationFailedResult    tunnelInstallAgentAuditResult = agentProtectConnectorAuditAdminVerificationFailedOutcome
-	agentProtectConnectorAuditAdminDeniedResult                tunnelInstallAgentAuditResult = agentProtectConnectorAuditAdminDeniedOutcome
+	agentProtectConnectorAuditSuccessResult tunnelInstallAgentAuditResult = iota
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
+	agentProtectConnectorAuditInstructionsDeliveryFailedResult
+	agentProtectConnectorAuditBuildFailedResult
+	agentProtectConnectorAuditAdminVerificationFailedResult
+	agentProtectConnectorAuditAdminDeniedResult
+	agentProtectConnectorAuditWorkerUnavailableResult
 )
 
 type tunnelInstallArgs struct {
@@ -131,7 +133,7 @@ type tunnelInstallAgentAudit struct {
 	reason string
 }
 
-type tunnelInstallAgentAuditResult string
+type tunnelInstallAgentAuditResult uint8
 
 // parseTunnelInstall parses the typed (power-user) form of the connector verb:
 // `/qurl-admin protect-connector <id> [env:…] [port:…] [alias:…] [container:|service:…]`.
@@ -709,11 +711,40 @@ func normalizeTunnelInstallAgentReason(reason string) string {
 }
 
 func (r tunnelInstallAgentAuditResult) outcome() string {
-	return string(r)
+	switch r {
+	case agentProtectConnectorAuditSuccessResult:
+		return agentProtectConnectorAuditOutcome
+	case agentProtectConnectorAuditBootstrapDMDeliveryFailedResult:
+		return agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome
+	case agentProtectConnectorAuditInstructionsDeliveryFailedResult:
+		return agentProtectConnectorAuditInstructionsDeliveryFailedOutcome
+	case agentProtectConnectorAuditBuildFailedResult:
+		return agentProtectConnectorAuditBuildFailedOutcome
+	case agentProtectConnectorAuditAdminVerificationFailedResult:
+		return agentProtectConnectorAuditAdminVerificationFailedOutcome
+	case agentProtectConnectorAuditAdminDeniedResult:
+		return agentProtectConnectorAuditAdminDeniedOutcome
+	case agentProtectConnectorAuditWorkerUnavailableResult:
+		return agentProtectConnectorAuditWorkerUnavailableOutcome
+	default:
+		return agentProtectConnectorAuditBuildFailedOutcome
+	}
 }
 
 func (r tunnelInstallAgentAuditResult) success() bool {
-	return r == agentProtectConnectorAuditSuccessResult
+	switch r {
+	case agentProtectConnectorAuditSuccessResult:
+		return true
+	case agentProtectConnectorAuditBootstrapDMDeliveryFailedResult,
+		agentProtectConnectorAuditInstructionsDeliveryFailedResult,
+		agentProtectConnectorAuditBuildFailedResult,
+		agentProtectConnectorAuditAdminVerificationFailedResult,
+		agentProtectConnectorAuditAdminDeniedResult,
+		agentProtectConnectorAuditWorkerUnavailableResult:
+		return false
+	default:
+		return false
+	}
 }
 
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {

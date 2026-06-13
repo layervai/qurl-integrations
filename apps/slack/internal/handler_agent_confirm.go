@@ -533,7 +533,9 @@ func agentConfirmAttributedCard(cardText, asker, approver string) string {
 //
 // On trigger expiry / open failure the card goes terminal with an "ask me again"
 // prompt: the action is already claimed (consumed), so the user re-asks the agent
-// to mint a fresh proposal + trigger — there is no retry on this card.
+// to mint a fresh proposal + trigger — there is no retry on this card. Modal
+// open and abandon events are intentionally not audit rows; the submitted modal is
+// the first point with an enforced connector identity and setup intent.
 func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, triggerReceivedAt time.Time) {
 	responseURL := payload.ResponseURL
 	if h.cfg.OpenView == nil {
