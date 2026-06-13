@@ -39,14 +39,13 @@ const (
 // upgrading github.com/distribution/reference.
 func ClassifyPin(image string) PinStatus {
 	name, digest, hasDigest := strings.Cut(image, "@")
-	parsed, parseErr := dockerref.Parse(image)
 	if hasDigest {
-		return classifyDigestImagePin(name, digest, parsed, parseErr)
+		return classifyDigestImagePin(image, name, digest)
 	}
-	return classifyTaggedImagePin(name, parsed, parseErr)
+	return classifyTaggedImagePin(image, name)
 }
 
-func classifyDigestImagePin(name, digest string, parsed dockerref.Reference, parseErr error) PinStatus {
+func classifyDigestImagePin(image, name, digest string) PinStatus {
 	if name == "" {
 		return MalformedDigest
 	}
@@ -83,6 +82,7 @@ func classifyDigestImagePin(name, digest string, parsed dockerref.Reference, par
 		// Future sha256DigestStatus values must fail closed.
 		return MalformedDigest
 	}
+	parsed, parseErr := dockerref.Parse(image)
 	named, ok := parsed.(dockerref.Named)
 	if parseErr != nil || !ok {
 		return MalformedDigest
@@ -94,7 +94,7 @@ func classifyDigestImagePin(name, digest string, parsed dockerref.Reference, par
 	return Pinned
 }
 
-func classifyTaggedImagePin(name string, parsed dockerref.Reference, parseErr error) PinStatus {
+func classifyTaggedImagePin(image, name string) PinStatus {
 	lastSlash := strings.LastIndex(name, "/")
 	lastColon := strings.LastIndex(name, ":")
 
@@ -120,6 +120,7 @@ func classifyTaggedImagePin(name string, parsed dockerref.Reference, parseErr er
 	if imageNameHasUppercase(repositoryName) {
 		return MalformedReference
 	}
+	parsed, parseErr := dockerref.Parse(image)
 	named, ok := parsed.(dockerref.Named)
 	if parseErr != nil || !ok {
 		return MalformedReference
