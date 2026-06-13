@@ -14,6 +14,7 @@
 // `X-Hub-Signature-256: sha256=…`. Do not let the two routes drift.
 
 const crypto = require('crypto');
+const express = require('express');
 
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
@@ -71,9 +72,10 @@ jest.mock('../src/webhook-subscriptions', () => ({
 // Capture audit emissions so tests can assert that the receiver fires
 // the right CloudWatch metric-filter event per failure branch.
 const mockAudit = jest.fn();
+const mockLoggerWarn = jest.fn();
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
-  warn: jest.fn(),
+  warn: mockLoggerWarn,
   error: jest.fn(),
   debug: jest.fn(),
   audit: mockAudit,
@@ -88,9 +90,37 @@ process.env.BASE_URL = 'http://localhost:3000';
 
 const request = require('supertest');
 const { app } = require('../src/server');
+const qurlWebhookRouter = require('../src/routes/qurl-webhook');
 
 function signBody(rawJson, secret = 'test-qurl-secret') {
   return crypto.createHmac('sha256', secret).update(rawJson).digest('hex');
+}
+
+function buildReqBodyClobberingApp() {
+  const testApp = express();
+  testApp.set('trust proxy', 1);
+  testApp.use('/webhooks', express.json({
+    limit: '1mb',
+    verify: (req, _res, buf) => { req.rawBody = buf; },
+  }));
+  testApp.use('/webhooks', (req, _res, next) => {
+    req.body = {};
+    next();
+  });
+  testApp.use('/webhooks', qurlWebhookRouter);
+  return testApp;
+}
+
+function buildRawOnlyApp() {
+  const testApp = express();
+  testApp.set('trust proxy', 1);
+  testApp.use('/webhooks', express.raw({
+    type: '*/*',
+    limit: '1mb',
+    verify: (req, _res, buf) => { req.rawBody = buf; },
+  }));
+  testApp.use('/webhooks', qurlWebhookRouter);
+  return testApp;
 }
 
 const VALID_PAYLOAD = {
@@ -583,11 +613,47 @@ describe('POST /webhooks/qurl — multi-secret HMAC selection (BYOK view counter
   });
 });
 
-describe('POST /webhooks/qurl — body.owner_id parse failure modes', () => {
+describe('POST /webhooks/qurl — raw body owner_id parse failure modes', () => {
   // Pre-HMAC body parse is bounded (req.rawBody is 1mb-capped by
   // server.js middleware), so we don't worry about deep-nesting V8
   // exhaustion. The remaining gaps are missing/non-string owner_id
-  // and a body that parsed-successfully but lacks the field.
+  // and a raw body that parsed successfully but lacks the field.
+  it('extracts owner_id from req.rawBody even if req.body is clobbered before the router', async () => {
+    const raw = JSON.stringify(VALID_PAYLOAD);
+    const res = await request(buildReqBodyClobberingApp())
+      .post('/webhooks/qurl')
+      // Keep this regression independent of singleton limiter state.
+      .set('X-Forwarded-For', '198.51.100.42')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'recorded' });
+    expect(mockRecordQurlView).toHaveBeenCalledWith(expect.objectContaining({
+      qurlId: VALID_PAYLOAD.data.qurl_id,
+      eventId: VALID_PAYLOAD.id,
+    }));
+  });
+
+  it('returns 401 when rawBody JSON parsing rejects a signed out-of-contract wire shape', async () => {
+    const raw = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(JSON.stringify(VALID_PAYLOAD)),
+    ]);
+    const res = await request(buildRawOnlyApp())
+      .post('/webhooks/qurl')
+      .set('X-Forwarded-For', '198.51.100.43')
+      .set('Content-Type', 'application/octet-stream')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    expect(res.status).toBe(401);
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'qURL webhook raw body JSON parse failed',
+      expect.objectContaining({ error: expect.any(String) }),
+    );
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
+  });
+
   it('returns 401 when body.owner_id is missing entirely', async () => {
     const payload = { ...VALID_PAYLOAD };
     delete payload.owner_id;
@@ -621,6 +687,23 @@ describe('POST /webhooks/qurl — body.owner_id parse failure modes', () => {
       .set('QURL-Signature', signBody(raw))
       .send(raw);
     expect(res.status).toBe(401);
+  });
+
+  it('rejects malformed JSON on the real /webhooks parser before the route handler runs', async () => {
+    const raw = '{"owner_id":';
+    const res = await request(app)
+      .post('/webhooks/qurl')
+      .set('Content-Type', 'application/json')
+      .set('QURL-Signature', signBody(raw))
+      .send(raw);
+    // 500 = current global error-handler mapping for body-parser
+    // SyntaxError, 400 = a future tighter parser-error handler.
+    expect([400, 500]).toContain(res.status);
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      'qURL webhook raw body JSON parse failed',
+      expect.any(Object),
+    );
+    expect(mockRecordQurlView).not.toHaveBeenCalled();
   });
 
   // Behavioral pin for the 1mb pre-HMAC parse boundary documented in

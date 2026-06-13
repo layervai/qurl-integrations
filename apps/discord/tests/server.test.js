@@ -399,7 +399,7 @@ describe('Server', () => {
 
 // ─── /webhooks rawBody parser invariant ────────────────────────────
 //
-// The qurl-webhook receiver does a pre-HMAC JSON.parse of req.body
+// The qurl-webhook receiver does a pre-HMAC JSON.parse of req.rawBody
 // to extract owner_id for secret routing. The SECURITY invariant
 // (called out in qurl-webhook.js's verifyAndResolve comment) is that
 // the 1mb cap on rawBodyJson middleware bounds the pre-trust window.

@@ -64,9 +64,13 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 
-// Parse JSON for webhooks with raw body for signature verification. MUST be
-// registered BEFORE the general app.use(express.json()) below so webhook
-// requests hit this parser first and get req.rawBody populated.
+// Parse JSON for webhooks with raw body for signature verification. The 1mb
+// cap is part of the qURL receiver's threat model: it bounds the raw-body
+// owner_id parse that selects the per-owner HMAC secret before the request is
+// trusted. MUST be registered BEFORE the general app.use(express.json()) below
+// so webhook requests hit this parser first and get req.rawBody populated.
+// The receiver intentionally ignores req.body; keeping express.json here still
+// enforces the cap and rejects malformed JSON before the router runs.
 const rawBodyJson = express.json({
   limit: '1mb',
   verify: (req, _res, buf) => { req.rawBody = buf; },
