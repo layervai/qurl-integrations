@@ -192,11 +192,16 @@ func TestSlashCommandHelp(t *testing.T) {
 // and returns the JSON response envelope.
 func slashResponse(t *testing.T, h *Handler, command, text string) map[string]string {
 	t.Helper()
+	return slashResponseForWorkspaceUser(t, h, command, text, "T123ABCDEF", "U_ADMIN1")
+}
+
+func slashResponseForWorkspaceUser(t *testing.T, h *Handler, command, text, teamID, userID string) map[string]string {
+	t.Helper()
 	body := url.Values{
 		fieldCommand:   {command},
 		fieldText:      {text},
-		fieldTeamID:    {"T123ABCDEF"},
-		fieldUserID:    {"U_ADMIN1"},
+		fieldTeamID:    {teamID},
+		fieldUserID:    {userID},
 		fieldChannelID: {"C123"},
 		fieldTriggerID: {"trig-split"},
 	}.Encode()
@@ -483,6 +488,33 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallRequiresWorkspaceOwner(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+
+	nonOwner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+	if provider.deleteCalls != 0 {
+		t.Fatalf("non-owner DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(nonOwner[respFieldText], "can only be run by the person who connected qURL") {
+		t.Fatalf("non-owner reply missing owner-only message: %q", nonOwner[respFieldText])
+	}
+
+	owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
+	if provider.deleteCalls != 1 {
+		t.Fatalf("owner DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if provider.deleteWorkspaceID != testAdminTeamID {
+		t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
+	}
+	if !strings.Contains(owner[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("owner reply missing confirmation: %q", owner[respFieldText])
 	}
 }
 
