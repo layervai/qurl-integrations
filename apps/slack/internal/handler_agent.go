@@ -60,6 +60,7 @@ const agentTurnRateWindow = time.Hour
 // agentTurnRateCounterFailOpenMsg is an infra-observed contract: the CloudWatch
 // metric filter added in qurl-integrations-infra#1065 keys on this exact slog
 // msg value for the fail-open path introduced by qurl-integrations-infra#1055.
+// TODO(upstream-contract): keep this value in lockstep with that infra filter.
 const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
 
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
