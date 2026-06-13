@@ -129,6 +129,32 @@ func TestHardenAgentMarkdown_EscapesRawHTMLTagStarts(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_EscapesSlackControlAngles(t *testing.T) {
+	t.Parallel()
+	in := `Notify <!channel>, <@U12345678>, and <#C12345678|ops>.`
+	want := `Notify \<!channel>, \<@U12345678>, and \<#C12345678|ops>.`
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestHardenAgentMarkdown_EscapesFutureSlackControlLetterPrefixes(t *testing.T) {
+	t.Parallel()
+	in := `Notify <@B12345678> and <#D12345678|direct>.`
+	want := `Notify \<@B12345678> and \<#D12345678|direct>.`
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestHardenAgentMarkdown_PreservesBenignAngleControlsLookalikes(t *testing.T) {
+	t.Parallel()
+	in := `Keep prose like 5 <# 7 and temp <@ home unchanged.`
+	if got := hardenAgentMarkdown(in); got != in {
+		t.Fatalf("hardened markdown = %q, want %q", got, in)
+	}
+}
+
 func TestHardenAgentMarkdown_PreservesVisibleAutolinks(t *testing.T) {
 	t.Parallel()
 	in := `Use <https://docs.example/setup>, <MAILTO:security@example.com>, <user@example.com>, or <tel:+15551234567>.`
@@ -200,6 +226,7 @@ func TestHardenAgentMarkdown_IsIdempotent(t *testing.T) {
 		testEscapedBracketRealLink,
 		testUnclosedCodeMarkdownLink,
 		"Email <user@example.com> and <a href=\"https://evil.example/login\">billing</a>.",
+		"Notify <!channel>, <@U12345678>, and <#C12345678|ops>.",
 		"[1]: https://evil.example/login",
 	} {
 		t.Run(in, func(t *testing.T) {
@@ -223,6 +250,7 @@ func FuzzHardenAgentMarkdown(f *testing.F) {
 		testEscapedBracketRealLink,
 		testUnclosedCodeMarkdownLink,
 		"Email <user@example.com> and <a href=\"https://evil.example/login\">billing</a>.",
+		"Notify <!channel>, <@U12345678>, and <#C12345678|ops>.",
 		"[1]: https://evil.example/login",
 		"Heads up!`code` done",
 	} {
@@ -320,6 +348,60 @@ func TestAgentMarkdownLinkHarden_HandlesChunkSplitSlackAngleLinks(t *testing.T) 
 	want := "Use billing portal (https://evil.example/login) now"
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_HandlesChunkSplitSlackControls(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Notify <") +
+		h.write("@U12345678> and <!channel") +
+		h.write("> now") +
+		h.flush()
+	want := `Notify \<@U12345678> and \<!channel> now`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_HandlesTwoByteChunkSplitSlackControls(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Notify <@") +
+		h.write("U12345678> and <#") +
+		h.write("C12345678|ops> now") +
+		h.flush()
+	want := `Notify \<@U12345678> and \<#C12345678|ops> now`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_PreservesTwoByteChunkSplitSlackLookalikes(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Keep temp <@") +
+		h.write(" home and 5 <#") +
+		h.write(" 7 unchanged") +
+		h.flush()
+	want := `Keep temp <@ home and 5 <# 7 unchanged`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesDeferredSlackControlPrefixesOnFlush(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"<@", "<#", "<!"} {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			var h agentMarkdownLinkHarden
+			got := h.write("prefix "+in) + h.flush()
+			want := `prefix \` + in
+			if got != want {
+				t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

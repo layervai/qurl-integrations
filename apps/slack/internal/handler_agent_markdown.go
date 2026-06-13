@@ -19,8 +19,10 @@ const (
 // local instead of using a full CommonMark library because streaming deltas must
 // be hardened before Slack sees them, even when syntax is split across chunk
 // boundaries. The pinned masked-link surface is inline/image links, reference
-// definitions, Slack <url|label> angle links, and raw HTML tag starts; keep new
-// renderer syntax support pinned by tests.
+// definitions, Slack <url|label> angle links, Slack control-angle sequences,
+// and raw HTML tag starts; keep new renderer syntax support pinned by tests.
+// Slack <!...> controls intentionally overlap raw-HTML declaration escaping so
+// that the broadcast-like surface stays explicit even if HTML handling changes.
 func hardenAgentMarkdown(markdown string) string {
 	return hardenAgentMarkdownWithOptions(markdown, false, 0)
 }
@@ -164,6 +166,11 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 		h.pendingLess = remaining
 		return false
 	}
+	if c == '<' && isSlackControlAngleStart(remaining) {
+		out.WriteByte('\\')
+		out.WriteByte(c)
+		return true
+	}
 	if c == '<' && isRawHTMLTagStart(remaining) {
 		out.WriteByte('\\')
 		out.WriteByte(c)
@@ -203,7 +210,7 @@ func (h *agentMarkdownLinkHarden) flush() string {
 		h.pendingBang = false
 	}
 	if h.pendingLess != "" {
-		out.WriteString(h.pendingLess)
+		out.WriteString(h.safePendingLessOriginal(h.pendingLess))
 		h.pendingLess = ""
 	}
 	if h.link.state != markdownLinkNone {
@@ -624,12 +631,36 @@ func isVisibleAngleLinkStart(s string) bool {
 	return len(s) >= 2 && s[0] == '<' && isVisibleAngleLinkStartAfterLess(s[1:])
 }
 
+func isSlackControlAngleStart(s string) bool {
+	if len(s) < 3 || s[0] != '<' {
+		return false
+	}
+	switch s[1] {
+	case '@', '#', '!':
+		return isASCIILetter(s[2])
+	default:
+		return false
+	}
+}
+
+func (h *agentMarkdownLinkHarden) safePendingLessOriginal(pending string) string {
+	switch pending {
+	case "<@", "<#", "<!":
+		return "\\" + pending
+	default:
+		return pending
+	}
+}
+
 func shouldDeferAngleAutolinkStart(s string) bool {
 	if s == "" || s[0] != '<' {
 		return false
 	}
 	afterLess := s[1:]
 	if afterLess == "" {
+		return true
+	}
+	if afterLess == "@" || afterLess == "#" || afterLess == "!" {
 		return true
 	}
 	if len(afterLess) > maxPartialAngleAutolinkBytes {

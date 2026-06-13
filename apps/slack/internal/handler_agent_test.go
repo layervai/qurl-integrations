@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strconv"
@@ -21,11 +22,15 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 const (
 	testAgentReachStagingReply = "You can reach staging."
 	testAgentStillWorksReply   = "still works"
+	testAgentStopEndTurn       = "end_turn"
+	testAgentStopToolUse       = "tool_use"
 )
 
 func TestStripBotMention(t *testing.T) {
@@ -267,7 +272,23 @@ func (f fakeAgentLLM) Complete(context.Context, *agent.Request) (agent.Response,
 	if f.err != nil {
 		return agent.Response{}, f.err
 	}
-	return agent.Response{Text: f.reply, StopReason: "end_turn"}, nil
+	return agent.Response{Text: f.reply, StopReason: testAgentStopEndTurn}, nil
+}
+
+type scriptedHandlerAgentLLM struct {
+	responses []agent.Response
+	captured  []*agent.Request
+	calls     int
+}
+
+func (s *scriptedHandlerAgentLLM) Complete(_ context.Context, req *agent.Request) (agent.Response, error) {
+	s.captured = append(s.captured, req)
+	if s.calls >= len(s.responses) {
+		return agent.Response{}, errors.New("scriptedHandlerAgentLLM: no more responses")
+	}
+	r := s.responses[s.calls]
+	s.calls++
+	return r, nil
 }
 
 // panicAgentLLM panics mid-turn to exercise processAgentEvent's panic safety-net.
@@ -536,6 +557,93 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 	got := (*posts)[0]
 	if got.channel != "C1" || got.threadTS != "100.1" || got.text != testAgentReachStagingReply {
 		t.Fatalf("reply = %+v", got)
+	}
+}
+
+func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testing.T) {
+	const (
+		resourceID  = "r_agent_inert"
+		description = "Deploy room <!channel> and <@U12345678>"
+	)
+	names := defaultTestTableNames()
+	adminStore := newStoreFromFake(t, newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {
+			seedChannelPolicySet("T1", "C1", "deploy", []string{resourceID}),
+		},
+	}), names, nil)
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != testResourcesPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		respondQURLEnvelope(t, w, []map[string]any{{
+			testKeyResourceID:  resourceID,
+			testKeyDescription: description,
+			testKeyType:        client.ResourceTypeURL,
+		}})
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	llm := &scriptedHandlerAgentLLM{responses: []agent.Response{
+		{
+			ToolCalls:  []agent.ToolCall{{ID: "tool_list", Name: "list_resources", Input: json.RawMessage(`{}`)}},
+			StopReason: testAgentStopToolUse,
+		},
+		{
+			Text:       "I found " + description,
+			StopReason: testAgentStopEndTurn,
+		},
+	}}
+	t.Setenv("QURL_API_KEY", "test-key")
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	textPost, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{
+		AgentLLM:            llm,
+		AgentStore:          agentStore,
+		AdminStore:          adminStore,
+		AuthProvider:        &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		NewClient:           func(apiKey string) *client.Client { return client.New(qurlSrv.URL, apiKey, client.WithRetry(0)) },
+		PostMessage:         textPost,
+		PostMarkdownMessage: mdPost,
+		AgentDefaultEnabled: true,
+	})
+	t.Cleanup(h.Wait)
+
+	w := httptest.NewRecorder()
+	h.handleEvent(w, []byte(appMentionBody("EvDescriptionControls")))
+	if w.Code != 200 {
+		t.Fatalf("ack code = %d", w.Code)
+	}
+	h.Wait()
+
+	if len(llm.captured) != 2 {
+		t.Fatalf("expected list_resources then final answer calls, got %d", len(llm.captured))
+	}
+	var sawRawToolResult bool
+	for _, m := range llm.captured[1].Messages {
+		for _, tr := range m.ToolResults {
+			if strings.Contains(tr.Content, description) {
+				sawRawToolResult = true
+			}
+		}
+	}
+	if !sawRawToolResult {
+		t.Fatalf("model did not receive the raw resource description in tool results: %+v", llm.captured[1].Messages)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 {
+		t.Fatalf("expected one reply, got %d: %+v", len(*posts), *posts)
+	}
+	got := (*posts)[0]
+	if !got.markdown {
+		t.Fatalf("free-text answer should use the standard-Markdown seam, got %+v", got)
+	}
+	want := `I found Deploy room \<!channel> and \<@U12345678>`
+	if got.text != want {
+		t.Fatalf("reply = %q, want escaped visible controls %q", got.text, want)
 	}
 }
 
@@ -1220,11 +1328,12 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 	h := NewHandler(Config{PostMessage: textPost})
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
 
-	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "plain [answer](https://evil.example)"})
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "plain [answer](https://evil.example) for <@U12345678> <!channel>"})
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != "plain answer (https://evil.example)" {
+	want := `plain answer (https://evil.example) for \<@U12345678> \<!channel>`
+	if len(*posts) != 1 || (*posts)[0].text != want {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
 }
