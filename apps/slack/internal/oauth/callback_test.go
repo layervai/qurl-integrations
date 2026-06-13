@@ -692,6 +692,9 @@ func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]a
 		if rec["key_id"] != testKeyID {
 			t.Errorf("key_id = %v, want %q", rec["key_id"], testKeyID)
 		}
+		if got, ok := rec["error"].(string); !ok || got == "" {
+			t.Errorf("error = %v, want non-empty string", rec["error"])
+		}
 		if rec["retry_window_hours"] != float64(setupBindingRetryWindowHours) {
 			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], setupBindingRetryWindowHours)
 		}
