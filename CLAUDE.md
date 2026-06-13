@@ -57,4 +57,4 @@ The following stay literal — don't "finish" the rebrand:
 
 When upstream qurl-service rebrands its API error strings, the test fixtures in this repo that mirror them (`"QURL not found"`, `"QURL API error (...)"`, `"token limit per QURL reached"` etc.) need to update in lockstep — `git grep TODO(upstream-rebrand)` finds the doc-comment markers.
 
-For non-error qurl-service contracts mirrored locally (for example TTLs), use `TODO(upstream-contract)` so `git grep TODO(upstream-contract)` finds those lockstep sites.
+For non-error external or cross-repo contracts mirrored locally (for example qurl-service TTLs or infra log filters), use `TODO(upstream-contract)` so `git grep TODO(upstream-contract)` finds those lockstep sites.
