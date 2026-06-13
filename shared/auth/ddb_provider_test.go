@@ -312,6 +312,63 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
+	t.Run("does not cache DDB transport errors", func(t *testing.T) {
+		ddb := &fakeDDBClient{getErr: errors.New("ddb down")}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
+			t.Fatal("want DDB error, got nil")
+		}
+
+		ddb.getErr = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_ddb_error")}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after DDB recovery: %v", err)
+		}
+		if got != "lv_live_after_ddb_error" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_ddb_error")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+
+	t.Run("does not cache decrypt errors", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_decrypt_error")},
+		}
+		encryptor := &passthroughEncryptor{openErr: errors.New("kms down")}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
+			t.Fatal("want decrypt error, got nil")
+		}
+
+		encryptor.openErr = nil
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after decrypt recovery: %v", err)
+		}
+		if got != "lv_live_after_decrypt_error" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_decrypt_error")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+		if encryptor.openCalls != 2 {
+			t.Fatalf("Open calls = %d, want 2", encryptor.openCalls)
+		}
+	})
+
 	t.Run("expired entry refreshes from DDB", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},

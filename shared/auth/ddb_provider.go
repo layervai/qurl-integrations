@@ -150,7 +150,11 @@ type DDBProvider struct {
 	// accepts five minutes as the starting cross-instance staleness window; that
 	// stays human-perceptible while collapsing the common multi-command session.
 	// Slack bot-token caching stays shorter because it gates reinstall detection
-	// rather than qURL API retry pressure.
+	// rather than qURL API retry pressure. The cache also keeps the decrypted
+	// key in heap memory for the TTL; that plaintext residency is the accepted
+	// KMS/latency trade-off. SetAPIKey seeds this process with the new key after
+	// a successful write, but sibling processes and post-delete refills still
+	// rely on the TTL if an eventually-consistent DDB read returns an older row.
 	apiKeyCache map[string]*cachedAPIKey
 
 	// The mutex coordinates the cache with in-flight fills and invalidation
@@ -541,8 +545,8 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
 	}
 
-	now := p.nowOrDefault().UTC()
-	nowString := now.Format(time.RFC3339)
+	now := p.nowOrDefault()
+	nowString := now.UTC().Format(time.RFC3339)
 	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
 		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
 	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
