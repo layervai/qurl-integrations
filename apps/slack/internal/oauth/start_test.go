@@ -251,7 +251,7 @@ func TestStartRejectsTamperedState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
-	assertOAuthErrorPage(t, rec, "Setup link expired")
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
 }
 
 func TestStartRejectsExpiredState(t *testing.T) {
@@ -266,7 +266,7 @@ func TestStartRejectsExpiredState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
-	assertOAuthErrorPage(t, rec, "Setup link expired")
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
 }
 
 func TestStartRejectsWrongMethod(t *testing.T) {

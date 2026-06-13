@@ -61,7 +61,7 @@ func Start(cfg Config) http.HandlerFunc {
 			// surface the misleading "setup must be completed in the
 			// same browser" error rather than re-running setup cleanly.
 			clearStateCookie(w)
-			renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link expired",
+			renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
 				"This setup link is invalid or expired.",
 				"Return to Slack and run /qurl setup <email> again.")
 			return

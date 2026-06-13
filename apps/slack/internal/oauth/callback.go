@@ -393,7 +393,7 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if err != nil {
 		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		clearStateCookie(w)
-		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link expired",
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
 			"This setup link is invalid or expired.",
 			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
@@ -807,15 +807,33 @@ func renderRebindRefused(w http.ResponseWriter, teamID string) {
 // renderOAuthErrorPage writes a styled error page with the given status.
 // Replaces bare http.Error callback failures with human-readable, actionable
 // guidance instead of a blank page with raw text. Same defense-in-depth
-// headers as renderRebindRefused. Each message argument renders as one
-// escaped paragraph; pass separate arguments instead of newline-joining copy.
+// headers as renderRebindRefused. Each non-blank message argument renders as
+// one escaped paragraph; pass separate arguments instead of newline-joining
+// copy. If a future caller accidentally passes only blank messages, the page
+// falls back to generic retry guidance instead of rendering an empty card.
 func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string, rest ...string) {
-	messages := append([]string{message}, rest...)
+	messages := oauthErrorMessages(message, rest...)
 	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(status)
 	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Messages: messages}); err != nil {
 		slog.Warn("oauth/callback error-page write failed", "error", err)
 	}
+}
+
+func oauthErrorMessages(message string, rest ...string) []string {
+	messages := make([]string, 0, 1+len(rest))
+	if strings.TrimSpace(message) != "" {
+		messages = append(messages, message)
+	}
+	for _, msg := range rest {
+		if strings.TrimSpace(msg) != "" {
+			messages = append(messages, msg)
+		}
+	}
+	if len(messages) == 0 {
+		return []string{"Try again or contact your qURL administrator if this keeps happening."}
+	}
+	return messages
 }
 
 func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {

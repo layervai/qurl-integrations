@@ -526,6 +526,26 @@ func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
 	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
 }
 
+func TestOAuthErrorPageSkipsBlankMessageParagraphs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "Retry from Slack.")
+	body := rec.Body.String()
+	if strings.Contains(body, "<p> </p>") || strings.Contains(body, "<p></p>") {
+		t.Errorf("blank message paragraph rendered:\n%s", body)
+	}
+	if !strings.Contains(body, "Retry from Slack.") {
+		t.Errorf("expected non-blank rest message to render:\n%s", body)
+	}
+
+	rec = httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "")
+	body = rec.Body.String()
+	if !strings.Contains(body, "Try again or contact your qURL administrator if this keeps happening.") {
+		t.Errorf("expected fallback guidance for all-blank messages:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
 func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
 	// Regression: configuredBy used to be read from ?admin_user=…
 	// which let an attacker pick the DM target. Now the value is
@@ -613,7 +633,7 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
-	assertOAuthErrorPage(t, rec, "Setup link expired")
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
 }
 
 // TestCallbackMintFailureDoesNotRevoke locks the contract: when the
