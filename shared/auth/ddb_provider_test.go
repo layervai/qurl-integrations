@@ -1276,6 +1276,42 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	})
 
+	t.Run("DeleteAPIKey evicts stale cache on not configured", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+			updateErr: &ddbtypes.ConditionalCheckFailedException{},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		err := p.DeleteAPIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		}
+		ddb.getFunc = func(_ context.Context, _ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{Item: nil}, nil
+		}
+
+		_, err = p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after conditional miss, got %v", err)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 after conditional miss eviction", ddb.getCalls)
+		}
+		if !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatal("post-conditional-miss refill should use a strongly consistent read")
+		}
+	})
+
 	t.Run("cache validation error serves cached key", func(t *testing.T) {
 		now := time.Unix(1700000000, 0)
 		encryptor := &passthroughEncryptor{}

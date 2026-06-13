@@ -957,6 +957,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 	if err != nil {
 		var missing *ddbtypes.ConditionalCheckFailedException
 		if errors.As(err, &missing) {
+			p.invalidateAPIKeyCache(workspaceID, now.Add(apiKeyCacheTTL))
 			return fmt.Errorf("DDBProvider.DeleteAPIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 		}
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: UpdateItem: %w", err)
