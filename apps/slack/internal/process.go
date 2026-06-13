@@ -104,6 +104,14 @@ func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Dur
 	return false
 }
 
+func (h *Handler) startAsyncWorkerWithTail(log *slog.Logger, work func(ctx context.Context, log *slog.Logger) func()) bool {
+	if h.runOnPoolWithTail(h.sem, log, asyncWorkTimeout, work) {
+		return true
+	}
+	log.Warn("async pool saturated — dropping request")
+	return false
+}
+
 // runOnPool acquires a non-blocking slot on sem and runs work in a wg-tracked,
 // panic-recovered, timeout-bounded goroutine off h.baseCtx. It returns false WITHOUT
 // running if sem is full, leaving the saturation log to the caller so each pool reports
@@ -141,6 +149,48 @@ func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Du
 		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
 		defer cancel()
 		work(ctx, log)
+	}()
+	return true
+}
+
+func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger) func()) bool {
+	select {
+	case sem <- struct{}{}:
+	default:
+		return false
+	}
+
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+
+		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
+		var tail func()
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Error("panic in async worker", "recover", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			tail = work(ctx, log)
+		}()
+		cancel()
+		// Release the bounded worker slot before the tail runs, but keep the tail
+		// in the same wg-tracked goroutine so shutdown waits for best-effort cleanup
+		// such as audit writes.
+		<-sem
+
+		if tail == nil {
+			return
+		}
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Error("panic in async worker tail", "recover", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			tail()
+		}()
 	}()
 	return true
 }

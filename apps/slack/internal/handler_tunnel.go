@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -88,23 +89,35 @@ const (
 	agentConnectorAuditReasonMaxRunes                           = 240
 	agentConnectorAuditWriteTimeout                             = 5 * time.Second
 	agentProtectConnectorAuditOutcome                           = "qURL Connector setup generated."
+	agentProtectConnectorAuditDegradedOutcome                   = "qURL Connector setup generated; install instructions were delivered as plain text after Block Kit delivery failed."
 	agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome  = "qURL Connector setup generated, but Slack could not deliver the bootstrap-key DM and the bootstrap key was revoked."
 	agentProtectConnectorAuditInstructionsDeliveryFailedOutcome = "qURL Connector setup generated, but Slack could not confirm install-instructions delivery and the bootstrap key was revoked."
 	agentProtectConnectorAuditBuildFailedOutcome                = "qURL Connector setup failed before install instructions were delivered."
+	agentProtectConnectorAuditDMUnconfiguredOutcome             = "qURL Connector setup was not started because Slack DM delivery is not configured."
 	agentProtectConnectorAuditAdminVerificationFailedOutcome    = "qURL Connector setup was not started because qURL admin status could not be verified."
 	agentProtectConnectorAuditAdminDeniedOutcome                = "qURL Connector setup was not started because the modal submitter is not a qURL admin."
 	agentProtectConnectorAuditWorkerUnavailableOutcome          = "qURL Connector setup was not started because qURL was busy."
+	agentProtectConnectorAuditModalRejectedOutcome              = "qURL Connector setup was not started because the modal submission could not be verified."
+	agentProtectConnectorAuditConfigurationUnavailableOutcome   = "qURL Connector setup was not started because qURL admin configuration was unavailable."
+	agentProtectConnectorAuditUnexpectedFailureOutcome          = "qURL Connector setup stopped unexpectedly before the outcome was recorded."
+	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome was not recorded."
 )
 
 const (
 	// Keep this enum in lockstep with tunnelInstallAgentAuditResult.outcome.
-	agentProtectConnectorAuditSuccessResult tunnelInstallAgentAuditResult = iota
+	agentProtectConnectorAuditResultInvalid tunnelInstallAgentAuditResult = iota
+	agentProtectConnectorAuditSuccessResult
+	agentProtectConnectorAuditDegradedResult
 	agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
 	agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	agentProtectConnectorAuditBuildFailedResult
+	agentProtectConnectorAuditDMUnconfiguredResult
 	agentProtectConnectorAuditAdminVerificationFailedResult
 	agentProtectConnectorAuditAdminDeniedResult
 	agentProtectConnectorAuditWorkerUnavailableResult
+	agentProtectConnectorAuditModalRejectedResult
+	agentProtectConnectorAuditConfigurationUnavailableResult
+	agentProtectConnectorAuditUnexpectedFailureResult
 	agentProtectConnectorAuditResultCount
 )
 
@@ -136,6 +149,14 @@ type tunnelInstallAgentAudit struct {
 }
 
 type tunnelInstallAgentAuditResult uint8
+
+type tunnelInstallInstructionsDelivery uint8
+
+const (
+	tunnelInstallInstructionsDeliveryFailed tunnelInstallInstructionsDelivery = iota
+	tunnelInstallInstructionsDeliverySucceeded
+	tunnelInstallInstructionsDeliveryDegraded
+)
 
 // parseTunnelInstall parses the typed (power-user) form of the connector verb:
 // `/qurl-admin protect-connector <id> [env:…] [port:…] [alias:…] [container:|service:…]`.
@@ -635,12 +656,23 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 // best-effort discard notice. agentAudit is nil for slash-command setup because
 // that path is not an agent action.
 func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, req *tunnelInstallRequest) {
+	result := h.processTunnelInstallCore(ctx, log, req)
+	h.recordTunnelInstallAgentAudit(log, req, result)
+}
+
+func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger, req *tunnelInstallRequest) (result tunnelInstallAgentAuditResult) {
+	result = agentProtectConnectorAuditResultInvalid
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("tunnel install: panic in setup worker", "recover", rec, "stack", string(debug.Stack()))
+			result = agentProtectConnectorAuditUnexpectedFailureResult
+		}
+	}()
 	args := req.args
 	if h.cfg.PostDM == nil {
 		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
 		_ = h.postResponse(log, req.responseURL, "qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
-		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditBuildFailedResult)
-		return
+		return agentProtectConnectorAuditDMUnconfiguredResult
 	}
 	build, failMsg, err := h.buildTunnelInstall(ctx, log, req.teamID, req.channelID, req.userID, args, req.attemptID)
 	if err != nil {
@@ -649,8 +681,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, re
 		// this worker, auth/resource/key/render failures are terminal agent
 		// setup attempts too. buildTunnelInstall revokes any minted key before
 		// returning.
-		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditBuildFailedResult)
-		return
+		return agentProtectConnectorAuditBuildFailedResult
 	}
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
@@ -664,11 +695,10 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, re
 			message += " Re-run `/qurl-admin protect-connector` after DM delivery is available."
 		}
 		_ = h.postResponse(log, req.responseURL, message)
-		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditBootstrapDMDeliveryFailedResult)
-		return
+		return agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
 	}
-	delivered := h.postInstallInstructions(log, req.responseURL, build.message)
-	if !delivered {
+	delivery := h.postInstallInstructions(log, req.responseURL, build.message)
+	if delivery == tunnelInstallInstructionsDeliveryFailed {
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
 		// revoke notice. The key is still revoked because delivery was not
@@ -686,15 +716,26 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, re
 		}
 	}
 
-	result := agentProtectConnectorAuditSuccessResult
-	if !delivered {
-		result = agentProtectConnectorAuditInstructionsDeliveryFailedResult
+	switch delivery {
+	case tunnelInstallInstructionsDeliverySucceeded:
+		return agentProtectConnectorAuditSuccessResult
+	case tunnelInstallInstructionsDeliveryDegraded:
+		return agentProtectConnectorAuditDegradedResult
+	case tunnelInstallInstructionsDeliveryFailed:
+		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
-	h.recordTunnelInstallAgentAudit(log, req, result)
+	return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 }
 
-func tunnelInstallAgentAuditFromMetadata(meta *TunnelInstallModalMetadata, args *tunnelInstallArgs) *tunnelInstallAgentAudit {
-	if meta == nil || meta.Agent == nil || meta.Agent.Action != string(agent.ActionProtectConnector) || args == nil {
+func tunnelInstallAgentAuditFromMetadata(log *slog.Logger, meta *TunnelInstallModalMetadata, args *tunnelInstallArgs) *tunnelInstallAgentAudit {
+	if meta == nil || meta.Agent == nil || args == nil {
+		return nil
+	}
+	if meta.Agent.Action != string(agent.ActionProtectConnector) {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("tunnel install agent metadata action mismatch", "action", meta.Agent.Action)
 		return nil
 	}
 	// Submit-side half of the protect-connector provenance carry-through; the
@@ -715,29 +756,41 @@ func normalizeTunnelInstallAgentReason(reason string) string {
 
 func (r tunnelInstallAgentAuditResult) outcome() (string, bool) {
 	switch r {
+	case agentProtectConnectorAuditResultInvalid:
+		return agentProtectConnectorAuditUnknownOutcome, false
 	case agentProtectConnectorAuditSuccessResult:
 		return agentProtectConnectorAuditOutcome, true
+	case agentProtectConnectorAuditDegradedResult:
+		return agentProtectConnectorAuditDegradedOutcome, true
 	case agentProtectConnectorAuditBootstrapDMDeliveryFailedResult:
 		return agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome, true
 	case agentProtectConnectorAuditInstructionsDeliveryFailedResult:
 		return agentProtectConnectorAuditInstructionsDeliveryFailedOutcome, true
 	case agentProtectConnectorAuditBuildFailedResult:
 		return agentProtectConnectorAuditBuildFailedOutcome, true
+	case agentProtectConnectorAuditDMUnconfiguredResult:
+		return agentProtectConnectorAuditDMUnconfiguredOutcome, true
 	case agentProtectConnectorAuditAdminVerificationFailedResult:
 		return agentProtectConnectorAuditAdminVerificationFailedOutcome, true
 	case agentProtectConnectorAuditAdminDeniedResult:
 		return agentProtectConnectorAuditAdminDeniedOutcome, true
 	case agentProtectConnectorAuditWorkerUnavailableResult:
 		return agentProtectConnectorAuditWorkerUnavailableOutcome, true
+	case agentProtectConnectorAuditModalRejectedResult:
+		return agentProtectConnectorAuditModalRejectedOutcome, true
+	case agentProtectConnectorAuditConfigurationUnavailableResult:
+		return agentProtectConnectorAuditConfigurationUnavailableOutcome, true
+	case agentProtectConnectorAuditUnexpectedFailureResult:
+		return agentProtectConnectorAuditUnexpectedFailureOutcome, true
 	case agentProtectConnectorAuditResultCount:
-		return agentProtectConnectorAuditBuildFailedOutcome, false
+		return agentProtectConnectorAuditUnknownOutcome, false
 	default:
-		return agentProtectConnectorAuditBuildFailedOutcome, false
+		return agentProtectConnectorAuditUnknownOutcome, false
 	}
 }
 
 func (r tunnelInstallAgentAuditResult) success() bool {
-	return r == agentProtectConnectorAuditSuccessResult
+	return r == agentProtectConnectorAuditSuccessResult || r == agentProtectConnectorAuditDegradedResult
 }
 
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
@@ -745,20 +798,15 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 		return
 	}
 	audit := req.agentAudit
-	baseCtx := h.baseCtx
-	if baseCtx == nil {
-		baseCtx = context.Background()
-	}
-	// Modal-submit audits intentionally do not inherit the worker ctx: setup,
-	// Slack delivery, and possible revoke may have spent or canceled that ctx by
-	// the time we write the review row. Give the best-effort audit its own short
-	// handler-scoped budget instead. Worker-tail callers may occupy their worker
-	// for this bounded audit budget, but they are off Slack's ack path.
-	auditCtx, cancel := context.WithTimeout(baseCtx, agentConnectorAuditWriteTimeout)
+	// Modal-submit audits intentionally do not inherit request, worker, or handler
+	// shutdown ctx: setup, Slack delivery, and possible revoke may have spent or
+	// canceled those by the time we write the review row. Keep the best-effort
+	// write independent but bounded so an already-acked submit still gets its row.
+	auditCtx, cancel := context.WithTimeout(context.Background(), agentConnectorAuditWriteTimeout)
 	defer cancel()
 	resultOutcome, known := result.outcome()
 	if !known {
-		log.Warn("tunnel install agent audit result unknown; using build-failed outcome", "result", uint8(result))
+		log.Warn("tunnel install agent audit result unknown; using unknown outcome", "result", uint8(result))
 	}
 	resultSuccess := result.success()
 	// Modal-submit audits have no public confirm card, so the legacy Outcome
@@ -783,10 +831,10 @@ func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunn
 	if req == nil || req.agentAudit == nil {
 		return
 	}
-	// Denied and worker-unavailable modal submits are still on Slack's
-	// view_submission ack path. Keep the best-effort, 5s-capped audit out of
-	// band with h.Go instead of the saturated worker pool, so a slow audit store
-	// cannot consume Slack's short modal response window.
+	// Rejected modal submits are still on Slack's view_submission ack path. Keep
+	// the best-effort, 5s-capped audit out of band with h.Go instead of the
+	// saturated worker pool, so a slow audit store cannot consume Slack's short
+	// modal response window.
 	h.Go(func() {
 		h.recordTunnelInstallAgentAudit(log, req, result)
 	})
@@ -1349,7 +1397,8 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // retries once before reporting failure because a false negative revokes a
 // freshly minted bootstrap key. Returns whether SOME rendering was delivered,
 // so the caller revokes only when delivery remains unconfirmed after the
-// fallback and retry.
+// fallback and retry. A text success after a rejected Block Kit attempt is
+// reported distinctly so agent audit rows can show the degraded delivery.
 //
 // The text post is the same single-call delivery the install flow used before
 // blocks existed, so this path is never worse than that baseline: a Slack-side
@@ -1361,12 +1410,19 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // bootstrap key, and the already-DM'd key is not revoked, so this is benign: at
 // worst the operator sees two ephemeral install messages, never a leaked or
 // stale key.
-func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) bool {
+func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) tunnelInstallInstructionsDelivery {
 	if blocks, ok := installMessageBlocks(msg); ok {
 		if h.postResponseBlocks(log, responseURL, msg, blocks) {
-			return true
+			return tunnelInstallInstructionsDeliverySucceeded
 		}
 		log.Warn("tunnel install: Block Kit follow-up delivery failed; retrying as plain text")
+		if h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text") {
+			return tunnelInstallInstructionsDeliveryDegraded
+		}
+		return tunnelInstallInstructionsDeliveryFailed
 	}
-	return h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text")
+	if h.postResponseWithRetry(log, responseURL, msg, "tunnel_install_text") {
+		return tunnelInstallInstructionsDeliverySucceeded
+	}
+	return tunnelInstallInstructionsDeliveryFailed
 }

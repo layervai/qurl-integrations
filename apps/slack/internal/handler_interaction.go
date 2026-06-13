@@ -234,6 +234,23 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
+	log := slog.With(
+		"command", "tunnel_install_modal",
+		"team_id", meta.TeamID,
+		"channel_id", meta.ChannelID,
+		"user_id", meta.UserID,
+		"view_id", payload.View.ID,
+	)
+	agentAudit := tunnelInstallAgentAuditFromMetadata(log, &meta, args)
+	req := &tunnelInstallRequest{
+		teamID:       meta.TeamID,
+		enterpriseID: meta.EnterpriseID,
+		channelID:    meta.ChannelID,
+		userID:       meta.UserID,
+		responseURL:  meta.ResponseURL,
+		args:         args,
+		agentAudit:   agentAudit,
+	}
 	// The Slack request signature covers the full form body, including the
 	// view_submission payload and its private_metadata, so CreatedAtUnix is
 	// tamper-resistant once Slack submits the modal. It is still only freshness
@@ -246,6 +263,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
 		respondTunnelInstallModalError(w, "This modal expired. Run /qurl-admin protect-connector again.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
 	// Slack signs the request envelope, not our private_metadata value by
@@ -254,46 +272,29 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
 		slog.Warn("tunnel install modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
 		respondTunnelInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect-connector again.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
 		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
 	if h.cfg.AdminStore == nil {
 		respondTunnelInstallModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditConfigurationUnavailableResult)
 		return
 	}
 	if h.aliasStore == nil {
 		respondTunnelInstallModalError(w, "Channel alias storage is not configured on this Secure Access Agent deployment.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditConfigurationUnavailableResult)
 		return
 	}
-
-	log := slog.With(
-		"command", "tunnel_install_modal",
-		"team_id", meta.TeamID,
-		"channel_id", meta.ChannelID,
-		"user_id", meta.UserID,
-		"view_id", payload.View.ID,
-	)
-	agentAudit := tunnelInstallAgentAuditFromMetadata(&meta, args)
-	req := &tunnelInstallRequest{
-		teamID:       meta.TeamID,
-		enterpriseID: meta.EnterpriseID,
-		channelID:    meta.ChannelID,
-		userID:       meta.UserID,
-		responseURL:  meta.ResponseURL,
-		args:         args,
-		agentAudit:   agentAudit,
-	}
-	// Validation, configuration, and request-identity rejections above are
-	// pre-execution and unaudited; stale or replayed modals never reach a
-	// trustworthy submitted connector identity. This submitted-modal admin
-	// re-check is the first denied path with a concrete connector identity;
-	// worker-pool saturation is also recorded because the submit had a concrete
-	// target. Accepted submits that reach the worker are recorded there.
-	// Slash-origin submits carry no agentAudit and no-op.
+	// The valid field state plus signed modal metadata gives agent-origin submits
+	// a concrete target before admin/config gates. Slash-origin submits carry no
+	// agentAudit and no-op, but agent-origin stale/replay/config rejections now
+	// leave the same App Home accountability trace as admin and worker failures.
 
 	// Slack expects modal submissions to be acknowledged quickly; keep this
 	// synchronous admin re-check bounded so a slow store fails closed. Use the
@@ -319,8 +320,11 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
-	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, req)
+	if !h.startAsyncWorkerWithTail(log, func(ctx context.Context, log *slog.Logger) func() {
+		result := h.processTunnelInstallCore(ctx, log, req)
+		return func() {
+			h.recordTunnelInstallAgentAudit(log, req, result)
+		}
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditWorkerUnavailableResult)

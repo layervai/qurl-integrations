@@ -269,6 +269,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, agentErrorReply)
 		return
 	}
+	reason := agentConfirmVisibleReason(prop)
 	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
 	// the card fallback below and agentReplyText).
 	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
@@ -303,33 +304,51 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, preview)
 		return
 	}
-	// The card section renders the summary as plain_text (safe), but the fallback is
-	// the message's top-level text — mrkdwn by default — so the same LLM-distilled
-	// summary must be escaped there too, or a prompt-injected masked link would
-	// surface in the notification/push preview and non-block clients.
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, id), escapeMrkdwnText(summary)); err != nil {
+	// Card text renders as plain_text (safe), but the fallback is the message's
+	// top-level text — mrkdwn by default — so LLM-distilled summary/reason must be
+	// escaped there too, or prompt-injected markup would surface in push previews
+	// and non-block clients.
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, reason, id), agentConfirmFallbackText(summary, reason)); err != nil {
 		log.Error("agent confirm: post card failed", "error", err)
 		h.postAgentReply(log, env, threadTS, preview)
 		return
 	}
 }
 
-// buildAgentConfirmBlocks renders the confirm card: a summary section plus
-// Approve (primary) and Reject (danger) buttons. Both buttons carry ONLY the
-// pending-action id in their value.
+// buildAgentConfirmBlocks renders the confirm card: a summary section, optional
+// reason section, plus Approve (primary) and Reject (danger) buttons. Both
+// buttons carry ONLY the pending-action id in their value.
 //
-// The summary renders as plain_text, NOT mrkdwn: it is LLM-distilled, so mrkdwn
-// would let a prompt-injected summary surface a masked link (`<http://evil|click>`)
-// or other markup publicly, right next to a live Approve button. plain_text shows
-// it literally.
-func buildAgentConfirmBlocks(summary, id string) []any {
-	return []any{
+// The text fields render as plain_text, NOT mrkdwn: they are LLM-distilled, so
+// mrkdwn would let prompt-injected masked links or mentions surface publicly,
+// right next to a live Approve button. plain_text shows them literally.
+func buildAgentConfirmBlocks(summary, reason, id string) []any {
+	blocks := []any{
 		map[string]any{"type": "section", "text": plainTextObj(summary)},
-		actionsBlock(
-			primaryButtonElement("Approve", agentConfirmApproveActionID, id),
-			dangerButtonElement("Reject", agentConfirmRejectActionID, id),
-		),
 	}
+	if reason = strings.TrimSpace(reason); reason != "" {
+		blocks = append(blocks, map[string]any{"type": "section", "text": plainTextObj("Reason: " + reason)})
+	}
+	blocks = append(blocks, actionsBlock(
+		primaryButtonElement("Approve", agentConfirmApproveActionID, id),
+		dangerButtonElement("Reject", agentConfirmRejectActionID, id),
+	))
+	return blocks
+}
+
+func agentConfirmFallbackText(summary, reason string) string {
+	text := escapeMrkdwnText(summary)
+	if reason = strings.TrimSpace(reason); reason != "" {
+		text += "\nReason: " + escapeMrkdwnText(reason)
+	}
+	return text
+}
+
+func agentConfirmVisibleReason(prop *agent.Proposal) string {
+	if prop == nil || prop.Action != agent.ActionProtectConnector {
+		return ""
+	}
+	return normalizeTunnelInstallAgentReason(prop.Reason)
 }
 
 // handleAgentConfirmClick is the block_actions entrypoint for an Approve/Reject

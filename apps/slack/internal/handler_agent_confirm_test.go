@@ -78,10 +78,10 @@ func TestAgentConfirmEnabled(t *testing.T) {
 }
 
 func TestBuildAgentConfirmBlocks(t *testing.T) {
-	blocks := buildAgentConfirmBlocks("Revoke $staging.", "abc123")
+	blocks := buildAgentConfirmBlocks("Revoke $staging.", "incident 412", "abc123")
 	raw, _ := json.Marshal(blocks)
 	s := string(raw)
-	for _, want := range []string{"Revoke $staging.", agentConfirmApproveActionID, agentConfirmRejectActionID, "abc123"} {
+	for _, want := range []string{"Revoke $staging.", "Reason: incident 412", agentConfirmApproveActionID, agentConfirmRejectActionID, "abc123"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("confirm blocks missing %q: %s", want, s)
 		}
@@ -90,6 +90,9 @@ func TestBuildAgentConfirmBlocks(t *testing.T) {
 	// injected masked link can't surface next to the Approve button.
 	if strings.Contains(s, "mrkdwn") {
 		t.Errorf("confirm card must not render any mrkdwn (injection surface): %s", s)
+	}
+	if got := agentConfirmFallbackText("Revoke <https://evil.example|click>.", "incident <@U99999999>"); strings.Contains(got, "<@U99999999>") || strings.Contains(got, "<https://evil.example|click>") {
+		t.Errorf("fallback text did not escape LLM-distilled fields: %s", got)
 	}
 }
 
@@ -1433,6 +1436,29 @@ func TestPostAgentConfirm_StoresPendingAndPostsCard(t *testing.T) {
 	}
 	if pend != 1 {
 		t.Fatalf("want one stored pending action under team T1, got %d", pend)
+	}
+}
+
+func TestPostAgentConfirm_ProtectConnectorShowsReasonBeforeApprove(t *testing.T) {
+	hc := newConfirmHarness(t, "")
+	prop := &agent.Proposal{
+		Action:  agent.ActionProtectConnector,
+		Summary: "Protect a new connector as `$prod`.",
+		Reason:  "incident <@U99999999>",
+	}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "U2", TS: "100.1"}}
+
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	if len(hc.blocks.calls) != 1 {
+		t.Fatalf("want exactly one confirm card, got %d", len(hc.blocks.calls))
+	}
+	card, _ := json.Marshal(hc.blocks.calls[0].blocks)
+	if !strings.Contains(string(card), "Reason: incident \\u003c@U99999999\\u003e") {
+		t.Fatalf("confirm card did not show protect-connector reason as plain text: %s", card)
+	}
+	if strings.Contains(hc.blocks.calls[0].fallback, "<@U99999999>") || !strings.Contains(hc.blocks.calls[0].fallback, "Reason: incident &lt;@U99999999&gt;") {
+		t.Fatalf("fallback did not escape protect-connector reason: %q", hc.blocks.calls[0].fallback)
 	}
 }
 
