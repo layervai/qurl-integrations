@@ -1006,6 +1006,41 @@ func TestHandler_WaitTimeout_DrainsOnSuccess(t *testing.T) {
 	}
 }
 
+// TestHandler_WaitTimeout_ZeroBudgetNoWorkers locks the shutdown edge
+// case where lameduck + HTTP drain consume the full platform budget. A
+// zero remaining budget should not log a bogus async-drain timeout when
+// no workers are registered.
+func TestHandler_WaitTimeout_ZeroBudgetNoWorkers(t *testing.T) {
+	h := &Handler{}
+
+	if drained := h.WaitTimeout(0); !drained {
+		t.Errorf("WaitTimeout(0) returned false with no workers; want true")
+	}
+}
+
+// TestHandler_WaitTimeout_ZeroBudgetWithWorker verifies the zero-budget
+// fast path still reports timeout when a registered worker is actually
+// pending.
+func TestHandler_WaitTimeout_ZeroBudgetWithWorker(t *testing.T) {
+	h := &Handler{}
+	block := make(chan struct{})
+	registered := make(chan struct{})
+
+	h.Go(func() {
+		close(registered)
+		<-block
+	})
+	<-registered
+	t.Cleanup(func() {
+		close(block)
+		h.Wait()
+	})
+
+	if drained := h.WaitTimeout(0); drained {
+		t.Errorf("WaitTimeout(0) returned true with worker still parked; want false")
+	}
+}
+
 // TestHandle_PostResponseRefusesRedirectsEndToEnd is the end-to-end
 // counterpart to TestResponseURLClient_RefusesRedirects: it goes
 // through processCreate → postResponse so a regression that wired the

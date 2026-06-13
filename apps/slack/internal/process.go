@@ -116,7 +116,7 @@ func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Du
 		return false
 	}
 
-	h.wg.Add(1)
+	h.asyncStart()
 	go func() {
 		// Defer LIFO is load-bearing here: on panic, the recover
 		// runs FIRST (innermost), absorbs the panic, then sem
@@ -126,7 +126,7 @@ func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Du
 		// panic. The ctx cancel is innermost-of-innermost so
 		// children of that ctx see cancellation before the worker
 		// frame returns.
-		defer h.wg.Done()
+		defer h.asyncDone()
 		defer func() { <-sem }()
 		defer func() {
 			if rec := recover(); rec != nil {

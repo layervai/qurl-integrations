@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -128,6 +129,9 @@ const (
 	pathSlackCommands     = "/slack/commands"
 	pathSlackEvents       = "/slack/events"
 	pathSlackInteractions = "/slack/interactions"
+	healthStatusKey       = "status"
+	healthStatusOK        = "ok"
+	healthStatusDraining  = "draining"
 )
 
 // Slash-command names. Both POST to pathSlackCommands with the same HMAC
@@ -664,8 +668,14 @@ type Handler struct {
 	// baseCtx is captured at NewHandler time from cfg.BaseContext (or
 	// context.Background()). Each async goroutine derives a
 	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
-	// (via SIGTERM in main.go) signals every in-flight worker.
+	// at HTTP drain start (after main.go's lameduck) signals every
+	// in-flight worker.
 	baseCtx context.Context
+	// unhealthy flips /health to 503 while the task is in lameduck.
+	// It is updated by the shutdown goroutine while ALB health probes
+	// can still be in flight, so the flag must be safe on the request
+	// hot path.
+	unhealthy atomic.Bool
 	// agentAckTimeout is captured from Config.AgentAckTimeout once at construction.
 	// The handler reads it without synchronization on the request hot path.
 	agentAckTimeout time.Duration
@@ -674,6 +684,10 @@ type Handler struct {
 	// the request goroutine (before the `go` keyword) — adding inside
 	// the spawned goroutine races Wait().
 	wg sync.WaitGroup
+	// activeWorkers mirrors wg for the zero-budget shutdown path: it lets
+	// WaitTimeout(0) distinguish "nothing left to drain" from "workers
+	// still pending" without racing an immediate timer.
+	activeWorkers atomic.Int64
 	// sem is a buffered-channel semaphore bounding concurrent async
 	// workers to len(sem) capacity. Send-with-default-drop gives back-
 	// pressure feedback to the user as ackBusy rather than queueing.
@@ -772,6 +786,14 @@ func (h *Handler) SetSlackInstallURL(installURL string) {
 	h.cfg.SlackInstallURL = installURL
 }
 
+// SetHealthy controls the task-level /health response. Production flips
+// this false during SIGTERM lameduck so ALB stops routing to the task
+// before the listener closes; tests may flip it back to true to exercise
+// recovery of the endpoint contract.
+func (h *Handler) SetHealthy(healthy bool) {
+	h.unhealthy.Store(!healthy)
+}
+
 // NewHandler creates a new Slack handler. Config is intentionally
 // passed by value rather than pointer despite gocritic's hugeParam
 // warning: the call site is once at process startup (cmd/main.go)
@@ -834,6 +856,16 @@ func (h *Handler) Wait() {
 	h.wg.Wait()
 }
 
+func (h *Handler) asyncStart() {
+	h.activeWorkers.Add(1)
+	h.wg.Add(1)
+}
+
+func (h *Handler) asyncDone() {
+	h.wg.Done()
+	h.activeWorkers.Add(-1)
+}
+
 // Compile-time check that *Handler still satisfies oauth.AsyncTracker
 // after any future rename of Handler.Go — would break here rather
 // than nil-tracker the OAuth callback's fire-and-forget revoke path
@@ -850,9 +882,9 @@ var _ oauth.AsyncTracker = (*Handler)(nil)
 // client or qurl-service stub can't crash the bot. Mirrors the
 // recover discipline in runAsync.
 func (h *Handler) Go(fn func()) {
-	h.wg.Add(1)
+	h.asyncStart()
 	go func() {
-		defer h.wg.Done()
+		defer h.asyncDone()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("panic in tracked async goroutine",
@@ -875,6 +907,10 @@ func (h *Handler) Go(fn func()) {
 // WaitTimeout is NOT appropriate as a hot-path drain primitive — only
 // use at end-of-life.
 func (h *Handler) WaitTimeout(d time.Duration) bool {
+	if d <= 0 {
+		return h.activeWorkers.Load() == 0
+	}
+
 	done := make(chan struct{})
 	go func() {
 		h.wg.Wait()
@@ -914,7 +950,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == pathHealth {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead:
-			respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			if h.unhealthy.Load() {
+				respondJSON(w, http.StatusServiceUnavailable, map[string]string{healthStatusKey: healthStatusDraining})
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]string{healthStatusKey: healthStatusOK})
 		default:
 			respondMethodNotAllowed(w, "GET, HEAD")
 		}

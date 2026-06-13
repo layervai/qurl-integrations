@@ -266,9 +266,9 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) agentAc
 	// the goroutine start.
 	// The goroutine is wg-tracked, so shutdown drain relies on ReactionPort.Add
 	// honoring ctx just like the other Slack seams wired through Handler.
-	h.wg.Add(1)
+	h.asyncStart()
 	go func() {
-		defer h.wg.Done()
+		defer h.asyncDone()
 		defer close(done)
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -472,10 +472,10 @@ func (h *Handler) runAgentFollowupPipeline(log *slog.Logger, env *slackEventEnve
 		return false
 	}
 
-	h.wg.Add(1)
+	h.asyncStart()
 	go func() {
 		gateHeld := true
-		defer h.wg.Done()
+		defer h.asyncDone()
 		defer func() {
 			if gateHeld {
 				<-h.followupGateSem
