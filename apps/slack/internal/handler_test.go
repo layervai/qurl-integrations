@@ -575,6 +575,20 @@ func TestSlashCommandUninstallEnvProviderWithoutOwnerStore(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallEnvProviderWithOwnerStoreSkipsOwnerGate(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	ts := newAdminTestServers(t)
+	ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("owner gate should not run for env provider"))
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = &auth.EnvProvider{EnvVar: "QURL_API_KEY"}
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
+		t.Fatalf("env-provider reply missing unsupported hint: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	h := newTestHandler(t, noopQURLServer(t))

@@ -1630,18 +1630,25 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
 	// EnvProvider can report "not configured" / "unsupported" without
-	// mutating anything. Any provider that can delete must have AdminStore
-	// wired so this destructive command is owner/admin-gated.
-	if h.cfg.AdminStore == nil {
-		if !isEnvBackedAuthProvider(h.cfg.AuthProvider) {
-			slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
-			respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
-			return
-		}
-	} else if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
+	// mutating anything, so it does not need the owner gate.
+	if isEnvBackedAuthProvider(h.cfg.AuthProvider) {
+		h.deleteWorkspaceAPIKey(w, teamID, userID)
 		return
 	}
+	// Any provider that can delete must have AdminStore wired so this
+	// destructive command is owner/admin-gated.
+	if h.cfg.AdminStore == nil {
+		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
+		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	}
+	if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
+		return
+	}
+	h.deleteWorkspaceAPIKey(w, teamID, userID)
+}
 
+func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
