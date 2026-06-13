@@ -123,6 +123,65 @@ func TestHandleGet_AliasNotFound(t *testing.T) {
 	}
 }
 
+// TestHandleGet_ChannelRejectionsShareCopyModuloToken fences the soft
+// anti-enumeration posture from issue #540: a user must not be able to tell
+// "this token does not resolve" from "this slug exists but is not exposed in
+// this channel" by a changed verb in the rejection copy. The sibling
+// TestHandleGet_DollarSlugNotAllowedNonAdmin fences the blocked-slug path
+// alone; this test pins byte-for-byte parity against the cold missing-token
+// path.
+func TestHandleGet_ChannelRejectionsShareCopyModuloToken(t *testing.T) {
+	normalizeToken := func(reply, token string) string {
+		t.Helper()
+		quotedToken := "`$" + token + "`"
+		if !strings.Contains(reply, quotedToken) {
+			t.Fatalf("reply %q did not echo token %q", reply, quotedToken)
+		}
+		return strings.ReplaceAll(reply, quotedToken, "`$<token>`")
+	}
+
+	missingTS := newAdminTestServers(t)
+	missingTS.seedNonAdmin(t)
+	var missingListHits atomic.Int32
+	missingTS.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		missingListHits.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{}, "", false)
+	})
+	missingH := newAdminTestHandler(t, missingTS)
+	_, _, missingReply := newAdminSlashInvoker(t, missingH).invokeAdminAsync("get $missing", testAdminTeamID, testAdminUserID)
+
+	blockedTS := newAdminTestServers(t)
+	blockedTS.seedNonAdmin(t)
+	blockedTS.seedPolicySet(t, testAdminTeamID, "C_test", "", []string{"r_other_alloc"})
+	var blockedListHits atomic.Int32
+	blockedTS.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		blockedListHits.Add(1)
+		writeTunnelSlugResourceFixture(t, w)
+	})
+	var mintHits atomic.Int32
+	blockedTS.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	blockedH := newAdminTestHandler(t, blockedTS)
+	_, _, blockedReply := newAdminSlashInvoker(t, blockedH).invokeAdminAsync("get $"+testTunnelSlug, testAdminTeamID, testAdminUserID)
+
+	if missingListHits.Load() != 0 {
+		t.Fatalf("missing-token branch reached upstream GET /v1/resources despite cold-channel short-circuit (hits = %d)", missingListHits.Load())
+	}
+	if blockedListHits.Load() == 0 {
+		t.Fatal("blocked-slug branch did not reach upstream slug lookup; warm-channel seed broke")
+	}
+	if mintHits.Load() != 0 {
+		t.Fatalf("mint reached despite blocked slug (hits = %d)", mintHits.Load())
+	}
+	missingNormalized := normalizeToken(missingReply, "missing")
+	blockedNormalized := normalizeToken(blockedReply, testTunnelSlug)
+	if blockedNormalized != missingNormalized {
+		t.Fatalf("channel rejection copy drifted:\nmissing: %q\nblocked: %q", missingNormalized, blockedNormalized)
+	}
+}
+
 // TestHandleGet_UnknownSlugColdChannelNoUpstreamHop is the direct
 // regression fence for #534: the unmetered cold-channel probe surface.
 //
@@ -1071,13 +1130,18 @@ func TestMapMintError_Unmapped5xx(t *testing.T) {
 func addTunnelSlugResource(t *testing.T, ts *adminTestServers) {
 	t.Helper()
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		writeResourceListFixture(t, w, []map[string]any{{
-			testKeyResourceID: testResourceIDFix,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
-		}}, "", false)
+		writeTunnelSlugResourceFixture(t, w)
 	})
+}
+
+func writeTunnelSlugResourceFixture(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	writeResourceListFixture(t, w, []map[string]any{{
+		testKeyResourceID: testResourceIDFix,
+		testKeyType:       client.ResourceTypeTunnel,
+		testKeySlug:       testTunnelSlug,
+		testKeyStatus:     client.StatusActive,
+	}}, "", false)
 }
 
 // TestHandleGet_DollarSlugAllowedSetNonAdmin fences the list→get
