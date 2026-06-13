@@ -51,9 +51,11 @@ at the OAuth-callback bind layer.
   cannot be recovered, setup stops with admin-facing recovery guidance.
   If the callback reports that a qURL key was provisioned but not stored,
   rerun `/qurl setup <email>` for the same workspace and qURL account within
-  qurl-service's configured external-binding idempotency window (currently 24
-  hours; `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`, source:
-  layervai/qurl-service#904). qURL can replay the setup key during that
+  qurl-service's configured external-binding idempotency window. qurl-service
+  currently owns a 24-hour default (`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`,
+  source: layervai/qurl-service#904); Slack emits the same default unless
+  `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` is set to a positive whole-hour
+  duration such as `24h` at startup. qURL can replay the setup key during that
   window. After the window expires, if the stored Slack key is lost/revoked, or
   if the admin abandons setup, use qURL account/API-key management or operator
   tooling to revoke the unused workspace key before retrying; self-service
@@ -128,9 +130,11 @@ binding-backed workspace key, but the Slack app failed to store it locally. Trea
 every event as actionable: the admin can recover by rerunning `/qurl setup
 <email>` with the same qURL account only during the binding replay window. The
 emitted `retry_window_hours` reports that window, and the event timestamp starts
-the operator clock. The emitted window is a best-effort mirror of qurl-service's
-`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`; double-check the current qurl-service
-contract before cleanup at the boundary.
+the operator clock. The emitted window comes from the Slack task's
+`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` runtime override when set, otherwise it
+uses the 24-hour qurl-service default mirror. Invalid override values fail
+startup; accepted values are positive whole-hour Go durations such as `24h` or
+`48h`.
 
 `cleanup_after_window_hours` is intentionally coincident with the same threshold
 today; prefer retry at the exact boundary and treat rows older than the emitted
@@ -236,6 +240,7 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
+| `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must be a positive whole-hour Go duration such as `24h`, otherwise startup fails. |
 | `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |

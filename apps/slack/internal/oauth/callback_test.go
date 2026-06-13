@@ -696,10 +696,26 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	if minter.revoked {
 		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
 	}
-	assertSetupBindingPersistFailureLogged(t, logs())
+	assertSetupBindingPersistFailureLogged(t, logs(), cfg.setupBindingReplayWindowHours())
 }
 
-func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]any) {
+func TestCallbackLogsConfiguredBindingReplayWindowOnPersistFailure(t *testing.T) {
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	cfg.SetupBindingReplayWindowHours = 12
+	store.setErr = errors.New("ddb down")
+	state := mintTestState(t, &cfg)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d want 500", rec.Code)
+	}
+	assertSetupBindingPersistFailureLogged(t, logs(), 12)
+}
+
+func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]any, replayWindowHours int) {
 	t.Helper()
 	matches := 0
 	for _, rec := range records {
@@ -716,11 +732,11 @@ func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]a
 		if got, ok := rec["error"].(string); !ok || got == "" {
 			t.Errorf("error = %v, want non-empty string", rec["error"])
 		}
-		if rec["retry_window_hours"] != float64(setupBindingRetryWindowHours) {
-			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], setupBindingRetryWindowHours)
+		if rec["retry_window_hours"] != float64(replayWindowHours) {
+			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], replayWindowHours)
 		}
-		if rec["cleanup_after_window_hours"] != float64(setupBindingCleanupAfterWindowHours) {
-			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], setupBindingCleanupAfterWindowHours)
+		if rec["cleanup_after_window_hours"] != float64(replayWindowHours) {
+			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], replayWindowHours)
 		}
 		if rec["operator_action"] != setupBindingPersistFailureOperatorAction {
 			t.Errorf("operator_action = %v, want %q", rec["operator_action"], setupBindingPersistFailureOperatorAction)

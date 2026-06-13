@@ -240,6 +240,12 @@ type Config struct {
 	// Auth0 is SlackBaseURL + "/oauth/qurl/callback".
 	SlackBaseURL string
 
+	// SetupBindingReplayWindowHours is the operator-facing replay window
+	// emitted when qurl-service provisions a binding-backed key but the
+	// Slack app cannot persist it locally. Zero uses the default mirror of
+	// qurl-service's QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT.
+	SetupBindingReplayWindowHours int
+
 	// OAuthStateSecret is the HMAC-SHA256 key used to mint and verify
 	// the `state` token threaded through Auth0. Operator-set; the
 	// constructor refuses anything shorter than stateMinSecret.
@@ -319,6 +325,16 @@ func (c Config) now() func() time.Time {
 	return time.Now
 }
 
+// setupBindingReplayWindowHours returns the operator-facing replay window for
+// binding-backed setup persist failures. A zero Config value preserves the
+// qurl-service default so focused tests and direct constructors stay stable.
+func (c *Config) setupBindingReplayWindowHours() int {
+	if c.SetupBindingReplayWindowHours > 0 {
+		return c.SetupBindingReplayWindowHours
+	}
+	return DefaultSetupBindingReplayWindowHours
+}
+
 // WorkspaceStore is the callback's workspace-key store. APIKey is used to
 // reuse an already configured workspace key before minting; SetAPIKey is hit
 // only after a successful replacement mint. Implemented by *auth.DDBProvider.
@@ -370,6 +386,9 @@ func (c Config) Validate() error {
 	// replacing the workspace key. Callers MUST pair the two.
 	if c.AdminStore != nil && c.BindClassifyError == nil {
 		return errors.New("AdminStore wired without BindClassifyError — same-caller idempotent re-entries would silently surface as 500")
+	}
+	if c.SetupBindingReplayWindowHours < 0 {
+		return errors.New("SetupBindingReplayWindowHours must be zero or positive")
 	}
 	return nil
 }

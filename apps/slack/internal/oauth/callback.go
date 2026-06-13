@@ -61,15 +61,12 @@ const (
 	auth0TokenBodyLimit                      = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
 	setupBindingPersistFailureEvent          = "setup_binding_backed_persist_failure"
 	setupBindingPersistFailureOperatorAction = "rerun_setup_within_retry_window_then_cleanup_after_window"
-	// TODO(upstream-contract): mirrors qurl-service's
-	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT, which is the source of truth for
-	// binding replay lifetime. This is best-effort lockstep only; this repo has
-	// no shared or generated source for the upstream value. Source:
-	// layervai/qurl-service#904.
-	setupBindingRetryWindowHours = 24
-	// Cleanup starts when the same replay window closes; keep this aliased to
-	// the retry window unless qurl-service introduces a separate cleanup TTL.
-	setupBindingCleanupAfterWindowHours = setupBindingRetryWindowHours
+	// DefaultSetupBindingReplayWindowHours mirrors qurl-service's
+	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT default. Production config can
+	// override this at startup when qurl-service changes before the Slack app
+	// redeploys.
+	// TODO(upstream-contract): keep in sync with layervai/qurl-service#904.
+	DefaultSetupBindingReplayWindowHours = 24
 	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
 	// plus four non-secret characters. The reuse path derives this
 	// from stored plaintext because workspace_state stores api_key
@@ -690,13 +687,14 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	defer persistCancel()
 	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
 		if minted.BindingBacked {
+			replayWindowHours := cfg.setupBindingReplayWindowHours()
 			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 				"event", setupBindingPersistFailureEvent,
 				"error", perr,
 				"team_id", teamID,
 				"key_id", keyID,
-				"retry_window_hours", setupBindingRetryWindowHours,
-				"cleanup_after_window_hours", setupBindingCleanupAfterWindowHours,
+				"retry_window_hours", replayWindowHours,
+				"cleanup_after_window_hours", replayWindowHours,
 				"operator_action", setupBindingPersistFailureOperatorAction)
 		} else {
 			slog.Error("oauth/callback persist failed — revoking legacy fallback key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
