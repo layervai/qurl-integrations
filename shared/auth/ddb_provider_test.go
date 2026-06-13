@@ -1027,6 +1027,9 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if ddb.getCalls != 2 {
 			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
 		}
+		if !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatal("post-delete refill should use a strongly consistent read")
+		}
 	})
 
 	t.Run("DeleteAPIKey forces strong refill after local invalidation", func(t *testing.T) {

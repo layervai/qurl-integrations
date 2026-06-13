@@ -1324,7 +1324,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		if h.canAdvertiseUninstall() {
 			respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 		} else {
-			respondUninstallUnsupported(w)
+			h.respondUninstallUnavailable(w)
 		}
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
@@ -1634,7 +1634,7 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	if h.cfg.AuthProvider == nil {
-		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		h.respondUninstallUnavailable(w)
 		return
 	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
@@ -1648,7 +1648,7 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	// destructive command is owner/admin-gated.
 	if h.cfg.AdminStore == nil {
 		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
-		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		h.respondUninstallUnavailable(w)
 		return
 	}
 	if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
@@ -1681,6 +1681,18 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 
 func respondUninstallUnsupported(w http.ResponseWriter) {
 	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
+}
+
+func (h *Handler) respondUninstallUnavailable(w http.ResponseWriter) {
+	if h.cfg.AuthProvider == nil {
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	}
+	if h.cfg.AuthProvider.SupportsDeleteAPIKey() && h.cfg.AdminStore == nil {
+		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	}
+	respondUninstallUnsupported(w)
 }
 
 func (h *Handler) canAdvertiseUninstall() bool {

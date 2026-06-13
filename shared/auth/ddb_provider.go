@@ -929,6 +929,9 @@ func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 // gates live outside this auth row, so removing configured_by/configured_at
 // does not change who can reconnect. Removing configured_at lets a reconnect
 // stamp fresh setup metadata while rotations still preserve it via SetAPIKey.
+// Rows with partial qURL setup metadata but no readable key are treated as
+// cleanup work: the metadata is removed and the user sees a disconnect success
+// rather than an internal partial-row state.
 //
 // TODO(#792): this local disconnect cannot revoke the upstream qURL key until
 // setup persists the qurl-service key_id for workspace keys.

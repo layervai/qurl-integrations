@@ -677,6 +677,32 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallUnexpectedArgsAuthProviderNotConfigured(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = nil
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
+
+	if !strings.Contains(resp[respFieldText], "qURL credential storage is not configured") {
+		t.Fatalf("nil-provider uninstall args reply missing credential-storage hint: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallUnexpectedArgsRequiresOwnerStoreForMutableProvider(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "owner verification is not configured") {
+		t.Fatalf("missing-owner-store uninstall args reply missing fail-closed hint: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallUnexpectedArgsUnsupportedDeployment(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	h := newTestHandler(t, noopQURLServer(t))
