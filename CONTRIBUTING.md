@@ -76,8 +76,9 @@ All of these must pass before merge:
 - **GitHub Actions refs** use full 40-character commit SHAs plus the exact
   upstream version tag as the first trailing comment, for example
   `owner/action@<sha> # v1.2.3`. `docker://` actions are not used in this repo.
-  Before changing a tag comment, confirm it matches the pinned SHA with
-  `git ls-remote https://github.com/OWNER/REPO.git refs/tags/v1.2.3`.
+  The validator enforces format only; reviewers own tag/SHA correctness. Before
+  changing a tag comment, confirm it matches the pinned SHA with `git ls-remote
+  https://github.com/OWNER/REPO.git refs/tags/v1.2.3`.
 
 ### Merge-result checks
 

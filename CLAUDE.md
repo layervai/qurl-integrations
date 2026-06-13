@@ -9,8 +9,9 @@
   external `uses:` entries must use full 40-character commit SHAs plus the exact
   upstream version tag as the first trailing comment, e.g.
   `owner/action@<sha> # v1.2.3`. Do not use `docker://` actions in this repo.
-  Before changing a tag comment, verify it with
-  `git ls-remote https://github.com/OWNER/REPO.git refs/tags/v1.2.3`.
+  The validator enforces format only; reviewers own tag/SHA correctness. Before
+  changing a tag comment, verify it with `git ls-remote
+  https://github.com/OWNER/REPO.git refs/tags/v1.2.3`.
 
 ## Layout
 
