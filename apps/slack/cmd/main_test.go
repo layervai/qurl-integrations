@@ -369,6 +369,7 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 		{name: "negative", raw: "-1h", wantErrText: "canonical Nh form"},
 		{name: "minutes unit rejected", raw: "90m", wantErrText: "canonical Nh form"},
 		{name: "compound duration rejected", raw: "2h0m0s", wantErrText: "canonical Nh form"},
+		{name: "too large", raw: "999999999999999999999999999999999999h", wantErrText: "too large"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
