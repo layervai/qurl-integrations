@@ -224,7 +224,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
@@ -282,6 +282,12 @@ For customer Slack installs, configure the Slack app with:
   `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
   `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
   `dm:true` and qURL Connector bootstrap-key delivery)
+  - Conversation-mode installs should include `reactions:write` so the agent can
+    add and clear the working-on-it reaction on admitted channel turns and DM
+    turns that still use the reaction fallback before assistant-pane status is
+    enabled. Without it, agent replies still post, but the best-effort reaction
+    ack is absent. This scope is not part of the install defaults; declare it in
+    the app manifest and add it explicitly to `SLACK_BOT_SCOPES`.
   - Conversation-mode installs that answer channel/private-channel/group-DM
     threads should include `channels:read` / `groups:read` / `mpim:read` with the
     corresponding event scopes. The confirm flow snapshots Slack's event
