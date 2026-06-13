@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-discord test-discord clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins check-discord test-discord clean
 
 VERSION ?= dev
 
@@ -67,6 +67,9 @@ release-snapshot: # Build release artifacts without publishing
 security:
 	go tool govulncheck ./...
 
+check-actions-pins:
+	scripts/validate-github-actions-pins.sh
+
 ## Pre-commit
 
 pre-commit-install:
@@ -85,7 +88,7 @@ check-discord: test-discord
 
 ## Full check (CI parity)
 
-check: fmt vet lint test-race
+check: check-actions-pins fmt vet lint test-race
 
 ## Cleanup
 
