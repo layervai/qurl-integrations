@@ -196,7 +196,7 @@ func TestAgentAck_ClearAbandonsRemoveWhenJoinContextDone(t *testing.T) {
 	h.clearAgentAck(slogTestLogger(t), &slackEventEnvelope{
 		TeamID: "T1",
 		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
-	}, neverAdded)
+	}, agentAckAdd{done: neverAdded})
 
 	_, removes := rec.snapshot()
 	if len(removes) != 0 {
@@ -205,24 +205,27 @@ func TestAgentAck_ClearAbandonsRemoveWhenJoinContextDone(t *testing.T) {
 }
 
 func TestAgentAck_ClearAbandonsRemoveWhenJoinTimeoutExpires(t *testing.T) {
-	oldTimeout := agentAckTimeout
-	agentAckTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { agentAckTimeout = oldTimeout })
-
 	rec := &recordingReactions{}
-	h := NewHandler(Config{Reactions: rec})
+	h := NewHandler(Config{Reactions: rec, AgentAckTimeout: 10 * time.Millisecond})
 
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	neverAdded := make(chan struct{})
+	canceled := make(chan struct{})
+	cancelAdd := sync.OnceFunc(func() { close(canceled) })
 	h.clearAgentAck(log, &slackEventEnvelope{
 		TeamID: "T1",
 		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
-	}, neverAdded)
+	}, agentAckAdd{done: neverAdded, cancel: cancelAdd})
 
 	_, removes := rec.snapshot()
 	if len(removes) != 0 {
 		t.Fatalf("remove should be skipped when the non-shutdown add join times out, got %d removes", len(removes))
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("clear should cancel the in-flight add when abandoning the remove")
 	}
 	gotLogs := logBuf.String()
 	if !strings.Contains(gotLogs, "level=WARN") || !strings.Contains(gotLogs, "ack may remain") {
