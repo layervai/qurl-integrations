@@ -3,10 +3,11 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-actions.yml
 name: Dependency Age Check (Actions)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun. The reusable's script exits 0 quickly when
-# no workflow/composite-action changes are in the diff.
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. The local
+# validate-pins job re-scans the full workflow/composite-action tree; the
+# reusable age-check exits 0 quickly when no workflow or composite-action
+# changes are in the diff.
 on:
   pull_request:
   workflow_dispatch:
@@ -23,6 +24,9 @@ permissions:
 
 jobs:
   validate-pins:
+    # Branch protection requires this exact job name as the status context.
+    # Renaming it requires updating the `main` protection settings and
+    # CONTRIBUTING.md.
     name: Validate GitHub Actions pins
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -3,10 +3,10 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-pip.yml
 name: Dependency Age Check (pip)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun. The reusable's script exits 0 quickly when
-# no requirements/poetry.lock/pyproject.toml changes are in the diff.
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. The reusable's
+# script exits 0 quickly when no requirements/poetry.lock/pyproject.toml
+# changes are in the diff.
 on:
   pull_request:
   workflow_dispatch:

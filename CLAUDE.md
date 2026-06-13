@@ -30,11 +30,17 @@ type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore |
 scope: slack | teams | discord | cli | zapier | chrome-extension | shared | ci
 ```
 
+> Keep this type list aligned with CONTRIBUTING.md and `.github/workflows/pr-title.yml`'s `types:` block.
+>
+> - When adding a new type: touch CLAUDE.md, CONTRIBUTING.md, and
+>   `.github/workflows/pr-title.yml`.
+>
 > Keep this scope list aligned with the Component dropdown in `.github/ISSUE_TEMPLATE/bug_report.yml`. `.github/workflows/pr-title.yml`'s `scopes:` block is the CI-enforced superset:
 >
 > - It currently lists two extra scopes (`infra`, `deps`) that aren't in this list or the issue template — tracked in #463 for sync.
 > - `requireScope: false`, so a scope is optional in PR titles; but when one is present, `amannn/action-semantic-pull-request` validates it against the workflow's list.
-> - When adding a new scope: touch CLAUDE.md and `bug_report.yml`, plus `pr-title.yml` if it isn't already in its superset.
+> - When adding a new scope: touch CLAUDE.md, CONTRIBUTING.md, and
+>   `bug_report.yml`, plus `pr-title.yml` if it isn't already in its superset.
 > - The dropdown's `other` option is a reporter-UX escape hatch — do NOT add it here (not a valid commit scope).
 
 ## Brand spelling

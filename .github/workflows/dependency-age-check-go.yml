@@ -3,11 +3,10 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-go.yml
 name: Dependency Age Check (Go)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun (a required check that never fires blocks
-# merge with "Expected — Waiting for status to be reported").
-# The reusable's script exits 0 quickly when no go.sum changes are
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. A required check
+# that never fires blocks merge with "Expected — Waiting for status to be
+# reported". The reusable's script exits 0 quickly when no go.sum changes are
 # in the diff — see "No go.sum changes detected" in age-check-go.sh.
 on:
   pull_request:

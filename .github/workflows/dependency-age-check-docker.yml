@@ -3,10 +3,9 @@
 # Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-docker.yml
 name: Dependency Age Check (Docker)
 
-# Fires on every PR (no path filter) so the status check always reports.
-# This lets branch protection require it without the path-filtered-
-# required-check footgun. The reusable's script exits 0 quickly when
-# no Dockerfile/compose changes are in the diff.
+# Fires on every PR with no path filter so branch-protected checks always
+# report and avoid the path-filtered-required-check footgun. The reusable's
+# script exits 0 quickly when no Dockerfile/compose changes are in the diff.
 on:
   pull_request:
   workflow_dispatch:
