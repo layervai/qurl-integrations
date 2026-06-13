@@ -667,13 +667,33 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	h := newUninstallAdminTestHandler(t, provider)
 
-	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb+" now", testAdminTeamID, testAdminUserID)
 
 	if provider.deleteCalls != 0 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
 	}
 	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall`.") {
 		t.Fatalf("uninstall args reply missing usage: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallUnexpectedArgsRequiresAdminOrOwner(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb+" now", testAdminTeamID, "USTRANGER000")
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if strings.Contains(resp[respFieldText], "Usage:") {
+		t.Fatalf("unauthorized uninstall args reply should not show usage: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "qURL workspace admin") {
+		t.Fatalf("unauthorized uninstall args reply missing admin-or-owner message: %q", resp[respFieldText])
 	}
 }
 

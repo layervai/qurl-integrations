@@ -1322,6 +1322,15 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// variants land here: advertise usage when uninstall is live, otherwise
 		// keep the same unsupported-deployment message as the bare verb.
 		if h.canAdvertiseUninstall() {
+			teamID := strings.TrimSpace(values.Get(fieldTeamID))
+			if teamID == "" {
+				respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
+				return
+			}
+			userID := strings.TrimSpace(values.Get(fieldUserID))
+			if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
+				return
+			}
 			respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 		} else {
 			h.respondUninstallUnavailable(w)
@@ -1706,6 +1715,9 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		respondSlack(w, ":warning: missing user_id in slash command payload")
 		return false
 	}
+	// CheckAdmin intentionally uses the same low-latency admin-store read as
+	// other Slack admin verbs; uninstall can be reconnected by the recorded
+	// owner/operator if a just-revoked admin races DynamoDB replication.
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
 	isAdmin, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
