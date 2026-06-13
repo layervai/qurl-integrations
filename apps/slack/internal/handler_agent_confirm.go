@@ -724,7 +724,7 @@ func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger,
 		delivered = h.deliverConfirmPrivate(ctx, log, pa, payload, res.ephemeralText)
 	}
 	res = confirmResultForDelivery(res, delivered)
-	_ = h.replaceOriginalResponse(log, responseURL, composeConfirmCard(res, delivered, pa.Asker, payload.User.ID))
+	_ = h.replaceOriginalResponse(log, responseURL, composeConfirmCard(res, pa.Asker, payload.User.ID))
 
 	// Best-effort: record the confirmed action attempt for the App Home review surface, keyed to
 	// the approver who ran it. Done AFTER the card swap so the audit PutItem adds no latency
@@ -749,18 +749,12 @@ func confirmResultForDelivery(res actionResult, delivered bool) actionResult {
 	return res
 }
 
-// composeConfirmCard builds the public terminal card text for an executed action. A
-// successful get whose private delivery failed must NOT keep claiming success — the user
-// received nothing — so it's downgraded to the delivery-failed copy; the get-failure copy
-// is self-contained, so a failed detail delivery needs no downgrade. Attribution (#662) is
-// appended for executed actions (pre-execution rejections aren't attributed, so their
-// generic copy stays byte-exact). Pure, so the success/delivery-failure matrix is unit-
-// testable without a live mint.
-func composeConfirmCard(res actionResult, delivered bool, asker, approver string) string {
+// composeConfirmCard builds the public terminal card text for an executed action.
+// Delivery-sensitive get outcomes are normalized by confirmResultForDelivery before
+// this point, so this helper only appends attribution when execution actually ran.
+// Pre-execution rejections aren't attributed, so their generic copy stays byte-exact.
+func composeConfirmCard(res actionResult, asker, approver string) string {
 	card := res.cardText
-	if !delivered && card == agentConfirmGetDeliveredReply {
-		card = agentConfirmGetDeliveryFailedReply
-	}
 	if res.attributed {
 		card = agentConfirmAttributedCard(card, asker, approver)
 	}

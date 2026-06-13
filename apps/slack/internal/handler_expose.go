@@ -531,13 +531,13 @@ func (h *Handler) createOrFindAndExposeURLResourceResult(ctx context.Context, lo
 
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.ChannelAlias, resource.ResourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return newActionCoreResult(false, fmt.Sprintf("URL resource is ready, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or %s.", args.ChannelAlias, args.ChannelAlias, copyText.aliasRetryAction), "URL resource is ready, but the alias is already bound in this channel.")
+		return newActionCoreResult(false, fmt.Sprintf("URL resource is ready, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or %s.", args.ChannelAlias, args.ChannelAlias, copyText.aliasRetryAction), "URL protection did not complete because the alias is already bound in this channel; the URL resource is ready.")
 	}
 	if err != nil {
 		// The qURL resource intentionally remains after a bind failure. A retry is
 		// safe because qurl-service's URL create path is idempotent by target URL.
 		log.Error("protect url resource: alias bind failed", "op", copyText.logOp, "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.ChannelAlias, "resource_id", resource.ResourceID)
-		return newActionCoreResult(false, "URL resource is ready, but Slack could not protect it in this channel. "+copyText.retrySentence+".", "URL resource is ready, but Slack could not protect it in this channel.")
+		return newActionCoreResult(false, "URL resource is ready, but Slack could not protect it in this channel. "+copyText.retrySentence+".", "URL protection did not complete because Slack could not protect it in this channel; the URL resource is ready.")
 	}
 	log.Info("URL resource created/found and protected in Slack channel", "op", copyText.logOp, "team_id", teamID, "channel_id", channelID, "channel_alias", args.ChannelAlias, "resource_id", resource.ResourceID)
 	return newActionCoreResult(true, fmt.Sprintf("URL resource is ready as `$%s` in this channel. Run `/qurl get $%s` to create a qURL.", args.ChannelAlias, args.ChannelAlias), "URL resource is ready in this channel.")

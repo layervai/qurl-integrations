@@ -71,7 +71,7 @@ func TestBuildAgentHomeView_EmptyState(t *testing.T) {
 func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 	entries := []slackdata.AuditEntry{
 		{Actor: "U1", Action: string(agent.ActionRevoke), Target: "billing", Channel: "C1", Reason: "stale resource cleanup", Outcome: "Revoked `$billing` and all its qURLs.", Result: "Resource and all of its qURLs were revoked.", ResultSuccess: auditSuccess(true), UnixSec: 1_700_000_100},
-		{Actor: "U1", Action: string(agent.ActionProtectURL), Target: "https://docs.example.com", Channel: "C1", Result: "URL resource is ready, but the alias is already bound in this channel.", ResultSuccess: auditSuccess(false), UnixSec: 1_700_000_050},
+		{Actor: "U1", Action: string(agent.ActionProtectURL), Target: "https://docs.example.com", Channel: "C1", Result: "URL protection did not complete because the alias is already bound in this channel; the URL resource is ready.", ResultSuccess: auditSuccess(false), UnixSec: 1_700_000_050},
 		{Actor: "U1", Action: string(agent.ActionGet), Target: "staging", Channel: "C1", UnixSec: 1_700_000_000},
 	}
 	blocks := buildAgentHomeView(entries)
@@ -88,7 +88,7 @@ func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 	if !blocksContain(t, blocks, "Succeeded:") || !blocksContain(t, blocks, "Resource and all of its qURLs were revoked.") {
 		t.Fatal("a successful structured result must render cleanly")
 	}
-	if !blocksContain(t, blocks, "Failed:") || !blocksContain(t, blocks, "URL resource is ready, but the alias is already bound") {
+	if !blocksContain(t, blocks, "Failed:") || !blocksContain(t, blocks, "URL protection did not complete because the alias is already bound") {
 		t.Fatal("a failed structured result must render as a failure")
 	}
 	if blocksContain(t, blocks, "ˊ") || blocksContain(t, blocks, "∗") {
