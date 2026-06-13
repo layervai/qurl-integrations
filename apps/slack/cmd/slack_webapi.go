@@ -472,7 +472,12 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		if !isSlackMarkdownBlockFallbackError(err) {
 			return err
 		}
-		slog.Info("Slack rejected markdown block; retrying with markdown_text", "error_code", slackChatPostMessageErrorCode(err), "error", err)
+		errorCode := slackChatPostMessageErrorCode(err)
+		if errorCode == slackAPIInvalidArguments {
+			slog.Debug("Slack rejected markdown block; retrying with markdown_text", "error_code", errorCode, "error", err)
+		} else {
+			slog.Info("Slack rejected markdown block; retrying with markdown_text", "error_code", errorCode, "error", err)
+		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
@@ -499,11 +504,12 @@ type slackMarkdownBlock struct {
 
 // slackMarkdownFallbackText is a lossy notification/screen-reader fallback, not
 // a second Markdown renderer; the markdown block remains the visible body.
-// Callers must pass already-hardened agent markdown; this helper does not
-// neutralize masked-link syntax by itself.
+// It reuses the agent markdown hardener as defense-in-depth in case a future
+// caller passes raw Markdown rather than the already-hardened agent reply.
 // Escaped hardening artifacts may remain here so the fallback never hides text
 // that was made literal for safety.
 func slackMarkdownFallbackText(markdownText string) string {
+	markdownText = internal.HardenAgentMarkdown(markdownText)
 	var lines []string
 	for _, line := range strings.Split(markdownText, "\n") {
 		line = strings.TrimSpace(line)

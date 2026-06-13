@@ -542,6 +542,15 @@ func TestSlackMarkdownFallbackTextCleansCommonMarkdown(t *testing.T) {
 	}
 }
 
+func TestSlackMarkdownFallbackTextNeutralizesMaskedLinksDefenseInDepth(t *testing.T) {
+	t.Parallel()
+	in := "Use [billing](https://evil.example/login) or <https://evil.example/admin|admin portal>."
+	want := "Use billing (https://evil.example/login) or admin portal (https://evil.example/admin)."
+	if got := slackMarkdownFallbackText(in); got != want {
+		t.Fatalf("fallback text = %q, want %q", got, want)
+	}
+}
+
 func TestSlackMarkdownFallbackTextPreservesMarkerOnlyReply(t *testing.T) {
 	t.Parallel()
 	if got := slackMarkdownFallbackText("  ***  "); got != "***" {

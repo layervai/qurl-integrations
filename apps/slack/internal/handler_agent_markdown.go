@@ -5,6 +5,7 @@ import "strings"
 const (
 	maxAgentMarkdownLinkBytes        = 4096
 	maxAgentMarkdownNestingDepth     = 32
+	maxPartialAngleAutolinkBytes     = 7
 	maxVisibleEmailAutolinkLookahead = 320
 )
 
@@ -22,6 +23,12 @@ const (
 // renderer syntax support pinned by tests.
 func hardenAgentMarkdown(markdown string) string {
 	return hardenAgentMarkdownWithOptions(markdown, false, 0)
+}
+
+// HardenAgentMarkdown exposes the Slack agent reply hardener to cmd-layer
+// fallback builders that need the same masked-link neutralization contract.
+func HardenAgentMarkdown(markdown string) string {
+	return hardenAgentMarkdown(markdown)
 }
 
 func hardenAgentMarkdownForStreamReconcile(markdown string) string {
@@ -54,7 +61,7 @@ type agentMarkdownLinkHarden struct {
 	codeBuffer   strings.Builder
 
 	pendingBang bool
-	pendingLess bool
+	pendingLess string
 	link        markdownLinkPending
 	angle       markdownAngleLinkPending
 }
@@ -90,7 +97,12 @@ const (
 )
 
 func (h *agentMarkdownLinkHarden) write(markdown string) string {
-	return h.writeLinks(h.references.write(markdown))
+	markdown = h.references.write(markdown)
+	if h.pendingLess != "" {
+		markdown = h.pendingLess + markdown
+		h.pendingLess = ""
+	}
+	return h.writeLinks(markdown)
 }
 
 func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
@@ -111,72 +123,55 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 			}
 			continue
 		}
-		h.consumeMarkdownByte(&out, c, markdown[i:])
+		if !h.consumeMarkdownByte(&out, c, markdown[i:]) {
+			break
+		}
 	}
 	return out.String()
 }
 
-func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c byte, remaining string) {
+func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c byte, remaining string) bool {
 	if h.pendingTicks > 0 {
 		h.emitBacktickRun(out)
 	}
 	if h.escaped {
 		out.WriteByte(c)
 		h.escaped = false
-		return
+		return true
 	}
 	if !h.codeDisabled && c == '`' {
 		h.pendingTicks++
-		return
+		return true
 	}
 	if h.inCode {
 		h.codeBuffer.WriteByte(c)
-		return
+		return true
 	}
 	if h.pendingBang {
 		h.pendingBang = false
 		if c == '[' {
 			h.startLink(true)
-			return
+			return true
 		}
 		out.WriteByte('!')
-	}
-	if h.pendingLess {
-		h.pendingLess = false
-		if isRawHTMLTagStartAfterLess(remaining) {
-			out.WriteByte('\\')
-			out.WriteByte('<')
-			out.WriteByte(c)
-			return
-		}
-		if isVisibleAngleLinkStartAfterLess(remaining) {
-			h.startAngleLink()
-			_ = h.consumeAngleLinkByte(out, c)
-			return
-		}
-		out.WriteByte('<')
 	}
 	if c == '\\' {
 		out.WriteByte(c)
 		h.escaped = true
-		return
+		return true
 	}
-	// A later chunk can split after several scheme bytes, for example "<htt".
-	// That intentionally fails closed through the raw-HTML guard below: the
-	// destination remains visible, but Slack cannot reinterpret it as a hidden
-	// labeled link.
-	if c == '<' && len(remaining) == 1 {
-		h.pendingLess = true
-		return
+	if c == '<' && shouldDeferAngleAutolinkStart(remaining) {
+		h.pendingLess = remaining
+		return false
 	}
 	if c == '<' && isRawHTMLTagStart(remaining) {
 		out.WriteByte('\\')
 		out.WriteByte(c)
-		return
+		return true
 	}
 	if c == '<' && isVisibleAngleLinkStart(remaining) {
 		h.startAngleLink()
-		return
+		return true
 	}
 	switch c {
 	case '!':
@@ -186,6 +181,7 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 	default:
 		out.WriteByte(c)
 	}
+	return true
 }
 
 func (h *agentMarkdownLinkHarden) flush() string {
@@ -206,16 +202,16 @@ func (h *agentMarkdownLinkHarden) flush() string {
 		out.WriteByte('!')
 		h.pendingBang = false
 	}
-	if h.pendingLess {
-		out.WriteByte('<')
-		h.pendingLess = false
+	if h.pendingLess != "" {
+		out.WriteString(h.pendingLess)
+		h.pendingLess = ""
 	}
 	if h.link.state != markdownLinkNone {
-		out.WriteString(h.link.original.String())
+		out.WriteString(h.safeMarkdownLinkOriginal(h.link.original.String()))
 		h.link = markdownLinkPending{}
 	}
 	if h.angle.active {
-		out.WriteString(escapeMarkdownAngleOriginal(h.angle.original.String(), h.angle.sawPipe))
+		out.WriteString(h.escapeMarkdownAngleOriginal())
 		h.angle = markdownAngleLinkPending{}
 	}
 	return out.String()
@@ -268,7 +264,7 @@ func (h *agentMarkdownLinkHarden) consumeLinkByte(out *strings.Builder, c byte) 
 		return true
 	case markdownLinkAfterLabel:
 		if c != '(' {
-			out.WriteString(h.link.original.String())
+			out.WriteString(h.safeMarkdownLinkOriginal(h.link.original.String()))
 			h.link = markdownLinkPending{}
 			return false
 		}
@@ -341,7 +337,7 @@ func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
 	case destination != "":
 		out.WriteString(destination)
 	default:
-		out.WriteString(h.link.original.String())
+		out.WriteString(h.safeMarkdownLinkOriginal(h.link.original.String()))
 	}
 	h.link = markdownLinkPending{}
 }
@@ -353,7 +349,7 @@ func (h *agentMarkdownLinkHarden) startAngleLink() {
 
 func (h *agentMarkdownLinkHarden) consumeAngleLinkByte(out *strings.Builder, c byte) bool {
 	if h.angle.original.Len() > maxAgentMarkdownLinkBytes {
-		out.WriteString(escapeMarkdownAngleOriginal(h.angle.original.String(), h.angle.sawPipe))
+		out.WriteString(h.escapeMarkdownAngleOriginal())
 		h.angle = markdownAngleLinkPending{}
 		return false
 	}
@@ -454,6 +450,18 @@ func (h *agentMarkdownLinkHarden) hardenNestedMarkdown(markdown string) string {
 
 func (h *agentMarkdownLinkHarden) escapeMarkdownLinkOriginal(original string) string {
 	return escapeMarkdownLinkOriginal(original, h.nestingDepth)
+}
+
+func (h *agentMarkdownLinkHarden) safeMarkdownLinkOriginal(original string) string {
+	return safeMarkdownLinkOriginal(original, h.nestingDepth)
+}
+
+func (h *agentMarkdownLinkHarden) escapeMarkdownAngleOriginal() string {
+	original := h.angle.original.String()
+	if !h.angle.sawPipe || !strings.HasPrefix(original, "<") {
+		return original
+	}
+	return "\\<" + h.angle.url.String() + "|" + h.hardenNestedMarkdown(h.angle.label.String())
 }
 
 type markdownReferenceDefinitionEscaper struct {
@@ -609,6 +617,25 @@ func isVisibleAngleLinkStart(s string) bool {
 	return len(s) >= 2 && s[0] == '<' && isVisibleAngleLinkStartAfterLess(s[1:])
 }
 
+func shouldDeferAngleAutolinkStart(s string) bool {
+	if s == "" || s[0] != '<' {
+		return false
+	}
+	afterLess := s[1:]
+	if afterLess == "" {
+		return true
+	}
+	if len(afterLess) > maxPartialAngleAutolinkBytes {
+		return false
+	}
+	for _, scheme := range []string{"http://", "https://", "mailto:", "tel:"} {
+		if len(afterLess) < len(scheme) && hasASCIIPrefixFold(scheme, afterLess) {
+			return true
+		}
+	}
+	return false
+}
+
 func isVisibleAngleLinkStartAfterLess(s string) bool {
 	return hasVisibleAutolinkScheme(s)
 }
@@ -659,13 +686,6 @@ func isASCIILetter(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-func escapeMarkdownAngleOriginal(original string, sawPipe bool) string {
-	if sawPipe && strings.HasPrefix(original, "<") {
-		return "\\" + original
-	}
-	return original
-}
-
 func escapeMarkdownControlText(markdown string) string {
 	return strings.NewReplacer("[", "\\[", "<", "\\<").Replace(markdown)
 }
@@ -679,6 +699,30 @@ func escapeMarkdownLinkOriginal(original string, nestingDepth int) string {
 		return "!\\[" + hardenAgentMarkdownWithOptions(strings.TrimPrefix(original, "!["), true, nestingDepth+1)
 	case strings.HasPrefix(original, "["):
 		return "\\[" + hardenAgentMarkdownWithOptions(strings.TrimPrefix(original, "["), true, nestingDepth+1)
+	default:
+		return original
+	}
+}
+
+func safeMarkdownLinkOriginal(original string, nestingDepth int) string {
+	if nestingDepth >= maxAgentMarkdownNestingDepth {
+		return escapeMarkdownControlText(original)
+	}
+	switch {
+	case strings.HasPrefix(original, "!["):
+		tail := strings.TrimPrefix(original, "![")
+		hardenedTail := hardenAgentMarkdownWithOptions(tail, true, nestingDepth+1)
+		if hardenedTail == tail {
+			return original
+		}
+		return "!\\[" + hardenedTail
+	case strings.HasPrefix(original, "["):
+		tail := strings.TrimPrefix(original, "[")
+		hardenedTail := hardenAgentMarkdownWithOptions(tail, true, nestingDepth+1)
+		if hardenedTail == tail {
+			return original
+		}
+		return "\\[" + hardenedTail
 	default:
 		return original
 	}
