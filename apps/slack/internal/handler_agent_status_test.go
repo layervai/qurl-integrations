@@ -37,6 +37,8 @@ func newStatusHandler(t *testing.T, seam AssistantThreadsPort, rec ReactionPort,
 	return h, posts, mu
 }
 
+var wantDMSurfaceAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "D1", timestamp: "100.2", name: agentAckReaction}
+
 func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	fake := &fakeAssistantThreads{}
 	rec := &recordingReactions{}
@@ -65,6 +67,32 @@ func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].threadTS != st.threadTS {
 		t.Fatalf("reply must post on the status thread (auto-clear precondition); reply=%+v status.thread=%s", *posts, st.threadTS)
+	}
+}
+
+func TestAgentStatus_DefaultPaneTurnOnReplyThread(t *testing.T) {
+	fake := &fakeAssistantThreads{}
+	rec := &recordingReactions{}
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "You can reach staging."}, false)
+
+	// Default/pre-pane mode still attempts native status in addition to the reaction
+	// fallback, so it must keep the same auto-clear precondition as exclusive mode.
+	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvDefaultStatus")))
+	h.Wait()
+
+	statuses := fake.statusCalls()
+	if len(statuses) != 1 {
+		t.Fatalf("a default pane (im) turn must set exactly one status, got %d", len(statuses))
+	}
+	st := statuses[0]
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].threadTS != st.threadTS {
+		t.Fatalf("default reply must post on the status thread (auto-clear precondition); reply=%+v status.thread=%s", *posts, st.threadTS)
+	}
+	adds, removes := rec.snapshot()
+	if len(adds) != 1 || adds[0] != wantDMSurfaceAck || len(removes) != 1 || removes[0] != wantDMSurfaceAck {
+		t.Fatalf("default pane (im) turn must also clear the reaction fallback, got adds=%+v removes=%+v", adds, removes)
 	}
 }
 
@@ -99,6 +127,26 @@ func TestAgentStatus_NilSeamIsNoOp(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 {
 		t.Fatalf("nil AssistantThreads seam must still post the reply, got %d", len(*posts))
+	}
+}
+
+func TestAgentStatus_DefaultNilSeamKeepsReactionFallback(t *testing.T) {
+	// If the AssistantThreads seam is unwired before the exclusive rollout flips on,
+	// the reaction fallback remains the visible working-on-it cue.
+	rec := &recordingReactions{}
+	h, posts, mu := newStatusHandler(t, nil, rec, fakeAgentLLM{reply: "ok"}, false)
+
+	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvDefaultNilStatus")))
+	h.Wait()
+
+	adds, removes := rec.snapshot()
+	if len(adds) != 1 || adds[0] != wantDMSurfaceAck || len(removes) != 1 || removes[0] != wantDMSurfaceAck {
+		t.Fatalf("default nil-seam pane turn must keep reaction fallback, got adds=%+v removes=%+v", adds, removes)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 {
+		t.Fatalf("default nil AssistantThreads seam must still post the reply, got %d", len(*posts))
 	}
 }
 

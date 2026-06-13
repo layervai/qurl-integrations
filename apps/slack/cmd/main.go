@@ -1236,7 +1236,7 @@ func logAgentSurfaceState(s agentSurfaceState) {
 			"read_only_live", readOnlyLive, "blocks_wired", s.blocksWired)
 	}
 
-	if s.exclusiveAcksFlag && !s.assistantThreadsWired {
+	if !s.killed && s.exclusiveAcksFlag && !s.assistantThreadsWired {
 		slog.Warn("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS is set but AssistantThreads is not wired; pane turns will not have a working-on-it indicator")
 	}
 }

@@ -184,6 +184,7 @@ func TestLogAgentSurfaceState_ExclusiveAcksWarnsWhenAssistantThreadsUnwired(t *t
 		{name: "exclusive with assistant threads", state: wired},
 		{name: "exclusive without assistant threads", state: with(wired, func(s *agentSurfaceState) { s.assistantThreadsWired = false }), wantWarn: true},
 		{name: "default without assistant threads", state: with(wired, func(s *agentSurfaceState) { s.exclusiveAcksFlag = false; s.assistantThreadsWired = false })},
+		{name: "killed suppresses exclusive warning", state: with(wired, func(s *agentSurfaceState) { s.killed = true; s.assistantThreadsWired = false })},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

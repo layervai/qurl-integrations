@@ -278,8 +278,8 @@ func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, 
 }
 
 // startAgentReactionAck marks an admitted turn with the reaction indicator when
-// this surface still uses one, and reports whether a reaction add was attempted
-// and must be cleared when the turn exits.
+// this surface still uses one, and reports whether reaction cleanup must be registered
+// when the turn exits. The add is best-effort; cleanup is also nil-/no-reaction-safe.
 func (h *Handler) startAgentReactionAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
 	if env.Event.ChannelType == slackChannelTypeIM && h.cfg.AgentSurfaceExclusiveAcks {
 		return false
