@@ -1707,11 +1707,14 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		respondSlack(w, ":warning: could not verify who connected qURL to this workspace. Ask the owner to run `/qurl setup <email>`, then retry.")
 		return false
 	}
+	// Issue #268 asks for workspace-admin self-service offboarding. Setup stays
+	// owner-only because it changes the key binding; uninstall only disconnects
+	// the existing Slack command mapping.
 	if ownerID == userID || isAdmin {
 		return true
 	}
 	slog.Warn("/qurl uninstall: non-admin denied", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
-	respondSlack(w, fmt.Sprintf("`/qurl uninstall` can only be run by a qURL workspace admin or by the person who connected qURL to this workspace (<@%s>).", ownerID))
+	respondSlack(w, "`/qurl uninstall` can only be run by a qURL workspace admin or by the person who connected qURL to this workspace.")
 	return false
 }
 

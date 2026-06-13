@@ -693,6 +693,9 @@ func TestSlashCommandUninstallAllowsWorkspaceAdminOrOwner(t *testing.T) {
 	if !strings.Contains(stranger[respFieldText], "qURL workspace admin") {
 		t.Fatalf("stranger reply missing admin-or-owner message: %q", stranger[respFieldText])
 	}
+	if strings.Contains(stranger[respFieldText], "<@") {
+		t.Fatalf("stranger reply disclosed owner mention: %q", stranger[respFieldText])
+	}
 
 	admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
 	if provider.deleteCalls != 1 {
