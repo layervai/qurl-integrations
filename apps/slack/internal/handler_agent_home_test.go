@@ -114,9 +114,9 @@ func TestAgentHomeEntryText_EscapesInjectedEcho(t *testing.T) {
 	e := slackdata.AuditEntry{
 		Actor:         "U1",
 		Action:        string(agent.ActionSetAlias),
-		Target:        injectedBacktickAlias, // a raw backtick would break out of the code span
-		Reason:        "*boom*",              // raw asterisks would bold the surrounding text
-		Result:        "*done* <now>",        // stored result still escapes before mrkdwn display
+		Target:        injectedBacktickAlias,                              // a raw backtick would break out of the code span
+		Reason:        "*boom* <@U99999999> <https://evil.example|click>", // raw mrkdwn would bold, mention, or link
+		Result:        "*done* <now>",                                     // stored result still escapes before mrkdwn display
 		ResultSuccess: auditSuccess(true),
 		Channel:       "C1",
 		UnixSec:       1_700_000_000,
@@ -133,6 +133,12 @@ func TestAgentHomeEntryText_EscapesInjectedEcho(t *testing.T) {
 	}
 	if !strings.Contains(got, "∗boom∗") {
 		t.Fatalf("the reason asterisks must be replaced by the text escaper, got %q", got)
+	}
+	if strings.Contains(got, "<@U99999999>") || strings.Contains(got, "<https://evil.example|click>") {
+		t.Fatalf("reason mentions and masked links must be escaped, got %q", got)
+	}
+	if !strings.Contains(got, "&lt;@U99999999&gt;") || !strings.Contains(got, "&lt;https://evil.example|click&gt;") {
+		t.Fatalf("reason mention/link syntax must render inert, got %q", got)
 	}
 	if strings.Contains(got, "*done* <now>") {
 		t.Fatalf("result text must be escaped, got %q", got)

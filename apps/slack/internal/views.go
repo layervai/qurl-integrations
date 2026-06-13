@@ -170,19 +170,36 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 	return json.Marshal(payload)
 }
 
+// TunnelInstallAgentMetadata marks a guided connector install modal as having
+// been opened from an already-claimed agent proposal. It stays intentionally
+// small: the modal submit is the enforcement point, so the final connector
+// identity comes from the submitted form, not the LLM proposal. Requester
+// identity is not serialized here; App Home audit rows are approver-scoped,
+// matching recordAgentAudit.
+type TunnelInstallAgentMetadata struct {
+	Action string `json:"action"`
+	// Reason is bounded proposal provenance for the audit row. Submit handling
+	// re-truncates it defensively before persistence, and renderers must treat
+	// it as untrusted text.
+	Reason string `json:"reason,omitempty"`
+}
+
 // TunnelInstallModalMetadata is carried through Slack private_metadata from
-// the slash-command request that opened the modal to the later
-// view_submission. The response_url lets the async installer post the same
-// ephemeral follow-up shape as the direct `/qurl-admin protect-connector <slug>` path.
+// the request that opened the modal to the later view_submission. The
+// response_url lets the async installer post the same ephemeral follow-up
+// shape as the direct `/qurl-admin protect-connector <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
 // resource or minting a bootstrap key; Slack response URLs are time-limited.
+// Agent is present only for the conversation-mode confirm flow, never for
+// slash-command initiated connector setup.
 type TunnelInstallModalMetadata struct {
-	TeamID        string `json:"team_id"`
-	EnterpriseID  string `json:"enterprise_id,omitempty"`
-	ChannelID     string `json:"channel_id"`
-	UserID        string `json:"user_id"`
-	ResponseURL   string `json:"response_url"`
-	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
+	TeamID        string                      `json:"team_id"`
+	EnterpriseID  string                      `json:"enterprise_id,omitempty"`
+	ChannelID     string                      `json:"channel_id"`
+	UserID        string                      `json:"user_id"`
+	ResponseURL   string                      `json:"response_url"`
+	CreatedAtUnix int64                       `json:"created_at_unix,omitempty"`
+	Agent         *TunnelInstallAgentMetadata `json:"agent,omitempty"`
 }
 
 // TunnelInstallModal renders the guided tunnel installer. The modal collects

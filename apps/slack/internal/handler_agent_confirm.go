@@ -482,7 +482,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 	// consistent: the modal submit isn't idempotent across opens, so consume-once is
 	// what stops two approvers from double-opening → double-minting a connector.
 	if confirmModalRouted(pa.Action) {
-		h.openAgentConnectorModal(ctx, log, payload, triggerReceivedAt)
+		h.openAgentConnectorModal(ctx, log, &pa, payload, triggerReceivedAt)
 		return
 	}
 	h.finalizeConfirmedAction(ctx, log, &pa, payload, responseURL)
@@ -534,7 +534,7 @@ func agentConfirmAttributedCard(cardText, asker, approver string) string {
 // On trigger expiry / open failure the card goes terminal with an "ask me again"
 // prompt: the action is already claimed (consumed), so the user re-asks the agent
 // to mint a fresh proposal + trigger — there is no retry on this card.
-func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, payload *interactionPayload, triggerReceivedAt time.Time) {
+func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, triggerReceivedAt time.Time) {
 	responseURL := payload.ResponseURL
 	if h.cfg.OpenView == nil {
 		log.Warn("agent confirm: protect-connector approved but OpenView is not configured")
@@ -554,6 +554,7 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 		UserID:        payload.User.ID,
 		ResponseURL:   responseURL,
 		CreatedAtUnix: h.now().Unix(),
+		Agent:         tunnelInstallAgentMetadata(pa),
 	})
 	if err != nil {
 		log.Error("agent confirm: protect-connector modal render failed", "error", err)
@@ -585,6 +586,18 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 	}
 	log.Info("agent confirm: protect-connector modal opened", "channel_id", payload.Channel.ID, "user_id", payload.User.ID)
 	_ = h.replaceOriginalResponse(log, responseURL, agentConfirmConnectorOpenedReply)
+}
+
+func tunnelInstallAgentMetadata(pa *pendingAction) *TunnelInstallAgentMetadata {
+	if pa == nil || pa.Action != agent.ActionProtectConnector {
+		return nil
+	}
+	// Confirm-side half of the protect-connector provenance carry-through; the
+	// submit-side half is tunnelInstallAgentAuditFromMetadata.
+	return &TunnelInstallAgentMetadata{
+		Action: string(pa.Action),
+		Reason: normalizeTunnelInstallAgentReason(pa.Reason),
+	}
 }
 
 // agentConfirmConnectorOpenErrorReply maps a views.open failure to the right
@@ -876,23 +889,52 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 // mutation already happened and the audit log is never an authority. res.cardText is
 // the legacy public-card outcome; res.audit is the clean result App Home renders.
 func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, res actionResult) {
-	if h.cfg.AgentStore == nil {
-		return
-	}
 	var resultSuccess *bool
 	if res.audit.display != "" {
 		success := res.audit.success
 		resultSuccess = &success
 	}
-	if err := h.cfg.AgentStore.PutAuditEntry(ctx, payload.Team.ID, &slackdata.AuditEntry{
-		Actor:         payload.User.ID,
-		Action:        string(pa.Action),
-		Target:        auditTargetFor(pa),
-		Channel:       payload.Channel.ID,
-		Reason:        pa.Reason,
-		Outcome:       res.cardText,
-		Result:        res.audit.display,
-		ResultSuccess: resultSuccess,
+	h.recordAgentAuditEntry(ctx, log, &agentAuditEntry{
+		teamID:        payload.Team.ID,
+		actorID:       payload.User.ID,
+		action:        string(pa.Action),
+		target:        auditTargetFor(pa),
+		channelID:     payload.Channel.ID,
+		reason:        pa.Reason,
+		outcome:       res.cardText,
+		result:        res.audit.display,
+		resultSuccess: resultSuccess,
+	})
+}
+
+type agentAuditEntry struct {
+	teamID        string
+	actorID       string
+	action        string
+	target        string
+	channelID     string
+	reason        string
+	outcome       string
+	result        string
+	resultSuccess *bool
+}
+
+// recordAgentAuditEntry is the low-level best-effort store write shared by the
+// confirm-card and modal-submit paths. A store failure never affects the
+// already-attempted user action.
+func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, entry *agentAuditEntry) {
+	if h.cfg.AgentStore == nil || entry == nil {
+		return
+	}
+	if err := h.cfg.AgentStore.PutAuditEntry(ctx, entry.teamID, &slackdata.AuditEntry{
+		Actor:         entry.actorID,
+		Action:        entry.action,
+		Target:        entry.target,
+		Channel:       entry.channelID,
+		Reason:        entry.reason,
+		Outcome:       entry.outcome,
+		Result:        entry.result,
+		ResultSuccess: entry.resultSuccess,
 	}); err != nil {
 		log.Warn("agent: record audit entry failed", "error", err)
 	}

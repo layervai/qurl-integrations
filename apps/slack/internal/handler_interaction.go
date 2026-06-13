@@ -217,6 +217,10 @@ func blockActionIDs(actions []interactionAction) []string {
 }
 
 func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
+	// Rejections before startAsyncWorker are pre-execution validation or
+	// authorization failures. Like confirm-card pre-execution rejections, they
+	// do not write agent audit rows; accepted submissions that reach the setup
+	// worker are recorded below.
 	args, fieldErrors := parseTunnelInstallModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)
@@ -297,8 +301,22 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	)
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	attemptID := tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
+	// Agent audit rows start at the async setup boundary: the validation and
+	// admin gates above reject before any setup attempt, while in-worker
+	// failures such as an upstream key-fetch error are recorded as attempted
+	// connector setups.
+	agentAudit := tunnelInstallAgentAuditFromMetadata(&meta, args)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstallWithAttempt(ctx, log, meta.TeamID, meta.EnterpriseID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, attemptID)
+		h.processTunnelInstall(ctx, log, &tunnelInstallRequest{
+			teamID:       meta.TeamID,
+			enterpriseID: meta.EnterpriseID,
+			channelID:    meta.ChannelID,
+			userID:       meta.UserID,
+			responseURL:  meta.ResponseURL,
+			args:         args,
+			attemptID:    attemptID,
+			agentAudit:   agentAudit,
+		})
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
 		return

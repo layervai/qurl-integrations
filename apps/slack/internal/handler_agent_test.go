@@ -283,6 +283,7 @@ type memAgentDDB struct {
 	// putCalls counts PutItem calls (conversation saves) so a test can assert the
 	// conflict-retry path attempts exactly one extra write, never a loop.
 	putCalls int
+	putErr   error // when set, PutItem fails
 	// forceConflicts makes the next N PutItems return a version conflict
 	// regardless of the stored version — the only way to deterministically force a
 	// SECOND conflict (a passive CAS fake can't, since no writer slips in between a
@@ -323,6 +324,9 @@ func (f *memAgentDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ..
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.putCalls++
+	if f.putErr != nil {
+		return nil, f.putErr
+	}
 	if f.forceConflicts > 0 {
 		f.forceConflicts--
 		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("forced conflict")}
