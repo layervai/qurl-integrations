@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
@@ -49,6 +51,25 @@ var oauthEnvKeys = []string{
 var slackInstallEnvKeys = []string{
 	envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL",
 	envSlackInstallStateSecret, "OAUTH_STATE_SECRET", envSlackBotScopes,
+}
+
+func TestNewAppLoggerEmitsJSONMsgKey(t *testing.T) {
+	var buf bytes.Buffer
+	newAppLogger(&buf).Info("contract check", "team_id", "T1")
+
+	var rec map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
+		t.Fatalf("unmarshal app log %q: %v", buf.String(), err)
+	}
+	if rec["msg"] != "contract check" {
+		t.Fatalf("msg = %v, want contract check", rec["msg"])
+	}
+	if rec["level"] != "INFO" {
+		t.Fatalf("level = %v, want INFO", rec["level"])
+	}
+	if rec["team_id"] != "T1" {
+		t.Fatalf("team_id = %v, want T1", rec["team_id"])
+	}
 }
 
 func validEnv() map[string]string {

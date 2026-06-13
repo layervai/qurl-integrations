@@ -57,6 +57,12 @@ const agentRateLimitedReply = "Conversation mode is at its limit for now — giv
 // The env limits are expressed per hour, so the window is one hour.
 const agentTurnRateWindow = time.Hour
 
+// agentTurnRateCounterFailOpenMsg is an infra-observed contract: the CloudWatch
+// metric filter added in qurl-integrations-infra#1065 keys on this exact slog
+// msg value for the fail-open path introduced by qurl-integrations-infra#1055.
+// TODO(upstream-contract): keep this value in lockstep with that infra filter.
+const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
+
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
 // triggering message while a turn runs (reactions.add), then removes when it ends.
 const agentAckReaction = "eyes"
@@ -208,7 +214,7 @@ func (h *Handler) agentTurnLimited(ctx context.Context, log *slog.Logger, env *s
 func (h *Handler) overTurnLimit(ctx context.Context, log *slog.Logger, teamID, scope string, limit int) bool {
 	count, err := h.cfg.AgentStore.BumpTurnCount(ctx, teamID, scope, agentTurnRateWindow)
 	if err != nil {
-		log.Warn("agent: turn-rate counter failed; allowing turn (fail-open)", "scope", scope, "team_id", teamID, "error", err)
+		log.Warn(agentTurnRateCounterFailOpenMsg, "scope", scope, "team_id", teamID, "error", err)
 		return false
 	}
 	if count > int64(limit) {
