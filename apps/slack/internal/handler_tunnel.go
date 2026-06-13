@@ -865,17 +865,13 @@ func (r tunnelInstallAgentAuditResult) info() (tunnelInstallAgentAuditResultInfo
 	return info, ok
 }
 
-func (r tunnelInstallAgentAuditResult) outcome() (string, bool) {
+func (r tunnelInstallAgentAuditResult) auditFields() (outcome string, resultSuccess *bool, known bool) {
 	info, ok := r.info()
 	if !ok {
-		return agentProtectConnectorAuditUnknownOutcome, false
+		return agentProtectConnectorAuditUnknownOutcome, nil, false
 	}
-	return info.outcome, true
-}
-
-func (r tunnelInstallAgentAuditResult) success() bool {
-	info, ok := r.info()
-	return ok && info.success
+	success := info.success
+	return info.outcome, &success, true
 }
 
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
@@ -892,14 +888,9 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	// write independent but bounded so an already-acked submit still gets its row.
 	auditCtx, cancel := context.WithTimeout(context.Background(), agentConnectorAuditWriteTimeout)
 	defer cancel()
-	resultOutcome, known := result.outcome()
+	resultOutcome, resultSuccess, known := result.auditFields()
 	if !known {
 		log.Warn("tunnel install agent audit result unknown; using unknown outcome", "result", uint8(result))
-	}
-	var resultSuccess *bool
-	if known {
-		success := result.success()
-		resultSuccess = &success
 	}
 	// Modal-submit audits have no public confirm card, so the legacy Outcome
 	// and structured App Home Result intentionally share the same neutral text.

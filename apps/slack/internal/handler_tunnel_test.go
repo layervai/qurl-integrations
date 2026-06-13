@@ -3316,15 +3316,15 @@ func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing test case for audit result %d", result)
 		}
-		outcome, known := result.outcome()
+		outcome, resultSuccess, known := result.auditFields()
 		if !known {
 			t.Fatalf("audit result %d known = false", result)
 		}
 		if outcome != info.outcome {
 			t.Fatalf("audit result %d outcome = %q, want %q", result, outcome, info.outcome)
 		}
-		if result.success() != info.success {
-			t.Fatalf("audit result %d success = %t, want %t", result, result.success(), info.success)
+		if resultSuccess == nil || *resultSuccess != info.success {
+			t.Fatalf("audit result %d success = %v, want %t", result, resultSuccess, info.success)
 		}
 	}
 
@@ -3333,15 +3333,15 @@ func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
 		agentProtectConnectorAuditResultCount,
 		tunnelInstallAgentAuditResult(255),
 	} {
-		outcome, known := result.outcome()
+		outcome, resultSuccess, known := result.auditFields()
 		if known {
 			t.Fatalf("unknown audit result %d known = true", result)
 		}
 		if outcome != agentProtectConnectorAuditUnknownOutcome {
 			t.Fatalf("unknown audit result %d outcome = %q, want %q", result, outcome, agentProtectConnectorAuditUnknownOutcome)
 		}
-		if result.success() {
-			t.Fatalf("unknown audit result %d success = true", result)
+		if resultSuccess != nil {
+			t.Fatalf("unknown audit result %d success = %v, want nil", result, resultSuccess)
 		}
 	}
 }
