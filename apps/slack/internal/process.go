@@ -177,7 +177,8 @@ func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout
 		cancel()
 		// Release the bounded worker slot before the tail runs, but keep the tail
 		// in the same wg-tracked goroutine so shutdown waits for best-effort cleanup
-		// such as audit writes.
+		// such as audit writes. Tails intentionally run outside the semaphore and
+		// must stay cheap or separately bounded.
 		<-sem
 
 		if tail == nil {
