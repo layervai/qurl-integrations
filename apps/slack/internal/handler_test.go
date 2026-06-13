@@ -489,6 +489,9 @@ func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
 		t.Fatalf("uninstall reply missing revocation caveat: %q", resp[respFieldText])
 	}
+	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
+		t.Fatalf("uninstall reply missing reconnect ownership hint: %q", resp[respFieldText])
+	}
 }
 
 func TestSlashCommandUninstallNotConfigured(t *testing.T) {
