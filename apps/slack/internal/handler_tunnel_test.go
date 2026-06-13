@@ -2320,7 +2320,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
-	captureTunnelPostDMSuccess(h)
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
@@ -2345,6 +2345,15 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	last := responseBodies[len(responseBodies)-1]
 	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard it") {
 		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
+	}
+	if len(*dmPosts) != 2 {
+		t.Fatalf("bootstrap DM posts = %d, want key DM and discard notice: %+v", len(*dmPosts), *dmPosts)
+	}
+	if !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
+		t.Fatalf("first DM = %q, want bootstrap key", (*dmPosts)[0].text)
+	}
+	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
+		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
 	}
 }
 

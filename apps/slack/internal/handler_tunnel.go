@@ -564,9 +564,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 
 // processTunnelInstall is the async-worker body for `/qurl-admin
 // protect-connector`. It runs the shared mutation core and delivers the result
-// to the slash command's response_url, revoking the bootstrap key if Slack never
-// confirms delivery (so a key whose install block may never have reached the
-// admin doesn't stay live).
+// to Slack. The secret DM is delivered first so DM failure can stop before
+// publishing install instructions that reference an unavailable secret; if the
+// later install-instructions delivery fails, the key is revoked and the admin gets
+// a best-effort discard notice.
 func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
 	if h.cfg.PostDM == nil {
 		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
@@ -594,7 +595,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
-		h.postTunnelBootstrapSecret(ctx, log, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again.")
+		_ = h.postTunnelBootstrapSecret(h.baseCtx, log, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again.")
 		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
@@ -602,6 +603,8 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 }
 
 func (h *Handler) postTunnelBootstrapSecret(ctx context.Context, log *slog.Logger, teamID, enterpriseID, userID, msg string) bool {
+	// processTunnelInstall checks this before minting; keep the helper guard so
+	// any future standalone call still fails closed instead of panicking.
 	if h.cfg.PostDM == nil {
 		return false
 	}
