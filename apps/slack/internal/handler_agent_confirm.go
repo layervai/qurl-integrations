@@ -879,8 +879,8 @@ func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payloa
 	if h.cfg.AgentStore == nil {
 		return
 	}
-	result, resultSuccess := res.audit.display, (*bool)(nil)
-	if result != "" {
+	var resultSuccess *bool
+	if res.audit.display != "" {
 		success := res.audit.success
 		resultSuccess = &success
 	}
@@ -891,7 +891,7 @@ func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payloa
 		Channel:       payload.Channel.ID,
 		Reason:        pa.Reason,
 		Outcome:       res.cardText,
-		Result:        result,
+		Result:        res.audit.display,
 		ResultSuccess: resultSuccess,
 	}); err != nil {
 		log.Warn("agent: record audit entry failed", "error", err)
