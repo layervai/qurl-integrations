@@ -542,6 +542,13 @@ func TestSlackMarkdownFallbackTextCleansCommonMarkdown(t *testing.T) {
 	}
 }
 
+func TestSlackMarkdownFallbackTextPreservesMarkerOnlyReply(t *testing.T) {
+	t.Parallel()
+	if got := slackMarkdownFallbackText("  ***  "); got != "***" {
+		t.Fatalf("fallback text = %q, want marker-only reply preserved", got)
+	}
+}
+
 func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 	t.Parallel()
 	var rawBody string

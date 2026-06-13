@@ -514,7 +514,10 @@ func slackMarkdownFallbackText(markdownText string) string {
 	for i := range fields {
 		fields[i] = trimMarkdownFallbackUnderscoreEmphasis(fields[i])
 	}
-	return strings.Join(fields, " ")
+	if fallback := strings.Join(fields, " "); fallback != "" {
+		return fallback
+	}
+	return strings.TrimSpace(markdownText)
 }
 
 var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "", "*", "")
