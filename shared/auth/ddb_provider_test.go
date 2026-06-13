@@ -448,6 +448,113 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
 		}
 	})
+
+	t.Run("waiter cancellation leaves owner fill active", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				close(getStarted)
+				<-releaseGet
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_owner_fill")}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		ownerResult := make(chan string, 1)
+		ownerErr := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				ownerErr <- err
+				return
+			}
+			ownerResult <- got
+		}()
+		<-getStarted
+
+		waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+		waiterErr := make(chan error, 1)
+		go func() {
+			_, err := p.APIKey(waiterCtx, testTeamID)
+			waiterErr <- err
+		}()
+		cancelWaiter()
+		select {
+		case err := <-waiterErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("waiter err = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not observe its own cancellation")
+		}
+
+		close(releaseGet)
+		select {
+		case err := <-ownerErr:
+			t.Fatalf("owner APIKey: %v", err)
+		case got := <-ownerResult:
+			if got != "lv_live_owner_fill" {
+				t.Fatalf("owner got %q want %q", got, "lv_live_owner_fill")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("owner did not finish after release")
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("cached APIKey after owner fill: %v", err)
+		}
+		if got != "lv_live_owner_fill" {
+			t.Fatalf("cached got %q want %q", got, "lv_live_owner_fill")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+	})
+
+	t.Run("panic releases in-flight lookup", func(t *testing.T) {
+		calls := 0
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				calls++
+				if calls == 1 {
+					panic("simulated APIKey lookup panic")
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_panic")}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("first APIKey should panic")
+				}
+			}()
+			_, _ = p.APIKey(context.Background(), testTeamID)
+		}()
+
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("second APIKey should start after panic cleanup: %v", err)
+		}
+		if got != "lv_live_after_panic" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_panic")
+		}
+		if calls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", calls)
+		}
+	})
 }
 
 func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
@@ -459,7 +566,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	}
 
-	t.Run("SetAPIKey evicts stale cached value", func(t *testing.T) {
+	t.Run("SetAPIKey seeds new cached value", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
 		}
@@ -480,7 +587,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
 			t.Fatalf("SetAPIKey: %v", err)
 		}
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}
 		got, err = p.APIKey(context.Background(), testTeamID)
 		if err != nil {
 			t.Fatalf("APIKey after SetAPIKey: %v", err)
@@ -488,8 +595,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
 		}
-		if ddb.getCalls != 2 {
-			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1 because SetAPIKey seeds the cache", ddb.getCalls)
 		}
 	})
 
@@ -564,7 +671,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 
 		ddb.getFunc = nil
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}
 		got, err := p.APIKey(context.Background(), testTeamID)
 		if err != nil {
 			t.Fatalf("APIKey after SetAPIKey: %v", err)
@@ -572,8 +679,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
 		}
-		if ddb.getCalls != 2 {
-			t.Fatalf("GetItem calls = %d, want 2 because stale in-flight fill must not cache", ddb.getCalls)
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1 because SetAPIKey seeds the cache", ddb.getCalls)
 		}
 	})
 }

@@ -468,6 +468,20 @@ func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string) {
 	p.apiKeyCacheGeneration[workspaceID]++
 }
 
+func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time) {
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	if p.apiKeyLookupInFlight != nil {
+		delete(p.apiKeyLookupInFlight, workspaceID)
+	}
+	if p.apiKeyCacheGeneration == nil {
+		p.apiKeyCacheGeneration = map[string]uint64{}
+	}
+	p.apiKeyCacheGeneration[workspaceID]++
+	p.cacheAPIKey(workspaceID, apiKey, now)
+}
+
 // SlackBotToken looks up the per-workspace Slack bot token captured during
 // Slack app OAuth installation. Missing token attributes are treated as a
 // reinstall-needed state instead of row corruption because older workspace rows
@@ -527,7 +541,8 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
 	}
 
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	now := p.nowOrDefault().UTC()
+	nowString := now.Format(time.RFC3339)
 	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
 		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
 	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
@@ -545,7 +560,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 			":key": &ddbtypes.AttributeValueMemberB{Value: ct},
 			":dk":  &ddbtypes.AttributeValueMemberB{Value: wrapped},
 			":by":  &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-			":now": &ddbtypes.AttributeValueMemberS{Value: now},
+			":now": &ddbtypes.AttributeValueMemberS{Value: nowString},
 		},
 		ReturnValues: ddbtypes.ReturnValueUpdatedOld,
 	})
@@ -559,7 +574,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
-	p.invalidateAPIKeyCache(workspaceID)
+	p.seedAPIKeyCache(workspaceID, apiKey, now)
 	return nil
 }
 
