@@ -3223,7 +3223,7 @@ func TestTunnelInstallAgentAuditIsIndependentOfNilBaseContext(t *testing.T) {
 	now := fixedNow
 	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
 	h := &Handler{cfg: Config{AgentStore: agentStore}}
-	h.recordTunnelInstallAgentAudit(slog.Default(), &tunnelInstallRequest{
+	h.recordTunnelInstallAgentAudit(nil, &tunnelInstallRequest{
 		teamID:    testAdminTeamID,
 		channelID: testTunnelChannelID,
 		userID:    testAdminUserID,

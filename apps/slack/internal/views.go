@@ -175,7 +175,9 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // small: the modal submit is the enforcement point, so the final connector
 // identity comes from the submitted form, not the LLM proposal. Requester
 // identity is not serialized here; App Home audit rows are approver-scoped,
-// matching recordAgentAudit.
+// matching recordAgentAudit. Today's protect-connector proposal does not carry
+// a proposed connector slug; add a structured audit field before preserving one
+// here so the enforced target and proposal hint do not get conflated.
 type TunnelInstallAgentMetadata struct {
 	Action string `json:"action"`
 	// Reason is bounded proposal provenance for the audit row. Submit handling

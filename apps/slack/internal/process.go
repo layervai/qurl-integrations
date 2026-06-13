@@ -156,7 +156,11 @@ func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Du
 // runOnPoolWithTail runs a bounded worker body and then, if returned, a
 // wg-tracked tail after the worker slot is released. That means peak goroutines
 // can be cap(sem) bodies plus cap(sem) tails; only use this helper for cheap,
-// independently bounded tails, or add a separate bound for the tail work.
+// independently bounded tails, or add a separate bound for the tail work. The
+// body ctx is canceled before the tail runs, so tails must derive their own
+// context. If cleanup/audit must happen after a body failure, the body must
+// recover internally and still return a tail; a panic before returning the
+// closure is logged by this helper and leaves no tail to run.
 func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger) func()) bool {
 	select {
 	case sem <- struct{}{}:

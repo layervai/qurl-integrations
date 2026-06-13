@@ -622,6 +622,8 @@ func tunnelInstallAgentMetadata(pa *pendingAction) *TunnelInstallAgentMetadata {
 	}
 	// Confirm-side half of the protect-connector provenance carry-through; the
 	// submit-side half is tunnelInstallAgentAuditFromMetadata.
+	// Protect-connector proposals are intentionally sparse and do not carry a
+	// proposed connector slug; the submitted modal is the first concrete target.
 	return &TunnelInstallAgentMetadata{
 		Action: string(pa.Action),
 		Reason: normalizeTunnelInstallAgentReason(pa.Reason),

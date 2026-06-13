@@ -769,7 +769,7 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
 		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
+		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
 		panicCleanup = nil
 		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
 		if errors.Is(err, ErrSlackMissingScope) {
@@ -796,7 +796,7 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		// confirmed, and the structured logs retain the resource/key IDs for
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
+		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
 		panicCleanup = nil
 		// Intentionally notify both places: the DM reaches admins who saw the key
 		// first, while response_url covers the command surface if DM delivery fails.
@@ -809,7 +809,10 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
 	// Unreachable with today's enum; if a future delivery state reaches this guard
-	// before the exhaustive linter catches it, surface the anomaly as unexpected.
+	// before the exhaustive linter catches it, fail closed by revoking the key and
+	// surfacing the anomaly as unexpected.
+	log.Error("tunnel install: unknown Slack follow-up delivery state after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "delivery_state", uint8(delivery))
+	safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "unknown_response_url_delivery_state")
 	panicCleanup = nil
 	return agentProtectConnectorAuditUnexpectedFailureResult
 }
@@ -878,6 +881,9 @@ func (r tunnelInstallAgentAuditResult) success() bool {
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
 	if req == nil || req.agentAudit == nil {
 		return
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 	audit := req.agentAudit
 	// Modal-submit audits intentionally do not inherit request, worker, or handler
