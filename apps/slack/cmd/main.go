@@ -587,6 +587,9 @@ func fetchAndFinishWorkspaceSlackToken(
 		cacheTTL = slackWorkspaceTokenNegativeCacheTTL
 	}
 	cached := cache.tokens.Finish(teamID, call, result, cacheTTL, now(), generation)
+	// Warn only when the negative fill was actually cached. If a concurrent
+	// purge detached this fill, marking fallbackWarned would leave sidecar
+	// state with no cache entry to evict and clear it later.
 	if cached && cacheNegative && err == nil && fallbackToken != "" {
 		cache.warnLegacySlackBotTokenFallback(teamID)
 	}
