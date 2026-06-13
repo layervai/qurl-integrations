@@ -483,18 +483,23 @@ func TestSlackPostMessageBlocksFuncSurfacesSlackError(t *testing.T) {
 	}
 }
 
-// mdTestChannel is the channel id the markdown_text builder tests post to. A
+// mdTestChannel is the channel id the markdown builder tests post to. A
 // shared const keeps the literal out of goconst's repeated-string count.
 const mdTestChannel = "C_chan"
 
-func TestSlackPostMarkdownMessageFuncPostsMarkdownTextField(t *testing.T) {
+func TestSlackPostMarkdownMessageFuncPostsMarkdownBlockAndFallback(t *testing.T) {
 	t.Parallel()
 	var rawBody string
 	var gotBody struct {
-		Channel      string `json:"channel"`
-		ThreadTS     string `json:"thread_ts"`
+		Channel  string `json:"channel"`
+		ThreadTS string `json:"thread_ts"`
+		Text     string `json:"text"`
+		Blocks   []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"blocks"`
+		Mrkdwn       *bool  `json:"mrkdwn"`
 		MarkdownText string `json:"markdown_text"`
-		Text         string `json:"text"`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -513,13 +518,17 @@ func TestSlackPostMarkdownMessageFuncPostsMarkdownTextField(t *testing.T) {
 	if gotBody.Channel != mdTestChannel || gotBody.ThreadTS != "1700000000.000100" {
 		t.Fatalf("body = %+v, want channel/thread_ts populated", gotBody)
 	}
-	if gotBody.MarkdownText != "Use **bold** and `code`" {
-		t.Fatalf("markdown_text = %q, want the standard-Markdown body verbatim", gotBody.MarkdownText)
+	if gotBody.Text != "Use **bold** and `code`" {
+		t.Fatalf("fallback text = %q, want the answer text", gotBody.Text)
 	}
-	// markdown_text must NOT be combined with text (Slack rejects the pairing); the
-	// body carries markdown_text alone.
-	if strings.Contains(rawBody, `"text"`) {
-		t.Fatalf("body %q must not carry a text field alongside markdown_text", rawBody)
+	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0].Type != "markdown" || gotBody.Blocks[0].Text != "Use **bold** and `code`" {
+		t.Fatalf("blocks = %+v, want one standard-Markdown block", gotBody.Blocks)
+	}
+	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false for the fallback text", gotBody.Mrkdwn)
+	}
+	if gotBody.MarkdownText != "" || strings.Contains(rawBody, `"markdown_text"`) {
+		t.Fatalf("body %q must not use markdown_text on the fallback-capable path", rawBody)
 	}
 }
 
@@ -539,6 +548,35 @@ func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 	}
 	if strings.Contains(rawBody, "thread_ts") {
 		t.Fatalf("body %q should omit thread_ts when empty", rawBody)
+	}
+}
+
+func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t *testing.T) {
+	t.Parallel()
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		if len(bodies) == 1 {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_blocks"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	if err := post(context.Background(), "T_test", "", mdTestChannel, "1700000000.000100", "Use **bold**"); err != nil {
+		t.Fatalf("chat.postMessage markdown fallback: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want markdown block then markdown_text fallback: %v", len(bodies), bodies)
+	}
+	if !strings.Contains(bodies[0], `"blocks"`) || strings.Contains(bodies[0], `"markdown_text"`) {
+		t.Fatalf("first request should use markdown blocks only: %s", bodies[0])
+	}
+	if !strings.Contains(bodies[1], `"markdown_text":"Use **bold**"`) || strings.Contains(bodies[1], `"blocks"`) || strings.Contains(bodies[1], `"text":`) {
+		t.Fatalf("second request should use markdown_text only: %s", bodies[1])
 	}
 }
 

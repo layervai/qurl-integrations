@@ -118,6 +118,24 @@ func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_MaskedLinkSplitAcrossDeltas_RevealsDestination(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	const reply = "Use [Click here](https://evil.example/login) now."
+	s.onDelta("Use ")
+	s.onDelta("[Click")
+	s.onDelta(" here](https://evil.example/login)")
+	s.onDelta(" now.")
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Use Click here (https://evil.example/login) now."
+	if port.appended() != want {
+		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
+	}
+}
+
 func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)

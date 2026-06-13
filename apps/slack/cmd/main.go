@@ -161,8 +161,8 @@ func run() error {
 	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
 	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
 	postEphemeral := newSlackPostEphemeralFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
-	// markdown_text seam for the agent's free-text answer, so a channel reply renders
-	// standard Markdown the same way the streaming pane does (see PostMarkdownMessage).
+	// standard-Markdown seam for the agent's free-text answer, so a channel reply
+	// renders like the streaming pane while still carrying a fallback.
 	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always

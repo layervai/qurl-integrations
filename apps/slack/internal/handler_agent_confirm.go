@@ -183,14 +183,12 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 		h.postAgentConfirm(log, env, threadTS, result.Proposal)
 		return
 	}
-	// The agent's own answer posts as markdown_text (standard Markdown rendered by
-	// Slack, parity with the streaming pane). It is the model's own prose, rendered
-	// rich and unescaped — including clickable links, the same surface the pane
-	// already exposes; that surface's threat model is ratified pre-enablement (#720).
+	// The agent's own answer posts as standard Markdown rendered by Slack, with
+	// masked links neutralized before either the channel or pane surface sees them.
 	// A proposal summary must NOT route here: it is LLM-distilled, so it stays escaped
 	// mrkdwn on the text seam (injection defense) — as does the blank-reply error fallback.
 	if result.Proposal == nil && strings.TrimSpace(result.Reply) != "" {
-		h.postAgentMarkdownReply(log, env, threadTS, result.Reply)
+		h.postAgentMarkdownReply(log, env, threadTS, hardenAgentMarkdown(result.Reply))
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))

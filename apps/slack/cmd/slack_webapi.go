@@ -437,26 +437,69 @@ func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAg
 }
 
 // newSlackPostMarkdownMessageFuncWithTokenLookup builds the
-// [internal.PostMarkdownMessage] seam: a threaded chat.postMessage whose body is
-// the markdown_text field, so Slack renders standard Markdown (the dialect the
-// streaming pane's chat.appendStream also takes) instead of the text field's
-// mrkdwn. markdown_text must not be combined with text/blocks, so the body carries
-// markdown_text alone. Shares the poster (token lookup + Grid fallback) with the
-// text seam — only the JSON body field differs.
+// [internal.PostMarkdownMessage] seam: a threaded chat.postMessage whose visible
+// body is a Slack markdown block, so Slack renders standard Markdown (the dialect
+// the streaming pane's chat.appendStream also takes) instead of the text field's
+// mrkdwn. The top-level text is a literal notification/screen-reader fallback; Slack
+// rejects text alongside markdown_text, so the normal path uses blocks. If Slack
+// rejects the markdown block shape in an older/limited surface, retry once with the
+// older markdown_text-only body so the answer still delivers.
 func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
 	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
 		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
-		body, err := json.Marshal(struct {
-			Channel      string `json:"channel"`
-			ThreadTS     string `json:"thread_ts,omitempty"`
-			MarkdownText string `json:"markdown_text"`
-		}{Channel: channelID, ThreadTS: threadTS, MarkdownText: markdownText})
+		body, err := slackMarkdownBlockMessageBody(channelID, threadTS, markdownText)
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request marshal: %w", err)
+		}
+		if err := poster.post(ctx, teamID, enterpriseID, body); !isSlackInvalidBlocksError(err) {
+			return err
+		}
+		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
 		return poster.post(ctx, teamID, enterpriseID, body)
 	}
+}
+
+func slackMarkdownBlockMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
+	return json.Marshal(struct {
+		Channel  string               `json:"channel"`
+		ThreadTS string               `json:"thread_ts,omitempty"`
+		Text     string               `json:"text"`
+		Blocks   []slackMarkdownBlock `json:"blocks"`
+		Mrkdwn   bool                 `json:"mrkdwn"`
+	}{Channel: channelID, ThreadTS: threadTS, Text: slackMarkdownFallbackText(markdownText), Blocks: []slackMarkdownBlock{{Type: "markdown", Text: markdownText}}, Mrkdwn: false})
+}
+
+type slackMarkdownBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func slackMarkdownFallbackText(markdownText string) string {
+	markdownText = strings.TrimSpace(markdownText)
+	if markdownText == "" {
+		return "Secure Access Agent reply."
+	}
+	return markdownText
+}
+
+func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
+	return json.Marshal(struct {
+		Channel      string `json:"channel"`
+		ThreadTS     string `json:"thread_ts,omitempty"`
+		MarkdownText string `json:"markdown_text"`
+	}{Channel: channelID, ThreadTS: threadTS, MarkdownText: markdownText})
+}
+
+func isSlackInvalidBlocksError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "chat.postMessage: invalid_blocks") || strings.Contains(msg, "chat.postMessage: invalid_blocks_format")
 }
 
 // newSlackPostMessageBlocksFuncWithTokenLookup builds the

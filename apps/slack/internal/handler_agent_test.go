@@ -206,10 +206,10 @@ func TestAgentEventKeys(t *testing.T) {
 func TestAgentReplyText(t *testing.T) {
 	// agentReplyText renders the mrkdwn text-seam reply: the escaped proposal preview,
 	// else the error fallback. The agent's own free-text answer is delivered as
-	// markdown_text (see TestDeliverAgentResult_RoutesByDialect), not through here — so
-	// a non-proposal result reaching this function renders the error reply.
+	// standard Markdown (see TestDeliverAgentResult_RoutesByDialect), not through here
+	// — so a non-proposal result reaching this function renders the error reply.
 	if got := agentReplyText(&agent.Result{Reply: "hello"}); got != agentErrorReply {
-		t.Errorf("non-proposal result renders the error fallback (answers go via markdown_text), got %q", got)
+		t.Errorf("non-proposal result renders the error fallback (answers go via standard Markdown), got %q", got)
 	}
 	prop := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "Protect $x."}})
 	if !strings.Contains(prop, "isn't enabled yet") || !strings.Contains(prop, "Protect $x.") {
@@ -440,7 +440,7 @@ func (f *memAgentDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...fun
 
 type capturedReply struct {
 	channel, threadTS, text string
-	// markdown records whether the reply arrived on the markdown_text seam
+	// markdown records whether the reply arrived on the standard-Markdown seam
 	// (PostMarkdownMessage) rather than the mrkdwn text seam (PostMessage).
 	markdown bool
 }
@@ -477,7 +477,7 @@ func capturingPostEphemeral() (PostEphemeralFunc, *[]capturedEphemeral, *sync.Mu
 	return fn, &posts, &mu
 }
 
-// capturingPostMarkdownMessage records markdown_text replies into the SAME slice
+// capturingPostMarkdownMessage records standard-Markdown replies into the SAME slice
 // (tagged markdown:true), so a test can assert which seam delivered a reply.
 func capturingPostMarkdownMessage(posts *[]capturedReply, mu *sync.Mutex) PostMessageFunc {
 	return func(_ context.Context, _, _, channel, threadTS, text string) error {
@@ -1167,16 +1167,17 @@ func TestHandleEvent_DisabledStaysSilent(t *testing.T) {
 }
 
 func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
-	// The agent's free-text answer delivers via markdown_text (standard Markdown,
-	// parity with the streaming pane); a proposal preview stays on the escaped mrkdwn
-	// text seam. The confirm card flow is OFF here (no PostMessageBlocks), so a
-	// proposal falls through to the text preview rather than a card.
+	// The agent's free-text answer delivers via the standard-Markdown seam (parity
+	// with the streaming pane) after masked-link hardening; a proposal preview stays
+	// on the escaped mrkdwn text seam. The confirm card flow is OFF here (no
+	// PostMessageBlocks), so a proposal falls through to the text preview rather
+	// than a card.
 	textPost, posts, mu := capturingPostMessage()
 	mdPost := capturingPostMarkdownMessage(posts, mu)
 	h := NewHandler(Config{PostMessage: textPost, PostMarkdownMessage: mdPost})
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
 
-	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "Use **bold** here"})
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "Use **bold** and [click](https://evil.example)"})
 	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Proposal: &agent.Proposal{Summary: "Protect $x."}})
 
 	mu.Lock()
@@ -1184,17 +1185,18 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	if len(*posts) != 2 {
 		t.Fatalf("want 2 posts, got %d: %+v", len(*posts), *posts)
 	}
-	// Free-text answer: markdown_text seam, body passed through verbatim (Slack's
-	// parser renders the Markdown — we must not pre-mangle it).
+	// Free-text answer: standard-Markdown seam, with masked links neutralized before
+	// Slack renders the Markdown.
 	if !(*posts)[0].markdown {
-		t.Errorf("free-text answer should post on the markdown_text seam, got mrkdwn: %+v", (*posts)[0])
+		t.Errorf("free-text answer should post on the standard-Markdown seam, got mrkdwn: %+v", (*posts)[0])
 	}
-	if (*posts)[0].text != "Use **bold** here" {
-		t.Errorf("free-text answer body = %q, want it verbatim", (*posts)[0].text)
+	if (*posts)[0].text != "Use **bold** and click (https://evil.example)" {
+		t.Errorf("free-text answer body = %q, want masked link revealed", (*posts)[0].text)
 	}
-	// Proposal preview: escaped mrkdwn text seam, never markdown_text (injection defense).
+	// Proposal preview: escaped mrkdwn text seam, never standard Markdown
+	// (injection defense).
 	if (*posts)[1].markdown {
-		t.Errorf("proposal preview should post on the mrkdwn text seam, got markdown_text: %+v", (*posts)[1])
+		t.Errorf("proposal preview should post on the mrkdwn text seam, got standard Markdown: %+v", (*posts)[1])
 	}
 	if !strings.HasPrefix((*posts)[1].text, agentProposalPreviewPrefix) {
 		t.Errorf("proposal preview = %q, want the preview prefix", (*posts)[1].text)
@@ -1203,16 +1205,17 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 
 func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 	// With the markdown seam unwired, the free-text answer still delivers — on the
-	// mrkdwn text seam (the pre-fix behavior), not dropped.
+	// mrkdwn text seam (degraded rendering), not dropped. Masked links are still
+	// neutralized before the fallback.
 	textPost, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{PostMessage: textPost})
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
 
-	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "plain answer"})
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: "plain [answer](https://evil.example)"})
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != "plain answer" {
+	if len(*posts) != 1 || (*posts)[0].text != "plain answer (https://evil.example)" {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
 }
