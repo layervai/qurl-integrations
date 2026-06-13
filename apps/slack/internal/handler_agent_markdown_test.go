@@ -5,7 +5,11 @@ import (
 	"testing"
 )
 
-const testNestedBillingMarkdownLink = "[billing](https://evil.example/login)"
+const (
+	testNestedBillingMarkdownLink = "[billing](https://evil.example/login)"
+	testNestedClickMarkdownLink   = "[click](https://evil.example/phish)"
+	testSafeURLPrefix             = "https://safe.example/"
+)
 
 func TestHardenAgentMarkdown_RevealsMaskedLinks(t *testing.T) {
 	t.Parallel()
@@ -132,6 +136,42 @@ func TestHardenAgentMarkdown_HardensNestedLinksInSlackAngleLabels(t *testing.T) 
 	}
 }
 
+func TestHardenAgentMarkdown_HardensMaskedSyntaxInLinkDestinations(t *testing.T) {
+	t.Parallel()
+	nested := testNestedClickMarkdownLink
+	got := hardenAgentMarkdown("Check [billing](" + testSafeURLPrefix + nested + ") now.")
+	if containsUnescapedMarkdownToken(got, nested) {
+		t.Fatalf("link destination should not expose raw nested masked syntax, got %q", got)
+	}
+	if !strings.Contains(got, testSafeURLPrefix+`\[click](https://evil.example/phish)`) {
+		t.Fatalf("link destination should keep the visible destination with literal nested label, got %q", got)
+	}
+}
+
+func TestHardenAgentMarkdown_HardensMaskedSyntaxInSlackAngleURLs(t *testing.T) {
+	t.Parallel()
+	nested := testNestedClickMarkdownLink
+	got := hardenAgentMarkdown("Use <" + testSafeURLPrefix + nested + "|see details>.")
+	if containsUnescapedMarkdownToken(got, nested) {
+		t.Fatalf("angle URL should not expose raw nested masked syntax, got %q", got)
+	}
+	if !strings.Contains(got, testSafeURLPrefix+`\[click](https://evil.example/phish)`) {
+		t.Fatalf("angle URL should keep the visible destination with literal nested label, got %q", got)
+	}
+}
+
+func TestHardenAgentMarkdown_HardensNoPipeSlackAngleURLOriginals(t *testing.T) {
+	t.Parallel()
+	nested := testNestedClickMarkdownLink
+	got := hardenAgentMarkdown("Use <" + testSafeURLPrefix + " " + nested + ">.")
+	if containsUnescapedMarkdownToken(got, nested) {
+		t.Fatalf("no-pipe angle original should not expose raw nested masked syntax, got %q", got)
+	}
+	if !strings.Contains(got, `\<`+testSafeURLPrefix+` \[click](https://evil.example/phish)>`) {
+		t.Fatalf("no-pipe angle original should keep the destination literal, got %q", got)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitLinks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden
@@ -194,6 +234,18 @@ func TestAgentMarkdownLinkHarden_HandlesSubSchemeChunkSplitAngleLinks(t *testing
 	}
 }
 
+func TestAgentMarkdownLinkHarden_HandlesChunkSplitEmailAutolinks(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Email <u") +
+		h.write("ser@example.com> now") +
+		h.flush()
+	want := "Email <user@example.com> now"
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitSlackAngleLinks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden
@@ -226,6 +278,19 @@ func TestAgentMarkdownLinkHarden_HardensNestedLinksInUnclosedSlackAngleLinks(t *
 	}
 	if !strings.Contains(got, "billing (https://evil.example/login)") {
 		t.Fatalf("unclosed angle link should expose nested destination, got %q", got)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_HardensMaskedSyntaxInUnclosedSlackAngleURLs(t *testing.T) {
+	t.Parallel()
+	nested := testNestedClickMarkdownLink
+	var h agentMarkdownLinkHarden
+	got := h.write("Use <"+testSafeURLPrefix+nested+"|see details") + h.flush()
+	if containsUnescapedMarkdownToken(got, nested) {
+		t.Fatalf("unclosed angle URL should not expose raw nested masked syntax, got %q", got)
+	}
+	if !strings.Contains(got, testSafeURLPrefix+`\[click](https://evil.example/phish)`) {
+		t.Fatalf("unclosed angle URL should keep the visible destination with literal nested label, got %q", got)
 	}
 }
 
@@ -335,6 +400,19 @@ func TestAgentMarkdownLinkHarden_HardensNestedLinksInOversizedAngleLinks(t *test
 	}
 }
 
+func TestAgentMarkdownLinkHarden_HardensMaskedSyntaxInOversizedAngleURLs(t *testing.T) {
+	t.Parallel()
+	nested := testNestedClickMarkdownLink
+	label := strings.Repeat("a", maxAgentMarkdownLinkBytes)
+	got := hardenAgentMarkdown("<" + testSafeURLPrefix + nested + "|" + label)
+	if containsUnescapedMarkdownToken(got, nested) {
+		t.Fatalf("oversized angle URL should not expose raw nested masked syntax, got %q", got)
+	}
+	if !strings.Contains(got, testSafeURLPrefix+`\[click](https://evil.example/phish)`) {
+		t.Fatalf("oversized angle URL should keep the visible destination with literal nested label, got %q", got)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitCodeFenceTicks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden
@@ -354,4 +432,26 @@ func TestAgentMarkdownLinkHarden_IncompleteLinkFlushesOriginal(t *testing.T) {
 	if got != "This is [not a link]" {
 		t.Fatalf("stream-hardened markdown = %q", got)
 	}
+}
+
+func containsUnescapedMarkdownToken(s, token string) bool {
+	for offset := 0; ; {
+		idx := strings.Index(s[offset:], token)
+		if idx < 0 {
+			return false
+		}
+		idx += offset
+		if !markdownByteEscaped(s, idx) {
+			return true
+		}
+		offset = idx + len(token)
+	}
+}
+
+func markdownByteEscaped(s string, idx int) bool {
+	var slashes int
+	for i := idx - 1; i >= 0 && s[i] == '\\'; i-- {
+		slashes++
+	}
+	return slashes%2 == 1
 }

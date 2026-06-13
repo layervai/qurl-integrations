@@ -327,7 +327,7 @@ func (h *agentMarkdownLinkHarden) consumeLinkDestinationByte(out *strings.Builde
 
 func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
 	label := strings.TrimSpace(h.hardenNestedMarkdown(h.link.label.String()))
-	destination := visibleMarkdownLinkDestination(h.link.destination.String())
+	destination := hardenVisibleMarkdownDestination(visibleMarkdownLinkDestination(h.link.destination.String()))
 	switch {
 	case label != "" && destination != "":
 		out.WriteString(label)
@@ -387,12 +387,12 @@ func (h *agentMarkdownLinkHarden) writeAnglePart(c byte) {
 
 func (h *agentMarkdownLinkHarden) emitAngleLink(out *strings.Builder) {
 	if !h.angle.sawPipe {
-		out.WriteString(h.angle.original.String())
+		out.WriteString(h.safeMarkdownAngleOriginal())
 		h.angle = markdownAngleLinkPending{}
 		return
 	}
 	label := strings.TrimSpace(h.hardenNestedMarkdown(h.angle.label.String()))
-	url := strings.TrimSpace(h.angle.url.String())
+	url := strings.TrimSpace(hardenVisibleMarkdownDestination(h.angle.url.String()))
 	switch {
 	case label != "" && url != "":
 		out.WriteString(label)
@@ -457,11 +457,18 @@ func (h *agentMarkdownLinkHarden) safeMarkdownLinkOriginal(original string) stri
 }
 
 func (h *agentMarkdownLinkHarden) escapeMarkdownAngleOriginal() string {
+	if !h.angle.sawPipe {
+		return h.safeMarkdownAngleOriginal()
+	}
+	return "\\<" + hardenVisibleMarkdownDestination(h.angle.url.String()) + "|" + h.hardenNestedMarkdown(h.angle.label.String())
+}
+
+func (h *agentMarkdownLinkHarden) safeMarkdownAngleOriginal() string {
 	original := h.angle.original.String()
-	if !h.angle.sawPipe || !strings.HasPrefix(original, "<") {
+	if !strings.HasPrefix(original, "<") || !markdownVisibleTextNeedsEscaping(h.angle.url.String()) {
 		return original
 	}
-	return "\\<" + h.angle.url.String() + "|" + h.hardenNestedMarkdown(h.angle.label.String())
+	return hardenVisibleMarkdownDestination(original)
 }
 
 type markdownReferenceDefinitionEscaper struct {
@@ -633,7 +640,23 @@ func shouldDeferAngleAutolinkStart(s string) bool {
 			return true
 		}
 	}
-	return false
+	for i := 0; i < len(afterLess); i++ {
+		if !isASCIILetter(afterLess[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func hardenVisibleMarkdownDestination(destination string) string {
+	if !markdownVisibleTextNeedsEscaping(destination) {
+		return destination
+	}
+	return escapeMarkdownControlText(destination)
+}
+
+func markdownVisibleTextNeedsEscaping(text string) bool {
+	return strings.ContainsAny(text, "[<")
 }
 
 func isVisibleAngleLinkStartAfterLess(s string) bool {

@@ -473,11 +473,7 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			return err
 		}
 		errorCode := slackChatPostMessageErrorCode(err)
-		if errorCode == slackAPIInvalidArguments {
-			slog.Debug("Slack rejected markdown block; retrying with markdown_text", "error_code", errorCode, "error", err)
-		} else {
-			slog.Info("Slack rejected markdown block; retrying with markdown_text", "error_code", errorCode, "error", err)
-		}
+		slog.Debug("Slack rejected markdown block; retrying with markdown_text", "error_code", errorCode, "error", err)
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
