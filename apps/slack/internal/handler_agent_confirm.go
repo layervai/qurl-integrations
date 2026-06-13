@@ -924,48 +924,26 @@ func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payloa
 		success := res.audit.success
 		resultSuccess = &success
 	}
-	h.recordAgentAuditEntry(ctx, log, &agentAuditEntry{
-		teamID:        payload.Team.ID,
-		actorID:       payload.User.ID,
-		action:        string(pa.Action),
-		target:        auditTargetFor(pa),
-		channelID:     payload.Channel.ID,
-		reason:        pa.Reason,
-		outcome:       res.cardText,
-		result:        res.audit.display,
-		resultSuccess: resultSuccess,
+	h.recordAgentAuditEntry(ctx, log, payload.Team.ID, &slackdata.AuditEntry{
+		Actor:         payload.User.ID,
+		Action:        string(pa.Action),
+		Target:        auditTargetFor(pa),
+		Channel:       payload.Channel.ID,
+		Reason:        pa.Reason,
+		Outcome:       res.cardText,
+		Result:        res.audit.display,
+		ResultSuccess: resultSuccess,
 	})
-}
-
-type agentAuditEntry struct {
-	teamID        string
-	actorID       string
-	action        string
-	target        string
-	channelID     string
-	reason        string
-	outcome       string
-	result        string
-	resultSuccess *bool
 }
 
 // recordAgentAuditEntry is the low-level best-effort store write shared by the
 // confirm-card and modal-submit paths. A store failure never affects the
 // already-attempted user action.
-func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, entry *agentAuditEntry) {
+func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, teamID string, entry *slackdata.AuditEntry) {
 	if h.cfg.AgentStore == nil || entry == nil {
 		return
 	}
-	if err := h.cfg.AgentStore.PutAuditEntry(ctx, entry.teamID, &slackdata.AuditEntry{
-		Actor:         entry.actorID,
-		Action:        entry.action,
-		Target:        entry.target,
-		Channel:       entry.channelID,
-		Reason:        entry.reason,
-		Outcome:       entry.outcome,
-		Result:        entry.result,
-		ResultSuccess: entry.resultSuccess,
-	}); err != nil {
+	if err := h.cfg.AgentStore.PutAuditEntry(ctx, teamID, entry); err != nil {
 		log.Warn("agent: record audit entry failed", "error", err)
 	}
 }

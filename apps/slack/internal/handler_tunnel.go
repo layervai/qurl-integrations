@@ -892,17 +892,13 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	// write independent but bounded so an already-acked submit still gets its row.
 	auditCtx, cancel := context.WithTimeout(context.Background(), agentConnectorAuditWriteTimeout)
 	defer cancel()
-	info, known := result.info()
-	resultOutcome := agentProtectConnectorAuditUnknownOutcome
-	if known {
-		resultOutcome = info.outcome
-	}
+	resultOutcome, known := result.outcome()
 	if !known {
 		log.Warn("tunnel install agent audit result unknown; using unknown outcome", "result", uint8(result))
 	}
 	var resultSuccess *bool
 	if known {
-		success := info.success
+		success := result.success()
 		resultSuccess = &success
 	}
 	// Modal-submit audits have no public confirm card, so the legacy Outcome
@@ -913,16 +909,15 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	// The stored action names the connector modal/workflow even for the
 	// defensive signed-agent action mismatch path; the result distinguishes that
 	// rejection from other modal verification failures.
-	h.recordAgentAuditEntry(auditCtx, log, &agentAuditEntry{
-		teamID:        req.teamID,
-		actorID:       req.userID,
-		action:        string(agent.ActionProtectConnector),
-		target:        audit.target,
-		channelID:     req.channelID,
-		reason:        audit.reason,
-		outcome:       resultOutcome,
-		result:        resultOutcome,
-		resultSuccess: resultSuccess,
+	h.recordAgentAuditEntry(auditCtx, log, req.teamID, &slackdata.AuditEntry{
+		Actor:         req.userID,
+		Action:        string(agent.ActionProtectConnector),
+		Target:        audit.target,
+		Channel:       req.channelID,
+		Reason:        audit.reason,
+		Outcome:       resultOutcome,
+		Result:        resultOutcome,
+		ResultSuccess: resultSuccess,
 	})
 }
 
