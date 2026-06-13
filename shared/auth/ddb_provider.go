@@ -146,13 +146,14 @@ type DDBProvider struct {
 	// expiry sweeps using Now instead of a background janitor. The cache is
 	// process-local: rotation or disconnect on one serving instance cannot evict
 	// sibling instances, so they may continue using a previously decrypted key,
-	// including a revoked key, until this TTL expires. Five minutes keeps that
-	// cross-instance staleness bounded while still collapsing the common
-	// multi-command session; Slack bot-token caching stays shorter because it
-	// gates reinstall detection rather than qURL API retry pressure.
-	apiKeyCache sync.Map // map[string]*cachedAPIKey, per issue #263
+	// including a revoked key, until this TTL expires. Issue #263 explicitly
+	// accepts five minutes as the starting cross-instance staleness window; that
+	// stays human-perceptible while collapsing the common multi-command session.
+	// Slack bot-token caching stays shorter because it gates reinstall detection
+	// rather than qURL API retry pressure.
+	apiKeyCache map[string]*cachedAPIKey
 
-	// The mutex coordinates the sync.Map with in-flight fills and invalidation
+	// The mutex coordinates the cache with in-flight fills and invalidation
 	// generations. Generation entries are retained after invalidation so a
 	// detached stale fill cannot observe a reset-to-zero generation and cache an
 	// old key; the map only grows for workspaces that rotate or disconnect in
@@ -331,12 +332,12 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 	p.apiKeyCacheMu.Lock()
 	defer p.apiKeyCacheMu.Unlock()
 
+	if p.apiKeyCache == nil {
+		p.apiKeyCache = map[string]*cachedAPIKey{}
+	}
 	p.sweepExpiredAPIKeyCacheLocked(now)
-	if cached, ok := p.apiKeyCache.Load(workspaceID); ok {
-		entry, ok := cached.(*cachedAPIKey)
-		if ok && now.Before(entry.expiresAt) {
-			return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
-		}
+	if entry, ok := p.apiKeyCache[workspaceID]; ok && now.Before(entry.expiresAt) {
+		return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
 	}
 
 	if p.apiKeyCacheGeneration == nil {
@@ -369,8 +370,8 @@ func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceI
 
 	apiKey, err := p.fetchAPIKey(ctx, workspaceID)
 	result = apiKeyLookupResult{apiKey: apiKey, err: err}
-	p.finishAPIKeyLookup(workspaceID, call, result, now, generation)
 	finished = true
+	p.finishAPIKeyLookup(workspaceID, call, result, now, generation)
 	return apiKey, err
 }
 
@@ -430,11 +431,13 @@ func (p *DDBProvider) finishAPIKeyLookup(workspaceID string, call *apiKeyLookupC
 }
 
 func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
-	entry := &cachedAPIKey{
+	if p.apiKeyCache == nil {
+		p.apiKeyCache = map[string]*cachedAPIKey{}
+	}
+	p.apiKeyCache[workspaceID] = &cachedAPIKey{
 		apiKey:    apiKey,
 		expiresAt: now.Add(apiKeyCacheTTL),
 	}
-	p.apiKeyCache.Store(workspaceID, entry)
 }
 
 func (p *DDBProvider) sweepExpiredAPIKeyCacheLocked(now time.Time) {
@@ -443,13 +446,11 @@ func (p *DDBProvider) sweepExpiredAPIKeyCacheLocked(now time.Time) {
 	}
 	// Minute-gated O(workspaces seen by this process), matching the Slack token
 	// cache without adding a background goroutine or real-clock timer to tests.
-	p.apiKeyCache.Range(func(key, value any) bool {
-		entry, ok := value.(*cachedAPIKey)
-		if !ok || !now.Before(entry.expiresAt) {
-			p.apiKeyCache.Delete(key)
+	for workspaceID, entry := range p.apiKeyCache {
+		if !now.Before(entry.expiresAt) {
+			delete(p.apiKeyCache, workspaceID)
 		}
-		return true
-	})
+	}
 	p.apiKeyCacheLastSweep = now
 }
 
@@ -457,7 +458,7 @@ func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string) {
 	p.apiKeyCacheMu.Lock()
 	defer p.apiKeyCacheMu.Unlock()
 
-	p.apiKeyCache.Delete(workspaceID)
+	delete(p.apiKeyCache, workspaceID)
 	if p.apiKeyLookupInFlight != nil {
 		delete(p.apiKeyLookupInFlight, workspaceID)
 	}
