@@ -225,6 +225,18 @@ func (hc *confirmHarness) pendingID(t *testing.T, teamID string) string {
 	return ids[0]
 }
 
+func requireSingleAuditEntry(t *testing.T, hc *confirmHarness, userID string) slackdata.AuditEntry {
+	t.Helper()
+	got, err := hc.store.ListAuditEntries(context.Background(), "T1", userID, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want one audit entry for %s, got %d: %+v", userID, len(got), got)
+	}
+	return got[0]
+}
+
 func confirmPayload(teamID, channelID, userID, responseURL, id string) *interactionPayload {
 	p := &interactionPayload{Type: "block_actions", ResponseURL: responseURL, TriggerID: "trig"}
 	p.Team.ID = teamID
@@ -824,6 +836,69 @@ func TestConfirm_ProtectURLOnApprove(t *testing.T) {
 	}
 	if !found || bound != testAgentCreatedURLResourceID {
 		t.Fatalf("channel alias = (%q, %v), want newly-created resource %q", bound, found, testAgentCreatedURLResourceID)
+	}
+}
+
+func TestConfirm_RecordsStructuredAuditResults(t *testing.T) {
+	cases := []struct {
+		name        string
+		pa          *pendingAction
+		before      func(*testing.T, *confirmHarness)
+		wantSuccess bool
+		wantResult  string
+	}{
+		{
+			name:        "revoke resolve failure",
+			pa:          &pendingAction{Action: agent.ActionRevoke, Token: "missing", ChannelID: "C1"},
+			wantSuccess: false,
+			wantResult:  "Resource could not be resolved for revoke.",
+		},
+		{
+			name:        "set-alias success",
+			pa:          &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1"},
+			wantSuccess: true,
+			wantResult:  "Alias now points to the qURL Connector in this channel.",
+		},
+		{
+			name:        "set-alias target not found",
+			pa:          &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "missing", ChannelID: "C1"},
+			wantSuccess: false,
+			wantResult:  "qURL Connector was not found.",
+		},
+		{
+			name: "protect-url alias already bound",
+			pa:   &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"},
+			before: func(t *testing.T, hc *confirmHarness) {
+				t.Helper()
+				if err := hc.h.cfg.AdminStore.BindChannelAlias(context.Background(), "T1", "C1", "docs", "r_existing"); err != nil {
+					t.Fatalf("seed bound alias: %v", err)
+				}
+			},
+			wantSuccess: false,
+			wantResult:  "URL resource is ready, but the alias is already bound in this channel.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			if c.before != nil {
+				c.before(t, hc)
+			}
+			id := hc.seedPending(t, c.pa)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+			ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if !ro || !hc.claimed(id) {
+				t.Fatalf("approve should claim and replace the card; replace=%v claimed=%v", ro, hc.claimed(id))
+			}
+
+			entry := requireSingleAuditEntry(t, hc, "Uadmin")
+			if entry.Result != c.wantResult {
+				t.Fatalf("Result = %q, want %q (entry=%+v)", entry.Result, c.wantResult, entry)
+			}
+			if entry.ResultSuccess == nil || *entry.ResultSuccess != c.wantSuccess {
+				t.Fatalf("ResultSuccess = %v, want %v (entry=%+v)", entry.ResultSuccess, c.wantSuccess, entry)
+			}
+		})
 	}
 }
 

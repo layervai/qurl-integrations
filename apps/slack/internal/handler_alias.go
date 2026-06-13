@@ -384,13 +384,17 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 // the user via [mapMintError]. So the worst case is a deferred,
 // well-handled error rather than a silent success.
 func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) string {
+	return h.resolveAndBindTunnelSlugAliasResult(ctx, log, teamID, channelID, alias, slug).cardText
+}
+
+func (h *Handler) resolveAndBindTunnelSlugAliasResult(ctx context.Context, log *slog.Logger, teamID, channelID, alias, slug string) actionCoreResult {
 	resourceID, err := h.resolveTunnelSlugAliasTarget(ctx, teamID, slug)
 	if err != nil {
 		log.Error("setalias tunnel slug target resolution failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias, "slug", slug)
 		if errors.Is(err, errTunnelSlugNotFound) {
-			return fmt.Sprintf("qURL Connector `$%s` was not found. Run `/qurl-admin protect-connector %s` first, then retry this alias.", slug, slug)
+			return newActionCoreResult(false, fmt.Sprintf("qURL Connector `$%s` was not found. Run `/qurl-admin protect-connector %s` first, then retry this alias.", slug, slug), "qURL Connector was not found.")
 		}
-		return sanitizeAPIError(err, "Failed to resolve qURL Connector ID")
+		return newActionCoreResult(false, sanitizeAPIError(err, "Failed to resolve qURL Connector ID"), "qURL Connector could not be resolved.")
 	}
 
 	// Multi-alias write: BindChannelAlias issues an atomic UpdateItem
@@ -402,11 +406,11 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	// narrow — claude-bot review #5 on the prior single-alias version.
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, alias, resourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias)
+		return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or pick a different alias.", alias, alias), "Alias is already bound in this channel.")
 	}
 	if err != nil {
 		log.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
-		return "Failed to update alias. Please try again."
+		return newActionCoreResult(false, "Failed to update alias. Please try again.", "Alias could not be updated.")
 	}
 	// Admin-verb audit trail: log the bound (alias, slug, resource_id)
 	// triple on success so post-incident reconstruction doesn't depend
@@ -415,7 +419,7 @@ func (h *Handler) resolveAndBindTunnelSlugAlias(ctx context.Context, log *slog.L
 	// server-minted `r_<id>` with no embeddable credentials), so no
 	// redaction is needed.
 	logAliasBound(teamID, channelID, alias, slug, resourceID)
-	return fmt.Sprintf("Alias `$%s` now points to qURL Connector `$%s` in this channel.", alias, slug)
+	return newActionCoreResult(true, fmt.Sprintf("Alias `$%s` now points to qURL Connector `$%s` in this channel.", alias, slug), "Alias now points to the qURL Connector in this channel.")
 }
 
 func logAliasBound(teamID, channelID, alias, slug, resourceID string) {
@@ -494,16 +498,20 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 // conversation-mode confirm flow (executeAgentAction). The caller gates admin; the
 // alias is escaped since the confirm path can carry an LLM-distilled value.
 func (h *Handler) unbindAliasResult(ctx context.Context, teamID, channelID, alias string) string {
+	return h.unbindAliasCoreResult(ctx, teamID, channelID, alias).cardText
+}
+
+func (h *Handler) unbindAliasCoreResult(ctx context.Context, teamID, channelID, alias string) actionCoreResult {
 	err := h.aliasStore.UnbindChannelAlias(ctx, teamID, channelID, alias)
 	switch {
 	case errors.Is(err, slackdata.ErrAliasNotFound):
-		return fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", escapeMrkdwnCode(alias))
+		return newActionCoreResult(false, fmt.Sprintf("Alias `$%s` is not bound in this channel. Nothing to clear.", escapeMrkdwnCode(alias)), "Alias was not bound in this channel.")
 	case err != nil:
 		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", alias)
-		return "Failed to clear alias. Please try again."
+		return newActionCoreResult(false, "Failed to clear alias. Please try again.", "Alias could not be cleared.")
 	default:
 		// Admin-verb audit trail: counterpart to the setalias "alias bound" line.
 		slog.Info("alias cleared", "team_id", teamID, "channel_id", channelID, "alias", alias)
-		return fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", escapeMrkdwnCode(alias))
+		return newActionCoreResult(true, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", escapeMrkdwnCode(alias)), "Alias is no longer bound to this channel.")
 	}
 }

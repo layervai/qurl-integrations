@@ -37,8 +37,8 @@ const (
 	defaultAuditListLimit = 20
 )
 
-// AuditEntry is one confirmed mutation, recorded for the App Home review surface.
-// Every field is a plain string the caller derives from the executed pending action.
+// AuditEntry is one confirmed agent action, recorded for the App Home review surface.
+// Every field is a plain string the caller derives from the approved pending action.
 // Any rendering surface MUST treat the displayed fields (Target, Reason) as untrusted
 // echo (they are partly LLM-distilled / user-influenced) and escape or validate them
 // exactly as the confirm card does before display — never render them raw.
@@ -48,11 +48,14 @@ type AuditEntry struct {
 	Target  string `json:"target,omitempty"`  // the resource token/alias/url acted on
 	Channel string `json:"channel,omitempty"` // the channel the action ran in
 	Reason  string `json:"reason,omitempty"`  // the audit reason (LLM-distilled intent)
-	// Outcome is the formatted public card text. Captured in the record, but the App
-	// Home summary does NOT echo it: escaping its intentional backticks for safety renders
-	// it degraded, and it largely repeats Target. A clean per-result line is a follow-up.
+	// Outcome is the legacy formatted public card text. Captured for compatibility, but
+	// App Home renders Result instead so intentional card mrkdwn never degrades there.
 	Outcome string `json:"outcome,omitempty"`
-	UnixSec int64  `json:"ts"` // when it ran, for display (store-stamped)
+	// Result is the clean display result for App Home. ResultSuccess is a pointer so a
+	// false failure can be stored distinctly from older entries that lack a result.
+	Result        string `json:"result,omitempty"`
+	ResultSuccess *bool  `json:"result_success,omitempty"`
+	UnixSec       int64  `json:"ts"` // when it ran, for display (store-stamped)
 }
 
 func (s *AgentStore) auditTTL() time.Duration {
@@ -62,7 +65,7 @@ func (s *AgentStore) auditTTL() time.Duration {
 	return defaultAuditTTL
 }
 
-// PutAuditEntry records one confirmed mutation under partition (the SLACK TEAM id),
+// PutAuditEntry records one confirmed agent action under partition (the SLACK TEAM id),
 // keyed by the actor + the write time so a per-user query returns it newest-first.
 // The store stamps the write time onto the stored copy (so the displayed time and the
 // sort key share one clock) without mutating the caller's entry. Intended to be called

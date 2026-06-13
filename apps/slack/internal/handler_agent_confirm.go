@@ -606,6 +606,34 @@ func agentConfirmConnectorOpenErrorReply(err error) string {
 	}
 }
 
+// actionAuditResult is the clean, structured result App Home renders for an
+// executed action. display is plain text (no deliberate mrkdwn/code spans);
+// success tells the review surface whether the approved action actually landed.
+type actionAuditResult struct {
+	display string
+	success bool
+}
+
+// actionCoreResult is the richer result from a mutation core: the existing
+// formatted card copy plus the clean audit result derived from the branch that
+// produced it.
+type actionCoreResult struct {
+	cardText string
+	audit    actionAuditResult
+}
+
+func newActionCoreResult(success bool, cardText, auditDisplay string) actionCoreResult {
+	return actionCoreResult{cardText: cardText, audit: actionAuditResult{display: auditDisplay, success: success}}
+}
+
+func (r actionCoreResult) actionResult() actionResult {
+	return actionResult{cardText: r.cardText, attributed: true, audit: r.audit, auditSet: true}
+}
+
+func newAttributedActionResult(success bool, cardText, auditDisplay string) actionResult {
+	return newActionCoreResult(success, cardText, auditDisplay).actionResult()
+}
+
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
 // PUBLIC confirm card. ephemeralText, when non-empty, is delivered PRIVATELY to the
 // clicker (response_url ephemeral) — used for sensitive output that must not be
@@ -615,12 +643,15 @@ func agentConfirmConnectorOpenErrorReply(err error) string {
 type actionResult struct {
 	cardText      string
 	ephemeralText string
-	// attributed marks a card that reflects an ACTUALLY-EXECUTED action (a mutation
-	// core was invoked), so the click path appends the on-behalf attribution footer.
-	// Pre-execution rejections (invalid LLM-distilled input, unsupported kinds) leave
-	// it false: nothing was performed, so there's nothing to attribute — and their
-	// generic copy stays byte-exact for the no-echo security checks.
+	// attributed marks a card that reflects an approved action reaching execution
+	// (including a clean core failure), so the click path appends the on-behalf
+	// attribution footer and records it for review. Pre-execution rejections
+	// (invalid LLM-distilled input, unsupported kinds) leave it false: nothing was
+	// performed, so there's nothing to attribute — and their generic copy stays
+	// byte-exact for the no-echo security checks.
 	attributed bool
+	audit      actionAuditResult
+	auditSet   bool
 }
 
 // isDirectMessageChannel reports whether a Slack conversation ID is a 1:1 direct
@@ -692,19 +723,30 @@ func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger,
 	if res.ephemeralText != "" {
 		delivered = h.deliverConfirmPrivate(ctx, log, pa, payload, res.ephemeralText)
 	}
+	res = confirmResultForDelivery(res, delivered)
 	_ = h.replaceOriginalResponse(log, responseURL, composeConfirmCard(res, delivered, pa.Asker, payload.User.ID))
 
-	// Best-effort: record the EXECUTED mutation for the App Home review surface, keyed to
+	// Best-effort: record the confirmed action attempt for the App Home review surface, keyed to
 	// the approver who ran it. Done AFTER the card swap so the audit PutItem adds no latency
-	// to it. The recorded text is the action outcome (res.cardText) — the mint either
-	// happened or it didn't — independent of whether the private DELIVERY then succeeded.
-	// Only attributed results invoked a mutation core (a pre-execution rejection records
-	// nothing); a store failure never affects the already-delivered outcome. protect-connector
-	// never reaches here — it routes to the modal (confirmModalRouted) and its execution +
-	// audit are deferred to the modal-submit path (#701).
+	// to it. Only attributed results reached the execution path (a pre-execution rejection
+	// records nothing); a store failure never affects the already-delivered outcome.
+	// protect-connector never reaches here — it routes to the modal (confirmModalRouted)
+	// and its execution + audit are deferred to the modal-submit path (#701).
 	if res.attributed {
-		h.recordAgentAudit(ctx, log, payload, pa, res.cardText)
+		h.recordAgentAudit(ctx, log, payload, pa, res)
 	}
+}
+
+// confirmResultForDelivery adjusts a successful get when the private delivery leg
+// failed. The action minted a link, but the user did not receive it, so both the
+// public terminal card and App Home result must read as a failure.
+func confirmResultForDelivery(res actionResult, delivered bool) actionResult {
+	if !delivered && res.cardText == agentConfirmGetDeliveredReply {
+		res.cardText = agentConfirmGetDeliveryFailedReply
+		res.audit = actionAuditResult{display: "Access link was generated, but could not be delivered.", success: false}
+		res.auditSet = true
+	}
+	return res
 }
 
 // composeConfirmCard builds the public terminal card text for an executed action. A
@@ -757,20 +799,32 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			// goes PRIVATELY to the clicker; the public card stays a neutral failure with
 			// no token echo — and, crucially, does NOT claim "sent privately", the old
 			// unconditional success copy that masked every mint failure.
-			return actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: mapCoreError(log, err, commonGetMintFailedMessage), attributed: true}
+			return actionResult{
+				cardText:      agentConfirmGetFailedReply,
+				ephemeralText: mapCoreError(log, err, commonGetMintFailedMessage),
+				attributed:    true,
+				audit:         actionAuditResult{display: "Access link could not be generated.", success: false},
+				auditSet:      true,
+			}
 		}
 		// Success: the one-time link is a credential — deliver it PRIVATELY, in the SAME
 		// conversation and thread the user approved in (see deliverConfirmPrivate), and
 		// keep the public card neutral. The asker-only gate (processAgentConfirm) ensures
 		// the clicker IS the asker, so the private delivery reaches the right person.
-		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: text, attributed: true}
+		return actionResult{
+			cardText:      agentConfirmGetDeliveredReply,
+			ephemeralText: text,
+			attributed:    true,
+			audit:         actionAuditResult{display: "Access link was sent privately to the approver.", success: true},
+			auditSet:      true,
+		}
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {
-			return actionResult{cardText: mapCoreError(log, err, commonRevokeFailedMessage)}
+			return newAttributedActionResult(false, mapCoreError(log, err, commonRevokeFailedMessage), "Resource could not be resolved for revoke.")
 		}
 		// A revoke result ("revoked $x") is benign and useful as a public audit line.
-		return actionResult{cardText: h.revokeResource(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token), attributed: true}
+		return h.revokeResourceResult(ctx, log, payload.Team.ID, payload.User.ID, resourceID, pa.Token).actionResult()
 	case agent.ActionSetAlias:
 		// The confirm path has no parser gate (unlike the slash verb), so validate the
 		// LLM-distilled alias/target through the SAME grammar first — see
@@ -783,7 +837,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		// Binds alias → target in the CLICK's channel (channel-scoped, like the slash
 		// set-alias). Inputs are validated, so the benign result is safe on the card.
-		return actionResult{cardText: h.resolveAndBindTunnelSlugAlias(ctx, log, payload.Team.ID, payload.Channel.ID, alias, target), attributed: true}
+		return h.resolveAndBindTunnelSlugAliasResult(ctx, log, payload.Team.ID, payload.Channel.ID, alias, target).actionResult()
 	case agent.ActionUnsetAlias:
 		// Validate the alias like set-alias before echoing it onto the public card:
 		// unbindAliasResult escapes backticks, but non-printables (bidi/zero-width)
@@ -793,7 +847,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		if !ok {
 			return actionResult{cardText: agentConfirmInvalidAliasReply}
 		}
-		return actionResult{cardText: h.unbindAliasResult(ctx, payload.Team.ID, payload.Channel.ID, alias), attributed: true}
+		return h.unbindAliasCoreResult(ctx, payload.Team.ID, payload.Channel.ID, alias).actionResult()
 	case agent.ActionProtectURL:
 		// Validate the LLM-distilled URL + channel alias through the slash grammar
 		// (single source) and execute the CANONICAL args — see confirmValidProtectURL.
@@ -809,10 +863,10 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		// Creates (or finds) the URL resource by target URL, then binds it as $alias
 		// in the CLICK's channel. Benign public result.
-		return actionResult{cardText: h.upsertAndExposeURLResource(ctx, log, payload.Team.ID, payload.Channel.ID, &exposeURLCreateArgs{
+		return h.upsertAndExposeURLResourceResult(ctx, log, payload.Team.ID, payload.Channel.ID, &exposeURLCreateArgs{
 			TargetURL:    args.TargetURL,
 			ChannelAlias: args.ChannelAlias,
-		}), attributed: true}
+		}).actionResult()
 	case agent.ActionProtectConnector:
 		// Unreachable from the confirm flow: processAgentConfirm routes
 		// protect-connector to openAgentConnectorModal (the modal/OpenView path)
@@ -825,24 +879,31 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 	}
 }
 
-// recordAgentAudit persists an executed mutation to the App Home review log, keyed by
+// recordAgentAudit persists a confirmed action attempt to the App Home review log, keyed by
 // the APPROVER (payload.User.ID) — the actor whose click ran it — so it surfaces only
 // in that user's own App Home and never aggregates across viewers (the per-viewer
 // boundary that keeps the surface from leaking cross-channel topology). Best-effort: a
 // nil store (pre-enablement) or a write error is swallowed after logging, since the
-// mutation already happened and the audit log is never an authority. outcome is the
-// NEUTRAL public card text, never the ephemeral one-time credential.
-func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, outcome string) {
+// mutation already happened and the audit log is never an authority. res.cardText is
+// the legacy public-card outcome; res.audit is the clean result App Home renders.
+func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, res actionResult) {
 	if h.cfg.AgentStore == nil {
 		return
 	}
+	result, resultSuccess := "", (*bool)(nil)
+	if res.auditSet {
+		success := res.audit.success
+		result, resultSuccess = res.audit.display, &success
+	}
 	if err := h.cfg.AgentStore.PutAuditEntry(ctx, payload.Team.ID, &slackdata.AuditEntry{
-		Actor:   payload.User.ID,
-		Action:  string(pa.Action),
-		Target:  auditTargetFor(pa),
-		Channel: payload.Channel.ID,
-		Reason:  pa.Reason,
-		Outcome: outcome,
+		Actor:         payload.User.ID,
+		Action:        string(pa.Action),
+		Target:        auditTargetFor(pa),
+		Channel:       payload.Channel.ID,
+		Reason:        pa.Reason,
+		Outcome:       res.cardText,
+		Result:        result,
+		ResultSuccess: resultSuccess,
 	}); err != nil {
 		log.Warn("agent: record audit entry failed", "error", err)
 	}

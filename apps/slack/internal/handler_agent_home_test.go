@@ -12,6 +12,8 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
+const injectedBacktickAlias = "ev`il"
+
 type recordingHomePublish struct {
 	calls []recordedHomePublish
 }
@@ -20,6 +22,8 @@ type recordedHomePublish struct {
 	userID string
 	blocks []any
 }
+
+func auditSuccess(v bool) *bool { return &v }
 
 func (r *recordingHomePublish) fn(_ context.Context, _, _, userID string, blocks []any) error {
 	r.calls = append(r.calls, recordedHomePublish{userID: userID, blocks: blocks})
@@ -66,12 +70,13 @@ func TestBuildAgentHomeView_EmptyState(t *testing.T) {
 
 func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 	entries := []slackdata.AuditEntry{
-		{Actor: "U1", Action: string(agent.ActionRevoke), Target: "billing", Channel: "C1", Reason: "stale resource cleanup", Outcome: "revoked the qURL and its links", UnixSec: 1_700_000_100},
+		{Actor: "U1", Action: string(agent.ActionRevoke), Target: "billing", Channel: "C1", Reason: "stale resource cleanup", Outcome: "Revoked `$billing` and all its qURLs.", Result: "Resource and all of its qURLs were revoked.", ResultSuccess: auditSuccess(true), UnixSec: 1_700_000_100},
+		{Actor: "U1", Action: string(agent.ActionProtectURL), Target: "https://docs.example.com", Channel: "C1", Result: "URL resource is ready, but the alias is already bound in this channel.", ResultSuccess: auditSuccess(false), UnixSec: 1_700_000_050},
 		{Actor: "U1", Action: string(agent.ActionGet), Target: "staging", Channel: "C1", UnixSec: 1_700_000_000},
 	}
 	blocks := buildAgentHomeView(entries)
-	if len(blocks) != 5 { // 3 chrome + 2 entries
-		t.Fatalf("expected 5 blocks, got %d", len(blocks))
+	if len(blocks) != 6 { // 3 chrome + 3 entries
+		t.Fatalf("expected 6 blocks, got %d", len(blocks))
 	}
 	// Neutral action label (not a success claim) + target.
 	if !blocksContain(t, blocks, "Revoke") || !blocksContain(t, blocks, "billing") {
@@ -80,12 +85,21 @@ func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 	if !blocksContain(t, blocks, "Get access") || !blocksContain(t, blocks, "staging") {
 		t.Fatal("the get entry must render its neutral label + target")
 	}
+	if !blocksContain(t, blocks, "Succeeded:") || !blocksContain(t, blocks, "Resource and all of its qURLs were revoked.") {
+		t.Fatal("a successful structured result must render cleanly")
+	}
+	if !blocksContain(t, blocks, "Failed:") || !blocksContain(t, blocks, "URL resource is ready, but the alias is already bound") {
+		t.Fatal("a failed structured result must render as a failure")
+	}
+	if blocksContain(t, blocks, "ˊ") || blocksContain(t, blocks, "∗") {
+		t.Fatal("clean structured results must not render degraded substitute glyphs")
+	}
 	// The audit reason renders (escaped); the formatted Outcome does NOT — its escaped
-	// backticks would read degraded, and it's captured in the record only (see #704).
+	// backticks would read degraded, and it is captured in the record only.
 	if !blocksContain(t, blocks, "stale resource cleanup") {
 		t.Fatal("the entry must render its reason")
 	}
-	if blocksContain(t, blocks, "revoked the qURL and its links") {
+	if blocksContain(t, blocks, "Revoked `$billing`") || blocksContain(t, blocks, "Revoked ˊ$billingˊ") {
 		t.Fatal("the formatted Outcome must not be echoed in the summary view")
 	}
 	// Channel renders as a Slack mention, not the raw id text.
@@ -98,15 +112,17 @@ func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 // LLM-distilled must render INERT — escaped exactly as the confirm card escapes it.
 func TestAgentHomeEntryText_EscapesInjectedEcho(t *testing.T) {
 	e := slackdata.AuditEntry{
-		Actor:   "U1",
-		Action:  string(agent.ActionSetAlias),
-		Target:  "ev`il",  // a raw backtick would break out of the code span
-		Reason:  "*boom*", // raw asterisks would bold the surrounding text
-		Channel: "C1",
-		UnixSec: 1_700_000_000,
+		Actor:         "U1",
+		Action:        string(agent.ActionSetAlias),
+		Target:        injectedBacktickAlias, // a raw backtick would break out of the code span
+		Reason:        "*boom*",              // raw asterisks would bold the surrounding text
+		Result:        "*done* <now>",        // stored result still escapes before mrkdwn display
+		ResultSuccess: auditSuccess(true),
+		Channel:       "C1",
+		UnixSec:       1_700_000_000,
 	}
 	got := agentHomeEntryText(&e)
-	if strings.Contains(got, "ev`il") {
+	if strings.Contains(got, injectedBacktickAlias) {
 		t.Fatalf("a backtick in the target must be escaped, got %q", got)
 	}
 	if !strings.Contains(got, "evˊil") {
@@ -117,6 +133,12 @@ func TestAgentHomeEntryText_EscapesInjectedEcho(t *testing.T) {
 	}
 	if !strings.Contains(got, "∗boom∗") {
 		t.Fatalf("the reason asterisks must be replaced by the text escaper, got %q", got)
+	}
+	if strings.Contains(got, "*done* <now>") {
+		t.Fatalf("result text must be escaped, got %q", got)
+	}
+	if !strings.Contains(got, "∗done∗ &lt;now&gt;") {
+		t.Fatalf("the result must be escaped by the text escaper, got %q", got)
 	}
 }
 
@@ -166,7 +188,7 @@ func TestRecordAgentAudit_PersistsForApprover(t *testing.T) {
 	var payload interactionPayload
 	payload.Team.ID, payload.Channel.ID, payload.User.ID = "T1", "C1", "Uadmin"
 	pa := &pendingAction{Action: agent.ActionRevoke, Token: "metrics", Reason: "cleanup"}
-	h.recordAgentAudit(context.Background(), slog.Default(), &payload, pa, "revoked $metrics")
+	h.recordAgentAudit(context.Background(), slog.Default(), &payload, pa, newAttributedActionResult(true, "Revoked `$metrics`.", "Resource and all of its qURLs were revoked."))
 
 	got, err := store.ListAuditEntries(context.Background(), "T1", "Uadmin", 10)
 	if err != nil {
@@ -175,8 +197,11 @@ func TestRecordAgentAudit_PersistsForApprover(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("the executed action must be recorded for the approver, got %d", len(got))
 	}
-	if got[0].Action != string(agent.ActionRevoke) || got[0].Target != "metrics" || got[0].Outcome != "revoked $metrics" {
+	if got[0].Action != string(agent.ActionRevoke) || got[0].Target != "metrics" || got[0].Outcome != "Revoked `$metrics`." {
 		t.Fatalf("recorded entry mismatch: %+v", got[0])
+	}
+	if got[0].Result != "Resource and all of its qURLs were revoked." || got[0].ResultSuccess == nil || !*got[0].ResultSuccess {
+		t.Fatalf("recorded result mismatch: %+v", got[0])
 	}
 }
 
@@ -186,5 +211,5 @@ func TestRecordAgentAudit_NilStoreSafe(t *testing.T) {
 	var payload interactionPayload
 	payload.Team.ID, payload.User.ID = "T1", "U1"
 	// Must not panic with a nil store.
-	h.recordAgentAudit(context.Background(), slog.Default(), &payload, &pendingAction{Action: agent.ActionGet, Token: "x"}, "ok")
+	h.recordAgentAudit(context.Background(), slog.Default(), &payload, &pendingAction{Action: agent.ActionGet, Token: "x"}, newAttributedActionResult(true, "ok", "Access link was sent privately to the approver."))
 }

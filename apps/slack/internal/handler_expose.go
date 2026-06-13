@@ -494,22 +494,25 @@ func (h *Handler) createOrFindAndExposeURLResourceFromModal(ctx context.Context,
 	return h.createOrFindAndExposeURLResource(ctx, log, teamID, channelID, args, exposeURLModalProtectionCopy)
 }
 
-// upsertAndExposeURLResource is the conversation-mode URL path: create/find the
-// URL resource by target URL only, then bind the Slack channel alias separately.
-// Omitting CreateResourceInput.Alias keeps existing-resource reuse clean even
-// when the dashboard resource has no alias or a different alias. The no-duplicate
+// upsertAndExposeURLResourceResult is the conversation-mode URL path: create/find
+// the URL resource by target URL only, then bind the Slack channel alias separately.
+// Omitting CreateResourceInput.Alias keeps existing-resource reuse clean even when
+// the dashboard resource has no alias or a different alias. The no-duplicate
 // guarantee is qurl-service's exact target-URL idempotency; Slack does not add a
-// separate idempotency key or normalize case/trailing-slash variants on this
-// write.
-func (h *Handler) upsertAndExposeURLResource(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs) string {
-	return h.createOrFindAndExposeURLResource(ctx, log, teamID, channelID, args, exposeURLAgentProtectionCopy)
+// separate idempotency key or normalize case/trailing-slash variants on this write.
+func (h *Handler) upsertAndExposeURLResourceResult(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs) actionCoreResult {
+	return h.createOrFindAndExposeURLResourceResult(ctx, log, teamID, channelID, args, exposeURLAgentProtectionCopy)
 }
 
 func (h *Handler) createOrFindAndExposeURLResource(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs, copyText exposeURLProtectionCopy) string {
+	return h.createOrFindAndExposeURLResourceResult(ctx, log, teamID, channelID, args, copyText).cardText
+}
+
+func (h *Handler) createOrFindAndExposeURLResourceResult(ctx context.Context, log *slog.Logger, teamID, channelID string, args *exposeURLCreateArgs, copyText exposeURLProtectionCopy) actionCoreResult {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("protect url resource: API key lookup failed", "op", copyText.logOp, "error", err, "team_id", teamID)
-		return exposeURLProtectFailedMsg
+		return newActionCoreResult(false, exposeURLProtectFailedMsg, "URL resource could not be protected.")
 	}
 	// Do not write the Slack channel alias into owner-level resource fields:
 	// Slack aliases are channel scoped and can differ across channels.
@@ -519,25 +522,25 @@ func (h *Handler) createOrFindAndExposeURLResource(ctx context.Context, log *slo
 	})
 	if err != nil {
 		log.Warn("protect url resource: resource create/find failed", "op", copyText.logOp, "error", err, "team_id", teamID)
-		return sanitizeAPIError(err, exposeURLProtectFailedPrefix)
+		return newActionCoreResult(false, sanitizeAPIError(err, exposeURLProtectFailedPrefix), "URL resource could not be protected.")
 	}
 	if resource == nil || resource.ResourceID == "" {
 		log.Error("protect url resource: qurl-service returned no resource_id", "op", copyText.logOp, "team_id", teamID)
-		return exposeURLProtectFailedMsg
+		return newActionCoreResult(false, exposeURLProtectFailedMsg, "URL resource could not be protected.")
 	}
 
 	err = h.aliasStore.BindChannelAlias(ctx, teamID, channelID, args.ChannelAlias, resource.ResourceID)
 	if errors.Is(err, slackdata.ErrAliasAlreadyBound) {
-		return fmt.Sprintf("URL resource is ready, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or %s.", args.ChannelAlias, args.ChannelAlias, copyText.aliasRetryAction)
+		return newActionCoreResult(false, fmt.Sprintf("URL resource is ready, but alias `$%s` is already bound in this channel. Run `/qurl-admin unset-alias $%s` first, or %s.", args.ChannelAlias, args.ChannelAlias, copyText.aliasRetryAction), "URL resource is ready, but the alias is already bound in this channel.")
 	}
 	if err != nil {
 		// The qURL resource intentionally remains after a bind failure. A retry is
 		// safe because qurl-service's URL create path is idempotent by target URL.
 		log.Error("protect url resource: alias bind failed", "op", copyText.logOp, "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.ChannelAlias, "resource_id", resource.ResourceID)
-		return "URL resource is ready, but Slack could not protect it in this channel. " + copyText.retrySentence + "."
+		return newActionCoreResult(false, "URL resource is ready, but Slack could not protect it in this channel. "+copyText.retrySentence+".", "URL resource is ready, but Slack could not protect it in this channel.")
 	}
 	log.Info("URL resource created/found and protected in Slack channel", "op", copyText.logOp, "team_id", teamID, "channel_id", channelID, "channel_alias", args.ChannelAlias, "resource_id", resource.ResourceID)
-	return fmt.Sprintf("URL resource is ready as `$%s` in this channel. Run `/qurl get $%s` to create a qURL.", args.ChannelAlias, args.ChannelAlias)
+	return newActionCoreResult(true, fmt.Sprintf("URL resource is ready as `$%s` in this channel. Run `/qurl get $%s` to create a qURL.", args.ChannelAlias, args.ChannelAlias), "URL resource is ready in this channel.")
 }
 
 // bindURLResourceToChannel binds channelAlias → resourceID in this channel
