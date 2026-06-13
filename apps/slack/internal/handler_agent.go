@@ -22,7 +22,10 @@ const (
 	slackEventTypeAssistantThreadStarted        = "assistant_thread_started"
 	slackEventTypeAssistantThreadContextChanged = "assistant_thread_context_changed"
 	slackEventTypeAppHomeOpened                 = "app_home_opened"
+	slackChannelTypeChannel                     = "channel"
+	slackChannelTypeGroup                       = "group"
 	slackChannelTypeIM                          = "im"
+	slackChannelTypeMPIM                        = "mpim"
 	slackMessageSubtypeThreadBroadcast          = "thread_broadcast"
 )
 

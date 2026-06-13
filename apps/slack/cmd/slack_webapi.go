@@ -775,14 +775,25 @@ func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpris
 	return p.stop.post(ctx, teamID, enterpriseID, body)
 }
 
-// newSlackResolveChannelNameFuncWithTokenLookup builds the
-// [internal.ResolveChannelNameFunc] seam: a conversations.info read on the
-// per-workspace bot token returning the channel's name. Unlike the POST seams
-// (which discard the body), this parses the response, so it doesn't use the shared
-// poster; it replicates the same token lookup + Enterprise Grid org-token fallback.
-// Requires the channels:read / groups:read scopes — without them Slack answers
-// missing_scope and the agent falls back to the channel id.
-func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveChannelNameFunc {
+// slackResolveChannelNameFromConversationInfo projects the conversations.info seam
+// to the legacy channel-name seam, preserving the previous empty-name-on-error shape.
+func slackResolveChannelNameFromConversationInfo(resolveInfo internal.ResolveConversationInfoFunc) internal.ResolveChannelNameFunc {
+	return func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error) {
+		info, err := resolveInfo(ctx, teamID, enterpriseID, channelID)
+		if err != nil {
+			return "", err
+		}
+		return info.Name, nil
+	}
+}
+
+// newSlackResolveConversationInfoFuncWithTokenLookup builds the
+// [internal.ResolveConversationInfoFunc] seam: a conversations.info read on the
+// per-workspace bot token returning the small metadata slice the handler needs (name
+// and is_mpim). Unlike the POST seams (which discard the body), this parses the
+// response, so it doesn't use the shared poster; it replicates the same token lookup +
+// Enterprise Grid org-token fallback.
+func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveConversationInfoFunc {
 	if httpClient == nil {
 		httpClient = defaultSlackPostMessageClient()
 	}
@@ -793,13 +804,13 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 	// get resolves one owner's token and reads conversations.info. A token-lookup
 	// failure is wrapped with %w so the caller's errors.Is(ErrSlackBotTokenNotConfigured)
 	// Grid fallback fires, mirroring slackWebAPIPoster.post.
-	get := func(ctx context.Context, ownerID, channelID string) (string, error) {
+	get := func(ctx context.Context, ownerID, channelID string) (internal.ConversationInfo, error) {
 		token, err := lookup(ctx, ownerID)
 		if err != nil {
-			return "", fmt.Errorf("conversations.info token lookup: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info token lookup: %w", err)
 		}
 		if token = strings.TrimSpace(token); token == "" {
-			return "", errors.New("conversations.info token lookup: empty token")
+			return internal.ConversationInfo{}, errors.New("conversations.info token lookup: empty token")
 		}
 		// The channel id is a Slack object id (C/G/D + base32) from the
 		// signature-verified Events payload; its charset can't contain a query-reserved
@@ -807,49 +818,50 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 		// caller passes that trusted id — a future untrusted source would need escaping.)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, conversationsInfoURL+"?channel="+channelID, http.NoBody)
 		if err != nil {
-			return "", fmt.Errorf("conversations.info request build: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info request build: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("User-Agent", userAgent)
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			return "", fmt.Errorf("conversations.info request: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info request: %w", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
 		if err != nil {
-			return "", fmt.Errorf("conversations.info response read: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info response read: %w", err)
 		}
 		if len(raw) > slackWebAPIResponseBodyLimit {
 			_, _ = io.Copy(io.Discard, resp.Body)
-			return "", fmt.Errorf("conversations.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
 		}
 		var out struct {
 			OK      bool   `json:"ok"`
 			Error   string `json:"error"`
 			Channel struct {
-				Name string `json:"name"`
+				Name   string `json:"name"`
+				IsMPIM bool   `json:"is_mpim"`
 			} `json:"channel"`
 		}
 		if err := json.Unmarshal(raw, &out); err != nil {
-			return "", fmt.Errorf("conversations.info decode: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info decode: %w", err)
 		}
 		if !out.OK {
 			slackErr := out.Error
 			if slackErr == "" {
 				slackErr = fmt.Sprintf("status %d", resp.StatusCode)
 			}
-			return "", fmt.Errorf("conversations.info: %s", slackErr)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info: %s", slackErr)
 		}
-		return out.Channel.Name, nil
+		return internal.ConversationInfo{Name: out.Channel.Name, IsMPIM: out.Channel.IsMPIM}, nil
 	}
-	return func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error) {
-		name, err := get(ctx, teamID, channelID)
+	return func(ctx context.Context, teamID, enterpriseID, channelID string) (internal.ConversationInfo, error) {
+		info, err := get(ctx, teamID, channelID)
 		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return name, err
+			return info, err
 		}
 		if enterpriseID == "" || enterpriseID == teamID {
-			return name, err
+			return info, err
 		}
 		return get(ctx, enterpriseID, channelID)
 	}

@@ -41,6 +41,11 @@ const (
 	// copy is self-contained — it does not promise a detail message that a rare mint-fail +
 	// delivery-fail double fault may never have delivered.
 	agentConfirmGetFailedReply = "Couldn't generate the access link — check the request and ask me again."
+	// agentConfirmGetUnsupportedSurfaceReply is a pre-mint boundary for confirmed
+	// group DMs. A normal post would leak the link to other members, and until mpim
+	// ephemerals are proven visible we refuse instead of minting a credential that
+	// may disappear.
+	agentConfirmGetUnsupportedSurfaceReply = "I can't safely deliver access links in this conversation yet. Ask me in a channel, private channel, or 1:1 DM."
 	// agentConfirmGetDeliveryFailedReply covers a SUCCESSFUL mint whose private delivery
 	// failed: the card must not claim success when the user received nothing.
 	agentConfirmGetDeliveryFailedReply = "Generated the access link, but couldn't deliver it here. Ask me again."
@@ -73,18 +78,19 @@ const (
 // and the Approve/Reject click — only what the click needs to re-authorize and
 // execute. There is deliberately NO admin-gated field: the gate is derived at
 // click time from the stored Action via adminGatedFor, never read off the wire,
-// so tampering with the button can't bypass the admin re-check. ChannelID is the
-// proposing channel (a cheap click-channel guard); the load-bearing channel scope
-// is the token re-resolution at execute.
+// so tampering with the button can't bypass the admin re-check. ChannelID and
+// ChannelType snapshot the proposing surface (cheap click-channel and mpim-boundary
+// guards); the load-bearing channel scope is the token re-resolution at execute.
 type pendingAction struct {
-	Action    agent.ActionKind `json:"action"`
-	Token     string           `json:"token,omitempty"`  // slug/alias (sigil stripped) for get/revoke
-	Reason    string           `json:"reason,omitempty"` // audit reason, forwarded to the mint on get
-	Alias     string           `json:"alias,omitempty"`  // alias name for set/unset-alias; channel alias for protect-url
-	Target    string           `json:"target,omitempty"` // target slug for set-alias
-	URL       string           `json:"url,omitempty"`    // target URL for protect-url
-	Asker     string           `json:"asker,omitempty"`  // Slack user who requested the turn; get is asker-only (see processAgentConfirm)
-	ChannelID string           `json:"channel_id"`
+	Action      agent.ActionKind `json:"action"`
+	Token       string           `json:"token,omitempty"`        // slug/alias (sigil stripped) for get/revoke
+	Reason      string           `json:"reason,omitempty"`       // audit reason, forwarded to the mint on get
+	Alias       string           `json:"alias,omitempty"`        // alias name for set/unset-alias; channel alias for protect-url
+	Target      string           `json:"target,omitempty"`       // target slug for set-alias
+	URL         string           `json:"url,omitempty"`          // target URL for protect-url
+	Asker       string           `json:"asker,omitempty"`        // Slack user who requested the turn; get is asker-only (see processAgentConfirm)
+	ChannelID   string           `json:"channel_id"`             // Slack conversation id that received the card
+	ChannelType string           `json:"channel_type,omitempty"` // Slack Events API channel_type at proposal time
 	// ThreadTS is the thread the confirm card was posted into (empty for a top-level
 	// card). The get's private delivery posts the link back into THIS thread so it
 	// lands where the user is looking — the assistant pane is a threaded view, so a
@@ -267,6 +273,12 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, agentErrorReply)
 		return
 	}
+	if prop.Action == agent.ActionGet && env.Event.ChannelType == slackChannelTypeMPIM {
+		// No pending card: Approve could only refuse this snapshotted mpim get.
+		log.Info("agent confirm: refused mpim get proposal before posting card")
+		h.postAgentReply(log, env, threadTS, agentConfirmGetUnsupportedSurfaceReply)
+		return
+	}
 	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
 	// the card fallback below and agentReplyText).
 	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
@@ -278,15 +290,16 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		return
 	}
 	blob, err := json.Marshal(pendingAction{
-		Action:    prop.Action,
-		Token:     prop.Token,
-		Reason:    prop.Reason,
-		Alias:     prop.Alias,
-		Target:    prop.Target,
-		URL:       prop.URL,
-		Asker:     env.Event.User, // the user who requested this turn — get is asker-only
-		ChannelID: env.Event.Channel,
-		ThreadTS:  threadTS, // deliver the get's link back into the card's own thread
+		Action:      prop.Action,
+		Token:       prop.Token,
+		Reason:      prop.Reason,
+		Alias:       prop.Alias,
+		Target:      prop.Target,
+		URL:         prop.URL,
+		Asker:       env.Event.User, // the user who requested this turn — get is asker-only
+		ChannelID:   env.Event.Channel,
+		ChannelType: env.Event.ChannelType,
+		ThreadTS:    threadTS, // deliver the get's link back into the card's own thread
 	})
 	if err != nil {
 		log.Error("agent confirm: marshal pending action failed", "error", err)
@@ -643,9 +656,9 @@ func newAttributedPrivateActionResult(success bool, cardText, ephemeralText, aud
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
 // PUBLIC confirm card. ephemeralText, when non-empty, is delivered PRIVATELY to the
 // clicker (response_url ephemeral) — used for sensitive output that must not be
-// broadcast to the channel (a get's one-time-use link). Routing is by action KIND,
-// not outcome: the whole get result (link OR error) goes ephemeral, so nothing
-// get-specific ever lands on the public card.
+// broadcast to the channel (a get's one-time-use link). Get successes and mint
+// failures keep their detail private; pre-mint safety refusals can use get-specific
+// public copy because they contain no credential, token, or executed-action attribution.
 type actionResult struct {
 	cardText      string
 	ephemeralText string
@@ -660,15 +673,85 @@ type actionResult struct {
 }
 
 // isDirectMessageChannel reports whether a Slack conversation ID is a 1:1 direct
-// message. Slack prefixes conversation IDs by type: D = 1:1 IM, C = channel, G =
-// private channel / group DM. A 1:1 DM is the only surface where a plain message is
-// inherently private (just the user and the app) AND where Slack won't render an
+// message. Slack prefixes conversation IDs by type: D = 1:1 IM, C = public channel,
+// G = private channel / group DM. A 1:1 DM is the only surface where a plain message
+// is inherently private (just the user and the app) AND where Slack won't render an
 // ephemeral — so it's the one place the confirm flow delivers the sensitive get output
 // as a normal message instead of an ephemeral. The events path detects an IM by the
 // typed ChannelType (slackChannelTypeIM), but a block_actions payload carries only
 // channel.id, so the interaction layer keys off the ID prefix instead.
 func isDirectMessageChannel(channelID string) bool {
 	return strings.HasPrefix(channelID, "D")
+}
+
+// isGPrefixedConversation reports whether a snapshot-less block_actions channel id is
+// Slack's shared G-prefix family. Current cards snapshot Slack's authoritative
+// channel_type at proposal time, so this prefix check is only a legacy/fallback
+// prefilter before paying for conversations.info.
+func isGPrefixedConversation(channelID string) bool {
+	return strings.HasPrefix(channelID, "G")
+}
+
+// isKnownNonMPIMChannelType reports Events API surfaces where a get can skip a
+// conversations.info mpim check. See deliverConfirmPrivate for the per-surface
+// delivery semantics that keep each returned type single-user safe.
+// TODO(upstream-contract): relies on Slack Events API channel_type keeping "group"
+// (private channel) distinct from "mpim" (multi-person DM).
+func isKnownNonMPIMChannelType(channelType string) bool {
+	switch channelType {
+	case slackChannelTypeChannel, slackChannelTypeGroup, slackChannelTypeIM:
+		return true
+	default:
+		return false
+	}
+}
+
+// getDeliverySurfaceUnsupported returns true when a get confirm should stop before
+// minting because the conversation is a confirmed mpim, whose private-delivery
+// visibility is not yet proven.
+// Current agent cards snapshot the Events API channel_type, so a proposal from an mpim
+// refuses without a Slack API lookup and a proposal from any other known surface
+// proceeds normally. Snapshot-less pending actions fall back to conversations.info for
+// G-prefixed ids (private channel vs mpim); missing metadata preserves the existing
+// ephemeral path rather than breaking private-channel approvals in installs without
+// mpim:read.
+func (h *Handler) getDeliverySurfaceUnsupported(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload) bool {
+	if pa.ChannelType == slackChannelTypeMPIM {
+		// Fresh cards should not reach this branch because postAgentConfirm refuses
+		// mpim gets before storing a pending action; keep it as a backstop for future
+		// writers and directly seeded/snapshot-carrying actions.
+		log.Info("agent confirm: refused get in snapshotted mpim before minting")
+		return true
+	}
+	if isKnownNonMPIMChannelType(pa.ChannelType) {
+		return false
+	}
+	if pa.ChannelType != "" {
+		log.Warn("agent confirm: unknown snapshotted channel_type for get surface; consulting fallback surface rules", "channel_type", pa.ChannelType)
+	}
+	if !isGPrefixedConversation(pa.ChannelID) {
+		// Slack's current private-channel/mpim ambiguity lives in the G-prefix
+		// family; unknown non-G surfaces proceed after the warning above.
+		return false
+	}
+	if h.cfg.ResolveConversationInfo == nil {
+		log.Warn("agent confirm: cannot classify G-prefixed get surface; proceeding with ephemeral delivery")
+		return false
+	}
+	// Keep confirm classification uncached: it is a one-time safety decision for a
+	// pending click, not a per-turn readability lookup.
+	rctx, cancel := context.WithTimeout(ctx, conversationsInfoResolveTimeout)
+	defer cancel()
+	info, err := h.cfg.ResolveConversationInfo(rctx, payload.Team.ID, payload.Enterprise.ID, pa.ChannelID)
+	if err != nil {
+		log.Warn("agent confirm: conversations.info failed for G-prefixed get surface; mpim boundary degraded; proceeding with ephemeral delivery", "error", err)
+		return false
+	}
+	if info.IsMPIM {
+		log.Info("agent confirm: refused get in resolved mpim before minting")
+		return true
+	}
+	return false
 }
 
 // deliverConfirmPrivate delivers a get's sensitive output (the one-time link on success,
@@ -682,12 +765,12 @@ func isDirectMessageChannel(channelID string) bool {
 //     top-level post would land out of sight. Intentional tradeoff: unlike an ephemeral
 //     this persists in that user's DM history; acceptable for a one-time-use credential
 //     scoped to the same user (it burns on first redemption regardless).
-//   - channel / group DM: a NORMAL post would leak the link to other members, so it goes
-//     out as a STANDALONE ephemeral scoped to the clicker via chat.postEphemeral (NOT the
-//     click's response_url, which the card-replace overwrites). Ephemerals render in
-//     multi-party conversations; the 1:1 IM above is the degenerate case where they don't.
-//     A group DM where the ephemeral somehow didn't render would hide the link there, not
-//     leak it — a known, rarely-reached boundary tracked in #725.
+//   - channel / private channel / unclassified group DM: a NORMAL post would leak the
+//     link to other members, so it goes out as a STANDALONE ephemeral scoped to the
+//     clicker via chat.postEphemeral (NOT the click's response_url, which the
+//     card-replace overwrites). Confirmed group DMs are refused before minting;
+//     unclassified group DMs fall back here and may hide the link, but do not post it
+//     to shared history.
 func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, text string) bool {
 	if isDirectMessageChannel(payload.Channel.ID) {
 		if h.cfg.PostMessage == nil {
@@ -700,8 +783,9 @@ func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, p
 		}
 		return true
 	}
-	// channel / group DM: a standalone ephemeral via chat.postEphemeral (decoupled from the
-	// click's response_url, so the card-replace can't overwrite it), threaded to the card.
+	// channel / private channel / unclassified group DM: a standalone ephemeral via
+	// chat.postEphemeral (decoupled from the click's response_url, so the
+	// card-replace can't overwrite it), threaded to the card.
 	if h.cfg.PostEphemeral == nil {
 		log.Warn("agent confirm: PostEphemeral seam is nil — cannot deliver the get result in a channel")
 		return false
@@ -772,6 +856,9 @@ func composeConfirmCard(res actionResult, asker, approver string) string {
 func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload) actionResult {
 	switch pa.Action {
 	case agent.ActionGet:
+		if h.getDeliverySurfaceUnsupported(ctx, log, pa, payload) {
+			return actionResult{cardText: agentConfirmGetUnsupportedSurfaceReply}
+		}
 		flags := map[string]string{}
 		if pa.Reason != "" {
 			// Carry the agent's distilled intent into the mint's audit log
