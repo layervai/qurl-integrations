@@ -486,6 +486,74 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	})
 }
 
+func TestComposeConfirmCard(t *testing.T) {
+	const (
+		asker    = "Uasker"
+		approver = "Uapprover"
+		link     = ":link: qURL ready: https://qurl.link/abc"
+	)
+	cases := []struct {
+		name      string
+		res       actionResult
+		delivered bool
+		wantCard  string // the card must contain this
+		notText   string // the card must NOT contain this (no leak)
+	}{
+		{
+			// The central guarantee: mint succeeded (DeliveredReply + link) but the private
+			// delivery failed → the card must stop claiming success and never echo the link.
+			name:      "successful get whose delivery failed downgrades to delivery-failed",
+			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			delivered: false,
+			wantCard:  agentConfirmGetDeliveryFailedReply,
+			notText:   link,
+		},
+		{
+			name:      "successful get delivered keeps the success card and never echoes the link",
+			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			delivered: true,
+			wantCard:  agentConfirmGetDeliveredReply,
+			notText:   link,
+		},
+		{
+			name:      "failed get keeps the failure card even when its detail was not delivered",
+			res:       actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: ":warning: staging", attributed: true},
+			delivered: false,
+			wantCard:  agentConfirmGetFailedReply,
+			notText:   "staging",
+		},
+		{
+			name:      "non-get executed action is untouched by the delivery flag",
+			res:       actionResult{cardText: "revoked $staging", attributed: true},
+			delivered: true,
+			wantCard:  "revoked $staging",
+		},
+		{
+			name:      "pre-execution rejection stays byte-exact (unattributed)",
+			res:       actionResult{cardText: agentConfirmInvalidAliasReply},
+			delivered: true,
+			wantCard:  agentConfirmInvalidAliasReply,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := composeConfirmCard(c.res, c.delivered, asker, approver)
+			if !strings.Contains(got, c.wantCard) {
+				t.Fatalf("card = %q, want to contain %q", got, c.wantCard)
+			}
+			if c.notText != "" && strings.Contains(got, c.notText) {
+				t.Fatalf("card leaked %q: %q", c.notText, got)
+			}
+			if c.res.attributed && !strings.Contains(got, asker) {
+				t.Fatalf("an executed (attributed) card must carry the attribution footer, got %q", got)
+			}
+			if !c.res.attributed && got != c.wantCard {
+				t.Fatalf("an unattributed card must stay byte-exact, got %q want %q", got, c.wantCard)
+			}
+		})
+	}
+}
+
 func TestPostAgentConfirm_SnapshotsAsker(t *testing.T) {
 	// The pending snapshot must carry the asker (env.Event.User) so the click can
 	// enforce asker-only for a get.
