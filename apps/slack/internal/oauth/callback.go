@@ -260,7 +260,8 @@ func Callback(cfg Config) http.HandlerFunc {
 		if err != nil {
 			slog.Error("oauth/callback Auth0 token exchange failed", "error", err)
 			renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-				"Slack finished its handoff, but qURL could not complete authorization. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+				"Slack finished its handoff, but qURL could not complete authorization.",
+				"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 			return
 		}
 
@@ -313,7 +314,8 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 	if err != nil || normalized != verified.Email {
 		slog.Warn("oauth/callback email mismatch for setup flow")
 		renderOAuthErrorPage(w, http.StatusBadRequest, "qURL account mismatch",
-			"The signed-in qURL account did not match the email used to start setup. Return to Slack and run /qurl setup <email> again with the same qURL account.")
+			"The signed-in qURL account did not match the email used to start setup.",
+			"Return to Slack and run /qurl setup <email> again with the same qURL account.")
 		return false
 	}
 	return true
@@ -328,7 +330,8 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		renderOAuthErrorPage(w, http.StatusMethodNotAllowed, "Use the Slack setup link",
-			"This setup callback only works from the browser redirect opened by /qurl setup <email>. Return to Slack and start setup again.")
+			"This setup callback only works from the browser redirect opened by /qurl setup <email>.",
+			"Return to Slack and start setup again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -347,14 +350,16 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		// closes the same-browser-replay window on Auth0 reject too.
 		clearStateCookie(w)
 		renderOAuthErrorPage(w, http.StatusBadRequest, "Authorization was canceled",
-			"qURL setup was not authorized. Return to Slack and run /qurl setup <email> again to retry.")
+			"qURL setup was not authorized.",
+			"Return to Slack and run /qurl setup <email> again to retry.")
 		return VerifiedState{}, "", false
 	}
 	code = q.Get("code")
 	stateParam := q.Get("state")
 	if code == "" || stateParam == "" {
 		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is incomplete",
-			"The authorization link is missing required setup details. Return to Slack and run /qurl setup <email> again.")
+			"The authorization link is missing required setup details.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -363,7 +368,8 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		slog.Warn("oauth/callback missing state cookie")
 		clearStateCookie(w)
 		renderOAuthErrorPage(w, http.StatusBadRequest, "Continue setup in the same browser",
-			"This setup link must be completed in the same browser where it was opened from Slack. Return to Slack and run /qurl setup <email> again.")
+			"This setup link must be completed in the same browser where it was opened from Slack.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 	// Both values come from the same MintState call so canonical
@@ -376,7 +382,8 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		slog.Warn("oauth/callback cookie/state mismatch")
 		clearStateCookie(w)
 		renderOAuthErrorPage(w, http.StatusBadRequest, "Continue setup in the same browser",
-			"This setup link must be completed in the same browser where it was opened from Slack. Return to Slack and run /qurl setup <email> again.")
+			"This setup link must be completed in the same browser where it was opened from Slack.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -387,7 +394,8 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		clearStateCookie(w)
 		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link expired",
-			"This setup link is invalid or expired. Return to Slack and run /qurl setup <email> again.")
+			"This setup link is invalid or expired.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -478,7 +486,8 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 		slog.Error("oauth/callback bind skipped — id_token sub unavailable", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", verified.TeamID)
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
-			"qURL could not confirm the signed-in account needed to bind this Slack workspace. Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
+			"qURL could not confirm the signed-in account needed to bind this Slack workspace.",
+			"Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
 		return false
 	}
 	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
@@ -533,7 +542,8 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 		slog.Error("oauth/callback BindWorkspace failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID, "error", bindErr)
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't bind this Slack workspace",
-			"qURL could not finish binding this Slack workspace. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL could not finish binding this Slack workspace.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return false
 	}
 }
@@ -587,7 +597,8 @@ func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (
 		slog.Error("oauth/callback existing workspace key lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"error", err, "team_id", teamID)
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't connect qURL",
-			"qURL is already connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL is already connected to this Slack workspace, but the stored workspace key could not be read.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false, false
 	}
 
@@ -606,7 +617,8 @@ func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (
 		slog.Error("oauth/callback stored workspace key validation failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"error", err, "team_id", teamID)
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-			"qURL is already connected to this Slack workspace, but the stored workspace key could not be verified. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL is already connected to this Slack workspace, but the stored workspace key could not be verified.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false, false
 	}
 	slog.Info("oauth/callback reused existing workspace API key", "team_id", teamID) //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
@@ -679,11 +691,13 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		}
 		if alreadyBound {
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL already connected",
-				"qURL is already connected for this Slack workspace, but this setup attempt could not recover the workspace key. Contact your qURL administrator for help.")
+				"qURL is already connected for this Slack workspace, but this setup attempt could not recover the workspace key.",
+				"Contact your qURL administrator for help.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-			"Something went wrong while creating your qURL API key. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"Something went wrong while creating your qURL API key.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 	apiKey, keyID, keyPrefix := minted.APIKey, minted.KeyID, minted.KeyPrefix
