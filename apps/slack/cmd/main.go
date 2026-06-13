@@ -169,10 +169,14 @@ func run() error {
 	// wired (same token lookup as the post seams); inert until the agent surface is live
 	// and needs the reactions:write scope in the Slack manifest to actually land.
 	agentReactions := newSlackReactionPortWithTokenLookup(workspaceTokenLookup, userAgent, slackReactionsAddURL, slackReactionsRemoveURL, nil)
-	// conversations.info seam so the agent's system prompt can name the channel
-	// ("#general (C123)"). Always wired (same token lookup); degrades to the bare
-	// channel id until the channels:read / groups:read scopes are in the manifest.
-	agentResolveChannelName := newSlackResolveChannelNameFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// conversations.info metadata seam for surface-specific confirm decisions (notably
+	// refusing group-DM get links before minting until mpim delivery is proven safe).
+	agentResolveConversationInfo := newSlackResolveConversationInfoFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// Channel-name projection so the agent's system prompt can render "#general
+	// (C123)". Shares the same conversations.info closure as the confirm surface
+	// classifier; degrades to the bare channel id until the relevant
+	// conversations.info scope is in the manifest.
+	agentResolveChannelName := slackResolveChannelNameFromConversationInfo(agentResolveConversationInfo)
 	// conversations.members seam: gates whether an assistant-pane turn may scope its reads
 	// to the channel the user opened the pane from (only a confirmed member's pane is
 	// scoped). Always wired (same token lookup + channels:read / groups:read scopes as the
@@ -277,6 +281,7 @@ func run() error {
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
 		Reactions:                   agentReactions,
 		ResolveChannelName:          agentResolveChannelName,
+		ResolveConversationInfo:     agentResolveConversationInfo,
 		ChannelMembership:           agentChannelMembership,
 		AssistantThreads:            agentAssistantThreads,
 		AppHomePublish:              agentAppHomePublish,

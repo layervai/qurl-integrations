@@ -201,6 +201,9 @@ func (hc *confirmHarness) seedPending(t *testing.T, pa *pendingAction) string {
 const (
 	testPendSKPrefix      = "pend#"
 	testPendClaimSKPrefix = "pendclaim#"
+	testPrivateChannelID  = "Gprivate"
+	testAskerUserID       = "Uasker"
+	testConfirmThreadTS   = "1700000000.5"
 )
 
 func (hc *confirmHarness) claimed(id string) bool {
@@ -235,6 +238,17 @@ func requireSingleAuditEntry(t *testing.T, hc *confirmHarness, userID string) sl
 		t.Fatalf("want one audit entry for %s, got %d: %+v", userID, len(got), got)
 	}
 	return got[0]
+}
+
+func requireNoAuditEntries(t *testing.T, hc *confirmHarness, userID string) {
+	t.Helper()
+	got, err := hc.store.ListAuditEntries(context.Background(), "T1", userID, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want no audit entries for %s, got %d: %+v", userID, len(got), got)
+	}
 }
 
 func confirmPayload(teamID, channelID, userID, responseURL, id string) *interactionPayload {
@@ -375,7 +389,7 @@ func TestConfirm_GetNonAskerDeniedThenAskerSucceeds(t *testing.T) {
 	// request — a DoS. This sequential assertion is what fails if the gate ever moves
 	// below the claim.
 	hc := newConfirmHarness(t, "Uadmin")
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: "Uasker", ChannelID: "C1"})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: testAskerUserID, ChannelID: "C1"})
 
 	// Non-asker Approve → denied ephemerally, nothing claimed.
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
@@ -388,7 +402,7 @@ func TestConfirm_GetNonAskerDeniedThenAskerSucceeds(t *testing.T) {
 	}
 
 	// The asker then approves and succeeds — proves the non-asker click didn't consume it.
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uasker", hc.respURL, id), id, true, time.Now())
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", testAskerUserID, hc.respURL, id), id, true, time.Now())
 	if !hc.claimed(id) {
 		t.Fatal("the asker must still be able to approve after a non-asker was denied")
 	}
@@ -399,7 +413,7 @@ func TestConfirm_GetNonAskerRejectDenied(t *testing.T) {
 	// card out from under them (claims nothing; the asker can still act, or the 10-min
 	// TTL reaps an abandoned card).
 	hc := newConfirmHarness(t, "Uadmin")
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Asker: "Uasker", ChannelID: "C1"})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Asker: testAskerUserID, ChannelID: "C1"})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, false, time.Now())
 
 	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
@@ -425,8 +439,8 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 			seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID}),
 		},
 	})
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
 	hc.h.Wait()
 
 	if !hc.claimed(id) {
@@ -436,7 +450,7 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 	if len(posts) != 1 {
 		t.Fatalf("want exactly one in-DM PostMessage delivery, got %d: %+v", len(posts), posts)
 	}
-	if posts[0].channel != "D1" || posts[0].threadTS != "1700000000.5" {
+	if posts[0].channel != "D1" || posts[0].threadTS != testConfirmThreadTS {
 		t.Fatalf("in-DM link delivery must target the card's channel+thread, got channel=%q thread=%q", posts[0].channel, posts[0].threadTS)
 	}
 	if !strings.Contains(posts[0].text, testAgentGetQURLLink) {
@@ -466,7 +480,7 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 	if strings.Contains(card, testAgentGetQURLLink) || strings.Contains(card, "staging") {
 		t.Fatalf("public card leaked the minted link or token: %q", card)
 	}
-	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	entry := requireSingleAuditEntry(t, hc, testAskerUserID)
 	if entry.Result != "Access link was sent privately to the approver." {
 		t.Fatalf("get success Result = %q", entry.Result)
 	}
@@ -486,8 +500,8 @@ func TestConfirm_GetApproveInDMMintDeliveryFailureAuditsFailure(t *testing.T) {
 		return errors.New("delivery unavailable")
 	}
 
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
 	hc.h.Wait()
 
 	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
@@ -497,7 +511,7 @@ func TestConfirm_GetApproveInDMMintDeliveryFailureAuditsFailure(t *testing.T) {
 	if !strings.Contains(card, agentConfirmGetDeliveryFailedReply) {
 		t.Fatalf("delivery failure must show the delivery-failed card, got %q", card)
 	}
-	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	entry := requireSingleAuditEntry(t, hc, testAskerUserID)
 	if entry.Result != agentConfirmGetDeliveryFailedAudit {
 		t.Fatalf("get delivery failure Result = %q", entry.Result)
 	}
@@ -514,8 +528,8 @@ func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 	// link" bug). The public response_url carries only the neutral card; the token-bearing
 	// detail never touches it.
 	hc := newConfirmHarness(t, "Uadmin")
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
-	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: testAskerUserID, ChannelID: "D1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
 	hc.h.Wait()
 
 	// The sensitive detail went via PostMessage, into the card's channel+thread.
@@ -523,7 +537,7 @@ func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 	if len(posts) != 1 {
 		t.Fatalf("want exactly one in-DM PostMessage delivery, got %d: %+v", len(posts), posts)
 	}
-	if posts[0].channel != "D1" || posts[0].threadTS != "1700000000.5" {
+	if posts[0].channel != "D1" || posts[0].threadTS != testConfirmThreadTS {
 		t.Fatalf("in-DM delivery must target the card's channel+thread, got channel=%q thread=%q", posts[0].channel, posts[0].threadTS)
 	}
 	if posts[0].text == "" {
@@ -544,12 +558,181 @@ func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 	if strings.Contains(card, "staging") || strings.Contains(card, posts[0].text) {
 		t.Fatalf("public card leaked the get detail: %q", card)
 	}
-	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	entry := requireSingleAuditEntry(t, hc, testAskerUserID)
 	if entry.Result != "Access link could not be generated." {
 		t.Fatalf("get mint failure Result = %q", entry.Result)
 	}
 	if entry.ResultSuccess == nil || *entry.ResultSuccess {
 		t.Fatalf("get mint failure ResultSuccess = %v, want false", entry.ResultSuccess)
+	}
+}
+
+func TestConfirm_GetInGroupDMRefusesBeforeMint(t *testing.T) {
+	// The Events API channel_type is authoritative and is snapshotted with the pending
+	// action. Refuse even if Slack ever provides a non-G conversation id for an mpim.
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.cfg.ResolveConversationInfo = func(context.Context, string, string, string) (ConversationInfo, error) {
+		t.Fatal("snapshotted mpim get should not call conversations.info")
+		return ConversationInfo{}, nil
+	}
+	const channelID = "Cmpim"
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: testAskerUserID, ChannelID: channelID, ChannelType: slackChannelTypeMPIM, ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", channelID, testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if !hc.claimed(id) {
+		t.Fatal("the mpim refusal should claim and retire the card")
+	}
+	if len(*hc.posts) != 0 || len(*hc.eph) != 0 {
+		t.Fatalf("mpim refusal must not deliver any private detail; posts=%+v eph=%+v", *hc.posts, *hc.eph)
+	}
+	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || card != agentConfirmGetUnsupportedSurfaceReply {
+		t.Fatalf("mpim get should replace the card with the boundary copy; replace=%v text=%q", ro, card)
+	}
+	if strings.Contains(card, "staging") || strings.Contains(card, agentAttributionAgentName) {
+		t.Fatalf("mpim refusal must not echo the token or attribution for a non-executed action: %q", card)
+	}
+	requireNoAuditEntries(t, hc, testAskerUserID)
+}
+
+func TestConfirm_GetResolvedGroupDMRefusesBeforeMint(t *testing.T) {
+	// A group DM (mpim) is shared, so a normal message would leak the link; until
+	// Slack ephemeral rendering is proven on that surface, snapshot-less legacy cards
+	// fall back to conversations.info and still stop before minting. No token-bearing
+	// detail is delivered anywhere.
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.cfg.ResolveConversationInfo = func(_ context.Context, _, _, channelID string) (ConversationInfo, error) {
+		if channelID != "Gmpim" {
+			t.Fatalf("resolved unexpected channel %q", channelID)
+		}
+		return ConversationInfo{IsMPIM: true}, nil
+	}
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: testAskerUserID, ChannelID: "Gmpim", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "Gmpim", testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if !hc.claimed(id) {
+		t.Fatal("the mpim refusal should claim and retire the card")
+	}
+	if len(*hc.posts) != 0 || len(*hc.eph) != 0 {
+		t.Fatalf("mpim refusal must not deliver any private detail; posts=%+v eph=%+v", *hc.posts, *hc.eph)
+	}
+	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || card != agentConfirmGetUnsupportedSurfaceReply {
+		t.Fatalf("mpim get should replace the card with the boundary copy; replace=%v text=%q", ro, card)
+	}
+	if strings.Contains(card, "staging") || strings.Contains(card, agentAttributionAgentName) {
+		t.Fatalf("mpim refusal must not echo the token or attribution for a non-executed action: %q", card)
+	}
+	requireNoAuditEntries(t, hc, testAskerUserID)
+}
+
+func TestConfirm_GetGPrefixedUnclassifiedFallsBackToEphemeral(t *testing.T) {
+	// A G-prefixed id is ambiguous from block_actions alone (private channel vs mpim).
+	// If conversations.info is unavailable or fails, preserve the existing
+	// chat.postEphemeral path rather than breaking private-channel approvals in
+	// installs without mpim:read. Confirmed mpims still refuse pre-mint (covered
+	// above); unclassified G surfaces are logged for operators.
+	cases := []struct {
+		name     string
+		resolver ResolveConversationInfoFunc
+	}{
+		{"missing resolver", nil},
+		{"resolver error", func(context.Context, string, string, string) (ConversationInfo, error) {
+			return ConversationInfo{}, errors.New("missing_scope")
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			hc.h.cfg.ResolveConversationInfo = c.resolver
+			id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Asker: testAskerUserID, ChannelID: "Gunknown", ThreadTS: testConfirmThreadTS})
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "Gunknown", testAskerUserID, hc.respURL, id), id, true, time.Now())
+			hc.h.Wait()
+
+			if !hc.claimed(id) {
+				t.Fatal("unclassified G-prefixed get should execute and claim")
+			}
+			if len(*hc.posts) != 0 {
+				t.Fatalf("unclassified G-prefixed get must not use normal PostMessage, got %+v", *hc.posts)
+			}
+			eph := *hc.eph
+			if len(eph) != 1 || eph[0].channel != "Gunknown" || eph[0].userID != testAskerUserID || eph[0].threadTS != testConfirmThreadTS {
+				t.Fatalf("unclassified G-prefixed get should use chat.postEphemeral fallback, got %+v", eph)
+			}
+			ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if !ro || strings.Contains(card, agentConfirmGetUnsupportedSurfaceReply) {
+				t.Fatalf("unclassified G-prefixed get should use normal get card composition, got replace=%v text=%q", ro, card)
+			}
+		})
+	}
+}
+
+func TestConfirm_GetInPrivateChannelStillUsesEphemeral(t *testing.T) {
+	// G-prefix also covers private channels. When conversations.info confirms the
+	// surface is NOT an mpim, preserve the existing safe path: standalone
+	// chat.postEphemeral scoped to the clicker, never a normal shared-history post.
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.cfg.ResolveConversationInfo = func(_ context.Context, _, _, channelID string) (ConversationInfo, error) {
+		if channelID != testPrivateChannelID {
+			t.Fatalf("resolved unexpected channel %q", channelID)
+		}
+		return ConversationInfo{Name: "private-eng", IsMPIM: false}, nil
+	}
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Asker: testAskerUserID, ChannelID: testPrivateChannelID, ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", testPrivateChannelID, testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if !hc.claimed(id) {
+		t.Fatal("private-channel get should execute and claim")
+	}
+	if len(*hc.posts) != 0 {
+		t.Fatalf("private-channel get must not use normal PostMessage, got %+v", *hc.posts)
+	}
+	eph := *hc.eph
+	if len(eph) != 1 || eph[0].channel != testPrivateChannelID || eph[0].userID != testAskerUserID || eph[0].threadTS != testConfirmThreadTS {
+		t.Fatalf("private-channel get should deliver via chat.postEphemeral to clicker/thread, got %+v", eph)
+	}
+	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro || strings.Contains(card, agentConfirmGetUnsupportedSurfaceReply) {
+		t.Fatalf("private-channel get should use normal get card composition, got replace=%v text=%q", ro, card)
+	}
+}
+
+func TestConfirm_GetKnownNonMPIMSurfacesDoNotResolveConversationInfo(t *testing.T) {
+	h := NewHandler(Config{
+		ResolveConversationInfo: func(context.Context, string, string, string) (ConversationInfo, error) {
+			t.Fatal("known non-mpim get surfaces should not call conversations.info")
+			return ConversationInfo{}, nil
+		},
+	})
+
+	if h.getDeliverySurfaceUnsupported(context.Background(), slog.Default(),
+		&pendingAction{ChannelID: "C1", ChannelType: slackChannelTypeChannel},
+		confirmPayload("T1", "C1", testAskerUserID, "", "id")) {
+		t.Fatal("public channel get surface should not be refused by the mpim boundary")
+	}
+	if h.getDeliverySurfaceUnsupported(context.Background(), slog.Default(), &pendingAction{ChannelType: slackChannelTypeIM}, confirmPayload("T1", "D1", testAskerUserID, "", "id")) {
+		t.Fatal("1:1 DM get surface should not be refused by the mpim boundary")
+	}
+	if h.getDeliverySurfaceUnsupported(context.Background(), slog.Default(), &pendingAction{ChannelType: slackChannelTypeGroup}, confirmPayload("T1", testPrivateChannelID, testAskerUserID, "", "id")) {
+		t.Fatal("snapshotted private-channel get surface should not be refused by the mpim boundary")
+	}
+}
+
+func TestConfirm_GetUnknownSnapshotFallsBackToResolvedMPIM(t *testing.T) {
+	h := NewHandler(Config{
+		ResolveConversationInfo: func(_ context.Context, _, _, channelID string) (ConversationInfo, error) {
+			if channelID != "Gmpim" {
+				t.Fatalf("resolved unexpected channel %q", channelID)
+			}
+			return ConversationInfo{IsMPIM: true}, nil
+		},
+	})
+
+	if !h.getDeliverySurfaceUnsupported(context.Background(), slog.Default(), &pendingAction{ChannelID: "Gmpim", ChannelType: "surprise"}, confirmPayload("T1", "Gmpim", testAskerUserID, "", "id")) {
+		t.Fatal("unknown snapshotted channel_type should fall back to conversations.info for G-prefixed surfaces")
 	}
 }
 
@@ -563,7 +746,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	t.Run("1:1 DM posts the link as a normal in-thread message", func(t *testing.T) {
 		hc := newConfirmHarness(t, "")
 		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "D1", ThreadTS: "1700.9"}
-		payload := confirmPayload("T1", "D1", "Uasker", hc.respURL, "id")
+		payload := confirmPayload("T1", "D1", testAskerUserID, hc.respURL, "id")
 		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("DM delivery should report success")
 		}
@@ -586,13 +769,13 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	t.Run("channel delivers the link as a standalone ephemeral scoped to the clicker", func(t *testing.T) {
 		hc := newConfirmHarness(t, "")
 		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "C1", ThreadTS: "1700.7"}
-		payload := confirmPayload("T1", "C1", "Uasker", hc.respURL, "id")
+		payload := confirmPayload("T1", "C1", testAskerUserID, hc.respURL, "id")
 		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("channel delivery should report success")
 		}
 		hc.h.Wait()
 		eph := *hc.eph
-		if len(eph) != 1 || eph[0].channel != "C1" || eph[0].userID != "Uasker" || eph[0].threadTS != "1700.7" || eph[0].text != link {
+		if len(eph) != 1 || eph[0].channel != "C1" || eph[0].userID != testAskerUserID || eph[0].threadTS != "1700.7" || eph[0].text != link {
 			t.Fatalf("the link must post via chat.postEphemeral to the channel/clicker/thread verbatim, got %+v", eph)
 		}
 		if len(*hc.posts) != 0 {
@@ -606,12 +789,29 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 		}
 	})
 
+	t.Run("private channel delivers the link as a standalone ephemeral scoped to the clicker", func(t *testing.T) {
+		hc := newConfirmHarness(t, "")
+		pa := &pendingAction{Action: agent.ActionGet, ChannelID: testPrivateChannelID, ThreadTS: "1700.7"}
+		payload := confirmPayload("T1", testPrivateChannelID, testAskerUserID, hc.respURL, "id")
+		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
+			t.Fatal("private-channel delivery should report success")
+		}
+		hc.h.Wait()
+		eph := *hc.eph
+		if len(eph) != 1 || eph[0].channel != testPrivateChannelID || eph[0].userID != testAskerUserID || eph[0].threadTS != "1700.7" || eph[0].text != link {
+			t.Fatalf("the link must post via chat.postEphemeral to the private channel/clicker/thread verbatim, got %+v", eph)
+		}
+		if len(*hc.posts) != 0 {
+			t.Fatalf("private-channel delivery must not use PostMessage, got %+v", *hc.posts)
+		}
+	})
+
 	t.Run("DM reports failure when PostMessage errors", func(t *testing.T) {
 		h := NewHandler(Config{PostMessage: func(context.Context, string, string, string, string, string) error {
 			return errors.New("boom")
 		}})
 		pa := &pendingAction{ChannelID: "D1", ThreadTS: "t"}
-		payload := confirmPayload("T1", "D1", "Uasker", "", "id")
+		payload := confirmPayload("T1", "D1", testAskerUserID, "", "id")
 		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("a failing in-DM PostMessage must report delivery failure so the card stops claiming success")
 		}
@@ -620,7 +820,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	t.Run("DM reports failure when the PostMessage seam is nil", func(t *testing.T) {
 		h := NewHandler(Config{})
 		pa := &pendingAction{ChannelID: "D1"}
-		payload := confirmPayload("T1", "D1", "Uasker", "", "id")
+		payload := confirmPayload("T1", "D1", testAskerUserID, "", "id")
 		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("a nil PostMessage seam must report delivery failure")
 		}
@@ -631,7 +831,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 			return errors.New("user_not_in_channel")
 		}})
 		pa := &pendingAction{ChannelID: "C1", ThreadTS: "t"}
-		payload := confirmPayload("T1", "C1", "Uasker", "", "id")
+		payload := confirmPayload("T1", "C1", testAskerUserID, "", "id")
 		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("a failing chat.postEphemeral must report delivery failure")
 		}
@@ -640,7 +840,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	t.Run("channel reports failure when the PostEphemeral seam is nil", func(t *testing.T) {
 		h := NewHandler(Config{})
 		pa := &pendingAction{ChannelID: "C1"}
-		payload := confirmPayload("T1", "C1", "Uasker", "", "id")
+		payload := confirmPayload("T1", "C1", testAskerUserID, "", "id")
 		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("a nil PostEphemeral seam must report delivery failure")
 		}
@@ -704,7 +904,7 @@ func TestConfirmResultForDelivery(t *testing.T) {
 
 func TestComposeConfirmCard(t *testing.T) {
 	const (
-		asker    = "Uasker"
+		asker    = testAskerUserID
 		approver = "Uapprover"
 		link     = ":link: qURL ready: https://qurl.link/abc"
 	)
@@ -756,30 +956,58 @@ func TestComposeConfirmCard(t *testing.T) {
 	}
 }
 
-func TestPostAgentConfirm_SnapshotsAsker(t *testing.T) {
+func TestPostAgentConfirm_SnapshotsAskerAndSurface(t *testing.T) {
 	// The pending snapshot must carry the asker (env.Event.User) so the click can
-	// enforce asker-only for a get.
+	// enforce asker-only for a get, and the proposal surface so known non-mpim cards
+	// can skip the legacy id-prefix classifier.
+	for _, channelType := range []string{slackChannelTypeChannel, slackChannelTypeGroup, slackChannelTypeIM} {
+		t.Run(channelType, func(t *testing.T) {
+			hc := newConfirmHarness(t, "")
+			prop := &agent.Proposal{Action: agent.ActionGet, Token: "staging", Reason: "r", Summary: "Get a link to $staging."}
+			const threadTS = "100.1"
+			env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", ChannelType: channelType, User: testAskerUserID, TS: threadTS}}
+			hc.h.postAgentConfirm(slog.Default(), env, threadTS, prop)
+
+			blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
+			if err != nil || !found {
+				t.Fatalf("pending not stored: found=%v err=%v", found, err)
+			}
+			var pa pendingAction
+			if err := json.Unmarshal(blob, &pa); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if pa.Asker != testAskerUserID {
+				t.Fatalf("snapshot Asker = %q, want %s", pa.Asker, testAskerUserID)
+			}
+			if pa.ChannelType != channelType {
+				t.Fatalf("snapshot ChannelType = %q, want %q", pa.ChannelType, channelType)
+			}
+			// The thread the card is posted into is snapshotted too, so the get's link can be
+			// delivered back into that exact thread (the assistant pane is a threaded view).
+			if pa.ThreadTS != threadTS {
+				t.Fatalf("snapshot ThreadTS = %q, want %q", pa.ThreadTS, threadTS)
+			}
+		})
+	}
+}
+
+func TestPostAgentConfirm_GetInGroupDMSkipsCard(t *testing.T) {
 	hc := newConfirmHarness(t, "")
 	prop := &agent.Proposal{Action: agent.ActionGet, Token: "staging", Reason: "r", Summary: "Get a link to $staging."}
-	const threadTS = "100.1"
-	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "Uasker", TS: threadTS}}
-	hc.h.postAgentConfirm(slog.Default(), env, threadTS, prop)
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "Gmpim", ChannelType: slackChannelTypeMPIM, User: testAskerUserID, TS: "100.1"}}
 
-	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
-	if err != nil || !found {
-		t.Fatalf("pending not stored: found=%v err=%v", found, err)
+	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+
+	if len(hc.blocks.calls) != 0 {
+		t.Fatalf("snapshotted mpim get must not post an unusable confirm card, got %d", len(hc.blocks.calls))
 	}
-	var pa pendingAction
-	if err := json.Unmarshal(blob, &pa); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if len(*hc.posts) != 1 || (*hc.posts)[0].text != agentConfirmGetUnsupportedSurfaceReply {
+		t.Fatalf("snapshotted mpim get should post the boundary copy, got %+v", *hc.posts)
 	}
-	if pa.Asker != "Uasker" {
-		t.Fatalf("snapshot Asker = %q, want Uasker", pa.Asker)
-	}
-	// The thread the card is posted into is snapshotted too, so the get's link can be
-	// delivered back into that exact thread (the assistant pane is a threaded view).
-	if pa.ThreadTS != threadTS {
-		t.Fatalf("snapshot ThreadTS = %q, want %q", pa.ThreadTS, threadTS)
+	for k := range hc.mem.items {
+		if strings.HasPrefix(k, "T1|"+testPendSKPrefix) {
+			t.Fatalf("snapshotted mpim get must not store a pending action, found %s", k)
+		}
 	}
 }
 
@@ -805,8 +1033,8 @@ func TestConfirm_SetAliasOnApprove(t *testing.T) {
 func TestAgentConfirmAttributedCard(t *testing.T) {
 	const body = "Revoked $staging."
 	// asker != approver → both mentions + the agent name, body preserved as prefix.
-	out := agentConfirmAttributedCard(body, "Uasker", "Uadmin")
-	for _, want := range []string{"<@Uasker>", "<@Uadmin>", agentAttributionAgentName, "Requested by", "approved by"} {
+	out := agentConfirmAttributedCard(body, testAskerUserID, "Uadmin")
+	for _, want := range []string{"<@" + testAskerUserID + ">", "<@Uadmin>", agentAttributionAgentName, "Requested by", "approved by"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("attributed card missing %q: %q", want, out)
 		}
@@ -834,11 +1062,11 @@ func TestConfirm_ExecutedCardCarriesAttribution(t *testing.T) {
 	// (#662). Pre-execution rejections are NOT attributed — covered by
 	// TestConfirm_AliasRejectsInvalidInput, whose cards stay byte-exact.
 	hc := newConfirmHarness(t, "Uadmin")
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1", Asker: "Uasker"})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1", Asker: testAskerUserID})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
 
 	_, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-	for _, want := range []string{"<@Uasker>", "<@Uadmin>", agentAttributionAgentName} {
+	for _, want := range []string{"<@" + testAskerUserID + ">", "<@Uadmin>", agentAttributionAgentName} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("executed card missing attribution %q: %q", want, text)
 		}

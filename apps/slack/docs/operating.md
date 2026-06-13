@@ -272,6 +272,19 @@ For customer Slack installs, configure the Slack app with:
   `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
   `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
   `dm:true` and qURL Connector bootstrap-key delivery)
+  - Conversation-mode installs that answer channel/private-channel/group-DM
+    threads should include `channels:read` / `groups:read` / `mpim:read` with the
+    corresponding event scopes. The confirm flow snapshots Slack's event
+    `channel_type`; fresh group-DM (`mpim`) `get` proposals answer directly
+    instead of posting unusable confirm cards, and legacy cards refuse before
+    minting `get` links.
+    `mpim:read` lets the legacy fallback classify snapshot-less `G`
+    conversations via `conversations.info`; without it, ambiguous `G`
+    conversations preserve the existing ephemeral delivery path for private
+    channels. This fallback boundary is best-effort: transient
+    `conversations.info` failures also fall back to the ephemeral path and emit
+    an operator warning. Pending cards created before this `channel_type`
+    snapshot shipped also use the fallback until their short TTL expires.
 - Installation mode: workspace-level installs or Enterprise Grid org-level
   installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
   workspace setup and admin checks still use workspace `team_id`.
