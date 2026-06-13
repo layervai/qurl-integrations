@@ -44,14 +44,15 @@ func ClassifyPin(image string) PinStatus {
 }
 
 func classifyDigestImagePin(name, digest string, parsed dockerref.Reference, parseErr error) PinStatus {
+	if name == "" {
+		return MalformedDigest
+	}
+
 	lastSlash := strings.LastIndex(name, "/")
 	lastColon := strings.LastIndex(name, ":")
 	nameSuffix := name[lastSlash+1:]
 	repositoryName := imageRepositoryName(name, lastSlash, lastColon)
 
-	if name == "" {
-		return MalformedDigest
-	}
 	if lastColon == lastSlash+1 {
 		return MalformedReference
 	}
@@ -215,6 +216,8 @@ func imageNameHasUppercase(name string) bool {
 func firstPathComponentHasValidPort(component string) bool {
 	lastColon := strings.LastIndex(component, ":")
 	if lastColon < 0 {
+		// No port-like suffix to validate; keep scanning this component for
+		// qURL policy tags such as :latest.
 		return true
 	}
 	port := component[lastColon+1:]

@@ -104,6 +104,8 @@ func FuzzClassifyPinRejectsLatest(f *testing.F) {
 			fragment + ":latest",
 			fragment + ":LATEST",
 			fragment + ":latest@" + validDigest,
+			fragment + ":latest/qurl-connector:v1",
+			fragment + ":LATEST/qurl-connector@" + validDigest,
 			"ghcr.io/foo:latest/" + fragment + ":v1",
 			"ghcr.io/foo:LATEST/" + fragment + "@" + validDigest,
 		}

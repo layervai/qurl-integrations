@@ -34,17 +34,11 @@ func newFakeProvider() *auth.DDBProvider {
 }
 
 const (
-	validStateSecret            = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
-	defaultSlackBotScopesCSV    = "commands,chat:write,im:write"
-	testConnectorImageRepo      = "ghcr.io/layervai/qurl-connector"
-	testConnectorVersionImage   = testConnectorImageRepo + ":v1.2.3"
-	testConnectorLatestImage    = testConnectorImageRepo + ":latest"
-	wantNonPinnedImageErr       = "must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest"
-	wantLatestDigestImageErr    = "digest pins must not include a latest tag"
-	wantDigestLowercaseImageErr = "digest must use 64 lowercase hex characters after sha256"
-	wantMalformedRefImageErr    = "image references must use image@sha256:<64 lowercase hex> with a full lowercase image name"
-	wantAmbiguousRefImageErr    = "slashless registry references must include a repository path"
-	wantMalformedDigestImageErr = "digest references must use image@sha256:<64 lowercase hex> with a full image name"
+	validStateSecret          = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
+	defaultSlackBotScopesCSV  = "commands,chat:write,im:write"
+	testConnectorImageRepo    = "ghcr.io/layervai/qurl-connector"
+	testConnectorVersionImage = testConnectorImageRepo + ":v1.2.3"
+	testConnectorLatestImage  = testConnectorImageRepo + ":latest"
 )
 
 var oauthEnvKeys = []string{
@@ -164,60 +158,60 @@ func TestReadTunnelImageConfig(t *testing.T) {
 		{
 			name:        "implicit latest routes to non-pinned message",
 			image:       testConnectorImageRepo,
-			wantErrText: wantNonPinnedImageErr,
+			wantErrText: connectorImageErrNonPinned,
 		},
 		{
 			name:        "explicit latest image rejected even with fallback opt in",
 			image:       testConnectorLatestImage,
 			fallback:    connectorImageFallbackSandbox,
-			wantErrText: wantNonPinnedImageErr,
+			wantErrText: connectorImageErrNonPinned,
 		},
 		{
 			name:        "latest tag with digest routes to latest-digest message",
 			image:       testConnectorLatestImage + "@sha256:" + strings.Repeat("a", 64),
-			wantErrText: wantLatestDigestImageErr,
+			wantErrText: connectorImageErrLatestDigest,
 		},
 		{
 			name:        "uppercase sha256 digest routes to lowercase-digest message",
 			image:       testConnectorImageRepo + "@sha256:" + strings.Repeat("A", 64),
-			wantErrText: wantDigestLowercaseImageErr,
+			wantErrText: connectorImageErrDigestLowercase,
 		},
 		{
 			name:              "malformed reference routes to malformed-reference message",
 			image:             "ghcr.io//qurl-connector:v1",
-			wantErrText:       wantMalformedRefImageErr,
+			wantErrText:       connectorImageErrMalformedRef,
 			wantErrAbsentText: connectorImageFallbackHint,
 		},
 		{
 			name:        "uppercase repository path routes to malformed-reference message",
 			image:       "ghcr.io/LayerV/qurl-connector:v1",
-			wantErrText: wantMalformedRefImageErr,
+			wantErrText: connectorImageErrMalformedRef,
 		},
 		{
 			name:        "slashless registry-looking ref routes to ambiguous-reference message",
 			image:       "gcr.io:v1",
-			wantErrText: wantAmbiguousRefImageErr,
+			wantErrText: connectorImageErrAmbiguousRef,
 		},
 		{
 			name:        "mixed-case localhost ref routes to ambiguous-reference message",
 			image:       "Localhost:5000",
-			wantErrText: wantAmbiguousRefImageErr,
+			wantErrText: connectorImageErrAmbiguousRef,
 		},
 		{
 			name:        "uppercase localhost ref routes to ambiguous-reference message",
 			image:       "LOCALHOST:5000",
-			wantErrText: wantAmbiguousRefImageErr,
+			wantErrText: connectorImageErrAmbiguousRef,
 		},
 		{
 			name:              "malformed digest routes to malformed-digest message",
 			image:             testConnectorImageRepo + "@notadigest",
-			wantErrText:       wantMalformedDigestImageErr,
+			wantErrText:       connectorImageErrMalformedDigest,
 			wantErrAbsentText: connectorImageFallbackHint,
 		},
 		{
 			name:        "uppercase bare sha256 digest routes to malformed-digest message",
 			image:       "SHA256:" + strings.Repeat("a", 64),
-			wantErrText: wantMalformedDigestImageErr,
+			wantErrText: connectorImageErrMalformedDigest,
 		},
 		{
 			name:        "unknown fallback rejected",

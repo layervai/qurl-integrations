@@ -38,6 +38,14 @@ const (
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
+
+	connectorImageErrNonPinned       = "must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest"
+	connectorImageErrLatestDigest    = "digest pins must not include a latest tag; use an image@sha256:<64 lowercase hex> digest without :latest, or a specific non-latest release tag before the digest"
+	connectorImageErrDigestLowercase = "digest must use 64 lowercase hex characters after sha256"
+	connectorImageErrMalformedRef    = "image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag"
+	connectorImageErrAmbiguousRef    = "slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest"
+	connectorImageErrMalformedDigest = "digest references must use image@sha256:<64 lowercase hex> with a full image name"
+
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
 	// and reap the process. This is the cap on the drain *as a whole*, not
@@ -1047,33 +1055,33 @@ func readTunnelImageConfig() (string, error) {
 			return image, nil
 		case connectorimage.LatestDigest:
 			return "", fmt.Errorf(
-				"%s digest pins must not include a latest tag; use an image@sha256:<64 lowercase hex> digest without :latest, or a specific non-latest release tag before the digest",
-				envQURLConnectorImage,
+				"%s %s",
+				envQURLConnectorImage, connectorImageErrLatestDigest,
 			)
 		case connectorimage.UppercaseDigest:
 			return "", fmt.Errorf(
-				"%s digest must use 64 lowercase hex characters after sha256",
-				envQURLConnectorImage,
+				"%s %s",
+				envQURLConnectorImage, connectorImageErrDigestLowercase,
 			)
 		case connectorimage.MalformedReference:
 			return "", fmt.Errorf(
-				"%s image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag",
-				envQURLConnectorImage,
+				"%s %s",
+				envQURLConnectorImage, connectorImageErrMalformedRef,
 			)
 		case connectorimage.AmbiguousReference:
 			return "", fmt.Errorf(
-				"%s slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest",
-				envQURLConnectorImage,
+				"%s %s",
+				envQURLConnectorImage, connectorImageErrAmbiguousRef,
 			)
 		case connectorimage.MalformedDigest:
 			return "", fmt.Errorf(
-				"%s digest references must use image@sha256:<64 lowercase hex> with a full image name",
-				envQURLConnectorImage,
+				"%s %s",
+				envQURLConnectorImage, connectorImageErrMalformedDigest,
 			)
 		case connectorimage.Floating:
 			return "", fmt.Errorf(
-				"%s must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest; %s",
-				envQURLConnectorImage, connectorImageFallbackHint,
+				"%s %s; %s",
+				envQURLConnectorImage, connectorImageErrNonPinned, connectorImageFallbackHint,
 			)
 		}
 		// Future connectorimage.PinStatus values must fail closed.
