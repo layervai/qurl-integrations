@@ -36,7 +36,7 @@ const (
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
-	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving it empty and setting " + connectorImageFallbackOptIn
+	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
 	// and reap the process. This is the cap on the drain *as a whole*, not
@@ -1305,6 +1305,8 @@ func firstPathComponentHasValidPort(component string) bool {
 }
 
 func looksLikeRegistryHost(host string) bool {
+	// Reserve localhost, dotted names, and host:port forms for registry hosts,
+	// while leaving bare words as valid Docker-style single-segment image names.
 	return strings.EqualFold(host, "localhost") || strings.ContainsAny(host, ".:")
 }
 
