@@ -124,6 +124,110 @@ at the OAuth-callback bind layer.
     bootstrap key remains bounded by its one-hour TTL; revoke it manually if
     logs show `tunnel_bootstrap_cleanup_failed`.
 
+### Bootstrap-key DM live smoke
+
+Run this smoke before relying on connector bootstrap-key DM delivery in a new
+Slack app shape, especially an Enterprise Grid org install. Use a real admin
+user who has not already opened a DM with the bot when possible. The smoke posts
+only non-secret text; do not paste bootstrap keys into the command or result.
+Any `-text` value is sent to Slack, so keep it short, non-secret, and at most
+4000 bytes after cleanup. The message text is not written to the JSON evidence.
+Line breaks, tabs, and control characters in `-text` are normalized before the
+message is sent: line breaks and tabs become spaces, while other control
+characters become `?`.
+
+Production-path DM delivery uses `conversations.open(users=<user_id>)`, then
+`chat.postMessage(channel=<dm_channel_id>)`. Run it with the exact bot token
+shape being validated:
+
+```sh
+printf 'Slack bot token: ' >&2
+read -rs SLACK_BOT_TOKEN
+printf '\n' >&2
+export SLACK_BOT_TOKEN
+go run ./apps/slack/cmd/slack-dm-smoke \
+  -user U0123456789 \
+  -workspace-shape 'Enterprise Grid org install; workspace token unavailable' \
+  -token-owner enterprise \
+  -scopes 'commands,chat:write,im:write'
+```
+
+`-timeout` is the total budget for `auth.test`, DM opening, message posting,
+and any optional direct-user probe. `-request-timeout` caps each Slack Web API
+request. The CLI rejects `-timeout` values below three times
+`-request-timeout`, or below four times `-request-timeout` when
+`-direct-user-probe` is enabled; leave more headroom when validating a slow
+workspace or network path. This guard is a conservative lower bound, not a
+guarantee that every later call can consume its full per-request timeout.
+Only override `-base-url` for a trusted Slack Web API endpoint or local test
+server. **The smoke sends the bearer token to that base URL**, so treat any
+remote override as trusted production infrastructure before running it. Remote
+overrides must use HTTPS; HTTP is accepted only for localhost or loopback test
+servers. The smoke honors Go's standard `HTTP_PROXY`, `HTTPS_PROXY`, and
+`NO_PROXY` environment handling; treat configured proxies as part of the trusted
+network path. The smoke is one-shot and does not retry `http_429` or 5xx
+responses.
+If Slack returns `http_429`, the JSON evidence includes `retry_after` when Slack
+sends that header; Slack normally sends seconds, though HTTP-date values should
+be treated as "wait until that time" before rerunning the smoke. Network
+and cancellation failures are recorded as `request_failed`, `request_timeout`,
+`budget_exhausted`, or `request_canceled` so evidence consumers can distinguish
+transport failures, single slow Slack Web API requests, overall smoke budget
+expiry, and cancellations. Transport-level failures serialize `status_code: 0`.
+Unexpectedly large Slack responses are recorded as `response_too_large` instead
+of parsed Slack evidence.
+
+For Enterprise Grid fallback, pair the token smoke with the actual guided
+connector setup in a workspace where the org-install token is the delivery
+token. Confirm the admin receives the bootstrap-key DM and that the key-free
+install instructions post separately. The local fallback contract is covered by
+`TestSlackPostDMFuncOpensIMThenPostsWithGridFallback`; the live smoke confirms
+Slack accepts the org-install token for the real workspace shape.
+
+To record Slack's current behavior for the bare-user-id path without depending
+on it for production, add `-direct-user-probe`. It may send a second non-secret
+test message tagged with ` (direct-user probe)` if Slack accepts the direct
+path; near-limit text is trimmed rune-safely before adding that tag so the
+probe message stays within the same 4000-byte cap. A `channel_not_found` or
+similar direct-channel rejection is useful evidence; it should not block
+the production path when the open-then-post steps succeed. Without strict mode,
+Slack/API/transport failures from this optional probe are recorded and the smoke
+still exits 0 after the production path succeeds; overall timeout or cancellation
+still fails the smoke. Always inspect `direct_user_probe` in the JSON evidence
+when the probe is enabled, especially to distinguish Slack rejections from
+transport errors such as `request_failed`; exit 0 only means the production
+open-then-post path succeeded unless `-strict-direct-user-probe` was used. Use
+`-strict-direct-user-probe` only with `-direct-user-probe` when that optional
+probe should fail the command.
+
+For the failure smoke, use a staging install with the DM-opening scope withheld
+or revoked, then trigger guided connector setup with a disposable connector id.
+Confirm that setup does not post install instructions, the user-facing response
+asks the admin to reinstall or reauthorize the Slack app, and the generated key
+cannot be used. The unit coverage for the same safety contract is
+`TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails`,
+`TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall`, and
+`TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails`.
+
+Record the result in the PR or issue using this shape. If `conversations.open`
+returns `ok:true` without a usable `channel.id`, the smoke records that
+production step as `missing_dm_channel_id`; treat it as a failed DM-open step
+even though Slack's raw response said `ok:true`. Pre-flight validation errors
+such as invalid flags, empty token/user input, or unsafe `-base-url` exit before
+contacting Slack and print stderr only; JSON evidence is emitted for runtime
+smoke attempts.
+
+```text
+Workspace shape:
+Token owner:
+Slack scopes:
+Fresh app-user DM user:
+Production path: conversations.open=<ok/error>, chat.postMessage(D...)=<ok/error>
+Direct user probe, if run: chat.postMessage(U...)=<ok/error>
+Forced failure: instructions posted? <yes/no>; key usable? <yes/no>; user-facing copy:
+Operator setup notes:
+```
+
 ## Binding-backed setup visibility
 
 `event="setup_binding_backed_persist_failure"` means qURL provisioned a
