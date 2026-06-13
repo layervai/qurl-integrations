@@ -302,14 +302,14 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		log.Error("tunnel install modal admin check failed", "error", err)
-		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
 		respondTunnelInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
 		return
 	}
 	if !isAdmin {
 		log.Warn("tunnel install modal denied: non-admin")
-		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
 		respondTunnelInstallModalError(w, "This command is admin-only.")
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
 		return
 	}
 

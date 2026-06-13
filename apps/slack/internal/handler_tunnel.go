@@ -730,6 +730,18 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	})
 }
 
+func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunnelInstallRequest, outcome string, success bool) {
+	if req == nil || req.agentAudit == nil {
+		return
+	}
+	// Denied modal submits are still on Slack's view_submission ack path. Keep
+	// the best-effort audit out-of-band so a slow audit store cannot consume
+	// Slack's short modal response window.
+	h.Go(func() {
+		h.recordTunnelInstallAgentAudit(log, req, outcome, success)
+	})
+}
+
 func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID, userID, msg string) error {
 	// processTunnelInstall checks this before minting; keep the helper guard so
 	// any future standalone call still fails closed instead of panicking.

@@ -13,9 +13,11 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
@@ -90,6 +92,33 @@ func (unusedAgentReadBackend) ResolveToken(context.Context, *agent.TurnContext, 
 
 func (unusedAgentReadBackend) Quota(context.Context, *agent.TurnContext) (string, error) {
 	return "", nil
+}
+
+type blockingPutAgentDDB struct {
+	*memAgentDDB
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingPutAgentDDB() *blockingPutAgentDDB {
+	return &blockingPutAgentDDB{
+		memAgentDDB: newMemAgentDDB(),
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (f *blockingPutAgentDDB) PutItem(ctx context.Context, in *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	f.once.Do(func() {
+		close(f.started)
+	})
+	select {
+	case <-f.release:
+		return f.memAgentDDB.PutItem(ctx, in, optFns...)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func protectConnectorAgentMetadataFromToolCall(t *testing.T) *TunnelInstallAgentMetadata {
@@ -1832,6 +1861,7 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 			if !strings.Contains(w.Body.String(), "admin-only") {
 				t.Fatalf("modal response = %s, want non-admin rejection", w.Body.String())
 			}
+			h.Wait()
 
 			got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, nonAdminUserID, 10)
 			if err != nil {
@@ -1860,6 +1890,83 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 				t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
 			}
 		})
+	}
+}
+
+func TestTunnelInstallModalNonAdminAgentAuditDoesNotDelayAck(t *testing.T) {
+	const nonAdminUserID = "U_non_admin"
+
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	ddb := newBlockingPutAgentDDB()
+	releaseAudit := func() {
+		select {
+		case <-ddb.release:
+		default:
+			close(ddb.release)
+		}
+	}
+	agentStore := &slackdata.AgentStore{Client: ddb, TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.SetAliasStore(h.cfg.AdminStore)
+	defer func() {
+		releaseAudit()
+		h.Wait()
+	}()
+
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        nonAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
+	}
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	req := newSignedRequest(t, pathSlackInteractions, body, body)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		done <- w
+	}()
+
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("modal response waited for rejected-path audit write")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "admin-only") {
+		t.Fatalf("modal response = %s, want non-admin rejection", w.Body.String())
+	}
+
+	select {
+	case <-ddb.started:
+	case <-time.After(time.Second):
+		t.Fatal("rejected-path audit write did not start")
+	}
+	releaseAudit()
+	h.Wait()
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, nonAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated modal should record one audit entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Outcome != agentProtectConnectorAuditAdminRejectedOutcome || got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit entry = %+v, want admin-rejected failure outcome", got[0])
 	}
 }
 
