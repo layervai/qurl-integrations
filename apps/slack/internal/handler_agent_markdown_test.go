@@ -103,6 +103,24 @@ func TestHardenAgentMarkdown_PreservesVisibleAutolinks(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_RevealsSlackAngleLinks(t *testing.T) {
+	t.Parallel()
+	in := "Use <https://evil.example/login|billing portal> or <mailto:security@example.com|security>."
+	want := "Use billing portal (https://evil.example/login) or security (mailto:security@example.com)."
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestHardenAgentMarkdown_HardensNestedLinksInSlackAngleLabels(t *testing.T) {
+	t.Parallel()
+	in := "Use <https://safe.example|[billing](https://evil.example)> now."
+	want := "Use billing (https://evil.example) (https://safe.example) now."
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitLinks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden
@@ -148,6 +166,28 @@ func TestAgentMarkdownLinkHarden_EscapesChunkSplitRawHTMLTagStarts(t *testing.T)
 		h.write(`a href="https://evil.example/login">billing</a>`) +
 		h.flush()
 	want := `Read \<a href="https://evil.example/login">billing\</a>`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_HandlesChunkSplitSlackAngleLinks(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Use <https://evil.example") +
+		h.write("/login|billing portal> now") +
+		h.flush()
+	want := "Use billing portal (https://evil.example/login) now"
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesUnclosedSlackAngleLinks(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Use <https://evil.example/login|billing portal") + h.flush()
+	want := `Use \<https://evil.example/login|billing portal`
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
 	}

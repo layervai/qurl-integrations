@@ -10,8 +10,10 @@ const maxAgentMarkdownLinkBytes = 4096
 // is an anti-phishing visible-destination pass, not a spec-complete Markdown
 // parser. Raw HTML tag starts are escaped because they could otherwise become
 // another hidden-destination renderer if Slack's markdown surface accepts HTML;
-// visible autolinks such as <https://example.com> stay untouched. Keep new syntax
-// support pinned by tests.
+// visible autolinks such as <https://example.com> stay untouched. This stays
+// local instead of using a full CommonMark library because streaming deltas must
+// be hardened before Slack sees them, even when syntax is split across chunk
+// boundaries. Keep new syntax support pinned by tests.
 func hardenAgentMarkdown(markdown string) string {
 	var h agentMarkdownLinkHarden
 	return h.write(markdown) + h.flush()
@@ -36,6 +38,7 @@ type agentMarkdownLinkHarden struct {
 	pendingBang bool
 	pendingLess bool
 	link        markdownLinkPending
+	angle       markdownAngleLinkPending
 }
 
 type markdownLinkPending struct {
@@ -48,6 +51,15 @@ type markdownLinkPending struct {
 	original     strings.Builder
 	label        strings.Builder
 	destination  strings.Builder
+}
+
+type markdownAngleLinkPending struct {
+	active   bool
+	escaped  bool
+	sawPipe  bool
+	original strings.Builder
+	url      strings.Builder
+	label    strings.Builder
 }
 
 type markdownLinkState int
@@ -69,6 +81,12 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 		c := markdown[i]
 
 	reprocess:
+		if h.angle.active {
+			if !h.consumeAngleLinkByte(&out, c) {
+				goto reprocess
+			}
+			continue
+		}
 		if h.link.state != markdownLinkNone {
 			if !h.consumeLinkByte(&out, c) {
 				goto reprocess
@@ -113,6 +131,11 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 			out.WriteByte(c)
 			return
 		}
+		if isVisibleAngleLinkStartAfterLess(remaining) {
+			h.startAngleLink()
+			_ = h.consumeAngleLinkByte(out, c)
+			return
+		}
 		out.WriteByte('<')
 	}
 	if c == '\\' {
@@ -127,6 +150,10 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 	if c == '<' && isRawHTMLTagStart(remaining) {
 		out.WriteByte('\\')
 		out.WriteByte(c)
+		return
+	}
+	if c == '<' && isVisibleAngleLinkStart(remaining) {
+		h.startAngleLink()
 		return
 	}
 	switch c {
@@ -164,6 +191,10 @@ func (h *agentMarkdownLinkHarden) flush() string {
 	if h.link.state != markdownLinkNone {
 		out.WriteString(h.link.original.String())
 		h.link = markdownLinkPending{}
+	}
+	if h.angle.active {
+		out.WriteString(escapeMarkdownAngleOriginal(h.angle.original.String(), h.angle.sawPipe))
+		h.angle = markdownAngleLinkPending{}
 	}
 	return out.String()
 }
@@ -291,6 +322,71 @@ func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
 		out.WriteString(h.link.original.String())
 	}
 	h.link = markdownLinkPending{}
+}
+
+func (h *agentMarkdownLinkHarden) startAngleLink() {
+	h.angle = markdownAngleLinkPending{active: true}
+	h.angle.original.WriteByte('<')
+}
+
+func (h *agentMarkdownLinkHarden) consumeAngleLinkByte(out *strings.Builder, c byte) bool {
+	if h.angle.original.Len() > maxAgentMarkdownLinkBytes {
+		out.WriteString(escapeMarkdownAngleOriginal(h.angle.original.String(), h.angle.sawPipe))
+		h.angle = markdownAngleLinkPending{}
+		return false
+	}
+	h.angle.original.WriteByte(c)
+	if h.angle.escaped {
+		h.writeAnglePart(c)
+		h.angle.escaped = false
+		return true
+	}
+	switch c {
+	case '\\':
+		h.writeAnglePart(c)
+		h.angle.escaped = true
+	case '|':
+		if h.angle.sawPipe {
+			h.angle.label.WriteByte(c)
+			return true
+		}
+		h.angle.sawPipe = true
+	case '>':
+		h.emitAngleLink(out)
+	default:
+		h.writeAnglePart(c)
+	}
+	return true
+}
+
+func (h *agentMarkdownLinkHarden) writeAnglePart(c byte) {
+	if h.angle.sawPipe {
+		h.angle.label.WriteByte(c)
+		return
+	}
+	h.angle.url.WriteByte(c)
+}
+
+func (h *agentMarkdownLinkHarden) emitAngleLink(out *strings.Builder) {
+	if !h.angle.sawPipe {
+		out.WriteString(h.angle.original.String())
+		h.angle = markdownAngleLinkPending{}
+		return
+	}
+	label := strings.TrimSpace(hardenAgentMarkdown(h.angle.label.String()))
+	url := strings.TrimSpace(h.angle.url.String())
+	switch {
+	case label != "" && url != "":
+		out.WriteString(label)
+		out.WriteString(" (")
+		out.WriteString(url)
+		out.WriteByte(')')
+	case url != "":
+		out.WriteString(url)
+	default:
+		out.WriteString(h.angle.original.String())
+	}
+	h.angle = markdownAngleLinkPending{}
 }
 
 func (h *agentMarkdownLinkHarden) emitBacktickRun(out *strings.Builder) {
@@ -481,6 +577,14 @@ func isRawHTMLTagStart(s string) bool {
 	return isRawHTMLTagStartAfterLess(s[1:])
 }
 
+func isVisibleAngleLinkStart(s string) bool {
+	return len(s) >= 2 && s[0] == '<' && isVisibleAngleLinkStartAfterLess(s[1:])
+}
+
+func isVisibleAngleLinkStartAfterLess(s string) bool {
+	return hasVisibleAutolinkScheme(s)
+}
+
 func isRawHTMLTagStartAfterLess(s string) bool {
 	if s == "" {
 		return false
@@ -521,6 +625,13 @@ func looksLikeVisibleEmailAutolink(s string) bool {
 
 func isASCIILetter(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func escapeMarkdownAngleOriginal(original string, sawPipe bool) string {
+	if sawPipe && strings.HasPrefix(original, "<") {
+		return "\\" + original
+	}
+	return original
 }
 
 func escapeMarkdownLinkOriginal(original string) string {

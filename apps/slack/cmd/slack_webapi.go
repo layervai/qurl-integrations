@@ -472,7 +472,7 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		if !isSlackMarkdownBlockFallbackError(err) {
 			return err
 		}
-		slog.Debug("Slack rejected markdown block; retrying with markdown_text", "error", err)
+		slog.Info("Slack rejected markdown block; retrying with markdown_text", "error", err)
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
