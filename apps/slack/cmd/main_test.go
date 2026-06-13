@@ -34,6 +34,7 @@ func newFakeProvider() *auth.DDBProvider {
 }
 
 const validStateSecret = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
+const defaultSlackBotScopesCSV = "commands,chat:write,im:write"
 
 var oauthEnvKeys = []string{
 	"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET", "AUTH0_AUDIENCE",
@@ -503,7 +504,7 @@ func TestBuildSlackInstallConfigHappyPath(t *testing.T) {
 	if string(cfg.StateSecret) != validStateSecret {
 		t.Fatalf("StateSecret not threaded through")
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands" {
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
 		t.Fatalf("default bot scopes = %v", cfg.BotScopes)
 	}
 	if cfg.TokenStore == nil {
@@ -553,7 +554,7 @@ func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands,chat:write,im:write" {
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
 		t.Fatalf("custom scopes = %v", cfg.BotScopes)
 	}
 }
@@ -566,13 +567,13 @@ func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 // slackinstall package.
 func TestBuildSlackInstallConfigStripsViewsWriteOverride(t *testing.T) {
 	env := validSlackInstallEnv()
-	env[envSlackBotScopes] = "commands,Views:Write"
+	env[envSlackBotScopes] = "commands,chat:write,im:write,Views:Write"
 	applySlackInstallEnv(t, env)
 	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v, want config load to succeed", ok, err)
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands" {
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
 		t.Fatalf("scopes = %v, want views:write stripped", cfg.BotScopes)
 	}
 }

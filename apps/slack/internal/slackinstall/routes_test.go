@@ -21,7 +21,7 @@ const testStateSecret = "0123456789abcdef0123456789abcdef"
 const (
 	testClientID        = "111.222"
 	testClientSecret    = "secret"
-	testScopeCSV        = "commands"
+	testScopeCSV        = "commands,chat:write,im:write"
 	testWorkspaceID     = "T_WORKSPACE"
 	testEnterpriseID    = "E_GRID"
 	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
@@ -57,7 +57,7 @@ func testConfig(store *fakeTokenStore) Config {
 		ClientSecret: testClientSecret,
 		SlackBaseURL: "https://slack-bot.example",
 		StateSecret:  []byte(testStateSecret),
-		BotScopes:    []string{botScopeCommands},
+		BotScopes:    DefaultBotScopes(),
 		TokenStore:   store,
 		Now:          func() time.Time { return time.Unix(1800000000, 0).UTC() },
 	}
@@ -74,17 +74,20 @@ func testStateHTTPCookie(value string) *http.Cookie {
 	}
 }
 
-func TestConfigValidateRequiresCommandsScope(t *testing.T) {
+func TestConfigValidateRequiresDefaultBotScopes(t *testing.T) {
 	cfg := testConfig(&fakeTokenStore{})
-	// `commands` alone is sufficient (see DefaultBotScopes for why).
-	cfg.BotScopes = []string{botScopeCommands}
+	cfg.BotScopes = DefaultBotScopes()
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate error = %v, want nil for commands-only scopes", err)
+		t.Fatalf("Validate error = %v, want nil for default scopes", err)
 	}
-	// A scope set missing `commands` is still rejected.
-	cfg.BotScopes = []string{"chat:write"}
+	// Missing any default scope is rejected.
+	cfg.BotScopes = []string{botScopeChatWrite, botScopeIMWrite}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeCommands) {
 		t.Fatalf("Validate error = %v, want missing commands", err)
+	}
+	cfg.BotScopes = []string{botScopeCommands, botScopeChatWrite}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), botScopeIMWrite) {
+		t.Fatalf("Validate error = %v, want missing im:write", err)
 	}
 }
 
@@ -587,7 +590,7 @@ func TestCallbackRejectsMissingRequiredSlackScopes(t *testing.T) {
 	}
 	slack := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Grant a scope set that omits the required `commands` scope, so
+		// Grant a scope set that omits required default scopes, so
 		// missingRequiredScopes flags it and the callback rejects with 422.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":                 true,
