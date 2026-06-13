@@ -1624,16 +1624,16 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
 		return
 	}
+	if h.cfg.AuthProvider == nil {
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
 	// AdminStore==nil mirrors setup's sandbox/no-DDB path; production wires
 	// the owner store and gates uninstall to the recorded workspace owner.
-	if h.cfg.AdminStore != nil {
-		if !h.requireUninstallOwner(w, teamID, userID) {
-			return
-		}
-	}
-	if h.cfg.AuthProvider == nil {
-		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+	if h.cfg.AdminStore == nil {
+		slog.Warn("/qurl uninstall: owner gate skipped because AdminStore is not configured", "team_id", teamID, "caller_user_id", userID)
+	} else if !h.requireUninstallOwner(w, teamID, userID) {
 		return
 	}
 
@@ -1652,6 +1652,7 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
 		return
 	}
+	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID)
 	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. Run `/qurl setup <email>` to reconnect it.")
 }
 
