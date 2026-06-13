@@ -382,7 +382,7 @@ func (e *markdownReferenceDefinitionEscaper) consumeReferenceDefinitionByte(out 
 			}
 			e.pending.state = markdownReferenceDefinitionAfterLabel
 		case '\n':
-			out.WriteString(e.pending.original.String())
+			out.WriteString(escapeMarkdownLinkOriginal(e.pending.original.String()))
 			e.pending = markdownReferenceDefinitionPending{}
 		}
 		return true

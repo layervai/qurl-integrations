@@ -23,6 +23,15 @@ func TestHardenAgentMarkdown_EscapesReferenceDefinitions(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_EscapesMultilineReferenceDefinitions(t *testing.T) {
+	t.Parallel()
+	in := "Use [the billing link][click\nhere].\n\n[click\nhere]: https://evil.example/login\nDone."
+	want := "Use [the billing link][click\nhere].\n\n\\[click\nhere]: https://evil.example/login\nDone."
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestHardenAgentMarkdown_InlineLinkAtLineStartStillRevealsDestination(t *testing.T) {
 	t.Parallel()
 	in := "[Open billing](https://evil.example/login) now."
@@ -89,6 +98,19 @@ func TestAgentMarkdownLinkHarden_HandlesChunkSplitReferenceDefinitions(t *testin
 		h.write("\nDone.") +
 		h.flush()
 	want := "Use [the billing link][1].\n\n\\[1]: https://evil.example/login\nDone."
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_HandlesChunkSplitMultilineReferenceDefinitions(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Use [the billing link][click\nhere].\n\n[click") +
+		h.write("\nhere]: https://evil.example/login") +
+		h.write("\nDone.") +
+		h.flush()
+	want := "Use [the billing link][click\nhere].\n\n\\[click\nhere]: https://evil.example/login\nDone."
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
 	}

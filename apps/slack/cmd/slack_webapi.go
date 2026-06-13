@@ -526,6 +526,8 @@ func trimMarkdownFallbackOrderedListMarker(line string) string {
 	return line[i+2:]
 }
 
+// Slack rejects markdown_text paired with text/blocks, so this compatibility
+// retry intentionally omits the literal notification/screen-reader fallback.
 func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
 	return json.Marshal(struct {
 		Channel      string `json:"channel"`
