@@ -41,7 +41,7 @@ const (
 	wantNonPinnedImageErr       = "must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest"
 	wantLatestDigestImageErr    = "digest pins must not include a latest tag"
 	wantDigestLowercaseImageErr = "digest must use 64 lowercase hex characters after sha256:"
-	wantMalformedRefImageErr    = "image references must use a full lowercase image name with a single non-empty, non-latest tag"
+	wantMalformedRefImageErr    = "image references must use image@sha256:<64 lowercase hex> with a full lowercase image name"
 	wantAmbiguousRefImageErr    = "slashless registry references must include a repository path"
 	wantMalformedDigestImageErr = "digest references must use image@sha256:<64 lowercase hex> with a full image name"
 )

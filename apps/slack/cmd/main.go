@@ -1028,7 +1028,9 @@ func readMaxConcurrentFollowupGateAsync() int {
 // readTunnelImageConfig makes the fallback policy explicit at startup. The
 // handler still treats an empty TunnelImage as "render the dev/sandbox fallback"
 // so focused tests can exercise that branch, but production cmd/main.go only
-// passes empty after an operator opt-in.
+// passes empty after an operator opt-in. The pinning checks stay here because
+// they are deploy-time policy; internal renderers keep only snippet-safety
+// validation for direct Config construction in tests.
 func readTunnelImageConfig() (string, error) {
 	image := strings.TrimSpace(os.Getenv(envQURLConnectorImage))
 	if err := internal.ValidateTunnelImageRef(image); err != nil {
@@ -1052,7 +1054,7 @@ func readTunnelImageConfig() (string, error) {
 			)
 		case tunnelImageMalformedReference:
 			return "", fmt.Errorf(
-				"%s image references must use a full lowercase image name with a single non-empty, non-latest tag, or image@sha256:<64 lowercase hex> digest; %s",
+				"%s image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag; %s",
 				envQURLConnectorImage, connectorImageFallbackHint,
 			)
 		case tunnelImageAmbiguousReference:
@@ -1113,6 +1115,13 @@ const (
 // pinned while still lacking a usable image name.
 func classifyTunnelImagePin(image string) tunnelImagePinStatus {
 	name, digest, hasDigest := strings.Cut(image, "@")
+	if hasDigest {
+		return classifyDigestImagePin(name, digest)
+	}
+	return classifyTaggedImagePin(name)
+}
+
+func classifyDigestImagePin(name, digest string) tunnelImagePinStatus {
 	lastSlash := strings.LastIndex(name, "/")
 	lastColon := strings.LastIndex(name, ":")
 	nameSuffix := name[lastSlash+1:]
@@ -1120,44 +1129,49 @@ func classifyTunnelImagePin(image string) tunnelImagePinStatus {
 	hasEmptyNameBeforeTag := lastColon == lastSlash+1
 	hasEmptyTag := strings.HasSuffix(nameSuffix, ":")
 	hasMultiColonTag := strings.Count(nameSuffix, ":") > 1
-	hasLatestTag := imageNameHasLatestTag(name)
-	if hasDigest {
-		if name == "" {
-			return tunnelImageMalformedDigest
-		}
-		if hasEmptyNameBeforeTag {
-			return tunnelImageMalformedReference
-		}
-		if status := classifyDigestRepositoryName(repositoryName); status != tunnelImagePinned {
-			return status
-		}
-		// The digest controls image resolution, but reject
-		// repo:latest@sha256:<hex> anyway so customer-facing snippets never
-		// visibly advertise the floating latest tag.
-		if hasLatestTag {
-			return tunnelImageLatestDigest
-		}
-		if hasEmptyTag || hasMultiColonTag {
-			return tunnelImageMalformedReference
-		}
-		switch classifySHA256ImageDigest(digest) {
-		case sha256DigestValid:
-			return tunnelImagePinned
-		case sha256DigestUppercaseHex:
-			return tunnelImageUppercaseDigest
-		case sha256DigestInvalid:
-			return tunnelImageMalformedDigest
-		}
-		// Future sha256DigestStatus values must fail closed.
+
+	if name == "" {
 		return tunnelImageMalformedDigest
 	}
+	if hasEmptyNameBeforeTag {
+		return tunnelImageMalformedReference
+	}
+	if status := classifyDigestRepositoryName(repositoryName); status != tunnelImagePinned {
+		return status
+	}
+	// The digest controls image resolution, but reject
+	// repo:latest@sha256:<hex> anyway so customer-facing snippets never
+	// visibly advertise the floating latest tag.
+	if imageNameHasLatestTag(name) {
+		return tunnelImageLatestDigest
+	}
+	if hasEmptyTag || hasMultiColonTag {
+		return tunnelImageMalformedReference
+	}
+	switch classifySHA256ImageDigest(digest) {
+	case sha256DigestValid:
+		return tunnelImagePinned
+	case sha256DigestUppercaseHex:
+		return tunnelImageUppercaseDigest
+	case sha256DigestInvalid:
+		return tunnelImageMalformedDigest
+	}
+	// Future sha256DigestStatus values must fail closed.
+	return tunnelImageMalformedDigest
+}
+
+func classifyTaggedImagePin(name string) tunnelImagePinStatus {
+	lastSlash := strings.LastIndex(name, "/")
+	lastColon := strings.LastIndex(name, ":")
+
 	if lastColon <= lastSlash {
 		return tunnelImageFloating
 	}
 	// Non-digest refs surface malformed tag syntax before latest-specific
 	// guidance. Digest refs check latest first so repo:latest@sha256:... never
 	// renders a customer snippet that visibly advertises :latest.
-	if hasMultiColonTag {
+	nameSuffix := name[lastSlash+1:]
+	if strings.Count(nameSuffix, ":") > 1 {
 		return tunnelImageMalformedReference
 	}
 	if lastSlash < 0 && looksLikeRegistryHost(name[:lastColon]) {
@@ -1167,15 +1181,16 @@ func classifyTunnelImagePin(image string) tunnelImagePinStatus {
 	if tag == "" {
 		return tunnelImageMalformedReference
 	}
-	if hasLatestTag {
+	if imageNameHasLatestTag(name) {
 		return tunnelImageFloating
 	}
+	repositoryName := imageRepositoryName(name, lastSlash, lastColon)
 	// Avoid treating bare digest-looking sha256:<hex> input as an image named
 	// "sha256" with a tag.
 	if strings.EqualFold(repositoryName, "sha256") {
 		return tunnelImageMalformedDigest
 	}
-	if hasEmptyNameBeforeTag || !imageNameHasRepository(repositoryName) {
+	if lastColon == lastSlash+1 || !imageNameHasRepository(repositoryName) {
 		return tunnelImageMalformedReference
 	}
 	// Non-latest tags are trusted release labels by operator convention; use
