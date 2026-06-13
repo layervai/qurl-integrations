@@ -794,10 +794,8 @@ func renderRebindRefused(w http.ResponseWriter, teamID string) {
 // Replaces bare http.Error callback failures with human-readable, actionable
 // guidance instead of a blank page with raw text. Same defense-in-depth
 // headers as renderRebindRefused.
-func renderOAuthErrorPage(w http.ResponseWriter, status int, heading string, messages ...string) {
-	if len(messages) == 0 {
-		messages = []string{""}
-	}
+func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string, rest ...string) {
+	messages := append([]string{message}, rest...)
 	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(status)
 	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Messages: messages}); err != nil {
