@@ -604,7 +604,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			waiterErr <- waiter.call.err
 		}()
 
-		_, err := p.fetchAndFinishAPIKeyLookup(context.Background(), testTeamID, owner.call, now, owner.generation, false)
+		_, err := p.fetchAndFinishAPIKeyLookup(context.Background(), testTeamID, owner.call, owner.generation, false)
 		if !errors.Is(err, ownerErr) {
 			t.Fatalf("owner err = %v, want %v", err, ownerErr)
 		}
@@ -655,7 +655,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := p.fetchAndFinishAPIKeyLookup(ctx, testTeamID, owner.call, now, owner.generation, false)
+		_, err := p.fetchAndFinishAPIKeyLookup(ctx, testTeamID, owner.call, owner.generation, false)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("owner err = %v, want context.Canceled", err)
 		}
@@ -743,7 +743,6 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			waiterResult <- got
 		}()
 
-		time.Sleep(10 * time.Millisecond)
 		cancelOwner()
 		select {
 		case err := <-ownerErr:

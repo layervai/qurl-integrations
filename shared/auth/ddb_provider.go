@@ -142,7 +142,7 @@ type DDBProvider struct {
 
 	// Cache successful APIKey lookups at the DDB/decrypt boundary so every
 	// long-lived consumer avoids repeat KMS Decrypt calls during normal slash
-	// command bursts. This mirrors newWorkspaceSlackTokenLookupWithInvalidation:
+	// command bursts. This mirrors the Slack bot-token cache pattern:
 	// per-workspace in-flight fills, generation-guarded invalidation, and inline
 	// expiry sweeps using Now instead of a background janitor. The cache is
 	// process-local: rotation or disconnect on one serving instance cannot evict
@@ -164,10 +164,11 @@ type DDBProvider struct {
 	apiKeyCache map[string]*cachedAPIKey
 
 	// The mutex coordinates the cache with in-flight fills and invalidation
-	// generations. Generation entries are retained after invalidation so a
-	// detached stale fill cannot observe a reset-to-zero generation and cache an
-	// old key; the map only grows for workspaces that rotate or disconnect in
-	// this process, matching the sibling Slack token lookup.
+	// generations. Generation entries are retained after invalidation even after
+	// an in-flight slot is deleted: that slot deletion detaches the old owner,
+	// which may still finish later, so resetting the generation to zero could let
+	// it cache an old key. The map only grows for workspaces that rotate or
+	// disconnect in this process, matching the sibling Slack token lookup.
 	apiKeyCacheMu         sync.Mutex
 	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
 	apiKeyCacheGeneration map[string]uint64
@@ -341,7 +342,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 			}
 		}
 
-		return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, now, start.generation, start.consistentRead)
+		return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, start.generation, start.consistentRead)
 	}
 }
 
@@ -397,7 +398,7 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 	return apiKeyLookupStart{call: call, owner: true, generation: generation, consistentRead: consistentRead}
 }
 
-func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, now time.Time, generation uint64, consistentRead bool) (string, error) {
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, generation uint64, consistentRead bool) (string, error) {
 	result := apiKeyLookupResult{}
 	finished := false
 	defer func() {
