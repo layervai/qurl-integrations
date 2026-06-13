@@ -1150,9 +1150,10 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // caller treats delivery as failed.
 //
 // If Slack actually persists the blocks post but the client reports failure
-// (e.g. a timeout), the text retry posts a second copy. Both carry the same
-// still-valid key and the key is not revoked, so this is benign — at worst the
-// operator sees two ephemeral install messages, never a leaked or stale key.
+// (e.g. a timeout), the text retry posts a second copy. Neither copy carries the
+// bootstrap key, and the already-DM'd key is not revoked, so this is benign: at
+// worst the operator sees two ephemeral install messages, never a leaked or
+// stale key.
 func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) bool {
 	if blocks, ok := installMessageBlocks(msg); ok {
 		if h.postResponseBlocks(log, responseURL, msg, blocks) {

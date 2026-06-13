@@ -1119,8 +1119,8 @@ func TestConfirm_ProtectConnectorOpensModalOnApprove(t *testing.T) {
 		t.Fatal("protect-connector approve must claim (consume-once before open)")
 	}
 	// Key-delivery privacy: meta.UserID must be the approving admin so the modal's
-	// same-user-submit gate aligns the ephemeral key target to the approver; the
-	// channel must be the (mismatch-guarded) proposing channel.
+	// same-user-submit gate aligns the DM target to the approver; the channel must
+	// be the (mismatch-guarded) proposing channel.
 	meta := modalMeta(t, ov.view)
 	if meta.UserID != "Uadmin" || meta.ChannelID != "C1" || meta.ResponseURL != hc.respURL {
 		t.Fatalf("modal metadata = %+v, want UserID=Uadmin ChannelID=C1 ResponseURL=card", meta)
