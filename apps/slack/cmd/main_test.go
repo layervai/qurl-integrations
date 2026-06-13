@@ -640,6 +640,7 @@ func applyEnv(t *testing.T, kvs map[string]string) {
 		t.Setenv(k, kvs[k])
 	}
 	t.Setenv("AUTH0_EMAIL_CONNECTION", kvs["AUTH0_EMAIL_CONNECTION"])
+	t.Setenv(envQURLBindingTTLContract, kvs[envQURLBindingTTLContract])
 }
 
 func applySlackInstallEnv(t *testing.T, kvs map[string]string) {
@@ -681,6 +682,101 @@ func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	}
 	if cfg.IDTokenVerifier == nil {
 		t.Error("IDTokenVerifier should be wired when the stubbed factory returns nil err")
+	}
+	if cfg.SetupBindingReplayWindowHours != oauth.DefaultSetupBindingReplayWindowHours {
+		t.Errorf("SetupBindingReplayWindowHours = %d, want default %d", cfg.SetupBindingReplayWindowHours, oauth.DefaultSetupBindingReplayWindowHours)
+	}
+}
+
+func TestBuildOAuthConfigSetupBindingReplayWindowOverride(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env[envQURLBindingTTLContract] = "12h"
+	applyEnv(t, env)
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true with all required env vars set")
+	}
+	if cfg.SetupBindingReplayWindowHours != 12 {
+		t.Errorf("SetupBindingReplayWindowHours = %d, want 12", cfg.SetupBindingReplayWindowHours)
+	}
+}
+
+func TestBuildOAuthConfigRejectsInvalidSetupBindingReplayWindow(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env[envQURLBindingTTLContract] = "90m"
+	applyEnv(t, env)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+	if ok {
+		t.Fatal("expected ok=false with non-canonical binding TTL contract")
+	}
+	if err == nil || !strings.Contains(err.Error(), "canonical Nh form") {
+		t.Fatalf("buildOAuthConfig() err = %v, want canonical-duration validation error", err)
+	}
+}
+
+func TestReadSetupBindingReplayWindowHours(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		unset       bool
+		want        int
+		wantErrText string
+	}{
+		{name: "unset defaults to upstream contract", unset: true, want: oauth.DefaultSetupBindingReplayWindowHours},
+		{name: "whole hour override", raw: "12h", want: 12},
+		{name: "trimmed whole hour override", raw: " 48h ", want: 48},
+		{name: "malformed", raw: "24", wantErrText: "canonical Nh form"},
+		{name: "zero", raw: "0h", wantErrText: "canonical Nh form"},
+		{name: "leading zero", raw: "01h", wantErrText: "canonical Nh form"},
+		{name: "leading plus", raw: "+24h", wantErrText: "canonical Nh form"},
+		{name: "negative", raw: "-1h", wantErrText: "canonical Nh form"},
+		{name: "minutes unit rejected", raw: "90m", wantErrText: "canonical Nh form"},
+		{name: "compound duration rejected", raw: "2h0m0s", wantErrText: "canonical Nh form"},
+		{name: "too large", raw: "999999999999999999999999999999999999h", wantErrText: "too large"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unset {
+				// t.Setenv cannot express a genuinely absent variable.
+				// Keep this subtest non-parallel while it restores the
+				// process env manually.
+				oldValue, hadOldValue := os.LookupEnv(envQURLBindingTTLContract)
+				if err := os.Unsetenv(envQURLBindingTTLContract); err != nil {
+					t.Fatalf("unset %s: %v", envQURLBindingTTLContract, err)
+				}
+				t.Cleanup(func() {
+					if hadOldValue {
+						if err := os.Setenv(envQURLBindingTTLContract, oldValue); err != nil {
+							t.Fatalf("restore %s: %v", envQURLBindingTTLContract, err)
+						}
+						return
+					}
+					if err := os.Unsetenv(envQURLBindingTTLContract); err != nil {
+						t.Fatalf("restore unset %s: %v", envQURLBindingTTLContract, err)
+					}
+				})
+			} else {
+				t.Setenv(envQURLBindingTTLContract, tc.raw)
+			}
+			got, err := readSetupBindingReplayWindowHours()
+			if tc.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("readSetupBindingReplayWindowHours() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readSetupBindingReplayWindowHours() err = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("readSetupBindingReplayWindowHours() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 

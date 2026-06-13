@@ -39,6 +39,7 @@ const (
 	listenAddr                    = ":8080"
 	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
+	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -920,6 +921,10 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		return oauth.Config{}, false, fmt.Errorf("%w: got %d bytes, want >= %d",
 			errOAuthStateSecretTooShort, len(stateSecret), minStateSecretBytes)
 	}
+	setupBindingReplayWindowHours, err := readSetupBindingReplayWindowHours()
+	if err != nil {
+		return oauth.Config{}, false, err
+	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch
 	// (bounded inside NewJWKSVerifier). The callback uses the verifier
@@ -947,19 +952,20 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	}
 
 	return oauth.Config{
-		Auth0Domain:          domain,
-		Auth0ClientID:        clientID,
-		Auth0ClientSecret:    clientSecret,
-		Auth0Audience:        audience,
-		Auth0EmailConnection: emailConnection,
-		SlackBaseURL:         baseURL,
-		OAuthStateSecret:     []byte(stateSecret),
-		Provider:             provider,
-		IDTokenVerifier:      verifier,
-		Minter:               &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
-		AsyncTracker:         tracker,
-		AdminStore:           adminStore,
-		BindClassifyError:    classifyBindError,
+		Auth0Domain:                   domain,
+		Auth0ClientID:                 clientID,
+		Auth0ClientSecret:             clientSecret,
+		Auth0Audience:                 audience,
+		Auth0EmailConnection:          emailConnection,
+		SlackBaseURL:                  baseURL,
+		SetupBindingReplayWindowHours: setupBindingReplayWindowHours,
+		OAuthStateSecret:              []byte(stateSecret),
+		Provider:                      provider,
+		IDTokenVerifier:               verifier,
+		Minter:                        &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
+		AsyncTracker:                  tracker,
+		AdminStore:                    adminStore,
+		BindClassifyError:             classifyBindError,
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
@@ -1127,6 +1133,35 @@ func readMaxConcurrentFollowupAsync() int {
 // from QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC.
 func readMaxConcurrentFollowupGateAsync() int {
 	return readPoolSizeEnv("QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC")
+}
+
+// readSetupBindingReplayWindowHours mirrors qurl-service's binding
+// idempotency TTL for operator-facing setup retry logs. Empty preserves the
+// upstream default; an explicit value must use the canonical Nh form because
+// the emitted event fields are named *_hours.
+func readSetupBindingReplayWindowHours() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(envQURLBindingTTLContract))
+	if raw == "" {
+		return oauth.DefaultSetupBindingReplayWindowHours, nil
+	}
+	invalidReplayWindowErr := fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)
+	hoursText, ok := strings.CutSuffix(raw, "h")
+	if !ok || hoursText == "" || strings.HasPrefix(hoursText, "0") {
+		return 0, invalidReplayWindowErr
+	}
+	for i := range hoursText {
+		if hoursText[i] < '0' || hoursText[i] > '9' {
+			return 0, invalidReplayWindowErr
+		}
+	}
+	// No upper cap: qurl-service owns the replay TTL contract, and this
+	// value only feeds operator-facing log fields, so a smaller
+	// Slack-only limit could become another drift source.
+	hours, err := strconv.Atoi(hoursText)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is too large to fit in an hour value", envQURLBindingTTLContract, raw)
+	}
+	return hours, nil
 }
 
 // readTunnelImageConfig makes the fallback policy explicit at startup. The
