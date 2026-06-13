@@ -2587,6 +2587,81 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	}
 }
 
+func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits, revokeHits int
+	var idempotencyKeys []string
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+		apiKeyHits++
+		idempotencyKeys = append(idempotencyKeys, r.Header.Get(client.HeaderIdempotencyKey))
+		keyID := fmt.Sprintf("key_retry_%d", apiKeyHits)
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      keyID,
+			testKeyAPIKey:     fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_retry_1", func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.TunnelImage = testTunnelImageRef
+	var dmCalls int
+	var dmTexts []string
+	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
+		dmCalls++
+		if dmCalls == 1 {
+			return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+		}
+		dmTexts = append(dmTexts, text)
+		return nil
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	firstAttempt := fixedNow
+	secondAttempt := firstAttempt.Add(time.Second)
+	args := &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, args, firstAttempt)
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, args, secondAttempt)
+
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[1] == "" {
+		t.Fatalf("idempotency keys = %v, want two non-empty keys", idempotencyKeys)
+	}
+	if idempotencyKeys[0] == idempotencyKeys[1] {
+		t.Fatalf("retry reused revoked-key idempotency key %q", idempotencyKeys[0])
+	}
+	if len(dmTexts) != 1 || !strings.Contains(dmTexts[0], "lv_live_retry_bootstrap_2") {
+		t.Fatalf("successful retry DMs = %+v, want fresh second bootstrap key", dmTexts)
+	}
+}
+
 // TestTunnelInstallFallsBackToTextWhenBlocksRejected fences the delivery safety
 // net: if Slack rejects the Block Kit install post (e.g. an over-large
 // rich_text payload) but accepts a plain-text post, postInstallInstructions
@@ -2672,14 +2747,18 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	}
 }
 
-func TestTunnelBootstrapIdempotencyKeyMatchesTypedAndModalPaths(t *testing.T) {
+func TestTunnelBootstrapIdempotencyKeyUsesExactAttemptTime(t *testing.T) {
 	t.Parallel()
 
 	setupStartedAt := fixedNow
-	typedPathKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
-	modalPathKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
-	if typedPathKey == "" || typedPathKey != modalPathKey {
-		t.Fatalf("typed key = %q, modal key = %q, want same non-empty key for same setup start", typedPathKey, modalPathKey)
+	first := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
+	sameAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
+	if first == "" || first != sameAttempt {
+		t.Fatalf("first key = %q, same-attempt key = %q, want same non-empty key", first, sameAttempt)
+	}
+	nextAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt.Add(time.Second))
+	if nextAttempt == first {
+		t.Fatalf("next-attempt key matched first key %q", first)
 	}
 }
 
@@ -2738,9 +2817,9 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v, want same non-empty retry key", idempotencyKeys)
 	}
-	nextWindowKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now.Add(tunnelInstallModalTTL))
-	if nextWindowKey == idempotencyKeys[0] {
-		t.Fatal("next-window tunnel bootstrap idempotency key matched current-window key")
+	nextAttemptKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now.Add(time.Second))
+	if nextAttemptKey == idempotencyKeys[0] {
+		t.Fatal("next-attempt tunnel bootstrap idempotency key matched current-attempt key")
 	}
 }
 

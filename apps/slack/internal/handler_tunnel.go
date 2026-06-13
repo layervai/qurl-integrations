@@ -661,26 +661,13 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
 }
 
-func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
-	// Bucket every install path on the modal TTL window, not the API key TTL.
-	// Modal submissions pass the modal creation timestamp so duplicate submits
-	// for one still-valid modal cannot shift buckets just because the async
-	// worker runs later. Typed slash-command retries pass the command time; if a
-	// typed retry crosses the same 25-minute bucket boundary it may mint a fresh
-	// key, which is acceptable because no Slack modal replay contract exists for
-	// that path.
-	// User-visible consequence: two submissions for the same still-valid modal
-	// collapse onto one bootstrap key, while retries after the bucket boundary
-	// intentionally receive a fresh key.
-	// qurl-service must replay the plaintext key on same-key idempotent
-	// bootstrap creates; upstream integration coverage is tracked in
-	// layervai/qurl-service#775.
-	windowSeconds := int64(tunnelInstallModalTTL / time.Second)
-	if windowSeconds <= 0 {
-		windowSeconds = 1
-	}
-	bucket := now.Unix() / windowSeconds
-	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%d", slug, bucket))
+func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, attemptStartedAt time.Time) string {
+	// Key on the exact install attempt instead of a broad modal-TTL bucket. A
+	// retried typed command after a DM-delivery revoke must not replay the
+	// just-revoked key, while duplicate submissions from the same modal still
+	// share the modal-created timestamp that handleTunnelInstallSubmission passes.
+	attemptID := attemptStartedAt.UTC().Format(time.RFC3339Nano)
+	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%s", slug, attemptID))
 }
 
 func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) (string, error) {
