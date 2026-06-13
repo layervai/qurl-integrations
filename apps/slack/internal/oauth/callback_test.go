@@ -319,24 +319,42 @@ func assertOAuthErrorPage(t *testing.T, rec *httptest.ResponseRecorder, heading 
 	assertSecurityHeaders(t, rec)
 	assertLayerVOAuthChrome(t, rec)
 	body := rec.Body.String()
-	if !strings.Contains(body, "<title>qURL setup</title>") {
-		t.Errorf("body should render the styled qURL setup page; got: %s", body)
+	wantTitle := "<title>" + html.EscapeString(heading) + "</title>"
+	if !strings.Contains(body, wantTitle) {
+		t.Errorf("body missing error title %q; got: %s", wantTitle, body)
 	}
 	if escapedHeading := html.EscapeString(heading); !strings.Contains(body, escapedHeading) {
 		t.Errorf("body missing heading %q; got: %s", heading, body)
+	}
+	// Headings, titles, and slash-command literals stay unmarked; each page
+	// should carry qURL™ exactly once in body copy.
+	assertSingleQURLTrademark(t, body, "error page")
+}
+
+// assertSingleQURLTrademark is intentionally exact-count. Browser-facing setup
+// pages should mark the first body-copy mention only; headings, titles, and
+// slash-command literals stay plain qURL.
+func assertSingleQURLTrademark(t *testing.T, body, page string) {
+	t.Helper()
+	if count := strings.Count(body, "qURL™"); count != 1 {
+		t.Errorf("%s trademark count: got %d want 1 in body:\n%s", page, count, body)
 	}
 }
 
 func assertLayerVOAuthChrome(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	body := rec.Body.String()
+	// These exact markers intentionally lock the LayerV-branded shell. A future
+	// restyle should update the assertions alongside the CSS.
 	for _, want := range []string{
-		`<div class="brand"><span class="brand-mark"></span><span>LayerV</span></div>`,
+		`<meta name="viewport" content="width=device-width, initial-scale=1">`,
+		`<div class="brand">`,
+		`class="brand-mark" aria-hidden="true"`,
+		`<span>LayerV</span>`,
+		`aria-hidden="true"`,
 		`color-scheme:dark`,
-		`--bg:#030712`,
-		`--lime:#7ec800`,
-		`--cyan:#38bdf8`,
-		`background:radial-gradient`,
+		`--lime:`,
+		`--cyan:`,
 		`class="card"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -346,6 +364,15 @@ func assertLayerVOAuthChrome(t *testing.T, rec *httptest.ResponseRecorder) {
 	for _, oldColor := range []string{"#f9fafb", "#fef2f2", "#d1d5db", "#b91c1c"} {
 		if strings.Contains(body, oldColor) {
 			t.Errorf("body still contains old light-card palette color %s: %s", oldColor, body)
+		}
+	}
+}
+
+func TestOAuthPageCSSStaysStaticAndSelfContained(t *testing.T) {
+	lowerCSS := strings.ToLower(oauthPageCSS)
+	for _, forbidden := range []string{"{{", "</style", "url(", "@import", "@font-face", "data:"} {
+		if strings.Contains(lowerCSS, forbidden) {
+			t.Fatalf("oauthPageCSS must stay static and self-contained; found %q in:\n%s", forbidden, oauthPageCSS)
 		}
 	}
 }
@@ -365,6 +392,13 @@ func TestCallbackHappyPath(t *testing.T) {
 	if !strings.Contains(body, "qURL Connected") {
 		t.Errorf("success body missing headline: %s", body)
 	}
+	if !strings.Contains(body, "qURL™ is connected") {
+		t.Errorf("success body missing first body-copy trademark: %s", body)
+	}
+	if strings.Contains(body, "qURL™ Connected") {
+		t.Errorf("success headline should not include trademark: %s", body)
+	}
+	assertSingleQURLTrademark(t, body, "success")
 	// Lock auto-escape: KeyPrefix and Email must render verbatim (html/
 	// template is the load-bearing XSS defense; a refactor to text/template
 	// would silently drop the protection).
@@ -531,10 +565,10 @@ func TestOAuthErrorPageHTMLEscapesInterpolations(t *testing.T) {
 func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
 	rec := httptest.NewRecorder()
 	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish",
-		"First paragraph with <b>unsafe</b> markup.",
+		"qURL™ setup hit <b>unsafe</b> markup.",
 		"Second paragraph keeps the next action scannable.")
 	body := rec.Body.String()
-	first := "First paragraph with &lt;b&gt;unsafe&lt;/b&gt; markup."
+	first := "qURL™ setup hit &lt;b&gt;unsafe&lt;/b&gt; markup."
 	second := "Second paragraph keeps the next action scannable."
 	firstIdx := strings.Index(body, first)
 	secondIdx := strings.Index(body, second)
@@ -551,21 +585,46 @@ func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
 	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
 }
 
+func TestOAuthErrorPageMarksFirstBodyQURLTrademark(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusBadRequest, "qURL account mismatch",
+		"The signed-in qURL™ account did not match the email used to start setup.",
+		"Return to Slack and run /qurl setup <email> again with the same qURL account.")
+	body := rec.Body.String()
+	if !strings.Contains(body, "The signed-in qURL™ account did not match") {
+		t.Errorf("expected first body-copy qURL mention to carry trademark:\n%s", body)
+	}
+	if strings.Contains(body, "qURL™ account mismatch") {
+		t.Errorf("heading should not carry trademark:\n%s", body)
+	}
+	if strings.Contains(body, "/qurl™ setup") {
+		t.Errorf("slash-command literal should not carry trademark:\n%s", body)
+	}
+	assertSingleQURLTrademark(t, body, "error page")
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
+}
+
 func TestOAuthErrorPageSkipsBlankMessageParagraphs(t *testing.T) {
 	rec := httptest.NewRecorder()
-	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "Retry from Slack.")
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "  Retry qURL™ setup from Slack.  ")
 	body := rec.Body.String()
 	if strings.Contains(body, "<p> </p>") || strings.Contains(body, "<p></p>") {
 		t.Errorf("blank message paragraph rendered:\n%s", body)
 	}
-	if !strings.Contains(body, "Retry from Slack.") {
+	if !strings.Contains(body, "Retry qURL™ setup from Slack.") {
 		t.Errorf("expected non-blank rest message to render:\n%s", body)
 	}
+	if strings.Contains(body, "  Retry qURL™ setup from Slack.  ") {
+		t.Errorf("message paragraph should be trimmed before rendering:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
 
-	rec = httptest.NewRecorder()
+func TestOAuthErrorPageFallsBackWhenAllMessagesBlank(t *testing.T) {
+	rec := httptest.NewRecorder()
 	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "")
-	body = rec.Body.String()
-	if !strings.Contains(body, "Try again or contact your qURL administrator if this keeps happening.") {
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL™ setup could not finish. Try again or contact your qURL administrator if this keeps happening.") {
 		t.Errorf("expected fallback guidance for all-blank messages:\n%s", body)
 	}
 	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
@@ -906,7 +965,7 @@ func TestCallbackHandlesAuth0Error(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
-	assertOAuthErrorPage(t, rec, "Authorization was canceled")
+	assertOAuthErrorPage(t, rec, "Authorization didn't complete")
 }
 
 // TestCallbackRendersSuccessWhenVerifierFails locks the documented
@@ -1086,6 +1145,12 @@ func TestCallbackDMsConfiguredUser(t *testing.T) {
 	defer slackClient.mu.Unlock()
 	if slackClient.gotUser != testUserID {
 		t.Errorf("DM user: got %q want %q", slackClient.gotUser, testUserID)
+	}
+	if !strings.Contains(slackClient.gotText, "qURL™ is connected") {
+		t.Errorf("DM text missing first body-copy trademark: %q", slackClient.gotText)
+	}
+	if strings.Contains(slackClient.gotText, "qURL is connected") {
+		t.Errorf("DM text should not use unmarked first body-copy mention: %q", slackClient.gotText)
 	}
 }
 
@@ -1403,9 +1468,15 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 	// for a bare http.Error with status 409 would slip past the
 	// status-only check and leave operators staring at the default
 	// error string instead of the rebind-refused copy.
-	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
-		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", body)
 	}
+	if !strings.Contains(body, "connected to qURL™ under a different admin") {
+		t.Errorf("rebind-refused body missing first body-copy trademark: %s", body)
+	}
+	assertSingleQURLTrademark(t, body, "rebind-refused")
+	assertSecurityHeaders(t, rec)
 	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
@@ -1437,9 +1508,12 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status: got %d want 409 (rebind-refused page, unverified arm)", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
-		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", body)
 	}
+	assertSingleQURLTrademark(t, body, "rebind-refused")
+	assertSecurityHeaders(t, rec)
 	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()

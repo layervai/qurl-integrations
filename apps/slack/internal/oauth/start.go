@@ -23,14 +23,13 @@ func Start(cfg Config) http.HandlerFunc {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
 			renderOAuthErrorPage(w, http.StatusMethodNotAllowed, "Use the Slack setup link",
-				"This setup start endpoint only works from the browser link opened by /qurl setup <email>.",
-				"Return to Slack and start setup again.")
+				"This qURL™ setup start endpoint only works from the browser link opened by /qurl setup <email>.")
 			return
 		}
 		if len(cfg.OAuthStateSecret) < StateMinSecret {
 			slog.Error("oauth/start refused: OAUTH_STATE_SECRET unset or shorter than 32 bytes")
 			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "qURL setup is unavailable",
-				"qURL setup is not configured for this Slack app.",
+				"qURL™ setup is not configured for this Slack app.",
 				"Contact your qURL administrator for help.")
 			return
 		}
@@ -38,7 +37,7 @@ func Start(cfg Config) http.HandlerFunc {
 		if stateParam == "" {
 			slog.Warn("oauth/start rejected: missing state")
 			renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is incomplete",
-				"This setup link is missing required setup details.",
+				"This qURL™ setup link is missing required setup details.",
 				"Return to Slack and start setup from /qurl setup <email>.")
 			return
 		}
@@ -62,7 +61,7 @@ func Start(cfg Config) http.HandlerFunc {
 			// same browser" error rather than re-running setup cleanly.
 			clearStateCookie(w)
 			renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
-				"This setup link is invalid or expired.",
+				"This qURL™ setup link is invalid or expired.",
 				"Return to Slack and run /qurl setup <email> again.")
 			return
 		}
