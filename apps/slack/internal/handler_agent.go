@@ -66,6 +66,9 @@ const agentAckReaction = "eyes"
 // hasn't landed in ~2s is already too late to feel responsive, so giving up (no
 // 👀 — the deferred remove then hits no_reaction → benign) beats delaying the
 // turn it's meant to make feel responsive.
+// On a very fast turn with a still-running add, deferred clear can spend one budget
+// joining the add before spending a fresh budget on remove; both happen after reply
+// delivery, so the user-visible turn stays unblocked.
 const agentAckTimeout = 2 * time.Second
 
 // agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
@@ -279,7 +282,7 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, ack a
 	joinCtx, joinCancel := h.agentAckContext()
 	if !ack.wait(joinCtx) {
 		joinCancel()
-		log.Warn("agent: ack reaction add still in flight; skipping remove to avoid racing add")
+		log.Warn("agent: ack reaction add still in flight; skipping remove to avoid racing add; ack may remain")
 		return
 	}
 	joinCancel()

@@ -54,6 +54,7 @@ type blockingOrderedReactions struct {
 	events     []string
 	addStarted chan struct{}
 	releaseAdd chan struct{}
+	start      sync.Once
 	release    sync.Once
 }
 
@@ -65,7 +66,7 @@ func newBlockingOrderedReactions() *blockingOrderedReactions {
 }
 
 func (r *blockingOrderedReactions) Add(ctx context.Context, _, _, _, _, _ string) error {
-	close(r.addStarted)
+	r.start.Do(func() { close(r.addStarted) })
 	select {
 	case <-r.releaseAdd:
 	case <-ctx.Done():
