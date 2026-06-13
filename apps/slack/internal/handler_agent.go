@@ -58,14 +58,16 @@ const agentTurnRateWindow = time.Hour
 // triggering message while a turn runs (reactions.add), then removes when it ends.
 const agentAckReaction = "eyes"
 
-// agentAckTimeout bounds each cosmetic working-on-it round-trip — reactions.add/
-// remove for channel turns, and assistant-pane setStatus (setAgentThinkingStatus)
-// for pane turns. It's deliberately tight and decoupled from the 4s
+// agentAckTimeout bounds each cosmetic working-on-it round-trip. Channel turns
+// use reactions.add/remove; exclusive pane mode uses assistant-pane setStatus.
+// Default pre-pane mode still attempts both the reaction fallback and setStatus
+// for im turns, so a hung pair can add up to 2x this timeout until the pane
+// rollout flag flips. It's deliberately tight and decoupled from the 4s
 // chat.postMessage budget: a "working on it" ack that hasn't landed in ~2s is
-// already too late to feel responsive, so giving up (no 👀 — the deferred remove
-// then hits no_reaction → benign) beats delaying the turn it's meant to make feel
-// responsive. Taking the add off the critical path entirely (async add +
-// clear-joins-add) is tracked as a follow-up.
+// already too late to feel responsive, so giving up (no eyes reaction, and a
+// later no_reaction on remove is benign) beats delaying the turn it's meant to
+// make feel responsive. Taking the add off the critical path entirely (async add
+// + clear-joins-add) is tracked as a follow-up.
 const agentAckTimeout = 2 * time.Second
 
 // agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
@@ -275,7 +277,7 @@ func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, 
 }
 
 // startAgentWorkingAck marks an admitted turn as in-progress and reports whether a
-// reaction was added and must be cleared when the turn exits.
+// reaction add was attempted and must be cleared when the turn exits.
 func (h *Handler) startAgentWorkingAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
 	if env.Event.ChannelType == slackChannelTypeIM {
 		if h.cfg.AgentSurfaceExclusiveAcks {
