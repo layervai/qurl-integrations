@@ -62,7 +62,9 @@ const (
 	setupBindingPersistFailureEvent = "slack_setup_binding_backed_persist_failure"
 	// Mirrors qurl-service's QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT, which is
 	// the source of truth for binding replay lifetime.
-	setupBindingRetryWindowHours        = 24
+	setupBindingRetryWindowHours = 24
+	// Cleanup starts when the same replay window closes; keep this aliased to
+	// the retry window unless qurl-service introduces a separate cleanup TTL.
 	setupBindingCleanupAfterWindowHours = setupBindingRetryWindowHours
 	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
 	// plus four non-secret characters. The reuse path derives this
