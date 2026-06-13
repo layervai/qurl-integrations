@@ -265,6 +265,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// tamper-resistant once Slack submits the modal. It is still only freshness
 	// state minted by our modal JSON; the team/user cross-checks below are the
 	// authorization boundary.
+	// Expired/future agent-origin modals may audit before those cross-checks;
+	// that row intentionally uses the signed metadata opener and target, while
+	// any mismatched submitter identity stays in the later warning logs.
 	// The timestamp is minted and checked by Slack app pods. Platform clock
 	// sync should keep drift tiny; stale modals and far-future timestamps both
 	// fail closed instead of minting a fresh bootstrap key from stale state.

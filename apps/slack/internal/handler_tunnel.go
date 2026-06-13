@@ -895,6 +895,9 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	// success=false on known delivery failure reflects that the setup did not
 	// reach a usable user-visible state; unknown results keep ResultSuccess nil
 	// so App Home does not render them as a definite failure.
+	// The stored action names the connector modal/workflow even for the
+	// defensive signed-agent action mismatch path; the result distinguishes that
+	// rejection from other modal verification failures.
 	h.recordAgentAuditEntry(auditCtx, log, &agentAuditEntry{
 		teamID:        req.teamID,
 		actorID:       req.userID,
@@ -917,7 +920,8 @@ func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunn
 	// saturated worker pool, so a slow audit store cannot consume Slack's short
 	// modal response window. This path is deliberately not pool-bounded: it is
 	// behind Slack request signing plus modal metadata/admin gates, and only
-	// rejection branches use it.
+	// rejection branches use it. Its peak concurrency is therefore however many
+	// signed rejections arrive within the audit write timeout window.
 	h.Go(func() {
 		h.recordTunnelInstallAgentAudit(log, req, result)
 	})

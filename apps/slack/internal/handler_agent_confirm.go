@@ -350,7 +350,8 @@ func agentConfirmVisibleReason(prop *agent.Proposal) string {
 	// modal provenance after an additional submit step. Other reason-bearing
 	// actions audit directly from the confirm click, but this flow needs the
 	// approver to see the exact reason before it is carried through to the
-	// later modal-submit audit row.
+	// later modal-submit audit row. The distilled reason is non-secret, bounded,
+	// and escaped before any channel-visible rendering.
 	if prop == nil || prop.Action != agent.ActionProtectConnector {
 		return ""
 	}
