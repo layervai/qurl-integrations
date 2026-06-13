@@ -66,6 +66,8 @@ func newAckHandler(t *testing.T, rec ReactionPort, llm agent.LLM) (*Handler, *[]
 // team T1, no enterprise, channel C1, message ts 100.1, emoji "eyes".
 var wantAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "C1", timestamp: "100.1", name: agentAckReaction}
 
+const testAgentStillWorksReply = "still works"
+
 func TestAgentAck_AddedAndClearedOnSuccess(t *testing.T) {
 	rec := &recordingReactions{}
 	h, _, _ := newAckHandler(t, rec, fakeAgentLLM{reply: "You can reach staging."})
@@ -107,13 +109,13 @@ func TestAgentAck_ClearedOnPanic(t *testing.T) {
 
 func TestAgentAck_BestEffortDoesNotFailTurn(t *testing.T) {
 	rec := &recordingReactions{addErr: errors.New("reaction down"), removeErr: errors.New("reaction down")}
-	h, posts, mu := newAckHandler(t, rec, fakeAgentLLM{reply: "still works"})
+	h, posts, mu := newAckHandler(t, rec, fakeAgentLLM{reply: testAgentStillWorksReply})
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvBestEffort")))
 	h.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != "still works" {
+	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
 		t.Fatalf("a failing reaction must not fail the turn; reply = %+v", *posts)
 	}
 }

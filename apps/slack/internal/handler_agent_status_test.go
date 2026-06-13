@@ -20,17 +20,18 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
-func newStatusHandler(t *testing.T, seam AssistantThreadsPort, rec ReactionPort, llm agent.LLM) (*Handler, *[]capturedReply, *sync.Mutex) {
+func newStatusHandler(t *testing.T, seam AssistantThreadsPort, rec ReactionPort, llm agent.LLM, exclusiveAcks bool) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{
-		AgentLLM:            llm,
-		AgentStore:          store,
-		PostMessage:         post,
-		AgentDefaultEnabled: true,
-		AssistantThreads:    seam,
-		Reactions:           rec,
+		AgentLLM:                  llm,
+		AgentStore:                store,
+		PostMessage:               post,
+		AgentDefaultEnabled:       true,
+		AgentSurfaceExclusiveAcks: exclusiveAcks,
+		AssistantThreads:          seam,
+		Reactions:                 rec,
 	})
 	t.Cleanup(h.Wait)
 	return h, posts, mu
@@ -39,7 +40,7 @@ func newStatusHandler(t *testing.T, seam AssistantThreadsPort, rec ReactionPort,
 func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	fake := &fakeAssistantThreads{}
 	rec := &recordingReactions{}
-	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "You can reach staging."})
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "You can reach staging."}, true)
 
 	// dmMessageBody: message.im, channel D1, ts 100.2, no thread_ts → root ts 100.2.
 	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvStatus")))
@@ -72,7 +73,7 @@ func TestAgentStatus_NotSetForAppMention(t *testing.T) {
 	// to scope to there, so the channel @-mention path keeps the 👀 ack and sets no status.
 	fake := &fakeAssistantThreads{}
 	rec := &recordingReactions{}
-	h, _, _ := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "ok"})
+	h, _, _ := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "ok"}, true)
 
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvMention")))
 	h.Wait()
@@ -89,7 +90,7 @@ func TestAgentStatus_NotSetForAppMention(t *testing.T) {
 func TestAgentStatus_NilSeamIsNoOp(t *testing.T) {
 	// AssistantThreads unwired: the im turn still runs and replies, with no status and
 	// no panic.
-	h, posts, mu := newStatusHandler(t, nil, nil, fakeAgentLLM{reply: "ok"})
+	h, posts, mu := newStatusHandler(t, nil, nil, fakeAgentLLM{reply: "ok"}, true)
 
 	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvNilStatus")))
 	h.Wait()
@@ -105,7 +106,7 @@ func TestAgentStatus_BestEffortDoesNotFailTurn(t *testing.T) {
 	// setStatus is still cosmetic: a failure must be visible at Warn without failing
 	// the turn or dropping its reply.
 	fake := &fakeAssistantThreads{statusErr: errors.New("no assistant thread")}
-	h, posts, mu := newStatusHandler(t, fake, nil, fakeAgentLLM{reply: "still works"})
+	h, posts, mu := newStatusHandler(t, fake, nil, fakeAgentLLM{reply: testAgentStillWorksReply}, true)
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -114,11 +115,42 @@ func TestAgentStatus_BestEffortDoesNotFailTurn(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != "still works" {
+	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
 		t.Fatalf("a failing setStatus must not fail the turn; reply = %+v", *posts)
 	}
 	logs := logBuf.String()
 	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "agent: set assistant pane status failed") {
 		t.Fatalf("a failing setStatus must log at Warn; log = %s", logs)
+	}
+}
+
+func TestAgentStatus_DefaultPaneTurnKeepsReactionFallback(t *testing.T) {
+	// Until the pane manifest/smoke gate flips QURL_AGENT_SURFACE_EXCLUSIVE_ACKS, an
+	// im turn keeps the old reaction fallback and logs setStatus failures at Debug.
+	fake := &fakeAssistantThreads{statusErr: errors.New("no assistant thread")}
+	rec := &recordingReactions{}
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentStillWorksReply}, false)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.processAgentEvent(context.Background(), logger,
+		env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?"))
+
+	adds, removes := rec.snapshot()
+	if len(adds) != 1 || adds[0] != wantAck || len(removes) != 1 || removes[0] != wantAck {
+		t.Fatalf("default pane (im) turn must keep reaction fallback, got adds=%+v removes=%+v", adds, removes)
+	}
+	if got := fake.statusCalls(); len(got) != 1 {
+		t.Fatalf("default pane (im) turn must still attempt setStatus, got %+v", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
+		t.Fatalf("a failing setStatus must not fail the turn; reply = %+v", *posts)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "level=DEBUG") || strings.Contains(logs, "level=WARN") {
+		t.Fatalf("default pane setStatus failure must stay Debug-only; log = %s", logs)
 	}
 }

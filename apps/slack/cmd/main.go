@@ -194,6 +194,7 @@ func run() error {
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
+	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
@@ -264,6 +265,7 @@ func run() error {
 		PostMessageBlocks:           postMessageBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,
 		AgentChannelFollowups:       agentChannelFollowups,
+		AgentSurfaceExclusiveAcks:   agentSurfaceExclusiveAcks,
 		AgentDefaultEnabled:         agentDefaultEnabled,
 		AgentMaxTurnsPerUserPerHour: agentMaxTurnsPerUser,
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
@@ -1107,6 +1109,16 @@ func readAgentConfirmEnabled() bool {
 // must never turn on. Only takes effect once the read-only surface is live.
 func readAgentChannelFollowups() bool {
 	return readBoolEnvFailSafe("QURL_AGENT_CHANNEL_FOLLOWUPS", false, false)
+}
+
+// readAgentSurfaceExclusiveAcks reads QURL_AGENT_SURFACE_EXCLUSIVE_ACKS — the flag
+// that swaps pane (message.im) turns from the staged additive fallback (reaction +
+// Debug-level setStatus attempt) to the post-pane exclusive ack path (native status
+// only, Warn on setStatus failure). Absent → off until the #1004 manifest/smoke gate
+// confirms the assistant pane is live. FAILS SAFE to off: a typo must never remove
+// the pre-enable reaction cue from ordinary DMs or create Warn-per-turn noise.
+func readAgentSurfaceExclusiveAcks() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS", false, false)
 }
 
 // readAgentDefaultEnabled reads QURL_AGENT_DEFAULT_ENABLED — the per-workspace

@@ -254,30 +254,57 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
 // on, so the thread_ts here MUST equal the reply's — both derive from
 // agentEventRootTS(&env.Event); keep them coupled.
 //
-// Post-enablement, a pane setStatus failure means the native status path is broken
-// (scope, rate limit, malformed thread, etc.), so log it at Warn while keeping the turn
-// best-effort.
-func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+// Post-enablement exclusive mode treats a pane setStatus failure as evidence the
+// native status path is broken (scope, rate limit, malformed thread, etc.), so it logs
+// at Warn while keeping the turn best-effort. Pre-enable additive mode still logs at
+// Debug because setStatus may fail on every ordinary DM until the pane is live and the
+// reaction remains the working cue.
+func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, warnOnFailure bool) {
 	if h.cfg.AssistantThreads == nil || env.Event.ChannelType != slackChannelTypeIM {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, agentAckTimeout)
 	defer cancel()
 	if err := h.cfg.AssistantThreads.SetStatus(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, agentEventRootTS(&env.Event), agentThinkingStatus); err != nil {
+		if !warnOnFailure {
+			log.Debug("agent: set assistant pane status failed (best-effort)", "error", err)
+			return
+		}
 		log.Warn("agent: set assistant pane status failed (best-effort)", "error", err)
 	}
 }
 
-// startAgentWorkingAck marks an admitted turn as in-progress and returns the matching
-// cleanup. Pane turns rely on Slack's status auto-clear when the reply posts; channel
-// turns still need the deferred reaction removal.
-func (h *Handler) startAgentWorkingAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) func() {
+// startAgentWorkingAck marks an admitted turn as in-progress and reports whether a
+// reaction was added and must be cleared when the turn exits.
+func (h *Handler) startAgentWorkingAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
 	if env.Event.ChannelType == slackChannelTypeIM {
-		h.setAgentThinkingStatus(ctx, log, env)
-		return func() {}
+		if h.cfg.AgentSurfaceExclusiveAcks {
+			h.setAgentThinkingStatus(ctx, log, env, true)
+			return false
+		}
+		h.addAgentAck(ctx, log, env)
+		h.setAgentThinkingStatus(ctx, log, env, false)
+		return true
 	}
 	h.addAgentAck(ctx, log, env)
-	return func() { h.clearAgentAck(log, env) }
+	return true
+}
+
+// agentOperatingChannel is the channel the agent OPERATES on for this turn (scopes
+// every channel-scoped read via TurnContext.ChannelID). For an @mention it's the
+// channel the mention came from; for an assistant-pane (DM) turn it's the channel the
+// user opened the pane FROM — but only when they're a confirmed member of it
+// (paneContextChannel), else the bare DM. The reply still posts to env.Event.Channel;
+// only the operating channel changes. The mutation path is unaffected — it anchors to
+// env.Event.Channel / the click's channel, never this — so the override widens reads
+// only, never actions.
+func (h *Handler) agentOperatingChannel(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) string {
+	if env.Event.ChannelType == slackChannelTypeIM {
+		if c := h.paneContextChannel(ctx, log, env); c != "" {
+			return c
+		}
+	}
+	return env.Event.Channel
 }
 
 // handleAgentEvent decides whether an event_callback should drive a
@@ -661,12 +688,12 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
-	// Working-on-it ack: pane turns use Slack's native assistant status; channel
-	// turns use the 👀 reaction on the triggering message. Both are best-effort and
-	// run only after the disabled/dedupe/rate-limit gates, so they mark turns that
-	// actually execute.
-	clearWorkingAck := h.startAgentWorkingAck(ctx, log, env)
-	defer clearWorkingAck()
+	// Working-on-it ack: before the pane rollout flag flips, pane turns keep the
+	// reaction fallback plus best-effort native status; after it flips, pane turns use
+	// only Slack's native assistant status. Channel turns always use the 👀 reaction.
+	if h.startAgentWorkingAck(ctx, log, env) {
+		defer h.clearAgentAck(log, env)
+	}
 
 	threadKey := agentEventThreadKey(env)
 	history, version, ok := h.resolveTurnHistory(ctx, log, env, partition, threadKey, pre)
@@ -674,19 +701,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
-	// The channel the agent OPERATES on this turn (scopes every channel-scoped read via
-	// TurnContext.ChannelID). For an @mention it's the channel the mention came from; for an
-	// assistant-pane (DM) turn it's the channel the user opened the pane FROM — but only when
-	// they're a confirmed member of it (paneContextChannel), else the bare DM. The reply
-	// still posts to env.Event.Channel; only the operating channel changes. The mutation path
-	// is unaffected — it anchors to env.Event.Channel / the click's channel, never this — so
-	// the override widens reads only, never actions.
-	operatingChannel := env.Event.Channel
-	if env.Event.ChannelType == slackChannelTypeIM {
-		if c := h.paneContextChannel(ctx, log, env); c != "" {
-			operatingChannel = c
-		}
-	}
+	operatingChannel := h.agentOperatingChannel(ctx, log, env)
 
 	// Resolve the operating channel's name for a friendlier system prompt ("#general (C123)"
 	// vs the bare id). A 1:1 DM with no pane context has no usable name → skipped; a scoped

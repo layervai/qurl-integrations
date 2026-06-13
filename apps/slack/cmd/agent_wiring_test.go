@@ -174,6 +174,31 @@ func TestReadAgentConfirmEnabled(t *testing.T) {
 	}
 }
 
+func TestReadAgentSurfaceExclusiveAcks(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "unset is off until pane smoke", val: "", want: false},
+		{name: "true enables", val: "true", want: true},
+		{name: "1 enables", val: "1", want: true},
+		{name: "false stays off", val: "false", want: false},
+		{name: "0 stays off", val: "0", want: false},
+		// Fail-safe: a typo must keep the pre-pane reaction fallback, not remove it.
+		{name: "garbage fails safe to off", val: "enable", want: false},
+		{name: "yes fails safe to off", val: "yes", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS", tc.val)
+			if got := readAgentSurfaceExclusiveAcks(); got != tc.want {
+				t.Fatalf("readAgentSurfaceExclusiveAcks(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReadAgentDefaultEnabled(t *testing.T) {
 	cases := []struct {
 		name string
