@@ -99,7 +99,10 @@ const (
 // with the tunnel-slug form so a sigil-less typo stays actionable, and
 // mentions URLs/resource-ids only parenthetically (the forms migrating
 // admins are most likely to try) rather than asserting the admin typed
-// one. Distinct from [msgAliasTargetInvalid], which fires once a
+// one. This is intentionally stricter than private-host classification
+// plus an allowlist: no raw URL target is accepted in any deployment,
+// so private-address exceptions cannot bypass the tunnel-only contract.
+// Distinct from [msgAliasTargetInvalid], which fires once a
 // `$`-prefixed target fails the tunnel-slug grammar.
 const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a qURL Connector ID — `/qurl-admin set-alias $<alias> $<id>`. (Raw URLs and resource IDs aren't supported targets.)"
 
