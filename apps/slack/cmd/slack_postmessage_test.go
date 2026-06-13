@@ -602,6 +602,38 @@ func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t
 	}
 }
 
+func TestSlackPostMarkdownMessageFuncMarkdownTextRetryPreservesSlackMrkdwnLinkText(t *testing.T) {
+	t.Parallel()
+	var retryBody struct {
+		MarkdownText string `json:"markdown_text"`
+		Text         string `json:"text"`
+		Blocks       []any  `json:"blocks"`
+	}
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		raw, _ := io.ReadAll(r.Body)
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_blocks"}`))
+			return
+		}
+		if err := json.Unmarshal(raw, &retryBody); err != nil {
+			t.Fatalf("decode retry body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	const answer = "Literal <https://evil.example|safe label>"
+	if err := post(context.Background(), "T_test", "", mdTestChannel, "", answer); err != nil {
+		t.Fatalf("chat.postMessage markdown fallback: %v", err)
+	}
+	if retryBody.MarkdownText != answer || retryBody.Text != "" || len(retryBody.Blocks) != 0 {
+		t.Fatalf("retry body = %+v, want markdown_text-only literal answer", retryBody)
+	}
+}
+
 func TestSlackPostMarkdownMessageFuncSurfacesMarkdownTextRetryError(t *testing.T) {
 	t.Parallel()
 	var requests int
