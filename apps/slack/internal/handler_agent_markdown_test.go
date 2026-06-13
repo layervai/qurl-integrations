@@ -86,6 +86,23 @@ func TestHardenAgentMarkdown_PreservesEscapedBrackets(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_EscapesRawHTMLTagStarts(t *testing.T) {
+	t.Parallel()
+	in := `Read <a href="https://evil.example/login">billing</a> and <img src="https://evil.example/pixel.png">.`
+	want := `Read \<a href="https://evil.example/login">billing\</a> and \<img src="https://evil.example/pixel.png">.`
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestHardenAgentMarkdown_PreservesVisibleAutolinks(t *testing.T) {
+	t.Parallel()
+	in := `Use <https://docs.example/setup> or <MAILTO:security@example.com>.`
+	if got := hardenAgentMarkdown(in); got != in {
+		t.Fatalf("hardened markdown = %q, want %q", got, in)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitLinks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden

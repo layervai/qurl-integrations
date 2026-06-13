@@ -8,7 +8,10 @@ const maxAgentMarkdownLinkBytes = 4096
 // removing masked-link ambiguity: [label](url) becomes label (url), so Slack can
 // still autolink the destination but the visible text no longer hides it. This
 // is an anti-phishing visible-destination pass, not a spec-complete Markdown
-// parser; keep new syntax support pinned by tests.
+// parser. Raw HTML tag starts are escaped because they could otherwise become
+// another hidden-destination renderer if Slack's markdown surface accepts HTML;
+// visible autolinks such as <https://example.com> stay untouched. Keep new syntax
+// support pinned by tests.
 func hardenAgentMarkdown(markdown string) string {
 	var h agentMarkdownLinkHarden
 	return h.write(markdown) + h.flush()
@@ -71,48 +74,54 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 			}
 			continue
 		}
-		if !h.codeDisabled && c == '`' {
-			h.pendingTicks++
-			continue
-		}
-		if h.pendingTicks > 0 {
-			h.emitBacktickRun(&out)
-		}
-		if h.inCode {
-			h.codeBuffer.WriteByte(c)
-			continue
-		}
-		if h.escaped {
-			out.WriteByte(c)
-			h.escaped = false
-			continue
-		}
-		if h.pendingBang {
-			h.pendingBang = false
-			if c == '[' && !h.inCode {
-				h.startLink(true)
-				continue
-			}
-			out.WriteByte('!')
-		}
-		if !h.inCode && c == '\\' {
-			out.WriteByte(c)
-			h.escaped = true
-			continue
-		}
-		if !h.inCode {
-			switch c {
-			case '!':
-				h.pendingBang = true
-				continue
-			case '[':
-				h.startLink(false)
-				continue
-			}
-		}
-		out.WriteByte(c)
+		h.consumeMarkdownByte(&out, c, markdown[i:])
 	}
 	return out.String()
+}
+
+func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c byte, remaining string) {
+	if !h.codeDisabled && c == '`' {
+		h.pendingTicks++
+		return
+	}
+	if h.pendingTicks > 0 {
+		h.emitBacktickRun(out)
+	}
+	if h.inCode {
+		h.codeBuffer.WriteByte(c)
+		return
+	}
+	if h.escaped {
+		out.WriteByte(c)
+		h.escaped = false
+		return
+	}
+	if h.pendingBang {
+		h.pendingBang = false
+		if c == '[' {
+			h.startLink(true)
+			return
+		}
+		out.WriteByte('!')
+	}
+	if c == '\\' {
+		out.WriteByte(c)
+		h.escaped = true
+		return
+	}
+	if c == '<' && isRawHTMLTagStart(remaining) {
+		out.WriteByte('\\')
+		out.WriteByte(c)
+		return
+	}
+	switch c {
+	case '!':
+		h.pendingBang = true
+	case '[':
+		h.startLink(false)
+	default:
+		out.WriteByte(c)
+	}
 }
 
 func (h *agentMarkdownLinkHarden) flush() string {
@@ -444,6 +453,30 @@ func visibleMarkdownLinkDestination(destination string) string {
 		return destination
 	}
 	return fields[0]
+}
+
+func isRawHTMLTagStart(s string) bool {
+	if len(s) < 2 || s[0] != '<' {
+		return false
+	}
+	switch s[1] {
+	case '!', '?':
+		return true
+	case '/':
+		return len(s) > 2 && isASCIILetter(s[2])
+	default:
+		return isASCIILetter(s[1]) && !hasVisibleAutolinkScheme(s[1:])
+	}
+}
+
+func hasVisibleAutolinkScheme(s string) bool {
+	return hasASCIIPrefixFold(s, "http://") ||
+		hasASCIIPrefixFold(s, "https://") ||
+		hasASCIIPrefixFold(s, "mailto:")
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 func escapeMarkdownLinkOriginal(original string) string {

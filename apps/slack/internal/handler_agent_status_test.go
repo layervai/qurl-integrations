@@ -42,7 +42,7 @@ var wantDMSurfaceAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "D1
 func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	fake := &fakeAssistantThreads{}
 	rec := &recordingReactions{}
-	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "You can reach staging."}, true)
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentReachStagingReply}, true)
 
 	// dmMessageBody: message.im, channel D1, ts 100.2, no thread_ts → root ts 100.2.
 	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvStatus")))
@@ -73,7 +73,7 @@ func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 func TestAgentStatus_DefaultPaneTurnOnReplyThread(t *testing.T) {
 	fake := &fakeAssistantThreads{}
 	rec := &recordingReactions{}
-	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "You can reach staging."}, false)
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentReachStagingReply}, false)
 
 	// Default/pre-pane mode still attempts native status in addition to the reaction
 	// fallback, so it must keep the same auto-clear precondition as exclusive mode.

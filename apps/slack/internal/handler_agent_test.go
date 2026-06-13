@@ -23,6 +23,11 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
+const (
+	testAgentReachStagingReply = "You can reach staging."
+	testAgentStillWorksReply   = "still works"
+)
+
 func TestStripBotMention(t *testing.T) {
 	// Realistic Slack ids (8-63 id chars), matching the mention-id grammar.
 	cases := map[string]string{
@@ -511,7 +516,7 @@ func threadBroadcastBody(eventID, ts, threadTS string) string {
 }
 
 func TestHandleEvent_AgentReplies(t *testing.T) {
-	h, posts, mu := newAgentEventHandler(t, "You can reach staging.")
+	h, posts, mu := newAgentEventHandler(t, testAgentReachStagingReply)
 	w := httptest.NewRecorder()
 	h.handleEvent(w, []byte(appMentionBody("Ev1")))
 	if w.Code != 200 {
@@ -525,7 +530,7 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.1" || got.text != "You can reach staging." {
+	if got.channel != "C1" || got.threadTS != "100.1" || got.text != testAgentReachStagingReply {
 		t.Fatalf("reply = %+v", got)
 	}
 }
@@ -699,7 +704,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 		// not the generic error copy — see TestProcessAgentEvent_GenericErrorCopy
 		// for the live-ctx (capability) branch.
 		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentTransientReply},
-		{"turn succeeded", fakeAgentLLM{reply: "You can reach staging."}, "You can reach staging."},
+		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, testAgentReachStagingReply},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
