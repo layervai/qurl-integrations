@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
 shopt -s nullglob
 
 status=0
 sha_re='^[0-9a-f]{40}$'
 tag_re='^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'
-workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+# This is a local format guard. It does not resolve refs over the network, so
+# reviewers still need to verify that tag comments match their pinned SHAs.
+action_files=(.github/workflows/*.yml .github/workflows/*.yaml .github/actions/*/action.yml .github/actions/*/action.yaml)
 
 fail() {
   printf '%s:%s: %s\n' "$1" "$2" "$3" >&2
@@ -20,7 +25,7 @@ trim() {
   printf '%s' "$value"
 }
 
-for file in "${workflow_files[@]}"; do
+for file in "${action_files[@]}"; do
   line_no=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_no=$((line_no + 1))
@@ -31,8 +36,14 @@ for file in "${workflow_files[@]}"; do
 
     uses_ref="${BASH_REMATCH[2]}"
     comment="$(trim "${BASH_REMATCH[4]:-}")"
+    read -r tag_comment _ <<< "$comment"
 
     if [[ "$uses_ref" == ./* ]]; then
+      continue
+    fi
+
+    if [[ "$uses_ref" == docker://* ]]; then
+      fail "$file" "$line_no" "docker:// actions cannot be commit SHA-pinned: $uses_ref"
       continue
     fi
 
@@ -46,7 +57,7 @@ for file in "${workflow_files[@]}"; do
       fail "$file" "$line_no" "external action must be pinned to a 40-character commit SHA: $uses_ref"
     fi
 
-    if [[ ! "$comment" =~ $tag_re ]]; then
+    if [[ ! "$tag_comment" =~ $tag_re ]]; then
       fail "$file" "$line_no" "SHA pin must include an exact version tag comment like '# v1.2.3': $uses_ref"
     fi
   done < "$file"
