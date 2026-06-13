@@ -29,6 +29,13 @@ repos:
         pass_filenames: false
         files: '^\.github/workflows/.*\.ya?ml$|^\.github/actions/(.*/)?action\.ya?ml$|^scripts/validate-github-actions-pins\.sh$'
 
+      - id: github-actions-pin-tests
+        name: GitHub Actions SHA pin tests
+        entry: scripts/test-validate-github-actions-pins.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(validate|test-validate)-github-actions-pins\.sh$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w

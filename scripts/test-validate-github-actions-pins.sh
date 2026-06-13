@@ -100,6 +100,12 @@ run_case missing-version-comment 1 "SHA pin must include an exact version tag co
     steps:
       - uses: actions/checkout@$sha"
 
+run_case major-only-comment 1 "SHA pin must include an exact version tag comment" \
+  ".github/workflows/test.yml" "jobs:
+  test:
+    steps:
+      - uses: actions/checkout@$sha # v6"
+
 run_case invalid-version-comment 1 "SHA pin must include an exact version tag comment" \
   ".github/workflows/test.yml" "jobs:
   test:

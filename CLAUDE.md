@@ -5,13 +5,9 @@
 - **Never push directly to `main`.** Branch protection enforces PRs.
 - **All commits must be GPG/SSH signed.** Unsigned commits are rejected.
 - **`golangci-lint` must pass clean.** Config is strict by design (see `.golangci.yml`); fix the code, not the rules.
-- **GitHub Actions refs must be pinned.** In workflow and composite-action YAML,
-  external `uses:` entries must use full 40-character commit SHAs plus the exact
-  upstream version tag as the first trailing comment, e.g.
-  `owner/action@<sha> # v1.2.3`. Do not use `docker://` actions in this repo.
-  The validator enforces format only; reviewers own tag/SHA correctness. Before
-  changing a tag comment, verify it with `git ls-remote
-  https://github.com/OWNER/REPO.git refs/tags/v1.2.3`.
+- **GitHub Actions refs must be pinned.** Follow the source-of-truth policy in
+  [CONTRIBUTING.md](CONTRIBUTING.md#pr-requirements): full commit SHA, exact
+  upstream version comment, no `docker://`, and human tag/SHA verification.
 
 ## Layout
 
