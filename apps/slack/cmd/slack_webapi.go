@@ -235,6 +235,7 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 
 const slackChatPostEphemeralURL = "https://slack.com/api/chat.postEphemeral"
+const maxSlackMarkdownFallbackLogKeys = 1024
 
 const (
 	slackReactionsAddURL    = "https://slack.com/api/reactions.add"
@@ -480,6 +481,9 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		fallbackLogMu.Lock()
 		_, fallbackLogAlreadySeen := fallbackLogSeen[fallbackLogKey]
 		if !fallbackLogAlreadySeen {
+			if len(fallbackLogSeen) >= maxSlackMarkdownFallbackLogKeys {
+				clear(fallbackLogSeen)
+			}
 			fallbackLogSeen[fallbackLogKey] = struct{}{}
 		}
 		fallbackLogMu.Unlock()
@@ -533,10 +537,14 @@ func slackMarkdownFallbackText(markdownText string) string {
 		}
 	}
 	text := strings.Join(lines, " ")
+	if slackMarkdownFallbackMarkerOnly(text) {
+		return strings.TrimSpace(markdownText)
+	}
 	text = slackMarkdownFallbackReplacer.Replace(text)
 	fields := strings.Fields(text)
 	for i := range fields {
-		fields[i] = trimMarkdownFallbackUnderscoreEmphasis(fields[i])
+		fields[i] = trimMarkdownFallbackEmphasis(fieldMarkdownFallbackEmphasisStar, fields[i])
+		fields[i] = trimMarkdownFallbackEmphasis(fieldMarkdownFallbackEmphasisUnderscore, fields[i])
 	}
 	if fallback := strings.Join(fields, " "); fallback != "" {
 		return fallback
@@ -544,18 +552,31 @@ func slackMarkdownFallbackText(markdownText string) string {
 	return strings.TrimSpace(markdownText)
 }
 
-var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "", "*", "")
+var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "")
 
-func trimMarkdownFallbackUnderscoreEmphasis(field string) string {
-	if !strings.HasPrefix(field, "_") || strings.Contains(field, "://") {
+const (
+	fieldMarkdownFallbackEmphasisStar       = "*"
+	fieldMarkdownFallbackEmphasisUnderscore = "_"
+)
+
+func slackMarkdownFallbackMarkerOnly(text string) bool {
+	text = strings.TrimSpace(text)
+	return text != "" && strings.Trim(text, "*_~` ") == ""
+}
+
+func trimMarkdownFallbackEmphasis(marker, field string) string {
+	if !strings.HasPrefix(field, marker) || strings.Contains(field, "://") {
 		return field
 	}
-	last := strings.LastIndexByte(field[1:], '_')
+	if strings.Trim(field, marker) == "" {
+		return field
+	}
+	last := strings.LastIndex(field[len(marker):], marker)
 	if last < 0 {
 		return field
 	}
-	last++
-	return field[1:last] + field[last+1:]
+	last += len(marker)
+	return field[len(marker):last] + field[last+len(marker):]
 }
 
 func trimMarkdownFallbackOrderedListMarker(line string) string {

@@ -542,6 +542,14 @@ func TestSlackMarkdownFallbackTextCleansCommonMarkdown(t *testing.T) {
 	}
 }
 
+func TestSlackMarkdownFallbackTextPreservesLiteralAsterisks(t *testing.T) {
+	t.Parallel()
+	in := "Compute 2 * 3 and inspect *.go files."
+	if got := slackMarkdownFallbackText(in); got != in {
+		t.Fatalf("fallback text = %q, want %q", got, in)
+	}
+}
+
 func TestSlackMarkdownFallbackTextNeutralizesMaskedLinksDefenseInDepth(t *testing.T) {
 	t.Parallel()
 	in := "Use [billing](https://evil.example/login) or <https://evil.example/admin|admin portal>."

@@ -208,6 +208,7 @@ func TestHardenAgentMarkdown_IsIdempotent(t *testing.T) {
 			if twice := hardenAgentMarkdown(once); twice != once {
 				t.Fatalf("hardenAgentMarkdown not idempotent:\ninput: %q\nonce: %q\ntwice: %q", in, once, twice)
 			}
+			assertNoVisibleMaskedLinkSyntax(t, once)
 		})
 	}
 }
@@ -232,6 +233,7 @@ func FuzzHardenAgentMarkdown(f *testing.F) {
 		if twice := hardenAgentMarkdown(once); twice != once {
 			t.Fatalf("hardenAgentMarkdown not idempotent:\ninput: %q\nonce: %q\ntwice: %q", in, once, twice)
 		}
+		assertNoVisibleMaskedLinkSyntax(t, once)
 	})
 }
 
@@ -509,6 +511,88 @@ func containsUnescapedMarkdownToken(s, token string) bool {
 		}
 		offset = idx + len(token)
 	}
+}
+
+func assertNoVisibleMaskedLinkSyntax(t *testing.T, markdown string) {
+	t.Helper()
+	if containsVisibleMaskedLinkSyntax(markdown) {
+		t.Fatalf("hardened markdown still contains visible masked-link syntax: %q", markdown)
+	}
+}
+
+func containsVisibleMaskedLinkSyntax(markdown string) bool {
+	var inCode bool
+	var codeTicks int
+	for i := 0; i < len(markdown); i++ {
+		if markdownByteEscaped(markdown, i) {
+			continue
+		}
+		if markdown[i] == '`' {
+			ticks := markdownBacktickRunLen(markdown[i:])
+			if inCode && ticks == codeTicks {
+				inCode = false
+				codeTicks = 0
+			} else if !inCode {
+				inCode = true
+				codeTicks = ticks
+			}
+			i += ticks - 1
+			continue
+		}
+		if inCode {
+			continue
+		}
+		if markdown[i] == '[' && visibleInlineLinkSyntaxStarts(markdown[i:]) {
+			return true
+		}
+		if markdown[i] == '<' && visibleSlackAngleMaskSyntaxStarts(markdown[i:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func markdownBacktickRunLen(s string) int {
+	var n int
+	for n < len(s) && s[n] == '`' {
+		n++
+	}
+	return n
+}
+
+func visibleInlineLinkSyntaxStarts(s string) bool {
+	for i := 1; i+1 < len(s); i++ {
+		if markdownByteEscaped(s, i) {
+			continue
+		}
+		if s[i] == '\n' {
+			return false
+		}
+		if s[i] == ']' {
+			return s[i+1] == '('
+		}
+	}
+	return false
+}
+
+func visibleSlackAngleMaskSyntaxStarts(s string) bool {
+	if len(s) < 2 || !hasVisibleAutolinkScheme(s[1:]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if markdownByteEscaped(s, i) {
+			continue
+		}
+		switch s[i] {
+		case '>':
+			return false
+		case '|':
+			return true
+		case ' ', '\t', '\n':
+			return false
+		}
+	}
+	return false
 }
 
 func markdownByteEscaped(s string, idx int) bool {
