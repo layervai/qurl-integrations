@@ -128,7 +128,9 @@ binding-backed workspace key, but the Slack app failed to store it locally. Trea
 every event as actionable: the admin can recover by rerunning `/qurl setup
 <email>` with the same qURL account only during the binding replay window. The
 emitted `retry_window_hours` reports that window, and the event timestamp starts
-the operator clock.
+the operator clock. The emitted window is a best-effort mirror of qurl-service's
+`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`; double-check the current qurl-service
+contract before cleanup at the boundary.
 
 `cleanup_after_window_hours` is intentionally coincident with the same threshold
 today; prefer retry at the exact boundary and treat rows older than the emitted
