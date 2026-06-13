@@ -354,9 +354,11 @@ const agentDeliveryBudget = 15 * time.Second
 //
 // When channelFollowupsEnabled is true, a channel message that is a thread REPLY is
 // also admitted — so a follow-up in a thread the agent is already in continues the
-// conversation without a re-@mention. processAgentEvent then confirms it's the
-// agent's OWN thread (it has saved history) before answering; a top-level channel
-// message is never admitted, so we never respond to un-addressed channel chatter.
+// conversation without a re-@mention. Slack's thread_broadcast subtype follows that
+// same path when a user also sends the thread reply to the channel. processAgentEvent
+// then confirms it's the agent's OWN thread (it has saved history) before answering;
+// a top-level channel message is never admitted, so we never respond to un-addressed
+// channel chatter.
 func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) bool {
 	e := &env.Event
 	// Drop bot posts and the agent's own messages before considering event shape.
