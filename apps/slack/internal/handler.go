@@ -289,6 +289,12 @@ type Config struct {
 	// pool (#719). Zero or negative falls back to defaultMaxConcurrentFollowupGateAsync.
 	MaxConcurrentFollowupGateAsync int
 
+	// AgentAckTimeout bounds each best-effort Slack "working on it" seam
+	// (reactions.add, reactions.remove, and assistant-pane setStatus). Zero or
+	// negative falls back to defaultAgentAckTimeout. Tests may shrink it to cover
+	// timeout paths without spending the production budget in wall-clock time.
+	AgentAckTimeout time.Duration
+
 	// ResponseURLClient is the HTTP client used to POST follow-up
 	// messages to Slack's response_url. Nil means "use a default *http.Client
 	// with responseURLTimeout"; tests inject one to assert payloads.
@@ -624,6 +630,9 @@ type Handler struct {
 	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
 	// (via SIGTERM in main.go) signals every in-flight worker.
 	baseCtx context.Context
+	// agentAckTimeout is captured from Config.AgentAckTimeout once at construction.
+	// The handler reads it without synchronization on the request hot path.
+	agentAckTimeout time.Duration
 	// wg tracks live async workers so cmd/main.go's Wait() can drain
 	// them after http.Server.Shutdown returns. wg.Add MUST happen on
 	// the request goroutine (before the `go` keyword) — adding inside
@@ -752,6 +761,10 @@ func NewHandler(cfg Config) *Handler {
 	if maxFollowupGateAsync <= 0 {
 		maxFollowupGateAsync = defaultMaxConcurrentFollowupGateAsync
 	}
+	agentAckTimeout := cfg.AgentAckTimeout
+	if agentAckTimeout <= 0 {
+		agentAckTimeout = defaultAgentAckTimeout
+	}
 	respClient := cfg.ResponseURLClient
 	if respClient == nil {
 		respClient = defaultResponseURLClient()
@@ -760,6 +773,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg:                   cfg,
 		now:                   time.Now,
 		baseCtx:               baseCtx,
+		agentAckTimeout:       agentAckTimeout,
 		sem:                   make(chan struct{}, maxAsync),
 		followupSem:           make(chan struct{}, maxFollowupAsync),
 		followupGateSem:       make(chan struct{}, maxFollowupGateAsync),

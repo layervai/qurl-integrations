@@ -1,16 +1,21 @@
 package internal
 
 // Tests for the agent "working on it" reaction ack (#661): added 👀 on the triggering
-// message once the turn is committed, cleared on EVERY exit (success / error / panic),
-// best-effort (a reaction failure never fails the turn), nil-seam no-op, and NOT added
-// for turns dropped at the disabled/rate-limit gates (the ack means "I'm working on
-// this", so it must only appear for turns that actually run).
+// message once the turn is committed without blocking the model turn, cleared on EVERY
+// exit (success / error / panic), best-effort (a reaction failure never fails the
+// turn), nil-seam no-op, and NOT added for turns dropped at the disabled/rate-limit
+// gates (the ack means "I'm working on this", so it must only appear for turns that
+// actually run).
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http/httptest"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +52,72 @@ func (r *recordingReactions) snapshot() (adds, removes []reactionCall) {
 	return append([]reactionCall(nil), r.adds...), append([]reactionCall(nil), r.removes...)
 }
 
+type blockingOrderedReactions struct {
+	mu         sync.Mutex
+	events     []string
+	addStarted chan struct{}
+	releaseAdd chan struct{}
+	start      sync.Once
+	release    sync.Once
+}
+
+func newBlockingOrderedReactions() *blockingOrderedReactions {
+	return &blockingOrderedReactions{
+		addStarted: make(chan struct{}),
+		releaseAdd: make(chan struct{}),
+	}
+}
+
+func (r *blockingOrderedReactions) Add(ctx context.Context, _, _, _, _, _ string) error {
+	r.start.Do(func() { close(r.addStarted) })
+	select {
+	case <-r.releaseAdd:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	r.record("add")
+	return nil
+}
+
+func (r *blockingOrderedReactions) Remove(_ context.Context, _, _, _, _, _ string) error {
+	r.record("remove")
+	return nil
+}
+
+func (r *blockingOrderedReactions) releaseAddCall() {
+	r.release.Do(func() { close(r.releaseAdd) })
+}
+
+func (r *blockingOrderedReactions) snapshotEvents() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+func (r *blockingOrderedReactions) record(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+type signalingAgentLLM struct {
+	started chan struct{}
+	finish  <-chan struct{}
+	once    sync.Once
+}
+
+func (s *signalingAgentLLM) Complete(ctx context.Context, _ *agent.Request) (agent.Response, error) {
+	s.once.Do(func() { close(s.started) })
+	if s.finish != nil {
+		select {
+		case <-s.finish:
+		case <-ctx.Done():
+			return agent.Response{}, ctx.Err()
+		}
+	}
+	return agent.Response{Text: "ack does not block me", StopReason: "end_turn"}, nil
+}
+
 func newAckHandler(t *testing.T, rec ReactionPort, llm agent.LLM) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
@@ -80,6 +151,141 @@ func TestAgentAck_AddedAndClearedOnSuccess(t *testing.T) {
 	}
 	if len(removes) != 1 || removes[0] != wantAck {
 		t.Fatalf("remove = %+v, want one %+v (cleared when the reply posts)", removes, wantAck)
+	}
+}
+
+func TestAgentAck_AddIsAsyncAndClearWaitsBeforeRemove(t *testing.T) {
+	rec := newBlockingOrderedReactions()
+	defer rec.releaseAddCall()
+
+	llmStarted := make(chan struct{})
+	llmFinish := make(chan struct{})
+	finishLLM := sync.OnceFunc(func() { close(llmFinish) })
+	defer finishLLM()
+	h, _, _ := newAckHandler(t, rec, &signalingAgentLLM{started: llmStarted, finish: llmFinish})
+	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvAsyncAck")))
+
+	select {
+	case <-rec.addStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reaction add did not start")
+	}
+
+	select {
+	case <-llmStarted:
+	case <-time.After(time.Second):
+		t.Fatal("LLM turn did not start while reactions.add was still blocked")
+	}
+
+	rec.releaseAddCall()
+	finishLLM()
+	h.Wait()
+
+	if got, want := rec.snapshotEvents(), []string{"add", "remove"}; !slices.Equal(got, want) {
+		t.Fatalf("reaction order = %v, want %v", got, want)
+	}
+}
+
+func TestAgentAck_ClearAbandonsRemoveWhenJoinContextDone(t *testing.T) {
+	rec := &recordingReactions{}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	h := NewHandler(Config{BaseContext: baseCtx, Reactions: rec})
+	cancel()
+
+	neverAdded := make(chan struct{})
+	h.clearAgentAck(slogTestLogger(t), &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, agentAckAdd{done: neverAdded})
+
+	_, removes := rec.snapshot()
+	if len(removes) != 0 {
+		t.Fatalf("remove should be skipped when the add join is abandoned, got %d removes", len(removes))
+	}
+}
+
+func TestAgentAck_ClearAbandonsRemoveWhenJoinTimeoutExpires(t *testing.T) {
+	rec := &recordingReactions{}
+	h := NewHandler(Config{Reactions: rec, AgentAckTimeout: 10 * time.Millisecond})
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	neverAdded := make(chan struct{})
+	canceled := make(chan struct{})
+	cancelAdd := sync.OnceFunc(func() { close(canceled) })
+	h.clearAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, agentAckAdd{done: neverAdded, cancel: cancelAdd})
+
+	_, removes := rec.snapshot()
+	if len(removes) != 0 {
+		t.Fatalf("remove should be skipped when the non-shutdown add join times out, got %d removes", len(removes))
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("clear should cancel the in-flight add when abandoning the remove")
+	}
+	gotLogs := logBuf.String()
+	if !strings.Contains(gotLogs, "level=WARN") || !strings.Contains(gotLogs, "ack may remain") {
+		t.Fatalf("clear should log the operator-facing stale-ack warning, got logs:\n%s", gotLogs)
+	}
+}
+
+func TestAgentAck_AbandonedAddCancellationLogsDebug(t *testing.T) {
+	rec := newBlockingOrderedReactions()
+	defer rec.releaseAddCall()
+	h := NewHandler(Config{Reactions: rec, AgentAckTimeout: 10 * time.Millisecond})
+	t.Cleanup(h.Wait)
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	add := h.addAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	})
+	select {
+	case <-rec.addStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reaction add did not start")
+	}
+	h.clearAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, add)
+	h.Wait()
+
+	gotLogs := logBuf.String()
+	if strings.Contains(gotLogs, "ack reaction add failed") {
+		t.Fatalf("intentional add cancellation should not log add-failed Warn, got logs:\n%s", gotLogs)
+	}
+	if !strings.Contains(gotLogs, "level=DEBUG") || !strings.Contains(gotLogs, "ack reaction add canceled or timed out") {
+		t.Fatalf("intentional add cancellation should log Debug, got logs:\n%s", gotLogs)
+	}
+}
+
+func TestAgentAck_RemoveCanceledDuringShutdownLogsDebug(t *testing.T) {
+	rec := &recordingReactions{removeErr: context.Canceled}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	h := NewHandler(Config{BaseContext: baseCtx, Reactions: rec})
+	cancel()
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	addDone := make(chan struct{})
+	close(addDone)
+	h.clearAgentAck(log, &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, agentAckAdd{done: addDone})
+
+	gotLogs := logBuf.String()
+	if strings.Contains(gotLogs, "level=WARN") {
+		t.Fatalf("shutdown-canceled remove should not log Warn, got logs:\n%s", gotLogs)
+	}
+	if !strings.Contains(gotLogs, "level=DEBUG") || !strings.Contains(gotLogs, "remove canceled during shutdown") {
+		t.Fatalf("shutdown-canceled remove should log Debug, got logs:\n%s", gotLogs)
 	}
 }
 
