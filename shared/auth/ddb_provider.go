@@ -925,9 +925,9 @@ func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 
 // DeleteAPIKey removes the qURL API key columns while preserving Slack app
 // install metadata in the same row. It returns [ErrWorkspaceNotConfigured] when
-// the workspace has no stored qURL key. Workspace ownership/admin gates live
-// outside this auth row, so removing configured_by/configured_at does not
-// change who can reconnect.
+// the workspace has no stored qURL key metadata. Workspace ownership/admin
+// gates live outside this auth row, so removing configured_by/configured_at
+// does not change who can reconnect.
 //
 // TODO(#792): this local disconnect cannot revoke the upstream qURL key until
 // setup persists the qurl-service key_id for workspace keys.
@@ -943,7 +943,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		},
 		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at"),
 		ConditionExpression: aws.String(
-			"attribute_exists(#qurl_api_key)",
+			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
 		),
 		ExpressionAttributeNames: map[string]string{
 			"#qurl_api_key":    attrQURLAPIKey,

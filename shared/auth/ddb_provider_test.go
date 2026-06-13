@@ -1840,7 +1840,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at"; got != want {
 			t.Errorf("UpdateExpression = %q, want %q", got, want)
 		}
-		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key)"; got != want {
+		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)"; got != want {
 			t.Errorf("ConditionExpression = %q, want %q", got, want)
 		}
 		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "2026-06-13T12:34:56Z" {
