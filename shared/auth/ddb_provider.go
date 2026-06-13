@@ -38,6 +38,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -89,6 +90,8 @@ const (
 	EnvWorkspaceStateKMSKeyARN = "WORKSPACE_STATE_KMS_KEY_ARN"
 )
 
+const apiKeyCacheTTL = 5 * time.Minute
+
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
 // workspace has no row in the workspace_state table (i.e. the admin has
 // not yet completed /oauth/qurl/start → /callback). The Slack handler
@@ -133,10 +136,21 @@ type DDBProvider struct {
 	TableName string
 	Encryptor FieldEncryptor
 
+	// Cache successful APIKey lookups for a short window so steady-state slash
+	// commands do not spend one DDB read plus one KMS Decrypt each time. Five
+	// minutes smooths normal command sessions while still letting key rotations
+	// propagate within a human "try again" interval.
+	apiKeyCache sync.Map // map[string]cachedAPIKey
+
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
 	// to time.Now.
 	Now func() time.Time
+}
+
+type cachedAPIKey struct {
+	apiKey    string
+	expiresAt time.Time
 }
 
 // SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
@@ -255,6 +269,15 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
 
+	now := p.nowOrDefault()
+	if cached, ok := p.apiKeyCache.Load(workspaceID); ok {
+		entry, ok := cached.(cachedAPIKey)
+		if ok && now.Before(entry.expiresAt) {
+			return entry.apiKey, nil
+		}
+		p.apiKeyCache.Delete(workspaceID)
+	}
+
 	// Eventually-consistent read is correct here: the per-workspace key
 	// only changes on (re-)install, and the few-ms propagation delay is
 	// inside the same "click the setup link" window. Strong reads would
@@ -292,7 +315,12 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if len(pt) == 0 {
 		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
 	}
-	return string(pt), nil
+	apiKey := string(pt)
+	p.apiKeyCache.Store(workspaceID, cachedAPIKey{
+		apiKey:    apiKey,
+		expiresAt: now.Add(apiKeyCacheTTL),
+	})
+	return apiKey, nil
 }
 
 // SlackBotToken looks up the per-workspace Slack bot token captured during
@@ -386,6 +414,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
+	p.apiKeyCache.Delete(workspaceID)
 	return nil
 }
 
@@ -505,6 +534,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
 	}
+	p.apiKeyCache.Delete(workspaceID)
 	return nil
 }
 

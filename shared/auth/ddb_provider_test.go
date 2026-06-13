@@ -14,6 +14,7 @@ import (
 const (
 	testTeamID        = "T123ABCDEF"
 	testSlackBotToken = "xoxb-123456789012345678901234567890"
+	testOldAPIKey     = "lv_live_old"
 )
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
@@ -21,6 +22,7 @@ const (
 type fakeDDBClient struct {
 	getOutput    *dynamodb.GetItemOutput
 	getErr       error
+	getCalls     int
 	putInput     *dynamodb.PutItemInput
 	putErr       error
 	updateInput  *dynamodb.UpdateItemInput
@@ -31,6 +33,7 @@ type fakeDDBClient struct {
 }
 
 func (f *fakeDDBClient) GetItem(_ context.Context, _ *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.getCalls++
 	return f.getOutput, f.getErr
 }
 func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
@@ -67,17 +70,22 @@ func (emptyPlaintextEncryptor) Open(_ context.Context, _, _, _ []byte) ([]byte, 
 type passthroughEncryptor struct {
 	sealErr error
 	openErr error
+
+	sealCalls int
+	openCalls int
 }
 
 const passthroughWrappedKey = "DK"
 
 func (p *passthroughEncryptor) Seal(_ context.Context, plaintext, _ []byte) (ciphertext, wrappedKey []byte, err error) {
+	p.sealCalls++
 	if p.sealErr != nil {
 		return nil, nil, p.sealErr
 	}
 	return append([]byte(nil), plaintext...), []byte(passthroughWrappedKey), nil
 }
 func (p *passthroughEncryptor) Open(_ context.Context, ciphertext, wrappedKey, _ []byte) ([]byte, error) {
+	p.openCalls++
 	if p.openErr != nil {
 		return nil, p.openErr
 	}
@@ -229,6 +237,185 @@ func TestDDBProviderAPIKey(t *testing.T) {
 		_, err := p.APIKey(context.Background(), testTeamID)
 		if !errors.Is(err, ErrWorkspaceNotConfigured) {
 			t.Fatalf("want ErrWorkspaceNotConfigured for Slack-installed but qURL-unconfigured row, got %v", err)
+		}
+	})
+
+	t.Run("does not cache workspace not configured", func(t *testing.T) {
+		ddb := &fakeDDBClient{getOutput: &dynamodb.GetItemOutput{Item: nil}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		}
+
+		ddb.getOutput = &dynamodb.GetItemOutput{
+			Item: map[string]ddbtypes.AttributeValue{
+				attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+				attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte("lv_live_after_install")},
+				attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+			},
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after install: %v", err)
+		}
+		if got != "lv_live_after_install" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_install")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("missing workspace should not be cached: GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+}
+
+func TestDDBProviderAPIKeyCache(t *testing.T) {
+	itemForKey := func(apiKey string) map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{
+			attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+			attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+			attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+		}
+	}
+
+	t.Run("hit skips DDB and decrypt", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_cached")},
+		}
+		encryptor := &passthroughEncryptor{}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		for i := 0; i < 2; i++ {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				t.Fatalf("APIKey call %d: %v", i+1, err)
+			}
+			if got != "lv_live_cached" {
+				t.Fatalf("call %d got %q want %q", i+1, got, "lv_live_cached")
+			}
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
+		}
+	})
+
+	t.Run("expired entry refreshes from DDB", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("first APIKey: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want %q", got, testOldAPIKey)
+		}
+
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_new")}
+		now = now.Add(apiKeyCacheTTL - time.Second)
+		got, err = p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("cached APIKey: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("cached call got %q want %q", got, testOldAPIKey)
+		}
+
+		now = now.Add(2 * time.Second)
+		got, err = p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("expired APIKey: %v", err)
+		}
+		if got != "lv_live_new" {
+			t.Fatalf("expired call got %q want %q", got, "lv_live_new")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+}
+
+func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
+	itemForKey := func(apiKey string) map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{
+			attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+			attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+			attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+		}
+	}
+
+	t.Run("SetAPIKey evicts stale cached value", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want %q", got, testOldAPIKey)
+		}
+
+		if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_new", "U_ADMIN"); err != nil {
+			t.Fatalf("SetAPIKey: %v", err)
+		}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_new")}
+		got, err = p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after SetAPIKey: %v", err)
+		}
+		if got != "lv_live_new" {
+			t.Fatalf("got %q want %q", got, "lv_live_new")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
+		}
+	})
+
+	t.Run("DeleteAPIKey evicts stale cached value", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteAPIKey: %v", err)
+		}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: nil}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after delete, got %v", err)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
 		}
 	})
 }
