@@ -1665,7 +1665,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		return
 	}
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID)
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. This does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed. Run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. This does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed. A workspace owner can run `/qurl setup <email>` to reconnect it.")
 }
 
 func (h *Handler) canAdvertiseUninstall() bool {
@@ -1685,26 +1685,19 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		respondSlack(w, ":warning: failed to verify who connected qURL to this workspace (upstream error; see logs). Try again in a moment.")
 		return false
 	}
-	// CheckAdmin is eventually consistent and uninstall has no later
-	// consistent backstop, so every ambiguous owner shape fails closed. A
-	// positive admin/owner result only grants deletion after the workspace has
-	// a non-empty, Slack-shaped owner record.
-	if ownerID == "" {
-		respondSlack(w, "qURL isn't connected to a workspace owner yet. Run `/qurl setup <email>` before uninstalling.")
-		return false
-	}
-	if !looksLikeSlackUserID(ownerID) {
-		slog.Warn("/qurl uninstall: stored owner_id is shape-bad", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
-		respondSlack(w, ":warning: could not verify who connected qURL to this workspace. Ask the owner to run `/qurl setup <email>`, then retry.")
-		return false
-	}
 	// Issue #268 asks for workspace-admin self-service offboarding. Setup stays
 	// owner-only because it changes the key binding; uninstall only disconnects
-	// the existing Slack command mapping.
-	if ownerID == userID || isAdmin {
+	// the existing Slack command mapping. CheckAdmin returns true for both the
+	// recorded workspace owner and explicit qURL workspace admins.
+	if isAdmin {
+		if ownerID == "" {
+			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
+		} else if !looksLikeSlackUserID(ownerID) {
+			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
+		}
 		return true
 	}
-	slog.Warn("/qurl uninstall: non-admin denied", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
+	slog.Warn("/qurl uninstall: non-admin denied", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
 	respondSlack(w, "`/qurl uninstall` can only be run by a qURL workspace admin or by the person who connected qURL to this workspace.")
 	return false
 }

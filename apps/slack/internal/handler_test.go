@@ -649,7 +649,7 @@ func TestSlashCommandUninstallFailsClosedWhenOwnerCheckErrors(t *testing.T) {
 	}
 }
 
-func TestSlashCommandUninstallFailsClosedWithoutWorkspaceOwner(t *testing.T) {
+func TestSlashCommandUninstallAllowsAdminWithoutWorkspaceOwner(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "", testAdminUserID, testWorkspaceConfiguredAt)
@@ -658,15 +658,15 @@ func TestSlashCommandUninstallFailsClosedWithoutWorkspaceOwner(t *testing.T) {
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
 
-	if provider.deleteCalls != 0 {
-		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
-	if !strings.Contains(resp[respFieldText], "isn't connected to a workspace owner yet") {
-		t.Fatalf("missing-owner reply missing setup recovery hint: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("missing-owner admin reply missing confirmation: %q", resp[respFieldText])
 	}
 }
 
-func TestSlashCommandUninstallFailsClosedForShapeBadOwner(t *testing.T) {
+func TestSlashCommandUninstallAllowsAdminForShapeBadOwner(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
@@ -675,11 +675,33 @@ func TestSlashCommandUninstallFailsClosedForShapeBadOwner(t *testing.T) {
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
 
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("shape-bad-owner admin reply missing confirmation: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallStrangerDoesNotProbeOwnerState(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "USTRANGER000")
+
 	if provider.deleteCalls != 0 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
 	}
-	if !strings.Contains(resp[respFieldText], "Ask the owner to run `/qurl setup <email>`, then retry") {
-		t.Fatalf("shape-bad-owner reply missing setup recovery hint: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "qURL workspace admin") {
+		t.Fatalf("stranger reply missing generic admin-or-owner message: %q", resp[respFieldText])
+	}
+	for _, leaked := range []string{"could not verify", "workspace owner yet", "setup <email>", "<@"} {
+		if strings.Contains(resp[respFieldText], leaked) {
+			t.Fatalf("stranger reply leaked owner state %q: %q", leaked, resp[respFieldText])
+		}
 	}
 }
 
