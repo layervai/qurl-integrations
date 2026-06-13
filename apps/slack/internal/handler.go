@@ -1673,7 +1673,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	defer cancel()
 	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
 		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
-			respondSlack(w, "qURL isn't currently connected to this workspace. Run `/qurl setup <email>` to connect it.")
+			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
 			return
 		}
 		if errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported) {

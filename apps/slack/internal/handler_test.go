@@ -513,6 +513,12 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
+	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
+		t.Fatalf("not-connected reply missing owner reconnect guidance: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "operator") {
+		t.Fatalf("not-connected reply missing operator recovery guidance: %q", resp[respFieldText])
+	}
 }
 
 func TestSlashCommandUninstallRepeatReportsNotConnected(t *testing.T) {
