@@ -712,39 +712,24 @@ func normalizeTunnelInstallAgentReason(reason string) string {
 	return truncateRunes(strings.TrimSpace(reason), agentConnectorAuditReasonMaxRunes)
 }
 
-func (r tunnelInstallAgentAuditResult) outcome() string {
+func (r tunnelInstallAgentAuditResult) outcome() (string, bool) {
 	switch r {
 	case agentProtectConnectorAuditSuccessResult:
-		return agentProtectConnectorAuditOutcome
+		return agentProtectConnectorAuditOutcome, true
 	case agentProtectConnectorAuditBootstrapDMDeliveryFailedResult:
-		return agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome
+		return agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome, true
 	case agentProtectConnectorAuditInstructionsDeliveryFailedResult:
-		return agentProtectConnectorAuditInstructionsDeliveryFailedOutcome
+		return agentProtectConnectorAuditInstructionsDeliveryFailedOutcome, true
 	case agentProtectConnectorAuditBuildFailedResult:
-		return agentProtectConnectorAuditBuildFailedOutcome
+		return agentProtectConnectorAuditBuildFailedOutcome, true
 	case agentProtectConnectorAuditAdminVerificationFailedResult:
-		return agentProtectConnectorAuditAdminVerificationFailedOutcome
+		return agentProtectConnectorAuditAdminVerificationFailedOutcome, true
 	case agentProtectConnectorAuditAdminDeniedResult:
-		return agentProtectConnectorAuditAdminDeniedOutcome
+		return agentProtectConnectorAuditAdminDeniedOutcome, true
 	case agentProtectConnectorAuditWorkerUnavailableResult:
-		return agentProtectConnectorAuditWorkerUnavailableOutcome
+		return agentProtectConnectorAuditWorkerUnavailableOutcome, true
 	default:
-		return agentProtectConnectorAuditBuildFailedOutcome
-	}
-}
-
-func (r tunnelInstallAgentAuditResult) known() bool {
-	switch r {
-	case agentProtectConnectorAuditSuccessResult,
-		agentProtectConnectorAuditBootstrapDMDeliveryFailedResult,
-		agentProtectConnectorAuditInstructionsDeliveryFailedResult,
-		agentProtectConnectorAuditBuildFailedResult,
-		agentProtectConnectorAuditAdminVerificationFailedResult,
-		agentProtectConnectorAuditAdminDeniedResult,
-		agentProtectConnectorAuditWorkerUnavailableResult:
-		return true
-	default:
-		return false
+		return agentProtectConnectorAuditBuildFailedOutcome, false
 	}
 }
 
@@ -764,13 +749,14 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	// Modal-submit audits intentionally do not inherit the worker ctx: setup,
 	// Slack delivery, and possible revoke may have spent or canceled that ctx by
 	// the time we write the review row. Give the best-effort audit its own short
-	// handler-scoped budget instead.
+	// handler-scoped budget instead. Worker-tail callers may occupy their worker
+	// for this bounded audit budget, but they are off Slack's ack path.
 	auditCtx, cancel := context.WithTimeout(baseCtx, agentConnectorAuditWriteTimeout)
 	defer cancel()
-	if !result.known() {
+	resultOutcome, known := result.outcome()
+	if !known {
 		log.Warn("tunnel install agent audit result unknown; using build-failed outcome", "result", uint8(result))
 	}
-	resultOutcome := result.outcome()
 	resultSuccess := result.success()
 	// Modal-submit audits have no public confirm card, so the legacy Outcome
 	// and structured App Home Result intentionally share the same neutral text.
