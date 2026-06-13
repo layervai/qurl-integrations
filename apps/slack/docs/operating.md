@@ -129,8 +129,11 @@ every event as actionable: the admin can recover by rerunning `/qurl setup
 <email>` with the same qURL account only during the binding replay window. The
 emitted `retry_window_hours` reports that window, and the event timestamp starts
 the operator clock.
-`cleanup_after_window_hours` is intentionally coupled to the same window today;
-cleanup starts after replay recovery closes.
+
+`cleanup_after_window_hours` is intentionally coincident with the same threshold
+today; prefer retry at the exact boundary and treat rows older than the emitted
+cleanup window as cleanup candidates until qurl-service exposes a separate
+cleanup TTL.
 
 Run this CloudWatch Logs Insights query against the Slack app log group with the
 time range set to the current replay window:
