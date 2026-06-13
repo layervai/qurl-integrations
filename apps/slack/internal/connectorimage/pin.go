@@ -28,7 +28,10 @@ const (
 // layers qURL policy on top. We do not use ParseNormalizedNamed because it
 // rewrites slashless refs such as gcr.io:v1 or localhost:5000 into Docker Hub
 // library images. Preserving the operator's input lets startup reject those
-// ambiguous forms instead of silently normalizing them.
+// ambiguous forms instead of silently normalizing them. The local guards below
+// intentionally depend on the current reference.Parse success/failure boundary;
+// re-check the ClassifyPin table and latest-tag fuzz invariant when upgrading
+// github.com/distribution/reference.
 func ClassifyPin(image string) PinStatus {
 	name, digest, hasDigest := strings.Cut(image, "@")
 	parsed, parseErr := dockerref.Parse(image)
