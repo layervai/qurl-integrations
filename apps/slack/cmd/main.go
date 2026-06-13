@@ -1279,6 +1279,8 @@ func imageNameHasRepository(name string) bool {
 		return false
 	}
 	if lastColon >= 0 {
+		// Non-digest refs reject slashless host:port earlier as ambiguous, but
+		// digest refs reach this helper directly and still need the same guard.
 		return !looksLikeRegistryHost(name[:lastColon])
 	}
 	return !looksLikeRegistryHost(name)
