@@ -27,6 +27,7 @@ const (
 	testAgentStreamEndTurn       = "end_turn"
 	testAgentStreamToolUse       = "tool_use"
 	testAgentStreamProposeRevoke = "propose_revoke"
+	testAgentStreamInstalledTeam = "T_installed"
 )
 
 type recordingStreamPort struct {
@@ -253,7 +254,7 @@ func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 	port := &recordingStreamPort{}
 	h := NewHandler(Config{AgentStream: port})
 	e := env(slackEventTypeAppMention, "channel", "U_remote", "", "", "<@U12345678> hi")
-	e.TeamID = "T_installed"
+	e.TeamID = testAgentStreamInstalledTeam
 	e.EnterpriseID = "E_grid"
 	e.Event.UserTeam = "T_remote"
 	e.Event.Channel = "C_shared"
@@ -269,7 +270,7 @@ func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 	}
 	got := port.starts[0]
 	want := AgentStreamStart{
-		TeamID:          "T_installed",
+		TeamID:          testAgentStreamInstalledTeam,
 		EnterpriseID:    "E_grid",
 		ChannelID:       "C_shared",
 		ThreadTS:        testChannelMentionStreamTS,
@@ -278,6 +279,27 @@ func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("startStream target = %+v, want %+v", got, want)
+	}
+}
+
+func TestNewAgentReplyStreamer_ChannelMentionRecipientTeamFallbacks(t *testing.T) {
+	h := NewHandler(Config{AgentStream: &recordingStreamPort{}})
+
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+	e.TeamID = testAgentStreamInstalledTeam
+	e.Event.SourceTeam = "T_source"
+	if got := agentStreamRecipientTeamID(e); got != "T_source" {
+		t.Fatalf("source_team should be the second-choice recipient team, got %q", got)
+	}
+
+	e.Event.SourceTeam = ""
+	if got := agentStreamRecipientTeamID(e); got != testAgentStreamInstalledTeam {
+		t.Fatalf("team_id should be the same-workspace recipient-team fallback, got %q", got)
+	}
+
+	e.TeamID = ""
+	if s := h.newAgentReplyStreamer(context.Background(), slog.Default(), e, agentEventRootTS(&e.Event)); s != nil {
+		t.Fatal("a channel stream without any recipient team must fall back to the posted path")
 	}
 }
 

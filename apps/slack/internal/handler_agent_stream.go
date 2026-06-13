@@ -18,8 +18,8 @@ const agentStreamFlushBytes = 48
 // newAgentReplyStreamer builds the per-turn streamer for a streamable agent reply, or nil
 // to keep the agent on the non-streaming post path. Pane DMs stream as before. Channel
 // app_mention turns also stream now: chat.startStream requires recipient_* there, and
-// recipient_team_id must be the triggering user's team when Slack provides it (shared
-// channel/Grid), falling back to the event's workspace team for the normal same-team case.
+// recipient_team_id must be the triggering user's team when Slack provides shared-channel
+// team hints, falling back to the event's workspace team for the normal same-team case.
 func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, replyTS string) *agentReplyStreamer {
 	if h.cfg.AgentStream == nil {
 		return nil
@@ -30,10 +30,7 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 	default:
 		return nil
 	}
-	recipientTeamID := env.Event.UserTeam
-	if recipientTeamID == "" {
-		recipientTeamID = env.TeamID
-	}
+	recipientTeamID := agentStreamRecipientTeamID(env)
 	if recipientTeamID == "" || env.Event.User == "" {
 		return nil
 	}
@@ -49,6 +46,16 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 		recipientTeamID: recipientTeamID,
 		userID:          env.Event.User,
 	}
+}
+
+func agentStreamRecipientTeamID(env *slackEventEnvelope) string {
+	if env.Event.UserTeam != "" {
+		return env.Event.UserTeam
+	}
+	if env.Event.SourceTeam != "" {
+		return env.Event.SourceTeam
+	}
+	return env.TeamID
 }
 
 // agentReplyStreamer drives one agent turn's native reply streaming: it lazily opens a Slack
