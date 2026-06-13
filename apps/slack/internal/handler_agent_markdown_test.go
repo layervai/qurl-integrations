@@ -9,6 +9,8 @@ const (
 	testNestedBillingMarkdownLink = "[billing](https://evil.example/login)"
 	testNestedClickMarkdownLink   = "[click](https://evil.example/phish)"
 	testSafeURLPrefix             = "https://safe.example/"
+	testEscapedBracketRealLink    = `Literal \[safe label](https://example.invalid) but real [link](https://evil.example).`
+	testUnclosedCodeMarkdownLink  = "` then [click me](https://evil.example/phish)"
 )
 
 func TestHardenAgentMarkdown_RevealsMaskedLinks(t *testing.T) {
@@ -76,7 +78,7 @@ func TestHardenAgentMarkdown_PreservesCodeSpans(t *testing.T) {
 
 func TestHardenAgentMarkdown_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
 	t.Parallel()
-	in := "` then [click me](https://evil.example/phish)"
+	in := testUnclosedCodeMarkdownLink
 	want := "` then click me (https://evil.example/phish)"
 	if got := hardenAgentMarkdown(in); got != want {
 		t.Fatalf("hardened markdown = %q, want %q", got, want)
@@ -92,9 +94,26 @@ func TestHardenAgentMarkdown_EscapedBacktickDoesNotLeaveEscapeState(t *testing.T
 	}
 }
 
+func TestHardenAgentMarkdown_PreservesBangBeforeCodeSpan(t *testing.T) {
+	t.Parallel()
+	in := "Heads up!`code` done"
+	if got := hardenAgentMarkdown(in); got != in {
+		t.Fatalf("hardened markdown = %q, want %q", got, in)
+	}
+}
+
+func TestHardenAgentMarkdown_PreservesBangBeforeUnclosedCodeSpan(t *testing.T) {
+	t.Parallel()
+	in := "Heads up!`code [click](https://evil.example/phish)"
+	want := "Heads up!`code click (https://evil.example/phish)"
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestHardenAgentMarkdown_PreservesEscapedBrackets(t *testing.T) {
 	t.Parallel()
-	in := `Literal \[safe label](https://example.invalid) but real [link](https://evil.example).`
+	in := testEscapedBracketRealLink
 	want := `Literal \[safe label](https://example.invalid) but real link (https://evil.example).`
 	if got := hardenAgentMarkdown(in); got != want {
 		t.Fatalf("hardened markdown = %q, want %q", got, want)
@@ -170,6 +189,50 @@ func TestHardenAgentMarkdown_HardensNoPipeSlackAngleURLOriginals(t *testing.T) {
 	if !strings.Contains(got, `\<`+testSafeURLPrefix+` \[click](https://evil.example/phish)>`) {
 		t.Fatalf("no-pipe angle original should keep the destination literal, got %q", got)
 	}
+}
+
+func TestHardenAgentMarkdown_IsIdempotent(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{
+		"Read [the setup guide](https://docs.example/setup).",
+		"Use <https://safe.example/[click](https://evil.example/phish)|see details>.",
+		"Use <https://safe.example/ [click](https://evil.example/phish)>.",
+		testEscapedBracketRealLink,
+		testUnclosedCodeMarkdownLink,
+		"Email <user@example.com> and <a href=\"https://evil.example/login\">billing</a>.",
+		"[1]: https://evil.example/login",
+	} {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			once := hardenAgentMarkdown(in)
+			if twice := hardenAgentMarkdown(once); twice != once {
+				t.Fatalf("hardenAgentMarkdown not idempotent:\ninput: %q\nonce: %q\ntwice: %q", in, once, twice)
+			}
+		})
+	}
+}
+
+func FuzzHardenAgentMarkdown(f *testing.F) {
+	for _, seed := range []string{
+		"",
+		"plain text",
+		"Read [the setup guide](https://docs.example/setup).",
+		"Use <https://safe.example/[click](https://evil.example/phish)|see details>.",
+		"Use <https://safe.example/ [click](https://evil.example/phish)>.",
+		testEscapedBracketRealLink,
+		testUnclosedCodeMarkdownLink,
+		"Email <user@example.com> and <a href=\"https://evil.example/login\">billing</a>.",
+		"[1]: https://evil.example/login",
+		"Heads up!`code` done",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		once := hardenAgentMarkdown(in)
+		if twice := hardenAgentMarkdown(once); twice != once {
+			t.Fatalf("hardenAgentMarkdown not idempotent:\ninput: %q\nonce: %q\ntwice: %q", in, once, twice)
+		}
+	})
 }
 
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitLinks(t *testing.T) {

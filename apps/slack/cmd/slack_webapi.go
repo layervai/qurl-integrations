@@ -11,6 +11,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -462,6 +463,8 @@ func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAg
 // older markdown_text-only body so the answer still delivers.
 func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
 	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
+	var fallbackLogMu sync.Mutex
+	fallbackLogSeen := make(map[string]struct{})
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
 		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
 		body, err := slackMarkdownBlockMessageBody(channelID, threadTS, markdownText)
@@ -473,7 +476,19 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			return err
 		}
 		errorCode := slackChatPostMessageErrorCode(err)
-		slog.Debug("Slack rejected markdown block; retrying with markdown_text", "error_code", errorCode, "error", err)
+		fallbackLogKey := teamID + "\x00" + enterpriseID + "\x00" + errorCode
+		fallbackLogMu.Lock()
+		_, fallbackLogAlreadySeen := fallbackLogSeen[fallbackLogKey]
+		if !fallbackLogAlreadySeen {
+			fallbackLogSeen[fallbackLogKey] = struct{}{}
+		}
+		fallbackLogMu.Unlock()
+		logArgs := []any{"team_id", teamID, "enterprise_id", enterpriseID, "error_code", errorCode, "error", err}
+		if fallbackLogAlreadySeen {
+			slog.Debug("Slack rejected markdown block; retrying with markdown_text", logArgs...)
+		} else {
+			slog.Info("Slack rejected markdown block; retrying with markdown_text", logArgs...)
+		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)

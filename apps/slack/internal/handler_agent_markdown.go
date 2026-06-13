@@ -139,14 +139,6 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 		h.escaped = false
 		return true
 	}
-	if !h.codeDisabled && c == '`' {
-		h.pendingTicks++
-		return true
-	}
-	if h.inCode {
-		h.codeBuffer.WriteByte(c)
-		return true
-	}
 	if h.pendingBang {
 		h.pendingBang = false
 		if c == '[' {
@@ -154,6 +146,14 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 			return true
 		}
 		out.WriteByte('!')
+	}
+	if !h.codeDisabled && c == '`' {
+		h.pendingTicks++
+		return true
+	}
+	if h.inCode {
+		h.codeBuffer.WriteByte(c)
+		return true
 	}
 	if c == '\\' {
 		out.WriteByte(c)
