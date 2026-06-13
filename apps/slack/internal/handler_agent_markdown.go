@@ -13,21 +13,26 @@ func hardenAgentMarkdown(markdown string) string {
 }
 
 type agentMarkdownLinkHarden struct {
-	inCode    bool
-	codeTicks int
+	references markdownReferenceDefinitionEscaper
+
+	inCode       bool
+	codeTicks    int
+	pendingTicks int
 
 	pendingBang bool
 	link        markdownLinkPending
 }
 
 type markdownLinkPending struct {
-	state       markdownLinkState
-	escaped     bool
-	labelDepth  int
-	destDepth   int
-	original    strings.Builder
-	label       strings.Builder
-	destination strings.Builder
+	state        markdownLinkState
+	escaped      bool
+	labelDepth   int
+	destDepth    int
+	destSawSpace bool
+	destQuote    byte
+	original     strings.Builder
+	label        strings.Builder
+	destination  strings.Builder
 }
 
 type markdownLinkState int
@@ -40,6 +45,10 @@ const (
 )
 
 func (h *agentMarkdownLinkHarden) write(markdown string) string {
+	return h.writeLinks(h.references.write(markdown))
+}
+
+func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 	var out strings.Builder
 	for i := 0; i < len(markdown); i++ {
 		c := markdown[i]
@@ -51,6 +60,9 @@ func (h *agentMarkdownLinkHarden) write(markdown string) string {
 			}
 			continue
 		}
+		if c != '`' && h.pendingTicks > 0 {
+			h.emitBacktickRun(&out)
+		}
 		if h.pendingBang {
 			h.pendingBang = false
 			if c == '[' && !h.inCode {
@@ -60,19 +72,7 @@ func (h *agentMarkdownLinkHarden) write(markdown string) string {
 			out.WriteByte('!')
 		}
 		if c == '`' {
-			n := countByteRun(markdown[i:], '`')
-			ticks := markdown[i : i+n]
-			if h.inCode {
-				if n == h.codeTicks {
-					h.inCode = false
-					h.codeTicks = 0
-				}
-			} else {
-				h.inCode = true
-				h.codeTicks = n
-			}
-			out.WriteString(ticks)
-			i += n - 1
+			h.pendingTicks++
 			continue
 		}
 		if !h.inCode {
@@ -92,6 +92,12 @@ func (h *agentMarkdownLinkHarden) write(markdown string) string {
 
 func (h *agentMarkdownLinkHarden) flush() string {
 	var out strings.Builder
+	if ref := h.references.flush(); ref != "" {
+		out.WriteString(h.writeLinks(ref))
+	}
+	if h.pendingTicks > 0 {
+		h.emitBacktickRun(&out)
+	}
 	if h.pendingBang {
 		out.WriteByte('!')
 		h.pendingBang = false
@@ -160,33 +166,55 @@ func (h *agentMarkdownLinkHarden) consumeLinkByte(out *strings.Builder, c byte) 
 		h.link.escaped = false
 		return true
 	case markdownLinkDestination:
-		h.link.original.WriteByte(c)
-		if h.link.escaped {
-			h.link.destination.WriteByte(c)
-			h.link.escaped = false
-			return true
-		}
-		switch c {
-		case '\\':
-			h.link.destination.WriteByte(c)
-			h.link.escaped = true
-		case '(':
-			h.link.destDepth++
-			h.link.destination.WriteByte(c)
-		case ')':
-			h.link.destDepth--
-			if h.link.destDepth == 0 {
-				h.emitNeutralizedLink(out)
-				return true
-			}
-			h.link.destination.WriteByte(c)
-		default:
-			h.link.destination.WriteByte(c)
-		}
-		return true
+		return h.consumeLinkDestinationByte(out, c)
 	default:
 		return false
 	}
+}
+
+func (h *agentMarkdownLinkHarden) consumeLinkDestinationByte(out *strings.Builder, c byte) bool {
+	h.link.original.WriteByte(c)
+	if h.link.escaped {
+		h.link.destination.WriteByte(c)
+		h.link.escaped = false
+		return true
+	}
+	if h.link.destQuote != 0 {
+		h.link.destination.WriteByte(c)
+		switch c {
+		case '\\':
+			h.link.escaped = true
+		case h.link.destQuote:
+			h.link.destQuote = 0
+		}
+		return true
+	}
+	switch c {
+	case '\\':
+		h.link.destination.WriteByte(c)
+		h.link.escaped = true
+	case '"', '\'':
+		if h.link.destSawSpace {
+			h.link.destQuote = c
+		}
+		h.link.destination.WriteByte(c)
+	case ' ', '\t', '\n':
+		h.link.destSawSpace = true
+		h.link.destination.WriteByte(c)
+	case '(':
+		h.link.destDepth++
+		h.link.destination.WriteByte(c)
+	case ')':
+		h.link.destDepth--
+		if h.link.destDepth == 0 {
+			h.emitNeutralizedLink(out)
+			return true
+		}
+		h.link.destination.WriteByte(c)
+	default:
+		h.link.destination.WriteByte(c)
+	}
+	return true
 }
 
 func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
@@ -206,13 +234,136 @@ func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
 	h.link = markdownLinkPending{}
 }
 
-func countByteRun(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] != b {
-			return i
-		}
+func (h *agentMarkdownLinkHarden) emitBacktickRun(out *strings.Builder) {
+	n := h.pendingTicks
+	h.pendingTicks = 0
+	if n == 0 {
+		return
 	}
-	return len(s)
+	if h.inCode {
+		if n == h.codeTicks {
+			h.inCode = false
+			h.codeTicks = 0
+		}
+	} else {
+		h.inCode = true
+		h.codeTicks = n
+	}
+	out.WriteString(strings.Repeat("`", n))
+}
+
+type markdownReferenceDefinitionEscaper struct {
+	lineColumn     int
+	lineHasContent bool
+	pending        markdownReferenceDefinitionPending
+}
+
+type markdownReferenceDefinitionPending struct {
+	state      markdownReferenceDefinitionState
+	escaped    bool
+	labelDepth int
+	original   strings.Builder
+}
+
+type markdownReferenceDefinitionState int
+
+const (
+	markdownReferenceDefinitionNone markdownReferenceDefinitionState = iota
+	markdownReferenceDefinitionLabel
+	markdownReferenceDefinitionAfterLabel
+)
+
+func (e *markdownReferenceDefinitionEscaper) write(markdown string) string {
+	var out strings.Builder
+	for i := 0; i < len(markdown); i++ {
+		c := markdown[i]
+
+	reprocess:
+		if e.pending.state != markdownReferenceDefinitionNone {
+			if !e.consumeReferenceDefinitionByte(&out, c) {
+				goto reprocess
+			}
+			continue
+		}
+		if c == '[' && !e.lineHasContent && e.lineColumn <= 3 {
+			e.startReferenceDefinition()
+			continue
+		}
+		out.WriteByte(c)
+		e.advanceLine(c)
+	}
+	return out.String()
+}
+
+func (e *markdownReferenceDefinitionEscaper) flush() string {
+	if e.pending.state == markdownReferenceDefinitionNone {
+		return ""
+	}
+	original := e.pending.original.String()
+	e.pending = markdownReferenceDefinitionPending{}
+	return original
+}
+
+func (e *markdownReferenceDefinitionEscaper) startReferenceDefinition() {
+	e.pending = markdownReferenceDefinitionPending{state: markdownReferenceDefinitionLabel}
+	e.pending.original.WriteByte('[')
+	e.advanceLine('[')
+}
+
+func (e *markdownReferenceDefinitionEscaper) consumeReferenceDefinitionByte(out *strings.Builder, c byte) bool {
+	if e.pending.original.Len() > maxAgentMarkdownLinkBytes {
+		out.WriteString(e.pending.original.String())
+		e.pending = markdownReferenceDefinitionPending{}
+		return false
+	}
+	e.pending.original.WriteByte(c)
+	e.advanceLine(c)
+	if e.pending.escaped {
+		e.pending.escaped = false
+		return true
+	}
+	switch e.pending.state {
+	case markdownReferenceDefinitionNone:
+		return false
+	case markdownReferenceDefinitionLabel:
+		switch c {
+		case '\\':
+			e.pending.escaped = true
+		case '[':
+			e.pending.labelDepth++
+		case ']':
+			if e.pending.labelDepth > 0 {
+				e.pending.labelDepth--
+				return true
+			}
+			e.pending.state = markdownReferenceDefinitionAfterLabel
+		case '\n':
+			out.WriteString(e.pending.original.String())
+			e.pending = markdownReferenceDefinitionPending{}
+		}
+		return true
+	case markdownReferenceDefinitionAfterLabel:
+		if c == ':' {
+			out.WriteByte('\\')
+		}
+		out.WriteString(e.pending.original.String())
+		e.pending = markdownReferenceDefinitionPending{}
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *markdownReferenceDefinitionEscaper) advanceLine(c byte) {
+	if c == '\n' {
+		e.lineColumn = 0
+		e.lineHasContent = false
+		return
+	}
+	if c != ' ' || e.lineColumn >= 3 {
+		e.lineHasContent = true
+	}
+	e.lineColumn++
 }
 
 func visibleMarkdownLinkDestination(destination string) string {

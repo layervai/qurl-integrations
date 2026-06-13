@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -553,7 +554,7 @@ func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 
 func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t *testing.T) {
 	t.Parallel()
-	for _, code := range []string{"invalid_blocks", "invalid_blocks_format", "invalid_block_type", "invalid_arguments"} {
+	for _, code := range []string{slackAPIInvalidBlocks, slackAPIInvalidBlocksFormat, slackAPIInvalidBlockType, slackAPIInvalidArguments} {
 		t.Run(code, func(t *testing.T) {
 			t.Parallel()
 			var bodies []string
@@ -582,6 +583,17 @@ func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t
 				t.Fatalf("second request should use markdown_text only: %s", bodies[1])
 			}
 		})
+	}
+}
+
+func TestSlackChatPostMessageErrorCodeUsesTypedError(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("wrapped: %w", &slackWebAPIError{op: "chat.postMessage", code: slackAPIInvalidBlockType})
+	if got := slackChatPostMessageErrorCode(err); got != slackAPIInvalidBlockType {
+		t.Fatalf("error code = %q, want %s", got, slackAPIInvalidBlockType)
+	}
+	if got := slackChatPostMessageErrorCode(errors.New("chat.postMessage: " + slackAPIInvalidBlockType)); got != "" {
+		t.Fatalf("plain error-string code = %q, want empty", got)
 	}
 }
 

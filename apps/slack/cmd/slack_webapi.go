@@ -204,6 +204,22 @@ func slackAPIErrorCode(code string) string {
 	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
 }
 
+const (
+	slackAPIInvalidArguments    = "invalid_arguments"
+	slackAPIInvalidBlockType    = "invalid_block_type"
+	slackAPIInvalidBlocks       = "invalid_blocks"
+	slackAPIInvalidBlocksFormat = "invalid_blocks_format"
+)
+
+type slackWebAPIError struct {
+	op   string
+	code string
+}
+
+func (e *slackWebAPIError) Error() string {
+	return e.op + ": " + e.code
+}
+
 func slackOpenViewAPIError(code, retryAfter string) error {
 	switch code {
 	case "invalid_trigger", "trigger_expired":
@@ -492,7 +508,10 @@ func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]b
 
 func isSlackMarkdownBlockFallbackError(err error) bool {
 	switch slackChatPostMessageErrorCode(err) {
-	case "invalid_arguments", "invalid_block_type", "invalid_blocks", "invalid_blocks_format":
+	// invalid_arguments is broader than the block-specific codes, but this helper
+	// only runs after the markdown-block attempt. A real argument error costs one
+	// doomed markdown_text retry, while older Slack surfaces still get delivery.
+	case slackAPIInvalidArguments, slackAPIInvalidBlockType, slackAPIInvalidBlocks, slackAPIInvalidBlocksFormat:
 		return true
 	default:
 		return false
@@ -500,15 +519,11 @@ func isSlackMarkdownBlockFallbackError(err error) bool {
 }
 
 func slackChatPostMessageErrorCode(err error) string {
-	if err == nil {
+	var apiErr *slackWebAPIError
+	if !errors.As(err, &apiErr) || apiErr.op != "chat.postMessage" {
 		return ""
 	}
-	const prefix = "chat.postMessage: "
-	msg := err.Error()
-	if !strings.HasPrefix(msg, prefix) {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimPrefix(msg, prefix))
+	return apiErr.code
 }
 
 // newSlackPostMessageBlocksFuncWithTokenLookup builds the
@@ -988,7 +1003,7 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 	if code == "missing_scope" {
 		return fmt.Errorf("%s: %w", op, internal.ErrSlackMissingScope)
 	}
-	return fmt.Errorf("%s: %s", op, code)
+	return &slackWebAPIError{op: op, code: code}
 }
 
 // slackChatPostMessageResponseError preserves the chat.postMessage error shape: no
