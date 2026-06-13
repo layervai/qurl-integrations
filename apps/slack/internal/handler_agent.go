@@ -69,7 +69,9 @@ const agentAckReaction = "eyes"
 // On a very fast turn with a still-running add, deferred clear can spend one budget
 // joining the add before spending a fresh budget on remove; both happen after reply
 // delivery, so the user-visible turn stays unblocked, but the agent worker slot stays
-// occupied until the deferred clear returns.
+// occupied until the deferred clear returns. In that slow-reaction/fast-reply case,
+// the reaction may briefly appear after the reply before clear removes it; preserving
+// add-before-remove ordering is the no-stale-reaction priority.
 const agentAckTimeout = 2 * time.Second
 
 // agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
@@ -257,9 +259,11 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) <-chan 
 // remove before the async add lands. The wait is bounded too: if a future seam ignores
 // its add context, or the add goroutine starts late enough that the join budget wins,
 // clear abandons the best-effort remove rather than recreating the remove-before-add
-// race. The remove uses a FRESH ctx off baseCtx: by defer time the turn ctx is spent
-// (agentTurnTimeout elapsed, or shutdown), so removing on it would fail instantly and
-// strand the 👀 — the same spent-ctx lesson as postAgentReply.
+// race. This bounds the clear path; the add worker itself still relies on the
+// ReactionPort honoring ctx, like other handler seams. The remove uses a FRESH ctx off
+// baseCtx: by defer time the turn ctx is spent (agentTurnTimeout elapsed, or shutdown),
+// so removing on it would fail instantly and strand the 👀 — the same spent-ctx lesson
+// as postAgentReply.
 func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, addDone <-chan struct{}) {
 	if h.cfg.Reactions == nil || addDone == nil {
 		return

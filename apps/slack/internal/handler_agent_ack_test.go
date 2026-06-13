@@ -11,7 +11,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
-	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -166,7 +166,7 @@ func TestAgentAck_AddIsAsyncAndClearWaitsBeforeRemove(t *testing.T) {
 	rec.releaseAddCall()
 	h.Wait()
 
-	if got, want := rec.snapshotEvents(), []string{"add", "remove"}; !reflect.DeepEqual(got, want) {
+	if got, want := rec.snapshotEvents(), []string{"add", "remove"}; !slices.Equal(got, want) {
 		t.Fatalf("reaction order = %v, want %v", got, want)
 	}
 }
