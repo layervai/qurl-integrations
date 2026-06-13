@@ -105,14 +105,29 @@ function verifyAndResolve(req) {
   // SECURITY: pre-HMAC parse depth/size MUST stay bounded by the
   // rawBodyJson middleware cap (server.js, `limit: '1mb'`). Loosening
   // that cap or adding extended type coercion here widens the
-  // pre-trust window — req.body is attacker-controlled JSON until
-  // the HMAC check below succeeds.
+  // pre-trust window — this parsed body is attacker-controlled JSON
+  // until the HMAC check below succeeds.
   // The lookup itself grants no trust: a forged owner_id either
   // misses the cache (→ 401) or hits a real secret the attacker
   // can't forge against (→ 401).
-  const ownerId = req.body && typeof req.body.owner_id === 'string' ? req.body.owner_id : null;
+  // Under today's express.json wiring, malformed JSON is rejected
+  // before this route runs; this catch is forward defense for raw-body
+  // parser refactors and parser-differential cases.
+  // Deliberately do not strip a UTF-8 BOM: qurl-service's Go JSON
+  // encoder never emits one, and a BOM-prefixed request is outside the
+  // signed wire shape we accept.
+  // rawBody.toString() intentionally uses Node's UTF-8 default; other
+  // charsets are outside qurl-service's webhook contract.
+  let body;
+  try {
+    body = JSON.parse(req.rawBody.toString());
+  } catch (err) {
+    logger.warn('qURL webhook raw body JSON parse failed', { error: err.message });
+    return { result: VERIFY_RESULTS.OWNER_ID_MISSING };
+  }
+  const ownerId = body && typeof body.owner_id === 'string' ? body.owner_id : null;
   if (!ownerId) {
-    logger.warn('qURL webhook missing or non-string body.owner_id');
+    logger.warn('qURL webhook raw body missing or non-string owner_id');
     return { result: VERIFY_RESULTS.OWNER_ID_MISSING };
   }
 
@@ -135,7 +150,7 @@ function verifyAndResolve(req) {
   if (!verifyHmacSha256(req.rawBody, secret, signature)) {
     return { result: VERIFY_RESULTS.SIG_INVALID, ownerId };
   }
-  return { result: VERIFY_RESULTS.OK, ownerId };
+  return { result: VERIFY_RESULTS.OK, ownerId, body };
 }
 
 // Reconstruct the absolute expiry instant from the recipient row's
@@ -452,7 +467,7 @@ router.post('/qurl', async (req, res) => {
     return res.status(429).json({ error: 'Too many invalid webhook attempts' });
   }
 
-  const { result, ownerId } = verifyAndResolve(req);
+  const { result, ownerId, body } = verifyAndResolve(req);
 
   // 503 is the only retriable failure mode — qurl-service retries 503
   // (1+2+4+8+16=31s backoff, 5 attempts) but NOT 401. The cache-
@@ -517,9 +532,9 @@ router.post('/qurl', async (req, res) => {
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  const eventType = req.body?.type;
-  const data = req.body?.data;
-  const eventId = req.body?.id;
+  const eventType = body?.type;
+  const data = body?.data;
+  const eventId = body?.id;
   // typeof guard (not just falsy): a payload with `id: { weird: true }`
   // would otherwise pass through DDB's UpdateExpression and persist a
   // non-scalar replay key — silent corruption of dedup semantics.
