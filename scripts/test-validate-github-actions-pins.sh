@@ -106,6 +106,12 @@ run_case invalid-version-comment 1 "SHA pin must include an exact version tag co
     steps:
       - uses: actions/checkout@$sha # v1.2.3.4"
 
+run_case invalid-prerelease-comment 1 "SHA pin must include an exact version tag comment" \
+  ".github/workflows/test.yml" "jobs:
+  test:
+    steps:
+      - uses: actions/checkout@$sha # v1.2.3-..foo"
+
 run_case docker-action 1 "docker:// actions are not allowed" \
   ".github/workflows/test.yml" "jobs:
   test:
