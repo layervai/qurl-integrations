@@ -219,6 +219,9 @@ func (h *Handler) effectiveAgentAckTimeout() time.Duration {
 	if h.agentAckTimeout > 0 {
 		return h.agentAckTimeout
 	}
+	// Most handlers go through NewHandler, which normalizes this field. The fallback
+	// keeps package-local bare Handler literals in focused unit tests from using a
+	// zero-duration timeout if they call an ack helper directly.
 	return defaultAgentAckTimeout
 }
 
@@ -250,6 +253,8 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) agentAc
 	// Nested Add is safe because the caller is processAgentEvent, already running
 	// inside runOnPool's wg slot; the counter cannot hit zero between this Add and
 	// the goroutine start.
+	// The goroutine is wg-tracked, so shutdown drain relies on ReactionPort.Add
+	// honoring ctx just like the other Slack seams wired through Handler.
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
