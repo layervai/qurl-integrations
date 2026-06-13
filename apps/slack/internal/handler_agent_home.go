@@ -94,13 +94,12 @@ func buildAgentHomeView(entries []slackdata.AuditEntry) []any {
 // agentHomeEntryText renders one audit entry as mrkdwn. This is a PUBLIC-echo surface:
 // Target and Reason are partly LLM-distilled, so they're escaped with the same
 // primitives the confirm card uses (escapeMrkdwnCode for the backticked target,
-// escapeMrkdwnText for the free-text reason) — a stored alias named "*ignore*" or one
-// carrying bidi/zero-width characters renders inert. The label is a NEUTRAL description
-// of the action attempted (not a success claim), so a failed action doesn't read as a
-// success. The stored Outcome is deliberately NOT echoed here: it's the formatted public
-// card text, and escaping its intentional backticks for safety would render it degraded
-// (and it largely repeats the target shown cleanly above) — a clean per-result line is a
-// follow-up (#704) that needs the action core to hand back a structured result.
+// escapeMrkdwnText for the free-text reason/result) — a stored alias named "*ignore*"
+// or one carrying bidi/zero-width characters renders inert. The label is a NEUTRAL
+// description of the action attempted; Result/ResultSuccess carries the per-action
+// success/failure line. The legacy Outcome is deliberately NOT echoed here: it's the
+// formatted public card text, and escaping its intentional backticks for safety would
+// render it degraded (and it largely repeats Target).
 func agentHomeEntryText(e *slackdata.AuditEntry) string {
 	var b strings.Builder
 	b.WriteString("*")
@@ -119,6 +118,16 @@ func agentHomeEntryText(e *slackdata.AuditEntry) string {
 		b.WriteString(e.Channel)
 		b.WriteString(">")
 	}
+	if e.Result != "" && e.ResultSuccess != nil {
+		status := "Failed"
+		if *e.ResultSuccess {
+			status = "Succeeded"
+		}
+		b.WriteString("\n*")
+		b.WriteString(status)
+		b.WriteString(":* ")
+		b.WriteString(escapeMrkdwnText(e.Result))
+	}
 	b.WriteString("\n_")
 	b.WriteString(time.Unix(e.UnixSec, 0).UTC().Format("2006-01-02 15:04 MST"))
 	b.WriteString("_")
@@ -130,8 +139,8 @@ func agentHomeEntryText(e *slackdata.AuditEntry) string {
 }
 
 // agentHomeActionLabel maps a stored action kind to a NEUTRAL display label for the
-// action attempted (not a success claim — per-result success/failure is #704), falling
-// back to the raw kind (which the caller still escapes) for an unrecognized value.
+// action attempted, falling back to the raw kind (which the caller still escapes) for
+// an unrecognized value.
 func agentHomeActionLabel(action string) string {
 	switch action {
 	case string(agent.ActionGet):

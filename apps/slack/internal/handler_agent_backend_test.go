@@ -86,6 +86,7 @@ func qurlBackendServer(t *testing.T) *httptest.Server {
 				testKeyStatus:     client.StatusActive,
 			})
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "staging":
+			// Alias resolution filters for active tunnel resources.
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_2","slug":"staging","type":"tunnel","status":"active","description":"Staging dashboard"}]}`))
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "ghost":
 			_, _ = w.Write([]byte(`{"data":[]}`))

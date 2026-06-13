@@ -225,6 +225,18 @@ func (hc *confirmHarness) pendingID(t *testing.T, teamID string) string {
 	return ids[0]
 }
 
+func requireSingleAuditEntry(t *testing.T, hc *confirmHarness, userID string) slackdata.AuditEntry {
+	t.Helper()
+	got, err := hc.store.ListAuditEntries(context.Background(), "T1", userID, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want one audit entry for %s, got %d: %+v", userID, len(got), got)
+	}
+	return got[0]
+}
+
 func confirmPayload(teamID, channelID, userID, responseURL, id string) *interactionPayload {
 	p := &interactionPayload{Type: "block_actions", ResponseURL: responseURL, TriggerID: "trig"}
 	p.Team.ID = teamID
@@ -454,6 +466,44 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 	if strings.Contains(card, testAgentGetQURLLink) || strings.Contains(card, "staging") {
 		t.Fatalf("public card leaked the minted link or token: %q", card)
 	}
+	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	if entry.Result != "Access link was sent privately to the approver." {
+		t.Fatalf("get success Result = %q", entry.Result)
+	}
+	if entry.ResultSuccess == nil || !*entry.ResultSuccess {
+		t.Fatalf("get success ResultSuccess = %v, want true", entry.ResultSuccess)
+	}
+}
+
+func TestConfirm_GetApproveInDMMintDeliveryFailureAuditsFailure(t *testing.T) {
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {
+			seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID}),
+		},
+	})
+	hc.h.cfg.PostMessage = func(context.Context, string, string, string, string, string) error {
+		return errors.New("delivery unavailable")
+	}
+
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro {
+		t.Fatalf("the DM failure card must replace the original, got ephemeral %q", card)
+	}
+	if !strings.Contains(card, agentConfirmGetDeliveryFailedReply) {
+		t.Fatalf("delivery failure must show the delivery-failed card, got %q", card)
+	}
+	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	if entry.Result != agentConfirmGetDeliveryFailedAudit {
+		t.Fatalf("get delivery failure Result = %q", entry.Result)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("get delivery failure ResultSuccess = %v, want false", entry.ResultSuccess)
+	}
 }
 
 func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
@@ -493,6 +543,13 @@ func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 	}
 	if strings.Contains(card, "staging") || strings.Contains(card, posts[0].text) {
 		t.Fatalf("public card leaked the get detail: %q", card)
+	}
+	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	if entry.Result != "Access link could not be generated." {
+		t.Fatalf("get mint failure Result = %q", entry.Result)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("get mint failure ResultSuccess = %v, want false", entry.ResultSuccess)
 	}
 }
 
@@ -590,6 +647,61 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	})
 }
 
+func TestConfirmResultForDelivery(t *testing.T) {
+	const link = ":link: qURL ready: https://qurl.link/abc"
+	cases := []struct {
+		name          string
+		res           actionResult
+		delivered     bool
+		wantCard      string
+		wantAuditText string
+		wantSuccess   bool
+	}{
+		{
+			name:          "successful get whose delivery failed downgrades card and audit",
+			res:           actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			delivered:     false,
+			wantCard:      agentConfirmGetDeliveryFailedReply,
+			wantAuditText: agentConfirmGetDeliveryFailedAudit,
+			wantSuccess:   false,
+		},
+		{
+			name:      "successful get delivered keeps success",
+			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			delivered: true,
+			wantCard:  agentConfirmGetDeliveredReply,
+		},
+		{
+			name:      "failed get delivery detail is not rewritten",
+			res:       actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: ":warning: staging", attributed: true},
+			delivered: false,
+			wantCard:  agentConfirmGetFailedReply,
+		},
+		{
+			name:      "non-get action is not rewritten",
+			res:       actionResult{cardText: "revoked $staging", attributed: true},
+			delivered: false,
+			wantCard:  "revoked $staging",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := confirmResultForDelivery(c.res, c.delivered)
+			if got.cardText != c.wantCard {
+				t.Fatalf("cardText = %q, want %q", got.cardText, c.wantCard)
+			}
+			if c.wantAuditText != "" {
+				if got.audit.display != c.wantAuditText {
+					t.Fatalf("audit.display = %q, want %q", got.audit.display, c.wantAuditText)
+				}
+				if got.audit.success != c.wantSuccess {
+					t.Fatalf("audit.success = %v, want %v", got.audit.success, c.wantSuccess)
+				}
+			}
+		})
+	}
+}
+
 func TestComposeConfirmCard(t *testing.T) {
 	const (
 		asker    = "Uasker"
@@ -597,51 +709,37 @@ func TestComposeConfirmCard(t *testing.T) {
 		link     = ":link: qURL ready: https://qurl.link/abc"
 	)
 	cases := []struct {
-		name      string
-		res       actionResult
-		delivered bool
-		wantCard  string // the card must contain this
-		notText   string // the card must NOT contain this (no leak)
+		name     string
+		res      actionResult
+		wantCard string // the card must contain this
+		notText  string // the card must NOT contain this (no leak)
 	}{
 		{
-			// The central guarantee: mint succeeded (DeliveredReply + link) but the private
-			// delivery failed → the card must stop claiming success and never echo the link.
-			name:      "successful get whose delivery failed downgrades to delivery-failed",
-			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
-			delivered: false,
-			wantCard:  agentConfirmGetDeliveryFailedReply,
-			notText:   link,
+			name:     "successful get delivered keeps the success card and never echoes the link",
+			res:      actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			wantCard: agentConfirmGetDeliveredReply,
+			notText:  link,
 		},
 		{
-			name:      "successful get delivered keeps the success card and never echoes the link",
-			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
-			delivered: true,
-			wantCard:  agentConfirmGetDeliveredReply,
-			notText:   link,
+			name:     "failed get keeps the failure card even when its detail was not delivered",
+			res:      actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: ":warning: staging", attributed: true},
+			wantCard: agentConfirmGetFailedReply,
+			notText:  "staging",
 		},
 		{
-			name:      "failed get keeps the failure card even when its detail was not delivered",
-			res:       actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: ":warning: staging", attributed: true},
-			delivered: false,
-			wantCard:  agentConfirmGetFailedReply,
-			notText:   "staging",
+			name:     "non-get executed action keeps its card text",
+			res:      actionResult{cardText: "revoked $staging", attributed: true},
+			wantCard: "revoked $staging",
 		},
 		{
-			name:      "non-get executed action is untouched by the delivery flag",
-			res:       actionResult{cardText: "revoked $staging", attributed: true},
-			delivered: true,
-			wantCard:  "revoked $staging",
-		},
-		{
-			name:      "pre-execution rejection stays byte-exact (unattributed)",
-			res:       actionResult{cardText: agentConfirmInvalidAliasReply},
-			delivered: true,
-			wantCard:  agentConfirmInvalidAliasReply,
+			name:     "pre-execution rejection stays byte-exact (unattributed)",
+			res:      actionResult{cardText: agentConfirmInvalidAliasReply},
+			wantCard: agentConfirmInvalidAliasReply,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := composeConfirmCard(c.res, c.delivered, asker, approver)
+			got := composeConfirmCard(c.res, asker, approver)
 			if !strings.Contains(got, c.wantCard) {
 				t.Fatalf("card = %q, want to contain %q", got, c.wantCard)
 			}
@@ -824,6 +922,75 @@ func TestConfirm_ProtectURLOnApprove(t *testing.T) {
 	}
 	if !found || bound != testAgentCreatedURLResourceID {
 		t.Fatalf("channel alias = (%q, %v), want newly-created resource %q", bound, found, testAgentCreatedURLResourceID)
+	}
+}
+
+func TestConfirm_RecordsStructuredAuditResults(t *testing.T) {
+	cases := []struct {
+		name        string
+		pa          *pendingAction
+		before      func(*testing.T, *confirmHarness)
+		wantSuccess bool
+		wantResult  string
+	}{
+		{
+			name:        "revoke resolve failure",
+			pa:          &pendingAction{Action: agent.ActionRevoke, Token: "missing", ChannelID: "C1"},
+			wantSuccess: false,
+			wantResult:  "Resource could not be resolved for revoke.",
+		},
+		{
+			name:        "set-alias success",
+			pa:          &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "staging", ChannelID: "C1"},
+			wantSuccess: true,
+			wantResult:  "Alias now points to the qURL Connector in this channel.",
+		},
+		{
+			name:        "set-alias target not found",
+			pa:          &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "missing", ChannelID: "C1"},
+			wantSuccess: false,
+			wantResult:  "qURL Connector was not found.",
+		},
+		{
+			name:        "unset-alias already clear is a no-op failure",
+			pa:          &pendingAction{Action: agent.ActionUnsetAlias, Alias: "ghost", ChannelID: "C1"},
+			wantSuccess: false,
+			wantResult:  "Alias was not bound in this channel.",
+		},
+		{
+			name: "protect-url alias already bound",
+			pa:   &pendingAction{Action: agent.ActionProtectURL, URL: "https://docs.example.com/handbook", Alias: "docs", ChannelID: "C1"},
+			before: func(t *testing.T, hc *confirmHarness) {
+				t.Helper()
+				if err := hc.h.cfg.AdminStore.BindChannelAlias(context.Background(), "T1", "C1", "docs", "r_existing"); err != nil {
+					t.Fatalf("seed bound alias: %v", err)
+				}
+			},
+			wantSuccess: false,
+			wantResult:  "URL protection did not complete because the alias is already bound in this channel; the URL resource is ready.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newConfirmHarness(t, "Uadmin")
+			if c.before != nil {
+				c.before(t, hc)
+			}
+			id := hc.seedPending(t, c.pa)
+			hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uadmin", hc.respURL, id), id, true, time.Now())
+			ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+			if !ro || !hc.claimed(id) {
+				t.Fatalf("approve should claim and replace the card; replace=%v claimed=%v", ro, hc.claimed(id))
+			}
+
+			entry := requireSingleAuditEntry(t, hc, "Uadmin")
+			if entry.Result != c.wantResult {
+				t.Fatalf("Result = %q, want %q (entry=%+v)", entry.Result, c.wantResult, entry)
+			}
+			if entry.ResultSuccess == nil || *entry.ResultSuccess != c.wantSuccess {
+				t.Fatalf("ResultSuccess = %v, want %v (entry=%+v)", entry.ResultSuccess, c.wantSuccess, entry)
+			}
+		})
 	}
 }
 

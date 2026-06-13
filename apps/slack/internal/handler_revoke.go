@@ -160,10 +160,14 @@ func (h *Handler) processRevoke(ctx context.Context, log *slog.Logger, values ur
 // gate first (requireAdminSync on the slash path; a CheckAdmin re-check on the
 // button click).
 func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, userID, resourceID, displayToken string) string {
+	return h.revokeResourceResult(ctx, log, teamID, userID, resourceID, displayToken).cardText
+}
+
+func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, teamID, userID, resourceID, displayToken string) actionCoreResult {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("revoke: failed to get API key", "error", err, "team_id", teamID, "user_id", userID)
-		return authErrorMessage(err)
+		return newActionCoreResult(false, authErrorMessage(err), "Workspace API key was not available.")
 	}
 	if err := c.DeleteResource(ctx, resourceID); err != nil {
 		var apiErr *client.APIError
@@ -181,16 +185,16 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 				// too, not only on the live-delete path. Idempotent and safe: for a
 				// genuinely typo'd id that references no channel, it's a no-op.
 				h.purgeResourceBindings(ctx, log, teamID, resourceID)
-				return fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken))
+				return newActionCoreResult(false, fmt.Sprintf("`$%s` not found — already revoked, or check the id.", escapeMrkdwnCode(displayToken)), "Resource was not found or was already revoked.")
 			case http.StatusUnauthorized, http.StatusForbidden:
 				// API key rejected — point at /qurl setup so the admin has
 				// a concrete reconnect path rather than a generic error.
 				log.Warn("revoke: upstream auth rejected", "status", apiErr.StatusCode, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-				return "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect."
+				return newActionCoreResult(false, "This workspace's API key was rejected by the qURL service — re-run `/qurl setup <email>` to reconnect.", "Workspace API key was rejected.")
 			}
 		}
 		log.Error("revoke resource failed", "error", err, "team_id", teamID, "user_id", userID, "resource_id", resourceID)
-		return ":warning: " + sanitizeAPIError(err, fmt.Sprintf("Failed to revoke `$%s`", escapeMrkdwnCode(displayToken)))
+		return newActionCoreResult(false, ":warning: "+sanitizeAPIError(err, fmt.Sprintf("Failed to revoke `$%s`", escapeMrkdwnCode(displayToken))), "Resource could not be revoked.")
 	}
 	log.Info("revoke succeeded", "team_id", teamID, "user_id", userID, "resource_id", resourceID)
 	// Cascade the delete into the bot's channel policies: a destroyed resource
@@ -199,7 +203,7 @@ func (h *Handler) revokeResource(ctx context.Context, log *slog.Logger, teamID, 
 	// is already gone, so a sweep failure only leaves a recoverable orphan and
 	// must not change the revoke reply.
 	h.purgeResourceBindings(ctx, log, teamID, resourceID)
-	return fmt.Sprintf("Revoked `$%s` and all its qURLs.", escapeMrkdwnCode(displayToken))
+	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.", escapeMrkdwnCode(displayToken)), "Resource and all of its qURLs were revoked.")
 }
 
 // purgeResourceBindings removes the just-revoked resourceID from every channel
