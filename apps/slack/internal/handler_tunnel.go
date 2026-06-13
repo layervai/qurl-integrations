@@ -753,10 +753,10 @@ func (r tunnelInstallAgentAuditResult) success() bool {
 }
 
 func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelInstallRequest, result tunnelInstallAgentAuditResult) {
-	audit := req.agentAudit
-	if audit == nil {
+	if req == nil || req.agentAudit == nil {
 		return
 	}
+	audit := req.agentAudit
 	baseCtx := h.baseCtx
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -794,9 +794,10 @@ func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunn
 	if req == nil || req.agentAudit == nil {
 		return
 	}
-	// Denied modal submits are still on Slack's view_submission ack path. Keep
-	// the best-effort audit out-of-band so a slow audit store cannot consume
-	// Slack's short modal response window.
+	// Denied and worker-unavailable modal submits are still on Slack's
+	// view_submission ack path. Keep the best-effort, 5s-capped audit out of
+	// band with h.Go instead of the saturated worker pool, so a slow audit store
+	// cannot consume Slack's short modal response window.
 	h.Go(func() {
 		h.recordTunnelInstallAgentAudit(log, req, result)
 	})
