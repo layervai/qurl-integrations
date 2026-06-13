@@ -63,7 +63,8 @@ const (
 	setupBindingPersistFailureOperatorAction = "rerun_setup_within_retry_window_then_cleanup_after_window"
 	// TODO(upstream-contract): mirrors qurl-service's
 	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT, which is the source of truth for
-	// binding replay lifetime.
+	// binding replay lifetime. This is best-effort lockstep only; this repo has
+	// no shared or generated source for the upstream value.
 	setupBindingRetryWindowHours = 24
 	// Cleanup starts when the same replay window closes; keep this aliased to
 	// the retry window unless qurl-service introduces a separate cleanup TTL.
