@@ -176,7 +176,10 @@ type DDBProvider struct {
 }
 
 type apiKeyLookupStart struct {
-	apiKey         string
+	apiKey string
+	// Cached API-key hits only store successful lookups, so err is expected
+	// to be nil. Keeping the Result shape here mirrors ttlcache and makes
+	// that contract explicit at the call site.
 	err            error
 	hit            bool
 	call           *ttlcache.Call[string]
@@ -364,6 +367,9 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 	start, consistentRead := ttlcache.GetOrStartWith[string, bool](p.apiKeyCache(), workspaceID, now, func() bool {
 		// GetOrStartWith runs this hook under the ttlcache lock; keep it
 		// non-reentrant and limited to the strong-read sidecar.
+		// The hook also runs for waiters so all callers observe and clean up
+		// strong-read sidecar state under the same lock, even though only a
+		// fill owner passes the flag into DDB.
 		if p.apiKeyStrongReadUntil == nil {
 			return false
 		}

@@ -8,6 +8,7 @@ import (
 
 const (
 	filledValue = "filled"
+	keptValue   = "keep"
 	staleValue  = "stale"
 )
 
@@ -20,11 +21,11 @@ func TestCacheHitExpiryAndSweep(t *testing.T) {
 			evicted = append(evicted, key+"="+result.Value)
 		},
 	})
-	cache.Seed("fresh", Result[string]{Value: "keep"}, time.Minute, at)
+	cache.Seed("fresh", Result[string]{Value: keptValue}, time.Minute, at)
 	cache.Seed("expired", Result[string]{Value: "drop"}, time.Second, at)
 
 	hit := cache.GetOrStart("fresh", at.Add(30*time.Second))
-	if !hit.Hit || hit.Result.Value != "keep" {
+	if !hit.Hit || hit.Result.Value != keptValue {
 		t.Fatalf("fresh hit = %#v, want cached keep", hit)
 	}
 	if _, ok := cache.entries["expired"]; ok {
@@ -37,6 +38,60 @@ func TestCacheHitExpiryAndSweep(t *testing.T) {
 	start := cache.GetOrStart("expired", at.Add(30*time.Second))
 	if !start.Owner {
 		t.Fatalf("expired key start = %#v, want new owner", start)
+	}
+}
+
+func TestCacheSweepEveryGatesFullMapSweep(t *testing.T) {
+	at := time.Unix(1800000000, 0)
+	var swept []time.Time
+	var evicted []string
+	cache := New[string](Options[string]{
+		SweepEvery: time.Minute,
+		OnEvict: func(key string, result Result[string]) {
+			evicted = append(evicted, key+"="+result.Value)
+		},
+		OnSweep: func(at time.Time) {
+			swept = append(swept, at)
+		},
+	})
+	cache.Seed("expired-other-key", Result[string]{Value: "drop-later"}, time.Second, at)
+	cache.Seed("fresh", Result[string]{Value: keptValue}, time.Minute, at)
+
+	first := cache.GetOrStart("fresh", at.Add(2*time.Second))
+	if !first.Hit || first.Result.Value != keptValue {
+		t.Fatalf("first hit = %#v, want cached keep", first)
+	}
+	if len(swept) != 1 || !swept[0].Equal(at.Add(2*time.Second)) {
+		t.Fatalf("swept after first lookup = %#v, want first lookup time", swept)
+	}
+	if _, ok := cache.entries["expired-other-key"]; ok {
+		t.Fatal("expired entry should be removed by the initial full-map sweep")
+	}
+	if len(evicted) != 1 || evicted[0] != "expired-other-key=drop-later" {
+		t.Fatalf("evicted after first sweep = %#v, want expired other key", evicted)
+	}
+
+	cache.Seed("expired-gated-key", Result[string]{Value: "keep-until-next-sweep"}, time.Second, at)
+	second := cache.GetOrStart("fresh", at.Add(30*time.Second))
+	if !second.Hit || second.Result.Value != keptValue {
+		t.Fatalf("second hit = %#v, want cached keep", second)
+	}
+	if len(swept) != 1 {
+		t.Fatalf("sweep count after gated lookup = %d, want 1", len(swept))
+	}
+	if _, ok := cache.entries["expired-gated-key"]; !ok {
+		t.Fatal("expired other-key entry should survive while SweepEvery gates the full-map sweep")
+	}
+
+	perKey := cache.GetOrStart("expired-gated-key", at.Add(30*time.Second))
+	if !perKey.Owner {
+		t.Fatalf("per-key expired lookup = %#v, want new owner", perKey)
+	}
+	if _, ok := cache.entries["expired-gated-key"]; ok {
+		t.Fatal("per-key lookup should evict its own expired entry even when full-map sweep is gated")
+	}
+	if len(swept) != 1 {
+		t.Fatalf("per-key eviction should not run OnSweep; sweep count = %d, want 1", len(swept))
 	}
 }
 
