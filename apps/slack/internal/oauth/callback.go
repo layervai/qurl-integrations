@@ -59,8 +59,8 @@ const (
 	existingKeyTimeout              = 5 * time.Second
 	dmTimeout                       = 5 * time.Second
 	auth0TokenBodyLimit             = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
-	setupBindingPersistFailureEvent = "slack_setup_binding_backed_persist_failure"
-	// TODO(upstream-rebrand): mirrors qurl-service's
+	setupBindingPersistFailureEvent = "setup_binding_backed_persist_failure"
+	// TODO(upstream-contract): mirrors qurl-service's
 	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT, which is the source of truth for
 	// binding replay lifetime.
 	setupBindingRetryWindowHours = 24

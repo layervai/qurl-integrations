@@ -123,18 +123,19 @@ at the OAuth-callback bind layer.
 
 ## Binding-backed setup visibility
 
-`event="slack_setup_binding_backed_persist_failure"` means qURL provisioned a
+`event="setup_binding_backed_persist_failure"` means qURL provisioned a
 binding-backed workspace key, but the Slack app failed to store it locally. Treat
 every event as actionable: the admin can recover by rerunning `/qurl setup
-<email>` with the same qURL account only during the 24-hour replay window. The
-event timestamp starts the operator clock.
+<email>` with the same qURL account only during the binding replay window. The
+emitted `retry_window_hours` reports that window, and the event timestamp starts
+the operator clock.
 
 Run this CloudWatch Logs Insights query against the Slack app log group with the
-time range set to the last 24 hours:
+time range set to the current replay window:
 
 ```text
 fields @timestamp, team_id, key_id, retry_window_hours, error
-| filter event = "slack_setup_binding_backed_persist_failure"
+| filter event = "setup_binding_backed_persist_failure"
 | sort @timestamp desc
 | limit 50
 ```
@@ -145,19 +146,21 @@ expires. If the admin reruns setup and the Slack storage write succeeds, close
 the ticket.
 
 For post-window cleanup, run the same event query over the older incident window
-(for example, the previous seven days with the end time set to 24 hours ago):
+(for example, a multi-day range whose end time is older than the emitted cleanup
+window):
 
 ```text
 fields @timestamp, team_id, key_id, cleanup_after_window_hours, error
-| filter event = "slack_setup_binding_backed_persist_failure"
+| filter event = "setup_binding_backed_persist_failure"
 | sort @timestamp asc
 | limit 100
 ```
 
-Threshold: any unresolved row after 24 hours is a cleanup candidate. Use qURL
-account/API-key management or operator tooling to revoke or recover the unused
-workspace key before asking the admin to retry. Customer self-service recovery
-for revoked or stale external-identity bindings is tracked in
+Threshold: any unresolved row older than its emitted `cleanup_after_window_hours`
+is a cleanup candidate. Use qURL account/API-key management or operator tooling
+to revoke or recover the unused workspace key before asking the admin to retry.
+Customer self-service recovery for revoked or stale external-identity bindings is
+tracked in
 [layervai/qurl-service#910](https://github.com/layervai/qurl-service/issues/910).
 The setup-binding rollout notes live in
 [qurl-integrations PR #703](https://github.com/layervai/qurl-integrations/pull/703),

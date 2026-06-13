@@ -31,7 +31,7 @@ const (
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
 	t.Helper()
 	// Mutates process-global slog state; keep tests that use this helper serial.
-	var buf bytes.Buffer
+	var buf lockedLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
@@ -50,6 +50,23 @@ func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
 		}
 		return records
 	}
+}
+
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // fakeWorkspaceStore captures SetAPIKey calls.
