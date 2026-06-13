@@ -429,11 +429,23 @@ func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger
 }
 
 func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
+	return h.latestSlackAppInstallMessage("Guided qURL Connector setup")
+}
+
+func (h *Handler) tunnelBootstrapDMSlackAppInstallMessage() string {
+	return h.latestSlackAppInstallMessage("qURL Connector bootstrap-key DM delivery")
+}
+
+func (h *Handler) latestSlackAppInstallMessage(subject string) string {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		subject = "qURL Slack app access"
+	}
 	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
 	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
-		return "Guided qURL Connector setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin protect-connector` again."
+		return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin protect-connector` again."
 	}
-	return "Guided qURL Connector setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin protect-connector` again."
+	return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin protect-connector` again."
 }
 
 func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {
@@ -584,7 +596,13 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 	if err := h.postTunnelInstallDM(ctx, teamID, enterpriseID, userID, build.secretMessage); err != nil {
 		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
-		_ = h.postResponse(log, responseURL, "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted. Re-run `/qurl-admin protect-connector` after DM delivery is available.")
+		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
+		if errors.Is(err, ErrSlackMissingScope) {
+			message += " " + h.tunnelBootstrapDMSlackAppInstallMessage()
+		} else {
+			message += " Re-run `/qurl-admin protect-connector` after DM delivery is available."
+		}
+		_ = h.postResponse(log, responseURL, message)
 		return
 	}
 	if !h.postInstallInstructions(log, responseURL, build.message) {
@@ -595,6 +613,8 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
+		// Intentionally notify both places: the DM reaches admins who saw the key
+		// first, while response_url covers the command surface if DM delivery fails.
 		if err := h.postTunnelInstallDM(h.baseCtx, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again."); err != nil {
 			log.Error("tunnel install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_dm_delivery_failed")
 		}

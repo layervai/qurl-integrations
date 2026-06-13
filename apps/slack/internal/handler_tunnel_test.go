@@ -2500,7 +2500,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	if len(responseBodies) != 1 {
 		t.Fatalf("response_url posts = %d, want 1 failure notice: %v", len(responseBodies), responseBodies)
 	}
-	failure := responseBodies[0]
+	failure := parseSlackText(t, []byte(responseBodies[0]))
 	for _, forbidden := range []string{testTunnelAPIKey, "Run this whole block", "docker run -d"} {
 		if strings.Contains(failure, forbidden) {
 			t.Fatalf("DM-failure notice leaked install secret/details %q: %s", forbidden, failure)
@@ -2508,6 +2508,81 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	}
 	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
 		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
+	}
+}
+
+func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, h.now())
+
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want 1 failure notice: %v", len(responseBodies), responseBodies)
+	}
+	failure := parseSlackText(t, []byte(responseBodies[0]))
+	for _, want := range []string{
+		"temporary key was revoked",
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"/qurl-admin protect-connector",
+	} {
+		if !strings.Contains(failure, want) {
+			t.Fatalf("failure notice = %s, missing %q", failure, want)
+		}
+	}
+	for _, forbidden := range []string{testTunnelAPIKey, "Run this whole block", "docker run -d"} {
+		if strings.Contains(failure, forbidden) {
+			t.Fatalf("missing-scope notice leaked install secret/details %q: %s", forbidden, failure)
+		}
 	}
 }
 

@@ -203,6 +203,20 @@ func TestSlackPostMessageFuncSurfacesSlackError(t *testing.T) {
 	}
 }
 
+func TestSlackPostMessageFuncWrapsMissingScope(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"missing_scope"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	err := post(context.Background(), "T_test", "", "C_chan", "", "hi")
+	if !errors.Is(err, internal.ErrSlackMissingScope) {
+		t.Fatalf("error = %v, want missing-scope sentinel", err)
+	}
+}
+
 func TestSlackPostMessageFuncSurfacesRateLimit(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

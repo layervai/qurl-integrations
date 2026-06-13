@@ -259,7 +259,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.Values, cmd *Command) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
-	enterpriseID := values.Get(fieldEnterpriseID)
+	enterpriseID := strings.TrimSpace(values.Get(fieldEnterpriseID))
 	channelID := values.Get(fieldChannelID)
 	userID := values.Get(fieldUserID)
 	triggerID := values.Get(fieldTriggerID)

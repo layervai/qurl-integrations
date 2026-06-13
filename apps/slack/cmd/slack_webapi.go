@@ -916,6 +916,9 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 	if code == "" {
 		code = "not_ok"
 	}
+	if code == "missing_scope" {
+		return fmt.Errorf("%s: %w", op, internal.ErrSlackMissingScope)
+	}
 	return fmt.Errorf("%s: %s", op, code)
 }
 

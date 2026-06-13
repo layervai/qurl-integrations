@@ -38,6 +38,10 @@ var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
 // retry-shaped action instead of a generic setup failure.
 var ErrSlackRateLimited = errors.New("slack views.open rate limited")
 
+// ErrSlackMissingScope lets Slack Web API adapters surface `missing_scope` as
+// a reauthorization problem instead of a generic delivery failure.
+var ErrSlackMissingScope = errors.New("slack missing_scope")
+
 var errSetupUsage = errors.New("setup usage")
 
 // SlackRateLimitError preserves Slack's Retry-After hint while still matching
