@@ -286,7 +286,7 @@ func truncateRunes(s string, maxRunes int) string {
 // response_url. Mirrors handleTunnelEditSubmission's posture: team/user
 // cross-checks against the signed private_metadata, admin re-check bounded off
 // h.baseCtx; no TTL because the bind mints no secret and is idempotent.
-func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *interactionPayload) {
+func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	var meta ExposeURLModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
 		slog.Warn("protect url modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
@@ -393,7 +393,7 @@ func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue)
 // forms already opened by older deployments. It creates the protected URL
 // resource, binds the chosen channel alias, and points the admin at `/qurl get
 // $alias` to mint links from then on.
-func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload *interactionPayload) {
+func (h *Handler) handleExposeURLCreateSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	var meta ExposeURLModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
 		slog.Warn("protect url create modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
