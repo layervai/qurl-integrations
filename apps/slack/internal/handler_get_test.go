@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -857,6 +858,36 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 	if strings.Contains(async, "https://qurl.link/dm-secret") {
 		t.Errorf("link leaked to channel ephemeral on dm:true: %q", async)
+	}
+}
+
+func TestHandleGet_DMVariantMissingScopeMentionsSlackReinstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/dm-scope", testResourceIDFix)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
+	for _, want := range []string{
+		"Could not DM you the link",
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"re-run the command",
+	} {
+		if !strings.Contains(async, want) {
+			t.Fatalf("async reply = %q, missing %q", async, want)
+		}
+	}
+	if strings.Contains(async, "https://qurl.link/dm-scope") {
+		t.Fatalf("async reply leaked dm:true link after DM failure: %q", async)
 	}
 }
 

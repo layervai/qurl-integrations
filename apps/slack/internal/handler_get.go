@@ -678,6 +678,9 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, teamID, enterpriseID, userID, message string) string {
 	if err := h.cfg.PostDM(ctx, teamID, enterpriseID, userID, message); err != nil {
 		log.Warn("get: DM post failed", "error", err)
+		if errors.Is(err, ErrSlackMissingScope) {
+			return ":warning: Could not DM you the link. " + h.latestSlackAppInstallMessage("Private qURL DM delivery", "re-run the command")
+		}
 		return ":warning: Could not DM you the link. Please re-run the command without `dm:true` to receive it in-channel."
 	}
 	return ":incoming_envelope: Sent to your DM."

@@ -429,23 +429,27 @@ func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger
 }
 
 func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
-	return h.latestSlackAppInstallMessage("Guided qURL Connector setup")
+	return h.latestSlackAppInstallMessage("Guided qURL Connector setup", "run `/qurl-admin protect-connector` again")
 }
 
 func (h *Handler) tunnelBootstrapDMSlackAppInstallMessage() string {
-	return h.latestSlackAppInstallMessage("qURL Connector bootstrap-key DM delivery")
+	return h.latestSlackAppInstallMessage("qURL Connector bootstrap-key DM delivery", "run `/qurl-admin protect-connector` again")
 }
 
-func (h *Handler) latestSlackAppInstallMessage(subject string) string {
+func (h *Handler) latestSlackAppInstallMessage(subject, retryInstruction string) string {
 	subject = strings.TrimSpace(subject)
 	if subject == "" {
 		subject = "qURL Slack app access"
 	}
+	retryInstruction = strings.TrimSpace(retryInstruction)
+	if retryInstruction == "" {
+		retryInstruction = "retry"
+	}
 	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
 	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
-		return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin protect-connector` again."
+		return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then " + retryInstruction + "."
 	}
-	return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin protect-connector` again."
+	return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then " + retryInstruction + "."
 }
 
 func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {
