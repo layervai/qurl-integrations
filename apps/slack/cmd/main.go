@@ -1067,8 +1067,8 @@ func readSetupBindingReplayWindowHours() (int, error) {
 			return 0, invalidReplayWindowErr
 		}
 	}
-	// qurl-service owns the replay TTL contract, so avoid a smaller
-	// Slack-only cap that could become another drift source.
+	// No upper cap: qurl-service owns the replay TTL contract, so a
+	// smaller Slack-only limit could become another drift source.
 	hours, err := strconv.Atoi(hoursText)
 	if err != nil {
 		return 0, fmt.Errorf("%s=%q is too large to fit in an hour value", envQURLBindingTTLContract, raw)
