@@ -524,14 +524,12 @@ func agentConfirmAttributedCard(cardText, asker, approver string) string {
 // the admin completes it.
 //
 // KEY-DELIVERY PRIVACY: meta.ResponseURL is the PUBLIC card's response_url, but
-// processTunnelInstall delivers the install (with the bootstrap key) as an
-// EPHEMERAL message, which Slack scopes to the response_url's interacting user —
-// here the Approve clicker. meta.UserID is set to that same clicker so the modal's
-// same-user-submit gate forces submitter == clicker == ephemeral target; if those
-// diverged the key would render to the wrong person. This is the same privacy
-// class PR4a/PR4b already ship (ephemeral denials on this card). processTunnelInstall
-// also revokes the key if Slack doesn't confirm delivery, so the residual is only
-// "delivery succeeds but renders in-channel" — a hard pre-enablement smoke test (#651).
+// processTunnelInstall posts only key-free install instructions there. The
+// temporary bootstrap key goes to meta.UserID by DM, so the same-user-submit gate
+// forces submitter == clicker == secret target; if those diverged the key would go
+// to the wrong person. processTunnelInstall revokes the key if either Slack
+// delivery step fails, so a freshly minted key cannot stay live after an
+// unconfirmed install attempt.
 //
 // On trigger expiry / open failure the card goes terminal with an "ask me again"
 // prompt: the action is already claimed (consumed), so the user re-asks the agent
@@ -544,7 +542,7 @@ func (h *Handler) openAgentConnectorModal(ctx context.Context, log *slog.Logger,
 		return
 	}
 
-	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
+	view, err := TunnelInstallModal(&TunnelInstallModalMetadata{
 		TeamID: payload.Team.ID,
 		// The click's channel (== the proposal's, mismatch-guarded), matching the
 		// other execute paths. The proposal's env/port/alias hints are intentionally
@@ -785,11 +783,12 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			flags["reason"] = pa.Reason
 		}
 		cmd := &Command{Subcommand: SubcmdGet, Alias: pa.Token, Flags: flags, Raw: "get $" + pa.Token}
-		text, err := h.getWork(ctx, log, getWorkArgs{
-			cmd:       cmd,
-			teamID:    payload.Team.ID,
-			channelID: payload.Channel.ID,
-			userID:    payload.User.ID,
+		text, err := h.getWork(ctx, log, &getWorkArgs{
+			cmd:          cmd,
+			teamID:       payload.Team.ID,
+			enterpriseID: payload.Enterprise.ID,
+			channelID:    payload.Channel.ID,
+			userID:       payload.User.ID,
 			// triggerID seeds only getWork's idempotency key — getWork never
 			// views.open's it, so the ~3s trigger-expiry doesn't apply on this
 			// async path (the consume-once claim is the real double-execute guard).

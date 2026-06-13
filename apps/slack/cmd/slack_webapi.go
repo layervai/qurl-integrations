@@ -387,6 +387,16 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	}
 }
 
+// newSlackPostDMFuncWithTokenLookup builds the [internal.PostDMFunc] seam: a
+// direct chat.postMessage to the Slack user id, using the same per-workspace
+// token lookup and Enterprise Grid fallback as channel posts.
+func newSlackPostDMFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostDMFunc {
+	post := newSlackPostMessageFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, slackUserID, text string) error {
+		return post(ctx, teamID, enterpriseID, slackUserID, "", text)
+	}
+}
+
 // newSlackPostEphemeralFuncWithTokenLookup builds the [internal.PostEphemeralFunc] seam:
 // a threaded chat.postEphemeral visible only to userID — used to deliver a get's one-time
 // link privately in a (multi-party) channel, as a standalone message the click's

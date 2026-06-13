@@ -782,7 +782,7 @@ func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 		channelID: "C1",
 		userID:    "U1",
 	}
-	reply, err := h.getWork(context.Background(), slogTestLogger(t), args)
+	reply, err := h.getWork(context.Background(), slogTestLogger(t), &args)
 	if reply != "" {
 		t.Errorf("reply = %q, want empty on the refuse-to-mint path", reply)
 	}
@@ -838,7 +838,7 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	var dmCalls atomic.Int32
 	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
 		dmCalls.Add(1)
 		dmText = text
 		return nil
@@ -888,7 +888,7 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
 		dmText = text
 		return nil
 	}

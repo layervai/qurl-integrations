@@ -68,6 +68,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	}
 	meta := TunnelInstallModalMetadata{
 		TeamID:        payload.Team.ID,
+		EnterpriseID:  payload.Enterprise.ID,
 		ChannelID:     payload.Channel.ID,
 		UserID:        payload.User.ID,
 		ResponseURL:   responseURL,
@@ -75,7 +76,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	}
 	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
-		view, err := TunnelInstallModal(meta)
+		view, err := TunnelInstallModal(&meta)
 		if err != nil {
 			log.Error("protect connector: modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)

@@ -14,6 +14,8 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
+const testSlackTeamID = "T_team"
+
 func staticTokenLookup(token string) slackBotTokenLookup {
 	return func(context.Context, string) (string, error) { return token, nil }
 }
@@ -98,6 +100,44 @@ func TestSlackPostMessageFuncUsesWorkspaceTokenLookup(t *testing.T) {
 	}
 }
 
+func TestSlackPostDMFuncPostsToUserIDWithGridFallback(t *testing.T) {
+	t.Parallel()
+	var gotAuth string
+	var gotBody struct {
+		Channel string `json:"channel"`
+		Text    string `json:"text"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var lookups []string
+	postDM := newSlackPostDMFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
+		lookups = append(lookups, ownerID)
+		if ownerID == testSlackTeamID {
+			return "", auth.ErrSlackBotTokenNotConfigured
+		}
+		return "xoxb-enterprise-token", nil
+	}, "", srv.URL, nil)
+	if err := postDM(context.Background(), testSlackTeamID, "E_org", "U_admin", "secret text"); err != nil {
+		t.Fatalf("PostDM: %v", err)
+	}
+	if len(lookups) != 2 || lookups[0] != testSlackTeamID || lookups[1] != "E_org" {
+		t.Fatalf("lookups = %v, want [T_team E_org]", lookups)
+	}
+	if gotAuth != "Bearer xoxb-enterprise-token" {
+		t.Fatalf("Authorization = %q, want enterprise token", gotAuth)
+	}
+	if gotBody.Channel != "U_admin" || gotBody.Text != "secret text" {
+		t.Fatalf("body = %+v, want DM channel/text", gotBody)
+	}
+}
+
 func TestSlackPostMessageFuncGridFallback(t *testing.T) {
 	t.Parallel()
 	t.Run("retries with enterprise token when workspace token missing", func(t *testing.T) {
@@ -112,15 +152,15 @@ func TestSlackPostMessageFuncGridFallback(t *testing.T) {
 		var lookups []string
 		post := newSlackPostMessageFuncWithTokenLookup(func(_ context.Context, ownerID string) (string, error) {
 			lookups = append(lookups, ownerID)
-			if ownerID == "T_team" {
+			if ownerID == testSlackTeamID {
 				return "", auth.ErrSlackBotTokenNotConfigured
 			}
 			return "xoxb-enterprise-token", nil
 		}, "", srv.URL, nil)
-		if err := post(context.Background(), "T_team", "E_org", "C_chan", "", "hi"); err != nil {
+		if err := post(context.Background(), testSlackTeamID, "E_org", "C_chan", "", "hi"); err != nil {
 			t.Fatalf("chat.postMessage: %v", err)
 		}
-		if len(lookups) != 2 || lookups[0] != "T_team" || lookups[1] != "E_org" {
+		if len(lookups) != 2 || lookups[0] != testSlackTeamID || lookups[1] != "E_org" {
 			t.Fatalf("lookups = %v, want [T_team E_org]", lookups)
 		}
 		if gotAuth != "Bearer xoxb-enterprise-token" {
@@ -130,13 +170,13 @@ func TestSlackPostMessageFuncGridFallback(t *testing.T) {
 
 	t.Run("no fallback when enterprise equals team or is empty", func(t *testing.T) {
 		t.Parallel()
-		for _, entID := range []string{"", "T_team"} {
+		for _, entID := range []string{"", testSlackTeamID} {
 			var lookups int
 			post := newSlackPostMessageFuncWithTokenLookup(func(context.Context, string) (string, error) {
 				lookups++
 				return "", auth.ErrSlackBotTokenNotConfigured
 			}, "", "https://slack.invalid/chat.postMessage", nil)
-			err := post(context.Background(), "T_team", entID, "C_chan", "", "hi")
+			err := post(context.Background(), testSlackTeamID, entID, "C_chan", "", "hi")
 			if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
 				t.Fatalf("enterpriseID %q: error = %v, want token-not-configured", entID, err)
 			}
