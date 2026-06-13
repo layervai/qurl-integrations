@@ -218,12 +218,14 @@ func run() error {
 		agentStore = buildAgentStore(signalCtx)
 	}
 	logAgentSurfaceState(agentSurfaceState{
-		llmWired:    agentLLM != nil,
-		storeWired:  agentStore != nil,
-		postWired:   postMessage != nil,
-		blocksWired: postMessageBlocks != nil,
-		confirmFlag: agentConfirmEnabled,
-		killed:      agentDisabled,
+		llmWired:              agentLLM != nil,
+		storeWired:            agentStore != nil,
+		postWired:             postMessage != nil,
+		blocksWired:           postMessageBlocks != nil,
+		assistantThreadsWired: agentAssistantThreads != nil,
+		confirmFlag:           agentConfirmEnabled,
+		exclusiveAcksFlag:     agentSurfaceExclusiveAcks,
+		killed:                agentDisabled,
 	})
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
@@ -1171,12 +1173,14 @@ func readIntEnvFailSafe(name string, def int) int {
 // does — a struct so logAgentSurfaceState's growing set of seam booleans can't be
 // transposed at the call site.
 type agentSurfaceState struct {
-	llmWired    bool
-	storeWired  bool
-	postWired   bool
-	blocksWired bool
-	confirmFlag bool // QURL_AGENT_CONFIRM_ENABLED
-	killed      bool
+	llmWired              bool
+	storeWired            bool
+	postWired             bool
+	blocksWired           bool
+	assistantThreadsWired bool
+	confirmFlag           bool // QURL_AGENT_CONFIRM_ENABLED
+	exclusiveAcksFlag     bool // QURL_AGENT_SURFACE_EXCLUSIVE_ACKS
+	killed                bool
 }
 
 // logAgentSurfaceState emits startup lines describing what conversation mode will
@@ -1230,6 +1234,10 @@ func logAgentSurfaceState(s agentSurfaceState) {
 		// the kill-switch line stand alone (the un-kill restart re-reports confirm state).
 		slog.Warn("QURL_AGENT_CONFIRM_ENABLED is set but confirm mode is DARK; mutations will NOT execute until the read-only surface is live and PostMessageBlocks is wired",
 			"read_only_live", readOnlyLive, "blocks_wired", s.blocksWired)
+	}
+
+	if s.exclusiveAcksFlag && !s.assistantThreadsWired {
+		slog.Warn("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS is set but AssistantThreads is not wired; pane turns will not have a working-on-it indicator")
 	}
 }
 

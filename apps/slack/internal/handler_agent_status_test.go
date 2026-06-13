@@ -124,7 +124,7 @@ func TestAgentStatus_BestEffortDoesNotFailTurn(t *testing.T) {
 		t.Fatalf("a failing setStatus must not fail the turn; reply = %+v", *posts)
 	}
 	logs := logBuf.String()
-	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "agent: set assistant pane status failed") {
+	if !strings.Contains(logs, `level=WARN msg="agent: set assistant pane status failed in exclusive mode"`) {
 		t.Fatalf("a failing setStatus must log at Warn; log = %s", logs)
 	}
 }
@@ -155,8 +155,11 @@ func TestAgentStatus_DefaultPaneTurnKeepsReactionFallback(t *testing.T) {
 		t.Fatalf("a failing setStatus must not fail the turn; reply = %+v", *posts)
 	}
 	logs := logBuf.String()
-	if !strings.Contains(logs, "level=DEBUG") || strings.Contains(logs, "level=WARN") {
-		t.Fatalf("default pane setStatus failure must stay Debug-only; log = %s", logs)
+	if !strings.Contains(logs, `level=DEBUG msg="agent: set assistant pane status failed (best-effort)"`) {
+		t.Fatalf("default pane setStatus failure must log at Debug; log = %s", logs)
+	}
+	if strings.Contains(logs, `level=WARN msg="agent: set assistant pane status failed`) {
+		t.Fatalf("default pane setStatus failure must not log that status failure at Warn; log = %s", logs)
 	}
 }
 
@@ -178,5 +181,27 @@ func TestAgentStatus_DefaultPaneReactionClearedOnStatusPanic(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("a panicking default pane status path must post the error reply; reply = %+v", *posts)
+	}
+}
+
+func TestAgentStatus_ExclusivePaneNoReactionOnStatusPanic(t *testing.T) {
+	// Exclusive/post-pane mode has no reaction fallback. If native status panics, the
+	// top-level recover must still post the error reply without adding or clearing a
+	// reaction.
+	fake := &fakeAssistantThreads{panicOnSetStatus: true}
+	rec := &recordingReactions{}
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentStillWorksReply}, true)
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?"))
+
+	adds, removes := rec.snapshot()
+	if len(adds) != 0 || len(removes) != 0 {
+		t.Fatalf("a panicking exclusive pane status path must not touch reaction fallback, got adds=%d removes=%d", len(adds), len(removes))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
+		t.Fatalf("a panicking exclusive pane status path must post the error reply; reply = %+v", *posts)
 	}
 }
