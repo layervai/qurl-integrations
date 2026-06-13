@@ -116,6 +116,34 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestHealthEndpoint_Returns503WhenUnhealthy(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	h.SetHealthy(false)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", http.NoBody))
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /health while unhealthy: status = %d, want 503", w.Code)
+	}
+	if got := w.Body.String(); !strings.Contains(got, `"status":"draining"`) {
+		t.Fatalf("GET /health while unhealthy body = %q, want draining status", got)
+	}
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodHead, "/health", http.NoBody))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("HEAD /health while unhealthy: status = %d, want 503", w.Code)
+	}
+
+	h.SetHealthy(true)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", http.NoBody))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /health after SetHealthy(true): status = %d, want 200", w.Code)
+	}
+}
+
 func TestSlashCommandHelp(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	body := url.Values{

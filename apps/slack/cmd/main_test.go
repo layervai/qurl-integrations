@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -281,6 +286,349 @@ func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), envQURLConnectorImage+" is required") {
 		t.Fatalf("run() err = %v, want %s fail-closed error before infra/env setup", err, envQURLConnectorImage)
 	}
+}
+
+func TestShutdownBudgetsLeaveLameduckDrainHeadroom(t *testing.T) {
+	if lameduckDuration <= 0 {
+		t.Fatalf("lameduckDuration = %s, want positive ALB drain head start", lameduckDuration)
+	}
+	if lameduckDuration >= shutdownTimeout {
+		t.Fatalf("lameduckDuration = %s must be less than shutdownTimeout = %s", lameduckDuration, shutdownTimeout)
+	}
+	if got := shutdownTimeout - lameduckDuration; got < 10*time.Second {
+		t.Fatalf("shutdown drain headroom = %s, want at least 10s after lameduck", got)
+	}
+}
+
+func TestShutdownSequenceLameduckThenDrainPreservesInFlightRequest(t *testing.T) {
+	h := internal.NewHandler(internal.Config{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.Handle("/health", h)
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("done"))
+	})
+
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: time.Second,
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve(ln)
+	}()
+	serveErrRead := false
+	t.Cleanup(func() {
+		_ = srv.Close()
+		if !serveErrRead {
+			<-serveErr
+		}
+	})
+
+	client := &http.Client{Timeout: time.Second}
+	baseURL := "http://" + ln.Addr().String()
+	slowResp := make(chan error, 1)
+	go func() {
+		resp, err := getWithContext(context.Background(), client, baseURL+"/slow")
+		if err != nil {
+			slowResp <- err
+			return
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			_ = resp.Body.Close()
+			slowResp <- err
+			return
+		}
+		if err := resp.Body.Close(); err != nil {
+			slowResp <- err
+			return
+		}
+		if resp.StatusCode != http.StatusOK || string(body) != "done" {
+			slowResp <- errors.New("unexpected slow response")
+			return
+		}
+		slowResp <- nil
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not reach handler")
+	}
+
+	handlerCanceled := make(chan struct{})
+	cancelHandler := func() { close(handlerCanceled) }
+	lameduckStarted := make(chan struct{})
+	finishLameduck := make(chan struct{})
+	sleep := func(ctx context.Context, _ time.Duration) bool {
+		close(lameduckStarted)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-finishLameduck:
+			return true
+		}
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		runShutdownSequence(srv, h, cancelHandler, 25*time.Millisecond, 500*time.Millisecond, sleep)
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-lameduckStarted:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown sequence did not enter lameduck")
+	}
+	waitForStatus(t, client, baseURL+"/health", http.StatusServiceUnavailable)
+
+	select {
+	case <-handlerCanceled:
+		t.Fatal("handler context canceled before lameduck completed")
+	default:
+	}
+
+	close(finishLameduck)
+	select {
+	case <-handlerCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("handler context was not canceled before HTTP drain")
+	}
+	close(release)
+
+	select {
+	case err := <-slowResp:
+		if err != nil {
+			t.Fatalf("slow request: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not complete during shutdown drain")
+	}
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown sequence did not complete")
+	}
+
+	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("Serve returned %v, want http.ErrServerClosed", err)
+	}
+	serveErrRead = true
+}
+
+func TestLameduckForSignal(t *testing.T) {
+	if got := lameduckForSignal(syscall.SIGTERM); got != lameduckDuration {
+		t.Fatalf("SIGTERM lameduck = %s, want %s", got, lameduckDuration)
+	}
+	if got := lameduckForSignal(syscall.SIGINT); got != 0 {
+		t.Fatalf("SIGINT lameduck = %s, want immediate drain", got)
+	}
+}
+
+func TestShutdownSignalSourceFirstSignalWinsAndCancelsContext(t *testing.T) {
+	input := make(chan os.Signal, 2)
+	stopCalls := 0
+	source := newShutdownSignalSourceFromInput(input, func() {
+		stopCalls++
+	})
+	defer source.stop()
+
+	input <- syscall.SIGTERM
+
+	select {
+	case sig := <-source.first:
+		if sig != syscall.SIGTERM {
+			t.Fatalf("first signal = %v, want %v", sig, syscall.SIGTERM)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first signal")
+	}
+
+	select {
+	case <-source.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for context cancellation")
+	}
+
+	input <- syscall.SIGINT
+	select {
+	case sig := <-source.first:
+		t.Fatalf("unexpected second signal delivered: %v", sig)
+	default:
+	}
+
+	source.stop()
+	if stopCalls != 1 {
+		t.Fatalf("stop calls = %d, want 1", stopCalls)
+	}
+}
+
+func TestShutdownSignalSourceStopIsIdempotentAndCancelsContext(t *testing.T) {
+	input := make(chan os.Signal)
+	stopCalls := 0
+	source := newShutdownSignalSourceFromInput(input, func() {
+		stopCalls++
+	})
+
+	source.stop()
+	source.stop()
+
+	if stopCalls != 1 {
+		t.Fatalf("stop calls = %d, want 1", stopCalls)
+	}
+	select {
+	case <-source.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for context cancellation")
+	}
+	select {
+	case <-source.stopped:
+	default:
+		t.Fatal("stopped channel is not closed")
+	}
+}
+
+func TestShutdownSequenceImmediateDrainSkipsLameduckHealth(t *testing.T) {
+	srv := &recordingShutdownServer{}
+	handler := &recordingShutdownHandler{}
+	canceled := false
+	sleepCalled := false
+
+	runShutdownSequence(
+		srv,
+		handler,
+		func() { canceled = true },
+		0,
+		time.Second,
+		func(context.Context, time.Duration) bool {
+			sleepCalled = true
+			return true
+		},
+	)
+
+	if sleepCalled {
+		t.Fatal("immediate drain should not sleep")
+	}
+	if len(handler.healthyCalls) != 0 {
+		t.Fatalf("SetHealthy calls = %v, want none for immediate drain", handler.healthyCalls)
+	}
+	if !canceled {
+		t.Fatal("handler context was not canceled")
+	}
+	if !srv.shutdownCalled {
+		t.Fatal("server Shutdown was not called")
+	}
+	if !handler.waitCalled {
+		t.Fatal("handler WaitTimeout was not called")
+	}
+	if handler.waitBudget <= 0 {
+		t.Fatalf("WaitTimeout budget = %s, want positive remaining budget", handler.waitBudget)
+	}
+}
+
+func TestShutdownSequenceBudgetExhaustedDuringLameduckStillClosesServer(t *testing.T) {
+	srv := &recordingShutdownServer{err: context.DeadlineExceeded}
+	handler := &recordingShutdownHandler{}
+	canceled := false
+
+	runShutdownSequence(
+		srv,
+		handler,
+		func() { canceled = true },
+		time.Second,
+		25*time.Millisecond,
+		func(context.Context, time.Duration) bool {
+			return false
+		},
+	)
+
+	if len(handler.healthyCalls) != 1 || handler.healthyCalls[0] {
+		t.Fatalf("SetHealthy calls = %v, want [false]", handler.healthyCalls)
+	}
+	if !canceled {
+		t.Fatal("handler context was not canceled")
+	}
+	if !srv.shutdownCalled {
+		t.Fatal("server Shutdown was not called")
+	}
+	if !handler.waitCalled {
+		t.Fatal("handler WaitTimeout was not called")
+	}
+	if handler.waitBudget != 0 {
+		t.Fatalf("WaitTimeout budget = %s, want 0 after exhausted lameduck", handler.waitBudget)
+	}
+}
+
+type recordingShutdownServer struct {
+	shutdownCalled bool
+	err            error
+}
+
+func (s *recordingShutdownServer) Shutdown(context.Context) error {
+	s.shutdownCalled = true
+	return s.err
+}
+
+type recordingShutdownHandler struct {
+	healthyCalls []bool
+	waitCalled   bool
+	waitBudget   time.Duration
+}
+
+func (h *recordingShutdownHandler) SetHealthy(healthy bool) {
+	h.healthyCalls = append(h.healthyCalls, healthy)
+}
+
+func (h *recordingShutdownHandler) WaitTimeout(d time.Duration) bool {
+	h.waitCalled = true
+	h.waitBudget = d
+	return true
+}
+
+func waitForStatus(t *testing.T, client *http.Client, url string, want int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("%s never returned status %d", url, want)
+		case <-tick.C:
+			resp, err := getWithContext(context.Background(), client, url)
+			if err != nil {
+				continue
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if err := resp.Body.Close(); err != nil {
+				continue
+			}
+			if resp.StatusCode == want {
+				return
+			}
+		}
+	}
+}
+
+func getWithContext(ctx context.Context, client *http.Client, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
 }
 
 // applyEnv writes every oauthEnvKeys entry — empty when absent from kvs

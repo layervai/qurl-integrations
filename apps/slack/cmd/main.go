@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,6 +85,19 @@ const (
 	// headroom for the expected case while staying well inside
 	// Fargate's 30s SIGTERM→SIGKILL window.
 	shutdownTimeout = 25 * time.Second
+
+	// lameduckDuration is the ALB deregistration head start inside
+	// shutdownTimeout. On SIGTERM, /health flips to 503, we keep the
+	// listener open briefly so ALB can remove the target, then
+	// srv.Shutdown starts the actual HTTP drain with the remaining
+	// budget. Keep this greater than the ALB target group's unhealthy
+	// detection window; with qurl-webhook-runtime's 5s interval x
+	// 2-unhealthy-threshold target, 13s gives a small ALB propagation
+	// margin while leaving roughly 12s for in-flight requests and async
+	// workers before Fargate's 30s SIGTERM→SIGKILL window closes.
+	// TODO(upstream-contract): Keep this in lockstep with
+	// qurl-integrations-infra's qurl-webhook-runtime health check cadence.
+	lameduckDuration = 13 * time.Second
 	// maxHeaderBytes is well above Slack's realistic header size (sig +
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
 	// the per-connection memory an attacker can force pre-handler.
@@ -145,11 +159,13 @@ func run() error {
 
 	// DDBProvider reads the workspace_state table populated by
 	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails
-	// startup distinctly from an empty table.
-	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	// startup distinctly from an empty table. The signal watcher is
+	// armed before infra setup so SIGTERM/SIGINT during AWS config
+	// load cancels those calls promptly.
+	shutdownSignals := newShutdownSignalSource(syscall.SIGTERM, syscall.SIGINT)
+	defer shutdownSignals.stop()
 
-	ddbProvider, err := auth.NewDDBProvider(signalCtx,
+	ddbProvider, err := auth.NewDDBProvider(shutdownSignals.ctx,
 		auth.WithTableName(os.Getenv("WORKSPACE_STATE_TABLE")),
 		auth.WithKMSKeyARN(os.Getenv("WORKSPACE_STATE_KMS_KEY_ARN")),
 	)
@@ -162,7 +178,7 @@ func run() error {
 	maxConcurrentAsync := readMaxConcurrentAsync()
 	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
 	maxConcurrentFollowupGateAsync := readMaxConcurrentFollowupGateAsync()
-	adminStore := buildAdminStore(signalCtx)
+	adminStore := buildAdminStore(shutdownSignals.ctx)
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
 		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
@@ -247,7 +263,7 @@ func run() error {
 	var agentStore *slackdata.AgentStore
 	if !agentDisabled {
 		agentLLM = buildAgentLLM()
-		agentStore = buildAgentStore(signalCtx)
+		agentStore = buildAgentStore(shutdownSignals.ctx)
 	}
 	logAgentSurfaceState(agentSurfaceState{
 		llmWired:              agentLLM != nil,
@@ -260,19 +276,20 @@ func run() error {
 		killed:                agentDisabled,
 	})
 
-	// signalCtx is hoisted above so the DDB-provider constructor can
-	// observe shutdown during AWS config load. It feeds two seams: the
-	// main goroutine (to detect SIGTERM and trigger srv.Shutdown) and
-	// Handler.BaseContext (so async slash-command workers observe
-	// cancellation through the same signal). Threading the same ctx
-	// into both keeps the shutdown story coherent — a worker mid-POST
-	// to response_url receives ctx.Canceled at the same instant
-	// Shutdown starts refusing new connections.
+	// shutdownSignals.ctx is hoisted above so the DDB-provider constructor
+	// can observe shutdown during AWS config load and the main goroutine can
+	// detect the concrete signal. Handler.BaseContext is deliberately decoupled:
+	// during lameduck the listener is still open, so requests accepted in
+	// that window must not inherit an already-canceled async context. The
+	// shutdown sequence cancels handlerCtx immediately before
+	// srv.Shutdown starts refusing new connections.
+	handlerCtx, cancelHandler := context.WithCancel(context.Background())
+	defer cancelHandler()
 
 	handler := internal.NewHandler(internal.Config{
 		AuthProvider:                   authProvider,
 		SlackSigningSecret:             slackSigningSecret,
-		BaseContext:                    signalCtx,
+		BaseContext:                    handlerCtx,
 		MaxConcurrentAsync:             maxConcurrentAsync,
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
 		MaxConcurrentFollowupGateAsync: maxConcurrentFollowupGateAsync,
@@ -336,7 +353,7 @@ func run() error {
 	if adminStore != nil {
 		oauthAdminStore = &adminStoreAdapter{store: adminStore}
 	}
-	oauthCfg, ok, err := buildOAuthConfig(signalCtx, ddbProvider, handler, oauthAdminStore)
+	oauthCfg, ok, err := buildOAuthConfig(shutdownSignals.ctx, ddbProvider, handler, oauthAdminStore)
 	if err != nil {
 		return fmt.Errorf("OAuth config: %w", err)
 	}
@@ -400,6 +417,9 @@ func run() error {
 		// torn connection. 75s = 60 + 15s headroom for response write +
 		// keep-alive close. /slack/* and /health respond in
 		// milliseconds, so the bump doesn't change their posture.
+		// Task-stop shutdown is stricter than WriteTimeout: a slow OAuth
+		// callback caught during deploy may still be cut so slash-command
+		// deploy traffic keeps the ALB lameduck head start.
 		WriteTimeout:   75 * time.Second,
 		IdleTimeout:    60 * time.Second,
 		MaxHeaderBytes: maxHeaderBytes,
@@ -408,9 +428,8 @@ func run() error {
 	// Bind first so a port-already-in-use failure returns before the
 	// drain goroutine spawns — keeps the "received shutdown signal"
 	// log line off the bind-failure path. Use a fresh background ctx
-	// for the bind so a SIGTERM arriving in the gap between
-	// signal.NotifyContext and Listen doesn't surface as
-	// "listen: context canceled".
+	// for the bind so a SIGTERM arriving in the gap between signal setup
+	// and Listen doesn't surface as "listen: context canceled".
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", listenAddr)
 	if err != nil {
@@ -418,39 +437,33 @@ func run() error {
 	}
 
 	shutdownDone := make(chan struct{})
+	var shutdownOnce sync.Once
+	runShutdown := func(duck time.Duration) {
+		shutdownOnce.Do(func() {
+			runShutdownSequence(srv, handler, cancelHandler, duck, shutdownTimeout, sleepContext)
+			close(shutdownDone)
+		})
+	}
+	signalWatcherDone := make(chan struct{})
 	go func() {
-		<-signalCtx.Done()
-		slog.Info("received shutdown signal — draining HTTP server")
-		shutdownStart := time.Now()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			slog.Error("graceful shutdown failed", "error", err)
+		defer close(signalWatcherDone)
+		select {
+		case sig := <-shutdownSignals.first:
+			runShutdown(lameduckForSignal(sig))
+		case <-shutdownSignals.stopped:
 		}
-		// Shutdown returns once HTTP handlers have responded. Slash-
-		// command handlers ack and return nearly instantly, so
-		// in-flight async workers (the goroutines runAsync spawned)
-		// outlive Shutdown. WaitTimeout drains them within whatever
-		// of shutdownTimeout remains — a misbehaving worker that
-		// ignored its ctx can't wedge the process past Fargate's
-		// hard kill.
-		drainBudget := shutdownTimeout - time.Since(shutdownStart)
-		if drainBudget < 0 {
-			drainBudget = 0
-		}
-		if !handler.WaitTimeout(drainBudget) {
-			slog.Warn("async drain timed out — exiting with workers still in flight", "budget", drainBudget)
-		}
-		close(shutdownDone)
 	}()
 
 	slog.Info("starting Secure Access Agent HTTP server", "addr", listenAddr)
 	serveErr := srv.Serve(ln)
 
-	// Always release the signal handler and wait for the drain goroutine
-	// regardless of how Serve returned — keeps the cleanup deterministic
-	// even if Serve fails with a non-ErrServerClosed error.
-	stop()
+	// Ensure exactly one shutdown sequence runs before return. The
+	// signal goroutine wins on real SIGTERM/SIGINT; if Serve returns
+	// first (for example a listener error), this path performs an
+	// immediate drain without the ALB lameduck delay.
+	runShutdown(0)
+	shutdownSignals.stop()
+	<-signalWatcherDone
 	<-shutdownDone
 
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -458,6 +471,149 @@ func run() error {
 	}
 	slog.Info("server stopped cleanly")
 	return nil
+}
+
+func lameduckForSignal(sig os.Signal) time.Duration {
+	if sig == syscall.SIGTERM {
+		return lameduckDuration
+	}
+	return 0
+}
+
+type shutdownSignalSource struct {
+	ctx     context.Context
+	first   <-chan os.Signal
+	stopped <-chan struct{}
+	stop    func()
+}
+
+func newShutdownSignalSource(signals ...os.Signal) shutdownSignalSource {
+	signalInput := make(chan os.Signal, 1)
+	signal.Notify(signalInput, signals...)
+	return newShutdownSignalSourceFromInput(signalInput, func() {
+		signal.Stop(signalInput)
+	})
+}
+
+func newShutdownSignalSourceFromInput(signalInput <-chan os.Signal, stopInput func()) shutdownSignalSource {
+	ctx, cancel := context.WithCancel(context.Background())
+	firstSignal := make(chan os.Signal, 1)
+	stopSignalInput := make(chan struct{})
+	signalInputDone := make(chan struct{})
+	// Only the first signal drives shutdown timing. Later signals do not
+	// shorten SIGTERM lameduck; Fargate's 30s SIGKILL remains the hard stop,
+	// and local SIGINT maps to immediate drain.
+	go func() {
+		defer close(signalInputDone)
+		select {
+		case sig := <-signalInput:
+			cancel()
+			firstSignal <- sig
+		case <-stopSignalInput:
+		}
+	}()
+
+	var stopOnce sync.Once
+	return shutdownSignalSource{
+		ctx:     ctx,
+		first:   firstSignal,
+		stopped: stopSignalInput,
+		stop: func() {
+			stopOnce.Do(func() {
+				if stopInput != nil {
+					stopInput()
+				}
+				cancel()
+				close(stopSignalInput)
+				<-signalInputDone
+			})
+		},
+	}
+}
+
+type shutdownHTTPServer interface {
+	Shutdown(context.Context) error
+}
+
+type shutdownHandler interface {
+	SetHealthy(bool)
+	WaitTimeout(time.Duration) bool
+}
+
+type shutdownSleeper func(context.Context, time.Duration) bool
+
+func runShutdownSequence(srv shutdownHTTPServer, handler shutdownHandler, cancelHandler context.CancelFunc, duck, timeout time.Duration, sleep shutdownSleeper) {
+	if duck < 0 {
+		duck = 0
+	}
+	if timeout < 0 {
+		timeout = 0
+	}
+	if sleep == nil {
+		sleep = sleepContext
+	}
+
+	shutdownStart := time.Now()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	lameduckBudgetExhausted := false
+	if duck > 0 {
+		slog.Info("received shutdown signal — entering lameduck", "duration", duck, "shutdown_timeout", timeout)
+		handler.SetHealthy(false)
+		if !sleep(shutdownCtx, duck) {
+			slog.Warn("lameduck ended early — shutdown budget exhausted", "duration", duck, "shutdown_timeout", timeout)
+			lameduckBudgetExhausted = true
+		} else {
+			slog.Info("lameduck complete — draining HTTP server", "remaining_budget", remainingShutdownBudget(shutdownStart, timeout))
+		}
+	} else {
+		slog.Info("draining HTTP server", "shutdown_timeout", timeout)
+	}
+
+	cancelHandler()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		if lameduckBudgetExhausted && errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("HTTP drain skipped — shutdown budget exhausted before drain", "error", err)
+		} else {
+			slog.Error("graceful shutdown failed", "error", err)
+		}
+	}
+	// Shutdown returns once HTTP handlers have responded. Slash-
+	// command handlers ack and return nearly instantly, so in-flight
+	// async workers (the goroutines runAsync spawned) can outlive
+	// Shutdown. Lameduck and Shutdown share the same timeout, so a
+	// slow HTTP drain deliberately squeezes this async budget down to
+	// zero rather than wedging the process past Fargate's hard kill.
+	drainBudget := remainingShutdownBudget(shutdownStart, timeout)
+	if lameduckBudgetExhausted {
+		drainBudget = 0
+	}
+	if !handler.WaitTimeout(drainBudget) {
+		slog.Warn("async drain timed out — exiting with workers still in flight", "budget", drainBudget)
+	}
+}
+
+func remainingShutdownBudget(start time.Time, budget time.Duration) time.Duration {
+	remaining := budget - time.Since(start)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 type slackBotTokenProvider interface {
