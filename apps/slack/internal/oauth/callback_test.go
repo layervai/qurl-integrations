@@ -509,8 +509,16 @@ func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
 		"First paragraph with <b>unsafe</b> markup.",
 		"Second paragraph keeps the next action scannable.")
 	body := rec.Body.String()
-	if strings.Count(body, "<p>") != 2 {
-		t.Errorf("expected two message paragraphs, got body:\n%s", body)
+	first := "First paragraph with &lt;b&gt;unsafe&lt;/b&gt; markup."
+	second := "Second paragraph keeps the next action scannable."
+	firstIdx := strings.Index(body, first)
+	secondIdx := strings.Index(body, second)
+	if firstIdx == -1 || secondIdx == -1 || firstIdx >= secondIdx {
+		t.Fatalf("expected escaped message paragraphs in order, got body:\n%s", body)
+	}
+	betweenMessages := body[firstIdx+len(first) : secondIdx]
+	if !strings.Contains(betweenMessages, "</p>") || !strings.Contains(betweenMessages, "<p") {
+		t.Errorf("expected the two messages to render as separate paragraphs, got between-message markup %q in body:\n%s", betweenMessages, body)
 	}
 	if strings.Contains(body, "<b>unsafe</b>") || !strings.Contains(body, "&lt;b&gt;unsafe&lt;/b&gt;") {
 		t.Errorf("message paragraphs must still be escaped; got:\n%s", body)
