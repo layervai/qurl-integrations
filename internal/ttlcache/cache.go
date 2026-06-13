@@ -169,6 +169,38 @@ func (c *Cache[V]) InvalidateWith(key string, underLock func()) {
 	}
 }
 
+// InvalidateIfWith invalidates key only when predicate accepts the currently
+// cached result. It returns false when key is missing or predicate rejects it.
+func (c *Cache[V]) InvalidateIfWith(key string, predicate func(Result[V]) bool, underLock func()) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.initLocked()
+	cached, ok := c.entries[key]
+	if !ok || predicate == nil || !predicate(cached.result) {
+		return false
+	}
+	c.evictLocked(key, cached)
+	delete(c.inFlight, key)
+	c.generation[key]++
+	if underLock != nil {
+		underLock()
+	}
+	return true
+}
+
+// CachedResultMatches reports whether key currently has a cached result that
+// predicate accepts. It does not sweep expiry; callers should use it only to
+// compare against an entry they just obtained from GetOrStart.
+func (c *Cache[V]) CachedResultMatches(key string, predicate func(Result[V]) bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.initLocked()
+	cached, ok := c.entries[key]
+	return ok && predicate != nil && predicate(cached.result)
+}
+
 // Seed replaces key with a cached result and detaches any in-flight owner.
 func (c *Cache[V]) Seed(key string, result Result[V], ttl time.Duration, at time.Time) {
 	c.SeedWith(key, result, ttl, at, nil)

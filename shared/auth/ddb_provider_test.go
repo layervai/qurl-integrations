@@ -10,6 +10,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/internal/ttlcache"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -107,6 +108,32 @@ func (p *passthroughEncryptor) Open(_ context.Context, ciphertext, wrappedKey, _
 
 func getItemConsistentRead(in *dynamodb.GetItemInput) bool {
 	return in != nil && in.ConsistentRead != nil && *in.ConsistentRead
+}
+
+func getItemUsesCacheValidationProjection(in *dynamodb.GetItemInput) bool {
+	return in != nil && aws.ToString(in.ProjectionExpression) == apiKeyValidationProjectionExpression
+}
+
+func requireCacheValidationProjection(t *testing.T, in *dynamodb.GetItemInput) {
+	t.Helper()
+	if got := aws.ToString(in.ProjectionExpression); got != apiKeyValidationProjectionExpression {
+		t.Fatalf("cache validation projection = %q", got)
+	}
+	if got := in.ExpressionAttributeNames[apiKeyValidationProjectionKey]; got != attrQURLAPIKey {
+		t.Fatalf("cache validation key alias = %q, want %q", got, attrQURLAPIKey)
+	}
+	if got := in.ExpressionAttributeNames[apiKeyValidationProjectionDataKey]; got != attrDataKeyCT {
+		t.Fatalf("cache validation data-key alias = %q, want %q", got, attrDataKeyCT)
+	}
+}
+
+func cachedAPIKeyResult(apiKey string) ttlcache.Result[cachedAPIKey] {
+	return ttlcache.Result[cachedAPIKey]{
+		Value: cachedAPIKey{
+			apiKey:     apiKey,
+			cacheToken: newAPIKeyCacheToken([]byte(apiKey), []byte(passthroughWrappedKey)),
+		},
+	}
 }
 
 func TestDDBProviderAPIKey(t *testing.T) {
@@ -291,7 +318,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	}
 
-	t.Run("hit skips DDB and decrypt", func(t *testing.T) {
+	t.Run("hit validates DDB and skips decrypt", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_cached")},
 		}
@@ -312,9 +339,13 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 				t.Fatalf("call %d got %q want %q", i+1, got, "lv_live_cached")
 			}
 		}
-		if ddb.getCalls != 1 {
-			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
 		}
+		if len(ddb.getInputs) != 2 || !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatalf("cached hit should validate with strongly consistent read, inputs=%v", ddb.getInputs)
+		}
+		requireCacheValidationProjection(t, ddb.getInputs[1])
 		if encryptor.openCalls != 1 {
 			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
 		}
@@ -428,7 +459,12 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			t.Fatalf("got %q want %q", got, testOldAPIKey)
 		}
 
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemConsistentRead(in) {
+				return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+		}
 		now = now.Add(apiKeyCacheTTL - time.Second)
 		got, err = p.APIKey(context.Background(), testTeamID)
 		if err != nil {
@@ -446,8 +482,8 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		if got != testNewAPIKey {
 			t.Fatalf("expired call got %q want %q", got, testNewAPIKey)
 		}
-		if ddb.getCalls != 2 {
-			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		if ddb.getCalls != 3 {
+			t.Fatalf("GetItem calls = %d, want 3", ddb.getCalls)
 		}
 	})
 
@@ -460,7 +496,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			Encryptor: &passthroughEncryptor{},
 			Now:       func() time.Time { return now },
 		}
-		p.apiKeyCache().Seed(testTeamID, ttlcache.Result[string]{Value: testOldAPIKey}, apiKeyCacheTTL, now.Add(-apiKeyCacheTTL-time.Second))
+		p.apiKeyCache().Seed(testTeamID, cachedAPIKeyResult(testOldAPIKey), apiKeyCacheTTL, now.Add(-apiKeyCacheTTL-time.Second))
 
 		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
 			t.Fatal("want DDB error, got nil")
@@ -485,8 +521,12 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 
 	t.Run("sweeps expired entries during lookup", func(t *testing.T) {
 		now := time.Unix(1700000000, 0)
-		ddb := &fakeDDBClient{
-			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)},
+		ddb := &fakeDDBClient{}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemConsistentRead(in) {
+				return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
 		}
 		p := &DDBProvider{
 			Client:    ddb,
@@ -494,8 +534,8 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			Encryptor: &passthroughEncryptor{},
 			Now:       func() time.Time { return now },
 		}
-		p.apiKeyCache().Seed("T_expired", ttlcache.Result[string]{Value: testOldAPIKey}, apiKeyCacheTTL, now.Add(-apiKeyCacheTTL-time.Second))
-		p.apiKeyCache().Seed("T_fresh", ttlcache.Result[string]{Value: testOldAPIKey}, apiKeyCacheTTL, now)
+		p.apiKeyCache().Seed("T_expired", cachedAPIKeyResult(testOldAPIKey), apiKeyCacheTTL, now.Add(-apiKeyCacheTTL-time.Second))
+		p.apiKeyCache().Seed("T_fresh", cachedAPIKeyResult(testOldAPIKey), apiKeyCacheTTL, now)
 		p.apiKeyStrongReadUntil = map[string]time.Time{
 			"T_expired": now.Add(-time.Second),
 			"T_fresh":   now.Add(time.Minute),
@@ -521,17 +561,18 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		if got != testOldAPIKey {
 			t.Fatalf("fresh cached got %q want %q", got, testOldAPIKey)
 		}
-		if ddb.getCalls != 1 {
-			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
 		}
 	})
 
 	t.Run("concurrent miss shares one DDB and decrypt fill", func(t *testing.T) {
 		releaseGet := make(chan struct{})
 		getStarted := make(chan struct{})
+		closeGetStarted := sync.OnceFunc(func() { close(getStarted) })
 		ddb := &fakeDDBClient{
 			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-				close(getStarted)
+				closeGetStarted()
 				<-releaseGet
 				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_shared_fill")}, nil
 			},
@@ -573,11 +614,53 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 				t.Fatalf("got %q want %q", got, "lv_live_shared_fill")
 			}
 		}
-		if ddb.getCalls != 1 {
-			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		if ddb.getCalls < 1 || ddb.getCalls > 2 {
+			t.Fatalf("GetItem calls = %d, want 1 fill plus optional cache validation", ddb.getCalls)
 		}
 		if encryptor.openCalls != 1 {
 			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
+		}
+	})
+
+	t.Run("same token validation shares one DDB read", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		token := newAPIKeyCacheToken([]byte(testOldAPIKey), []byte(passthroughWrappedKey))
+
+		ownerCall, owner := p.getOrStartAPIKeyValidation(testTeamID, token)
+		if !owner {
+			t.Fatal("first validation should own the DDB read")
+		}
+		waiterCall, owner := p.getOrStartAPIKeyValidation(testTeamID, token)
+		if owner {
+			t.Fatal("same-token validation should join the owner")
+		}
+		if waiterCall != ownerCall {
+			t.Fatal("same-token validation did not return the existing call")
+		}
+
+		current, err := p.cachedAPIKeyStillCurrent(context.Background(), testTeamID, token)
+		p.finishAPIKeyValidation(testTeamID, ownerCall, current, err)
+		<-waiterCall.done
+		if waiterCall.err != nil {
+			t.Fatalf("waiter validation err = %v", waiterCall.err)
+		}
+		if !waiterCall.current {
+			t.Fatal("waiter validation current = false, want true")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("validation GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		requireCacheValidationProjection(t, ddb.getInputs[0])
+		if !getItemConsistentRead(ddb.getInputs[0]) {
+			t.Fatal("validation read should be strongly consistent")
 		}
 	})
 
@@ -770,9 +853,10 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 	t.Run("waiter cancellation leaves owner fill active", func(t *testing.T) {
 		releaseGet := make(chan struct{})
 		getStarted := make(chan struct{})
+		closeGetStarted := sync.OnceFunc(func() { close(getStarted) })
 		ddb := &fakeDDBClient{
 			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-				close(getStarted)
+				closeGetStarted()
 				<-releaseGet
 				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_owner_fill")}, nil
 			},
@@ -830,8 +914,8 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		if got != "lv_live_owner_fill" {
 			t.Fatalf("cached got %q want %q", got, "lv_live_owner_fill")
 		}
-		if ddb.getCalls != 1 {
-			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 with cache validation", ddb.getCalls)
 		}
 	})
 
@@ -905,7 +989,12 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
 			t.Fatalf("SetAPIKey: %v", err)
 		}
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
 		got, err = p.APIKey(context.Background(), testTeamID)
 		if err != nil {
 			t.Fatalf("APIKey after SetAPIKey: %v", err)
@@ -913,9 +1002,10 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
 		}
-		if ddb.getCalls != 1 {
-			t.Fatalf("GetItem calls = %d, want 1 because SetAPIKey seeds the cache", ddb.getCalls)
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 including cache validation", ddb.getCalls)
 		}
+		requireCacheValidationProjection(t, ddb.getInputs[1])
 	})
 
 	t.Run("DeleteAPIKey evicts stale cached value", func(t *testing.T) {
@@ -983,6 +1073,91 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	})
 
+	t.Run("sibling DeleteAPIKey invalidates warm cache via validation", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				requireCacheValidationProjection(t, in)
+				if !getItemConsistentRead(in) {
+					t.Fatal("cache validation should use a strongly consistent read")
+				}
+				return &dynamodb.GetItemOutput{Item: nil}, nil
+			}
+			if !getItemConsistentRead(in) {
+				t.Fatal("post-validation refill should use a strongly consistent read")
+			}
+			return &dynamodb.GetItemOutput{Item: nil}, nil
+		}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after sibling delete, got %v", err)
+		}
+		if ddb.getCalls != 3 {
+			t.Fatalf("GetItem calls = %d, want prime + validation + strong refill", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want only the prime decrypt", encryptor.openCalls)
+		}
+	})
+
+	t.Run("sibling SetAPIKey refreshes warm cache via validation", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				requireCacheValidationProjection(t, in)
+				if !getItemConsistentRead(in) {
+					t.Fatal("cache validation should use a strongly consistent read")
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+			}
+			if !getItemConsistentRead(in) {
+				t.Fatal("post-validation refill should use a strongly consistent read")
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after sibling rotation: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want rotated key %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 3 {
+			t.Fatalf("GetItem calls = %d, want prime + validation + strong refill", ddb.getCalls)
+		}
+		if encryptor.openCalls != 2 {
+			t.Fatalf("Open calls = %d, want prime decrypt + rotated-key decrypt", encryptor.openCalls)
+		}
+	})
+
 	t.Run("SetAPIKey prevents in-flight stale read from repopulating cache", func(t *testing.T) {
 		releaseGet := make(chan struct{})
 		getStarted := make(chan struct{})
@@ -1026,8 +1201,12 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			}
 		}
 
-		ddb.getFunc = nil
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemConsistentRead(in) {
+				return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
 		got, err := p.APIKey(context.Background(), testTeamID)
 		if err != nil {
 			t.Fatalf("APIKey after SetAPIKey: %v", err)
@@ -1035,8 +1214,8 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
 		}
-		if ddb.getCalls != 1 {
-			t.Fatalf("GetItem calls = %d, want 1 because SetAPIKey seeds the cache", ddb.getCalls)
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 including cache validation", ddb.getCalls)
 		}
 	})
 
@@ -1103,15 +1282,239 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 	})
 
-	t.Run("blank private cache mutation guards are no-ops", func(t *testing.T) {
+	t.Run("cache validation error serves cached key", func(t *testing.T) {
 		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
 		p := &DDBProvider{
-			Client:    &fakeDDBClient{},
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		validationErr := errors.New("ddb validation down")
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				return nil, validationErr
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey during validation outage: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want cached key %q", got, testOldAPIKey)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want prime + validation", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want only the prime decrypt", encryptor.openCalls)
+		}
+	})
+
+	t.Run("cache validation error rechecks local token before serving cached key", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		validationAttempts := 0
+		validationErr := errors.New("ddb validation down")
+		ddb.getFunc = func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				validationAttempts++
+				if validationAttempts == 1 {
+					if err := p.SetAPIKey(ctx, testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
+						t.Fatalf("SetAPIKey during validation: %v", err)
+					}
+					return nil, validationErr
+				}
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after validation outage racing SetAPIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want new cached key %q", got, testNewAPIKey)
+		}
+		if validationAttempts != 2 {
+			t.Fatalf("validation attempts = %d, want old-token error + new-token validation", validationAttempts)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want only the prime decrypt", encryptor.openCalls)
+		}
+	})
+
+	t.Run("cache validation context error retries before serving cached key", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		validationAttempts := 0
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				validationAttempts++
+				if validationAttempts == 1 {
+					return nil, context.DeadlineExceeded
+				}
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after transient validation context error: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want cached key %q", got, testOldAPIKey)
+		}
+		if validationAttempts != 2 {
+			t.Fatalf("validation attempts = %d, want retry + success", validationAttempts)
+		}
+		if ddb.getCalls != 3 {
+			t.Fatalf("GetItem calls = %d, want prime + two validations", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want only the prime decrypt", encryptor.openCalls)
+		}
+	})
+
+	t.Run("SetAPIKey racing cache validation prevents stale return", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		validationCalls := 0
+		ddb.getFunc = func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				validationCalls++
+				if validationCalls == 1 {
+					if err := p.SetAPIKey(ctx, testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
+						t.Fatalf("SetAPIKey during validation: %v", err)
+					}
+					return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}, nil
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey racing SetAPIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if validationCalls != 2 {
+			t.Fatalf("validation calls = %d, want old-token validation + new-token validation", validationCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want only the prime decrypt", encryptor.openCalls)
+		}
+	})
+
+	t.Run("cache validation recheck loop is bounded", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
 			TableName: "ws",
 			Encryptor: &passthroughEncryptor{},
 			Now:       func() time.Time { return now },
 		}
-		p.seedAPIKeyCache(testTeamID, testOldAPIKey, now)
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		validatedKey := testOldAPIKey
+		replacements := []string{
+			"lv_live_recheck_1",
+			"lv_live_recheck_2",
+			"lv_live_recheck_3",
+			"lv_live_recheck_4",
+		}
+		validationCalls := 0
+		ddb.getFunc = func(ctx context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemUsesCacheValidationProjection(in) {
+				currentKey := validatedKey
+				if validationCalls >= len(replacements) {
+					t.Fatalf("unexpected validation call %d", validationCalls+1)
+				}
+				nextKey := replacements[validationCalls]
+				validationCalls++
+				if err := p.SetAPIKey(ctx, testTeamID, nextKey, "U_ADMIN"); err != nil {
+					t.Fatalf("SetAPIKey during validation %d: %v", validationCalls, err)
+				}
+				validatedKey = nextKey
+				return &dynamodb.GetItemOutput{Item: itemForKey(currentKey)}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(validatedKey)}, nil
+		}
+
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if err == nil || !strings.Contains(err.Error(), "cache validation did not converge") {
+			t.Fatalf("err = %v, want cache validation did not converge", err)
+		}
+		if validationCalls != apiKeyValidationRecheckLimit+1 {
+			t.Fatalf("validation calls = %d, want %d", validationCalls, apiKeyValidationRecheckLimit+1)
+		}
+	})
+
+	t.Run("blank private cache mutation guards are no-ops", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		p.seedAPIKeyCache(testTeamID, testOldAPIKey, newAPIKeyCacheToken([]byte(testOldAPIKey), []byte(passthroughWrappedKey)), now)
 		p.apiKeyCache().WithLock(func() {
 			p.apiKeyStrongReadUntil = map[string]time.Time{
 				testTeamID: now.Add(apiKeyCacheTTL),
@@ -1119,7 +1522,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		})
 
 		p.invalidateAPIKeyCache(" \t ", now.Add(apiKeyCacheTTL))
-		p.seedAPIKeyCache("\n", testNewAPIKey, now)
+		p.seedAPIKeyCache("\n", testNewAPIKey, newAPIKeyCacheToken([]byte(testNewAPIKey), []byte(passthroughWrappedKey)), now)
 
 		got, err := p.APIKey(context.Background(), testTeamID)
 		if err != nil {
