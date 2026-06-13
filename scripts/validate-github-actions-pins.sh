@@ -8,9 +8,10 @@ shopt -s nullglob
 
 status=0
 sha_re='^[0-9a-f]{40}$'
-tag_re='^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'
+tag_re='^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.+-]+)?$'
 # This is a local format guard. It does not resolve refs over the network, so
-# reviewers still need to verify that tag comments match their pinned SHAs.
+# reviewers still need to verify that tag comments match their pinned SHAs. It
+# intentionally enforces this repo's exact vX.Y.Z comment convention.
 action_files=(.github/workflows/*.yml .github/workflows/*.yaml .github/actions/*/action.yml .github/actions/*/action.yaml)
 
 fail() {
@@ -30,7 +31,9 @@ for file in "${action_files[@]}"; do
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_no=$((line_no + 1))
 
-    if [[ ! "$line" =~ ^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*([^[:space:]#]+)([[:space:]]*#(.*))?$ ]]; then
+    # This line-based scan assumes workflow/action `uses:` declarations start
+    # their YAML line; it intentionally avoids adding a YAML parser dependency.
+    if [[ ! "$line" =~ ^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*([^[:space:]#]+)[[:space:]]*(#(.*))?$ ]]; then
       continue
     fi
 
@@ -38,12 +41,16 @@ for file in "${action_files[@]}"; do
     comment="$(trim "${BASH_REMATCH[4]:-}")"
     read -r tag_comment _ <<< "$comment"
 
+    if [[ "$uses_ref" == \"*\" || "$uses_ref" == \'*\' ]]; then
+      uses_ref="${uses_ref:1:${#uses_ref}-2}"
+    fi
+
     if [[ "$uses_ref" == ./* ]]; then
       continue
     fi
 
     if [[ "$uses_ref" == docker://* ]]; then
-      fail "$file" "$line_no" "docker:// actions cannot be commit SHA-pinned: $uses_ref"
+      fail "$file" "$line_no" "docker:// actions are not allowed by this repo policy: $uses_ref"
       continue
     fi
 
