@@ -693,9 +693,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	if h.startAgentReactionAck(ctx, log, env) {
 		defer h.clearAgentAck(log, env)
 	}
-	if env.Event.ChannelType == slackChannelTypeIM {
-		h.setAgentThinkingStatus(ctx, log, env, h.cfg.AgentSurfaceExclusiveAcks)
-	}
+	h.setAgentThinkingStatus(ctx, log, env, h.cfg.AgentSurfaceExclusiveAcks)
 
 	threadKey := agentEventThreadKey(env)
 	history, version, ok := h.resolveTurnHistory(ctx, log, env, partition, threadKey, pre)
