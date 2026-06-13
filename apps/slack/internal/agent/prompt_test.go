@@ -55,7 +55,7 @@ func TestSystemPrompt_Invariants(t *testing.T) {
 		t.Error("prompt must keep conversation-mode URL protection aligned with the HTTPS-only create policy")
 	}
 	if !strings.Contains(p, "light, standard Markdown") {
-		t.Error("prompt must align free-text answers with the markdown_text delivery path")
+		t.Error("prompt must align free-text answers with the standard-Markdown delivery path")
 	}
 
 	// Per-turn context is injected.

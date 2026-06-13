@@ -70,12 +70,11 @@ func agentStreamRecipientTeamID(env *slackEventEnvelope) string {
 // thread, and the streamed message lands on replyTS (the status's thread), so no explicit
 // clear is needed (consistent with the non-streaming path's deliberate reliance on auto-clear).
 //
-// Rendering dialect: chat.appendStream takes markdown_text (standard Markdown), and the
-// non-streaming reply now posts the agent's own answer through markdown_text too
-// (postAgentMarkdownReply → chat.postMessage markdown_text), so both paths render through
-// Slack's one Markdown parser — **bold**, links, and bullets render identically. The agent
-// emits standard Markdown for both; no mrkdwn normalizing is needed. (The escaped proposal
-// preview still posts as mrkdwn text, but it carries no Markdown — see deliverAgentResult.)
+// Rendering dialect: chat.appendStream takes standard Markdown, and the non-streaming reply
+// posts the agent's own answer as standard Markdown too. Both paths run through the same
+// masked-link hardener before delivery, so a split stream delta can't preserve a hidden
+// [label](url) destination that the channel path would have neutralized. The escaped proposal
+// preview still posts as mrkdwn text, but it carries no Markdown — see deliverAgentResult.
 type agentReplyStreamer struct {
 	// ctx is the turn ctx, used for streaming WHILE the turn runs (onDelta). baseCtx (h.baseCtx)
 	// backs deliveryCtx() for the finalize steps — see deliveryCtx for why finalize can't reuse
@@ -96,6 +95,7 @@ type agentReplyStreamer struct {
 	pending  strings.Builder // coalescer: delta text not yet flushed
 	streamed strings.Builder // everything sent to the stream, to reconcile a synthetic reply
 	streamTS string          // the Slack stream handle (empty until the first delta opens one)
+	markdown agentMarkdownLinkHarden
 	// broken marks a start/append failure: streaming stops and finalize/the caller fall back to
 	// a posted reply. Invariant: broken ⟹ pending is empty — every site that sets broken either
 	// precedes the pending write (a first-delta StartStream failure) or follows pending.Reset()
@@ -117,6 +117,10 @@ type agentReplyStreamer struct {
 // to weigh if the interleave proves to matter once enabled — measured under #708.
 func (s *agentReplyStreamer) onDelta(delta string) {
 	if s.broken {
+		return
+	}
+	delta = s.markdown.write(delta)
+	if delta == "" {
 		return
 	}
 	if s.streamTS == "" {
@@ -188,6 +192,9 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 	}
 	ctx, cancel := s.deliveryCtx()
 	defer cancel()
+	if tail := s.markdown.flush(); tail != "" {
+		s.pending.WriteString(tail)
+	}
 	s.flush(ctx) // the buffered tail (a no-op if the stream already broke)
 	// Reconcile a Reply the deltas never carried: Run can synthesize one (the iteration-cap /
 	// empty-text fallback — see agent.WithStreamSink) that no terminal delta streamed, which
@@ -199,9 +206,19 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 	// case is the benign reverse — skipping a reply the user already saw stream. Routed through
 	// pending+flush so it shares the one append+record+break path.
 	if !s.broken {
-		if r := strings.TrimSpace(result.Reply); r != "" && !strings.Contains(s.streamed.String(), r) {
-			s.pending.WriteString(result.Reply)
-			s.flush(ctx)
+		reply := hardenAgentMarkdown(result.Reply)
+		if r := strings.TrimSpace(reply); r != "" {
+			streamed := s.streamed.String()
+			if !strings.Contains(streamed, r) {
+				// Per-delta streaming treats chunk starts as possible Markdown parse
+				// boundaries. If that stricter form is already present, do not append a
+				// one-shot variant that may be less escaped around reference definitions.
+				streamReply := hardenAgentMarkdownForStreamReconcile(result.Reply)
+				if sr := strings.TrimSpace(streamReply); sr != "" && !strings.Contains(streamed, sr) {
+					s.pending.WriteString(streamReply)
+					s.flush(ctx)
+				}
+			}
 		}
 	}
 	s.stop(ctx)
@@ -227,6 +244,9 @@ func (s *agentReplyStreamer) finalizeError() (handled bool) {
 	}
 	ctx, cancel := s.deliveryCtx()
 	defer cancel()
+	if tail := s.markdown.flush(); tail != "" {
+		s.pending.WriteString(tail)
+	}
 	s.flush(ctx) // deliver the partial tail (a no-op if the stream already broke)
 	s.stop(ctx)
 	return !s.broken
