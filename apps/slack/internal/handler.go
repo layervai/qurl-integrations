@@ -335,9 +335,14 @@ type Config struct {
 	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
-	// Empty falls back to the public client image with the `latest` tag for
-	// dev/sandbox installs; production deploys should set an immutable tag or
-	// digest so Slack never instructs customers to run a floating image.
+	// The public env var is QURL_CONNECTOR_IMAGE; this field keeps the
+	// historical tunnel naming used by the install-rendering code.
+	// Empty falls back to the public client image with the `latest` tag only for
+	// explicit dev/sandbox installs; production cmd/main.go fails closed unless
+	// the operator sets a specific non-latest tag or digest.
+	// Tag/digest policy is enforced by cmd/main.go, not by the renderer, so tests
+	// that construct Config directly must pass a pinned image unless they
+	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
 
 	// PostFeedback delivers a `/qurl feedback` submission to the internal

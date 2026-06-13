@@ -202,6 +202,7 @@ SLACK_SIGNING_SECRET=... \
 SLACK_CLIENT_ID=... \
 SLACK_CLIENT_SECRET=... \
 QURL_ENDPOINT=https://api.layerv.ai \
+QURL_CONNECTOR_IMAGE_FALLBACK=dev-sandbox \
 AUTH0_DOMAIN=layerv.us.auth0.com \
 AUTH0_CLIENT_ID=... \
 AUTH0_CLIENT_SECRET=... \
@@ -235,10 +236,15 @@ docker buildx build --platform linux/arm64 \
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
-| `QURL_CONNECTOR_IMAGE` | No | Container image reference rendered by `/qurl-admin protect-connector`. Set this to an immutable release tag or digest for production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty uses `ghcr.io/layervai/qurl-connector:latest` as a dev fallback. Values with whitespace or control characters fail startup validation. |
+| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
+| `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
 | `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC` | No | Pool cap for the short **channel thread follow-up admission gate**: workspace-toggle read plus "is this already an agent thread?" transcript read. Empty/0 uses the built-in default (10). Each gate attempt has a 5s fail-closed budget; slow reads log as `agent: thread-continuity lookup failed; dropping channel reply`. During staged enablement, watch that line plus `agent: follow-up gate pool saturated — dropping channel reply`, and tune from observed DynamoDB latency and read volume. |
 | `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC` | No | Pool cap for in-flight **admitted channel thread follow-up turns** — separate from `QURL_SLACK_MAX_CONCURRENT_ASYNC` so a busy channel's follow-up work can't saturate the main pool that `@mention`/DM/slash/interaction work shares. Empty/0 uses the built-in default (same as the main pool, 50). During staged enablement, watch `agent: follow-up turn pool saturated — dropping admitted channel reply`; main-pool isolation holds at any size. |
+
+Use a full repository path for dotted or port-bearing registries. Slashless
+`host:tag`-style values such as `gcr.io:v1` are rejected as ambiguous; use
+`gcr.io/<org>/<image>:v1` or a digest pin instead.
 
 Channel follow-up concurrency is split into short gate reads and long turns. The worst
 steady-state in-flight turn ceiling is `QURL_SLACK_MAX_CONCURRENT_ASYNC` +
@@ -250,6 +256,10 @@ semaphores and upstream service limits rather than a smaller local connection po
 `WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are unconditionally
 required at startup — the Secure Access Agent needs DynamoDB + KMS for per-workspace key
 lookups even on `/qurl get` / `/qurl list`.
+
+Before promoting a build with the `QURL_CONNECTOR_IMAGE` startup check, verify
+the deployment manifest or task definition injects a pinned connector image; the
+production manifest is intentionally managed outside this public repository.
 
 The `Slack install` group is required for low-friction customer onboarding.
 Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
