@@ -662,9 +662,16 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, re
 
 func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger, req *tunnelInstallRequest) (result tunnelInstallAgentAuditResult) {
 	result = agentProtectConnectorAuditResultInvalid
+	var panicCleanup *tunnelInstallBuild
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Error("tunnel install: panic in setup worker", "recover", rec, "stack", string(debug.Stack()))
+			if panicCleanup != nil {
+				revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "unexpected_panic")
+			}
+			if req != nil && strings.TrimSpace(req.responseURL) != "" {
+				_ = h.postResponse(log, req.responseURL, "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect-connector` again.")
+			}
 			result = agentProtectConnectorAuditUnexpectedFailureResult
 		}
 	}()
@@ -683,6 +690,7 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		// returning.
 		return agentProtectConnectorAuditBuildFailedResult
 	}
+	panicCleanup = build
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
@@ -695,6 +703,7 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 			message += " Re-run `/qurl-admin protect-connector` after DM delivery is available."
 		}
 		_ = h.postResponse(log, req.responseURL, message)
+		panicCleanup = nil
 		return agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
 	}
 	delivery := h.postInstallInstructions(log, req.responseURL, build.message)
@@ -714,16 +723,21 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
+		panicCleanup = nil
 	}
 
 	switch delivery {
 	case tunnelInstallInstructionsDeliverySucceeded:
+		panicCleanup = nil
 		return agentProtectConnectorAuditSuccessResult
 	case tunnelInstallInstructionsDeliveryDegraded:
+		panicCleanup = nil
 		return agentProtectConnectorAuditDegradedResult
 	case tunnelInstallInstructionsDeliveryFailed:
 		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
+	// Unreachable with today's enum; keeps the function total if a future delivery
+	// state is added before the exhaustive linter catches the missing case.
 	return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 }
 

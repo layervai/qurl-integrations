@@ -345,6 +345,9 @@ func agentConfirmFallbackText(summary, reason string) string {
 }
 
 func agentConfirmVisibleReason(prop *agent.Proposal) string {
+	// Scope this display to protect-connector: this PR newly persists that
+	// modal provenance after an additional submit step, so the approver should
+	// see the exact reason before it is attached to their App Home row.
 	if prop == nil || prop.Action != agent.ActionProtectConnector {
 		return ""
 	}

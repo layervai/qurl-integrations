@@ -3266,12 +3266,25 @@ func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
 
 func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	now := fixedNow
+	ts := newAdminTestServers(t)
 	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
-	h := &Handler{cfg: Config{AgentStore: agentStore}}
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
 	h.processTunnelInstall(context.Background(), slog.Default(), &tunnelInstallRequest{
-		teamID:    testAdminTeamID,
-		channelID: testTunnelChannelID,
-		userID:    testAdminUserID,
+		teamID:      testAdminTeamID,
+		channelID:   testTunnelChannelID,
+		userID:      testAdminUserID,
+		responseURL: responseURL.URL,
 		agentAudit: &tunnelInstallAgentAudit{
 			target: testTunnelSlug,
 			reason: testTunnelAgentReason,
@@ -3287,6 +3300,13 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	}
 	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
 		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want unexpected-failure notice: %v", len(responseBodies), responseBodies)
+	}
+	notice := parseSlackText(t, []byte(responseBodies[0]))
+	if !strings.Contains(notice, "stopped unexpectedly") || !strings.Contains(notice, "discard it") {
+		t.Fatalf("unexpected-failure notice = %q, want retry/discard copy", notice)
 	}
 }
 
