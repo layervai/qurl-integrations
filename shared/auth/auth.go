@@ -13,6 +13,7 @@ type Provider interface {
 	// APIKey returns the qURL API key for the given workspace ID.
 	APIKey(ctx context.Context, workspaceID string) (string, error)
 	// SupportsDeleteAPIKey reports whether DeleteAPIKey can remove a stored key.
+	// When false, DeleteAPIKey must not mutate provider-backed state.
 	SupportsDeleteAPIKey() bool
 	// DeleteAPIKey removes the qURL API key for the given workspace ID.
 	DeleteAPIKey(ctx context.Context, workspaceID string) error

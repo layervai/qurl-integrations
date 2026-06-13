@@ -1316,7 +1316,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// but gates to the recorded workspace owner before removing the key.
 		h.handleUninstall(w, values)
 	case slashSubcommand(text, uninstallVerb):
-		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
+		if h.canAdvertiseUninstall() {
+			respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
+		} else {
+			slog.Info("unknown slash subcommand", "command", command, "text", text)
+			respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), command))
+		}
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel

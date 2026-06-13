@@ -576,6 +576,16 @@ func TestSlashCommandUninstallAuthProviderNotConfigured(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallMissingTeamID(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, "", testAdminUserID)
+
+	if !strings.Contains(resp[respFieldText], "Slack workspace ID") {
+		t.Fatalf("missing-team reply missing payload hint: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallRequiresOwnerStoreForMutableProvider(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	h := newTestHandler(t, noopQURLServer(t))
@@ -634,8 +644,7 @@ func TestSlashCommandUninstallEnvProviderWithOwnerStoreSkipsOwnerGate(t *testing
 
 func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
-	h := newTestHandler(t, noopQURLServer(t))
-	h.cfg.AuthProvider = provider
+	h := newUninstallAdminTestHandler(t, provider)
 
 	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
 
@@ -644,6 +653,17 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall`.") {
 		t.Fatalf("uninstall args reply missing usage: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallUnexpectedArgsUnsupportedDeploymentUnknown(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	h := newTestHandler(t, noopQURLServer(t))
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
+
+	if !strings.Contains(resp[respFieldText], "Unknown subcommand") {
+		t.Fatalf("unsupported uninstall args reply should fall through to unknown: %q", resp[respFieldText])
 	}
 }
 
@@ -662,6 +682,20 @@ func TestSlashCommandUninstallFailsClosedWhenOwnerCheckErrors(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "Try again in a moment") {
 		t.Fatalf("owner-check-error reply missing retry hint: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallFailsClosedWithoutUserID(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newUninstallAdminTestHandler(t, provider)
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "")
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "missing user_id") {
+		t.Fatalf("missing-user reply missing payload hint: %q", resp[respFieldText])
 	}
 }
 
