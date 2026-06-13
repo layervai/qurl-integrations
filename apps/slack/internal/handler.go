@@ -1316,9 +1316,9 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// but gates to the recorded workspace owner before removing the key.
 		h.handleUninstall(w, values)
 	case slashSubcommand(text, uninstallVerb):
-		// Exact `/qurl uninstall` reaches handleUninstall so unsupported deployments
-		// can explain that operator-managed installs are not self-service. Argument
-		// variants stay hidden as unknown unless uninstall is actually advertised.
+		// Bare `/qurl uninstall` is handled above so unsupported deployments can
+		// explain that operator-managed installs are not self-service. Argument
+		// variants land here: advertise usage only when uninstall is live.
 		if h.canAdvertiseUninstall() {
 			respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 		} else {

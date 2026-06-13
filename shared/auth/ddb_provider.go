@@ -925,7 +925,9 @@ func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 
 // DeleteAPIKey removes the qURL API key columns while preserving Slack app
 // install metadata in the same row. It returns [ErrWorkspaceNotConfigured] when
-// the workspace has no stored qURL key.
+// the workspace has no stored qURL key. Workspace ownership/admin gates live
+// outside this auth row, so removing configured_by/configured_at does not
+// change who can reconnect.
 //
 // TODO(#792): this local disconnect cannot revoke the upstream qURL key until
 // setup persists the qurl-service key_id for workspace keys.
