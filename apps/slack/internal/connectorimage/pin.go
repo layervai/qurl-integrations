@@ -121,16 +121,12 @@ func classifyTaggedImagePin(name string, parsed dockerref.Reference, parseErr er
 	if parseErr != nil || !ok {
 		return MalformedReference
 	}
-	tagged, ok := parsed.(dockerref.Tagged)
-	if !ok {
+	if _, ok := parsed.(dockerref.Tagged); !ok {
 		return Floating
 	}
 	repositoryName = named.Name()
 	if slashlessRegistryReference(repositoryName) {
 		return AmbiguousReference
-	}
-	if strings.EqualFold(tagged.Tag(), "latest") || imageNameHasLatestTag(name) {
-		return Floating
 	}
 	// Non-latest tags are trusted release labels by operator convention; use
 	// image@sha256:<digest> when byte-for-byte image immutability is required.
