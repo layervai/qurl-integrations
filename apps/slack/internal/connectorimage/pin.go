@@ -11,8 +11,11 @@ import (
 	dockerref "github.com/distribution/reference"
 )
 
-// PinStatus describes whether an operator-provided image ref is pinned enough
-// for production startup and, if not, which startup error should explain it.
+// PinStatus describes whether an operator-provided image ref is accepted by
+// the production startup policy and, if not, which startup error should explain
+// it. Pinned means "specific enough for qURL startup policy": non-latest tags
+// are trusted release labels by operator convention, while digest refs are the
+// immutable byte-for-byte pins.
 type PinStatus int
 
 // PinStatus values returned by ClassifyPin.

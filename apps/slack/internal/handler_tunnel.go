@@ -746,6 +746,9 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	if image == "" {
 		image = defaultTunnelImage
 	}
+	// Production startup validates the same value; repeat the cheap character
+	// check here so tests or alternate constructors cannot render unsafe image
+	// bytes into Slack shell/YAML snippets.
 	if err := ValidateTunnelImageRef(image); err != nil {
 		return preparedTunnelInstallMessage{}, fmt.Errorf("tunnel image reference: %w", err)
 	}
