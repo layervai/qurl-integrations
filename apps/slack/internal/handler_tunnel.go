@@ -100,7 +100,7 @@ const (
 	agentProtectConnectorAuditModalRejectedOutcome              = "qURL Connector setup was not started because the modal submission could not be verified."
 	agentProtectConnectorAuditConfigurationUnavailableOutcome   = "qURL Connector setup was not started because qURL admin configuration was unavailable."
 	agentProtectConnectorAuditUnexpectedFailureOutcome          = "qURL Connector setup stopped unexpectedly before the outcome was recorded."
-	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome was not recorded."
+	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome could not be determined."
 	tunnelInstallUnexpectedFailureNotice                        = "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect-connector` again."
 )
 
@@ -799,10 +799,10 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		panicCleanup = nil
 		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
-	// Unreachable with today's enum; keeps the function total if a future delivery
-	// state is added before the exhaustive linter catches the missing case.
+	// Unreachable with today's enum; if a future delivery state reaches this guard
+	// before the exhaustive linter catches it, surface the anomaly as unexpected.
 	panicCleanup = nil
-	return agentProtectConnectorAuditInstructionsDeliveryFailedResult
+	return agentProtectConnectorAuditUnexpectedFailureResult
 }
 
 func (h *Handler) postTunnelInstallUnexpectedFailureNotice(log *slog.Logger, req *tunnelInstallRequest) {

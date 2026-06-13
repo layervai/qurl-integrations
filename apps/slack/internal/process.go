@@ -178,8 +178,9 @@ func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout
 		// Release the bounded worker slot before the tail runs, but keep the tail
 		// in the same wg-tracked goroutine so shutdown waits for best-effort cleanup
 		// such as audit writes. Tails intentionally run outside the semaphore: a
-		// saturated pool can have cap(sem) bodies plus cap(sem) tails in flight, so
-		// tails must stay cheap or separately bounded.
+		// saturated pool can have cap(sem) bodies plus cap(sem) tails in flight.
+		// This helper is only appropriate for cheap, bounded tails; callers adding
+		// heavier tail work should give that work its own bound.
 		<-sem
 
 		if tail == nil {
