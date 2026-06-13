@@ -699,10 +699,12 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 
 func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]any) {
 	t.Helper()
+	matches := 0
 	for _, rec := range records {
 		if rec["event"] != setupBindingPersistFailureEvent {
 			continue
 		}
+		matches++
 		if rec["team_id"] != testTeamID {
 			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
 		}
@@ -721,9 +723,13 @@ func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]a
 		if rec["operator_action"] != "rerun_setup_within_retry_window_then_cleanup_after_window" {
 			t.Errorf("operator_action = %v", rec["operator_action"])
 		}
-		return
 	}
-	t.Fatalf("missing %q log event in records: %#v", setupBindingPersistFailureEvent, records)
+	if matches == 0 {
+		t.Fatalf("missing %q log event in records: %#v", setupBindingPersistFailureEvent, records)
+	}
+	if matches > 1 {
+		t.Errorf("found %d %q log events, want 1", matches, setupBindingPersistFailureEvent)
+	}
 }
 
 func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
