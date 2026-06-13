@@ -24,21 +24,21 @@ const (
 	MalformedDigest
 )
 
-// ClassifyPin delegates Docker reference grammar to
-// github.com/distribution/reference, then layers qURL policy on top. We do not
-// use ParseNormalizedNamed as the entry point because it rewrites slashless refs
-// such as gcr.io:v1 or localhost:5000 into Docker Hub library images. Preserving
-// the operator's input lets startup reject those ambiguous forms instead of
-// silently normalizing them.
+// ClassifyPin delegates Docker reference grammar to reference.Parse, then
+// layers qURL policy on top. We do not use ParseNormalizedNamed because it
+// rewrites slashless refs such as gcr.io:v1 or localhost:5000 into Docker Hub
+// library images. Preserving the operator's input lets startup reject those
+// ambiguous forms instead of silently normalizing them.
 func ClassifyPin(image string) PinStatus {
 	name, digest, hasDigest := strings.Cut(image, "@")
+	parsed, parseErr := dockerref.Parse(image)
 	if hasDigest {
-		return classifyDigestImagePin(name, digest)
+		return classifyDigestImagePin(name, digest, parsed, parseErr)
 	}
-	return classifyTaggedImagePin(name)
+	return classifyTaggedImagePin(name, parsed, parseErr)
 }
 
-func classifyDigestImagePin(name, digest string) PinStatus {
+func classifyDigestImagePin(name, digest string, parsed dockerref.Reference, parseErr error) PinStatus {
 	lastSlash := strings.LastIndex(name, "/")
 	lastColon := strings.LastIndex(name, ":")
 	nameSuffix := name[lastSlash+1:]
@@ -74,16 +74,21 @@ func classifyDigestImagePin(name, digest string) PinStatus {
 		// Future sha256DigestStatus values must fail closed.
 		return MalformedDigest
 	}
-	if strings.EqualFold(repositoryName, "sha256") || slashlessRegistryReference(name, lastSlash, lastColon) {
+	named, ok := parsed.(dockerref.Named)
+	if parseErr != nil || !ok {
 		return MalformedDigest
 	}
-	if !isParsedDockerReferencePinned(name + "@" + digest) {
+	if _, ok := parsed.(dockerref.Digested); !ok {
+		return MalformedDigest
+	}
+	repositoryName = named.Name()
+	if strings.EqualFold(repositoryName, "sha256") || slashlessRegistryReference(repositoryName) {
 		return MalformedDigest
 	}
 	return Pinned
 }
 
-func classifyTaggedImagePin(name string) PinStatus {
+func classifyTaggedImagePin(name string, parsed dockerref.Reference, parseErr error) PinStatus {
 	lastSlash := strings.LastIndex(name, "/")
 	lastColon := strings.LastIndex(name, ":")
 
@@ -113,7 +118,15 @@ func classifyTaggedImagePin(name string) PinStatus {
 	if strings.EqualFold(repositoryName, "sha256") {
 		return MalformedDigest
 	}
-	if lastColon == lastSlash+1 || imageNameHasUppercase(repositoryName) || !isParsedDockerReferencePinned(name) {
+	named, ok := parsed.(dockerref.Named)
+	if parseErr != nil || !ok {
+		return MalformedReference
+	}
+	if _, ok := parsed.(dockerref.Tagged); !ok {
+		return Floating
+	}
+	repositoryName = named.Name()
+	if lastColon == lastSlash+1 || imageNameHasUppercase(repositoryName) {
 		return MalformedReference
 	}
 	// Non-latest tags are trusted release labels by operator convention; use
@@ -186,29 +199,8 @@ func imageRepositoryName(name string, lastSlash, lastColon int) string {
 	return name
 }
 
-func slashlessRegistryReference(name string, lastSlash, lastColon int) bool {
-	if lastSlash >= 0 {
-		return false
-	}
-	if lastColon > lastSlash {
-		return looksLikeRegistryHost(name[:lastColon])
-	}
-	return looksLikeRegistryHost(name)
-}
-
-func isParsedDockerReferencePinned(image string) bool {
-	parsed, err := dockerref.ParseAnyReference(image)
-	if err != nil {
-		return false
-	}
-	if _, ok := parsed.(dockerref.Named); !ok {
-		return false
-	}
-	if _, ok := parsed.(dockerref.Tagged); ok {
-		return true
-	}
-	_, ok := parsed.(dockerref.Digested)
-	return ok
+func slashlessRegistryReference(name string) bool {
+	return !strings.Contains(name, "/") && looksLikeRegistryHost(name)
 }
 
 func imageNameHasUppercase(name string) bool {
