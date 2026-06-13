@@ -3,16 +3,8 @@ name: "discord: Build and Test"
 on:
   push:
     branches: [main]
-    paths:
-      - 'apps/discord/**'
-      - 'shared/**'
-      - '.github/workflows/discord.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'apps/discord/**'
-      - 'shared/**'
-      - '.github/workflows/discord.yml'
 
 permissions:
   contents: read
@@ -26,9 +18,39 @@ concurrency:
 # NODE_VERSION env var back — it would drift.
 
 jobs:
+  changes:
+    name: discord / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      discord: ${{ steps.filter.outputs.discord }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            discord:
+              # Source of truth for Discord-impacting paths on PR and main push events.
+              - 'apps/discord/**'
+              - 'shared/**'
+              - '.github/workflows/discord.yml'
+
   build-and-test:
+    name: discord / build and test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.discord == 'true'
     defaults:
       run:
         working-directory: apps/discord
@@ -61,8 +83,11 @@ jobs:
         run: npm test -- --ci --silent
 
   docker-check:
+    name: discord / docker
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.discord == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -70,9 +95,76 @@ jobs:
         working-directory: apps/discord
         run: docker build -t discord-bot-test .
 
+  required:
+    name: discord / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every Discord quality gate must be listed here; discord / required only
+    # validates jobs in this needs set. display_names below is annotation-only.
+    needs: [changes, build-and-test, docker-check]
+    if: always()
+    steps:
+      - name: Verify Discord CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DISCORD_CHANGED: ${{ needs.changes.outputs.discord }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::discord / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$DISCORD_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No Discord-impacting changes detected; Discord CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::discord / detect changes emitted unexpected discord output: ${DISCORD_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              build-and-test)
+                echo "discord / build and test"
+                ;;
+              docker-check)
+                echo "discord / docker"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a Discord quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Discord-impacting changes require every quality gate listed
+              # in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"
+
   trigger-deploy:
-    needs: [build-and-test, docker-check]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [changes, required]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.discord == 'true'
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}

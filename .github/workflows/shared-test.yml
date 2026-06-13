@@ -4,31 +4,43 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   changes:
-    name: Detect Changes
+    name: shared / detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       shared: ${{ steps.filter.outputs.shared }}
     steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
 
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
           filters: |
             shared:
+              # Source of truth for shared Go-impacting paths on PR and main push events.
               - 'shared/**'
               - 'go.mod'
               - 'go.sum'
+              - '.golangci.yml'
+              - '.github/workflows/shared-test.yml'
 
   lint:
-    name: Lint
+    name: shared / lint
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.shared == 'true'
@@ -47,7 +59,7 @@ jobs:
           args: --timeout=5m
 
   test-all:
-    name: Test All Apps
+    name: shared / test all
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.shared == 'true'
@@ -74,3 +86,70 @@ jobs:
 
       - name: Vet all
         run: go vet ./...
+
+  required:
+    name: shared / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every shared quality gate must be listed here; shared / required only
+    # validates jobs in this needs set. display_names below is annotation-only.
+    needs: [changes, lint, test-all]
+    if: always()
+    steps:
+      - name: Verify shared CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SHARED_CHANGED: ${{ needs.changes.outputs.shared }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::shared / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$SHARED_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No shared-impacting changes detected; shared CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::shared / detect changes emitted unexpected shared output: ${SHARED_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              lint)
+                echo "shared / lint"
+                ;;
+              test-all)
+                echo "shared / test all"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a shared quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Shared-impacting changes require every quality gate listed
+              # in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"

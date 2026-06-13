@@ -87,10 +87,13 @@ green for the current `main` merge result before a PR can merge. If `main`
 moves after checks turn green, update the PR branch or rerun checks against the
 new merge result before merging.
 
-Slack-impacting PRs are gated by the always-present `slack / required` check.
-The Slack workflow's `changes` filter is the source of truth for which paths
-need Slack validation. When that filter matches, the aggregate validates every
-Slack quality gate listed in its workflow `needs:` set.
+App- and shared-impacting PRs are gated by always-present aggregate checks:
+`slack / required`, `discord / required`, `chrome-extension / required`, and
+`shared / required`. Each workflow's `changes` filter is the source of truth
+for which paths need validation. When that filter matches, the aggregate
+validates every quality gate listed in its workflow `needs:` set. Branch
+protection should require only these aggregate checks for path-gated app/shared
+workflows, not the internally skipped expensive jobs.
 
 ## Code Conventions
 
