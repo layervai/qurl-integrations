@@ -608,7 +608,9 @@ func agentConfirmConnectorOpenErrorReply(err error) string {
 
 // actionAuditResult is the clean, structured result App Home renders for an
 // executed action. display is plain text (no deliberate mrkdwn/code spans);
-// success tells the review surface whether the approved action actually landed.
+// success tells the review surface whether the full approved action actually
+// landed. No-op and partial branches stay false even when preparatory work
+// completed.
 type actionAuditResult struct {
 	display string
 	success bool
@@ -634,6 +636,12 @@ func newAttributedActionResult(success bool, cardText, auditDisplay string) acti
 	return newActionCoreResult(success, cardText, auditDisplay).actionResult()
 }
 
+func newAttributedPrivateActionResult(success bool, cardText, ephemeralText, auditDisplay string) actionResult {
+	res := newAttributedActionResult(success, cardText, auditDisplay)
+	res.ephemeralText = ephemeralText
+	return res
+}
+
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
 // PUBLIC confirm card. ephemeralText, when non-empty, is delivered PRIVATELY to the
 // clicker (response_url ephemeral) — used for sensitive output that must not be
@@ -651,7 +659,10 @@ type actionResult struct {
 	// byte-exact for the no-echo security checks.
 	attributed bool
 	audit      actionAuditResult
-	auditSet   bool
+	// auditSet is intentionally separate from attributed: attribution says the
+	// action reached execution; auditSet says that branch produced a clean,
+	// structured App Home result. New executed branches usually set both.
+	auditSet bool
 }
 
 // isDirectMessageChannel reports whether a Slack conversation ID is a 1:1 direct
@@ -793,25 +804,13 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			// goes PRIVATELY to the clicker; the public card stays a neutral failure with
 			// no token echo — and, crucially, does NOT claim "sent privately", the old
 			// unconditional success copy that masked every mint failure.
-			return actionResult{
-				cardText:      agentConfirmGetFailedReply,
-				ephemeralText: mapCoreError(log, err, commonGetMintFailedMessage),
-				attributed:    true,
-				audit:         actionAuditResult{display: "Access link could not be generated.", success: false},
-				auditSet:      true,
-			}
+			return newAttributedPrivateActionResult(false, agentConfirmGetFailedReply, mapCoreError(log, err, commonGetMintFailedMessage), "Access link could not be generated.")
 		}
 		// Success: the one-time link is a credential — deliver it PRIVATELY, in the SAME
 		// conversation and thread the user approved in (see deliverConfirmPrivate), and
 		// keep the public card neutral. The asker-only gate (processAgentConfirm) ensures
 		// the clicker IS the asker, so the private delivery reaches the right person.
-		return actionResult{
-			cardText:      agentConfirmGetDeliveredReply,
-			ephemeralText: text,
-			attributed:    true,
-			audit:         actionAuditResult{display: "Access link was sent privately to the approver.", success: true},
-			auditSet:      true,
-		}
+		return newAttributedPrivateActionResult(true, agentConfirmGetDeliveredReply, text, "Access link was sent privately to the approver.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {

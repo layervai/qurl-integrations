@@ -466,6 +466,13 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 	if strings.Contains(card, testAgentGetQURLLink) || strings.Contains(card, "staging") {
 		t.Fatalf("public card leaked the minted link or token: %q", card)
 	}
+	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	if entry.Result != "Access link was sent privately to the approver." {
+		t.Fatalf("get success Result = %q", entry.Result)
+	}
+	if entry.ResultSuccess == nil || !*entry.ResultSuccess {
+		t.Fatalf("get success ResultSuccess = %v, want true", entry.ResultSuccess)
+	}
 }
 
 func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
@@ -910,6 +917,12 @@ func TestConfirm_RecordsStructuredAuditResults(t *testing.T) {
 			pa:          &pendingAction{Action: agent.ActionSetAlias, Alias: "oncall", Target: "missing", ChannelID: "C1"},
 			wantSuccess: false,
 			wantResult:  "qURL Connector was not found.",
+		},
+		{
+			name:        "unset-alias already clear is a no-op failure",
+			pa:          &pendingAction{Action: agent.ActionUnsetAlias, Alias: "ghost", ChannelID: "C1"},
+			wantSuccess: false,
+			wantResult:  "Alias was not bound in this channel.",
 		},
 		{
 			name: "protect-url alias already bound",
