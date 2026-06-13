@@ -210,7 +210,7 @@ func (h *agentMarkdownLinkHarden) flush() string {
 		h.pendingBang = false
 	}
 	if h.pendingLess != "" {
-		out.WriteString(safePendingLessOriginal(h.pendingLess))
+		out.WriteString(h.safePendingLessOriginal(h.pendingLess))
 		h.pendingLess = ""
 	}
 	if h.link.state != markdownLinkNone {
@@ -643,7 +643,7 @@ func isSlackControlAngleStart(s string) bool {
 	}
 }
 
-func safePendingLessOriginal(pending string) string {
+func (h *agentMarkdownLinkHarden) safePendingLessOriginal(pending string) string {
 	switch pending {
 	case "<@", "<#", "<!":
 		return "\\" + pending
