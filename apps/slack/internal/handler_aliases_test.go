@@ -168,15 +168,18 @@ func TestHandleAliases_ShowsDisplayName(t *testing.T) {
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops jump host"},
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops <!channel> <@U123> & *jump* host"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$ops-bastion` — Ops jump host → `$bastion`") {
+	if !strings.Contains(async, "`$ops-bastion` — Ops &lt;!channel&gt; &lt;@U123&gt; &amp; ∗jump∗ host → `$bastion`") {
 		t.Errorf("aliases reply missing id + Display Name + alias mapping: %q", async)
+	}
+	if strings.Contains(async, "<!channel>") || strings.Contains(async, "<@U123>") {
+		t.Errorf("aliases reply rendered raw Slack control sequence: %q", async)
 	}
 }
 

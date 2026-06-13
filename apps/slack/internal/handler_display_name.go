@@ -265,7 +265,7 @@ func (h *Handler) resolveAndSetTunnelDisplayName(ctx context.Context, log *slog.
 		return sanitizeAPIError(err, "Failed to update the Display Name")
 	}
 	slog.Info("tunnel display name set", "team_id", teamID, "id", id, "resource_id", resource.ResourceID)
-	return fmt.Sprintf("✅ Display Name updated for `%s`: %s", id, name)
+	return fmt.Sprintf("✅ Display Name updated for `%s`: %s", id, escapeMrkdwnText(name))
 }
 
 // resolveAndResetTunnelDisplayName resolves the tunnel by id, then PATCHes

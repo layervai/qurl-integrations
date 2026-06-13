@@ -230,12 +230,12 @@ func TestSetDisplayName_MultiWordQuoted(t *testing.T) {
 	seedAliasAdminGate(t, h, testAliasTeamID)
 
 	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
-		invokeAdminAsync(`set-display-name `+testTunnelSlug+` "Staging DB (read replica)"`, testAliasTeamID, "U_alias_admin")
+		invokeAdminAsync(`set-display-name `+testTunnelSlug+` "Staging DB *read replica* & failover"`, testAliasTeamID, "U_alias_admin")
 
-	if !strings.Contains(async, "Staging DB (read replica)") {
-		t.Errorf("async reply = %q, want the quoted multi-word name", async)
+	if !strings.Contains(async, "Staging DB ∗read replica∗ &amp; failover") {
+		t.Errorf("async reply = %q, want the quoted multi-word name escaped for mrkdwn", async)
 	}
-	if capPatch.description == nil || *capPatch.description != "Staging DB (read replica)" {
+	if capPatch.description == nil || *capPatch.description != "Staging DB *read replica* & failover" {
 		t.Errorf("PATCH description = %v, want unquoted multi-word name", capPatch.description)
 	}
 }

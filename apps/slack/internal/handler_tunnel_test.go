@@ -1882,12 +1882,15 @@ func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
 	key := &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}
 	const aliasStatus = "qURL alias `$prod-dashboard` is ready in this channel."
 
-	withName, err := prepared.render(args, key, aliasStatus, "Prod API gateway", now)
+	withName, err := prepared.render(args, key, aliasStatus, "Prod <!channel> <@U123> & *gateway*", now)
 	if err != nil {
 		t.Fatalf("render with Display Name: %v", err)
 	}
-	if !strings.Contains(withName, "qURL Connector `"+testTunnelSlug+"` — Prod API gateway is ready to install.") {
+	if !strings.Contains(withName, "qURL Connector `"+testTunnelSlug+"` — Prod &lt;!channel&gt; &lt;@U123&gt; &amp; ∗gateway∗ is ready to install.") {
 		t.Errorf("install confirmation missing Display Name on id line:\n%s", withName)
+	}
+	if strings.Contains(withName, "<!channel>") || strings.Contains(withName, "<@U123>") {
+		t.Errorf("install confirmation rendered raw Slack control sequence:\n%s", withName)
 	}
 
 	withoutName, err := prepared.render(args, key, aliasStatus, "", now)

@@ -289,19 +289,19 @@ func formatAliasGroupLine(target, slug, description string, aliases []string) st
 	rhs := make([]string, 0, len(aliases))
 	for _, a := range aliases {
 		if a != slug {
-			rhs = append(rhs, "`$"+a+"`")
+			rhs = append(rhs, mrkdwnTokenSpan(a))
 		}
 	}
 	var left string
 	switch {
 	case slug != "":
-		left = "`$" + slug + "`"
+		left = mrkdwnTokenSpan(slug)
 		// Append the tunnel's Display Name to the id when present. The
 		// description field doubles as the Display Name (see
 		// handleSetDisplayName); it's normally set, but the alias-only
 		// fallback rows pass "" (no resource fetch happened), so guard it.
 		if description != "" {
-			left += " — " + description
+			left += " — " + escapeMrkdwnText(description)
 		}
 	case target != "":
 		left = target + " (legacy URL)"

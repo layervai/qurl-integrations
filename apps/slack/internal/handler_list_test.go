@@ -38,6 +38,10 @@ const (
 	testListURLFirst      = "https://first.example.com"
 	testListURLSecond     = "https://second.example.com"
 	testListGetCommand    = "/qurl get"
+
+	testListEscapedDescriptionCase = "description is mrkdwn escaped"
+	testListUnsafeDescription      = "Use <!channel> <@U123> & *now*"
+	testListEscapedDescription     = "Use &lt;!channel&gt; &lt;@U123&gt; &amp; ∗now∗"
 )
 
 // writeResourceListFixture writes a /v1/resources success envelope
@@ -180,6 +184,7 @@ func TestFormatTunnelListLine(t *testing.T) {
 		{name: "slug + one non-slug alias", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`)"},
 		{name: "self-binding slug excluded from extras", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana}, want: "• `$prod-db` (alias: `$grafana`) — Prod database"},
 		{name: "install-default description renders as Display Name", resource: tunnel(testListAliasProdDB, "Slack qURL Connector install for "+testListAliasProdDB), boundAliases: nil, want: "• `$prod-db` — Slack qURL Connector install for " + testListAliasProdDB},
+		{name: testListEscapedDescriptionCase, resource: tunnel(testListAliasProdDB, testListUnsafeDescription), boundAliases: nil, want: "• `$prod-db` — " + testListEscapedDescription},
 		{name: "only the self-binding slug bound — no extras rendered", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasProdDB}, want: "• `$prod-db`"},
 		// Slug-less, resource-alias-less tunnel: no `$<token>` of its own.
 		{name: "slug-less tunnel with no bound alias renders bare resource_id", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "• `r_noslug0001` (no ID — ask your Slack admin to set one)"},
@@ -215,7 +220,7 @@ func TestFormatURLListLine(t *testing.T) {
 	}{
 		{name: "resource alias token", resource: urlResource(testListAliasDocs, ""), boundAliases: nil, want: testListURLDocsLine},
 		{name: "resource alias plus description", resource: urlResource("billing", "Billing portal"), boundAliases: nil, want: "• `$billing` — Billing portal"},
-		{name: "description is mrkdwn escaped", resource: urlResource("alerts", "Use <!channel> *now*"), boundAliases: nil, want: "• `$alerts` — Use &lt;!channel&gt; ∗now∗"},
+		{name: testListEscapedDescriptionCase, resource: urlResource("alerts", "Use <!channel> *now*"), boundAliases: nil, want: "• `$alerts` — Use &lt;!channel&gt; ∗now∗"},
 		{name: "channel alias fallback when resource alias missing", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: []string{testListAliasDocs}, want: testListURLDocsLine},
 		{name: "resource alias excludes matching channel alias", resource: urlResource(testListAliasDocs, ""), boundAliases: []string{testListAliasDocs, "kb"}, want: "• `$docs` (alias: `$kb`)"},
 		{name: "resource alias token is mrkdwn escaped", resource: &client.Resource{ResourceID: testListResIDURLDocs, Type: client.ResourceTypeURL, Alias: "do`cs", TargetURL: testListURLDocs, Status: client.StatusActive}, boundAliases: nil, want: "• `$doˊcs`"},
@@ -260,6 +265,7 @@ func TestFormatTunnelListSection(t *testing.T) {
 		{name: "slug + Display Name", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: nil, want: "*`$prod-db`*\nProd database"},
 		{name: "slug + one non-slug alias, no Display Name", resource: tunnel(testListAliasProdDB, ""), boundAliases: []string{testListAliasGrafana}, want: "*`$prod-db`*\n_alias:_ `$grafana`"},
 		{name: "slug + Display Name + two aliases (self-binding slug excluded)", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB, testListAliasGrafana, "metrics"}, want: "*`$prod-db`*\nProd database\n_aliases:_ `$grafana`, `$metrics`"},
+		{name: testListEscapedDescriptionCase, resource: tunnel(testListAliasProdDB, testListUnsafeDescription), boundAliases: nil, want: "*`$prod-db`*\n" + testListEscapedDescription},
 		{name: "only the self-binding slug bound — no aliases line", resource: tunnel(testListAliasProdDB, "Prod database"), boundAliases: []string{testListAliasProdDB}, want: "*`$prod-db`*\nProd database"},
 		{name: "slug-less, alias-less tunnel spells out the missing ID", resource: &client.Resource{ResourceID: "r_noslug0001", Type: client.ResourceTypeTunnel, Status: client.StatusActive}, boundAliases: nil, want: "*`r_noslug0001`*\n_No ID set — ask your Slack admin to set one._"},
 		{name: "slug-less tunnel keeps its Display Name above the no-ID note", resource: &client.Resource{ResourceID: "r_noslug0002", Type: client.ResourceTypeTunnel, Status: client.StatusActive, Description: "ops jump host"}, boundAliases: nil, want: "*`r_noslug0002`*\nops jump host\n_No ID set — ask your Slack admin to set one._"},
@@ -732,16 +738,23 @@ func TestHandleList_TunnelWithDisplayName(t *testing.T) {
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
 			{testKeyResourceID: "r_tun_desc1", testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "ops jump host"},
+			{testKeyResourceID: "r_tun_unsafe", testKeyType: client.ResourceTypeTunnel, testKeySlug: "unsafe-desc", testKeyDescription: testListUnsafeDescription},
 			{testKeyResourceID: "r_tun_nodes", testKeyType: client.ResourceTypeTunnel, testKeySlug: "no-desc-tun"},
 		}, "", false)
 	})
-	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_desc1", "r_tun_nodes")
+	ts.seedChannelExposure(t, testAdminTeamID, "C_test", "r_tun_desc1", "r_tun_unsafe", "r_tun_nodes")
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("list", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "`$ops-bastion` — ops jump host") {
 		t.Errorf("async reply missing slug + Display Name row: %q", async)
+	}
+	if !strings.Contains(async, "`$unsafe-desc` — "+testListEscapedDescription) {
+		t.Errorf("async reply missing escaped unsafe Display Name row: %q", async)
+	}
+	if strings.Contains(async, "<!channel>") || strings.Contains(async, "<@U123>") {
+		t.Errorf("async reply rendered raw Slack control sequence: %q", async)
 	}
 	if !strings.Contains(async, "`$no-desc-tun`") {
 		t.Errorf("async reply missing no-Display-Name tunnel row: %q", async)
