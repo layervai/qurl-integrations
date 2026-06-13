@@ -234,6 +234,9 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) <-chan 
 		return nil
 	}
 	done := make(chan struct{})
+	// Nested Add is safe because the caller is processAgentEvent, already running
+	// inside runOnPool's wg slot; the counter cannot hit zero between this Add and
+	// the goroutine start.
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -268,13 +271,26 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, addDo
 	if h.cfg.Reactions == nil || addDone == nil {
 		return
 	}
-	joinCtx, joinCancel := h.agentAckContext()
-	defer joinCancel()
+	addJoined := false
 	select {
 	case <-addDone:
-	case <-joinCtx.Done():
-		log.Warn("agent: ack reaction add still in flight; skipping remove to avoid racing add; ack may remain")
-		return
+		addJoined = true
+	default:
+	}
+
+	if !addJoined {
+		joinCtx, joinCancel := h.agentAckContext()
+		defer joinCancel()
+		select {
+		case <-addDone:
+		case <-joinCtx.Done():
+			if h.baseCtx != nil && h.baseCtx.Err() != nil {
+				log.Debug("agent: ack reaction add unfinished during shutdown; skipping remove")
+			} else {
+				log.Warn("agent: ack reaction add still in flight; skipping remove to avoid racing add; ack may remain")
+			}
+			return
+		}
 	}
 
 	ctx, cancel := h.agentAckContext()
@@ -289,12 +305,14 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, addDo
 // Best-effort behind the AssistantThreads seam (nil = no-op) and ONLY for im turns:
 // app_mention is a channel, not an assistant thread, so setStatus has nothing to scope
 // to. Set SYNCHRONOUSLY on the live turn ctx before the LLM call so it's visible while
-// the turn runs, under its own agentAckTimeout cap. There is NO deferred clear: Slack
-// auto-clears the status when the agent posts its reply (every turn exit posts one),
-// and a 2-minute server-side timeout backstops the no-reply case. The auto-clear only
-// fires when the reply lands on the SAME thread the status was set on, so the thread_ts
-// here MUST equal the reply's — both derive from agentEventRootTS(&env.Event); keep
-// them coupled.
+// the turn runs, under its own agentAckTimeout cap. The old #693 additive pre-LLM
+// concern no longer stacks with reaction add (now async); setStatus remains the one
+// synchronous working-on-it seam here. There is NO deferred clear: Slack auto-clears
+// the status when the agent posts its reply (every turn exit posts one), and a
+// 2-minute server-side timeout backstops the no-reply case. The auto-clear only fires
+// when the reply lands on the SAME thread the status was set on, so the thread_ts here
+// MUST equal the reply's — both derive from agentEventRootTS(&env.Event); keep them
+// coupled.
 //
 // Post-enablement exclusive mode treats a pane setStatus failure as evidence the
 // native status path is broken (scope, rate limit, malformed thread, etc.), so it logs

@@ -99,11 +99,19 @@ func (r *blockingOrderedReactions) record(event string) {
 
 type signalingAgentLLM struct {
 	started chan struct{}
+	finish  <-chan struct{}
 	once    sync.Once
 }
 
-func (s *signalingAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+func (s *signalingAgentLLM) Complete(ctx context.Context, _ *agent.Request) (agent.Response, error) {
 	s.once.Do(func() { close(s.started) })
+	if s.finish != nil {
+		select {
+		case <-s.finish:
+		case <-ctx.Done():
+			return agent.Response{}, ctx.Err()
+		}
+	}
 	return agent.Response{Text: "ack does not block me", StopReason: "end_turn"}, nil
 }
 
@@ -148,7 +156,10 @@ func TestAgentAck_AddIsAsyncAndClearWaitsBeforeRemove(t *testing.T) {
 	defer rec.releaseAddCall()
 
 	llmStarted := make(chan struct{})
-	h, _, _ := newAckHandler(t, rec, &signalingAgentLLM{started: llmStarted})
+	llmFinish := make(chan struct{})
+	finishLLM := sync.OnceFunc(func() { close(llmFinish) })
+	defer finishLLM()
+	h, _, _ := newAckHandler(t, rec, &signalingAgentLLM{started: llmStarted, finish: llmFinish})
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvAsyncAck")))
 
 	select {
@@ -164,6 +175,7 @@ func TestAgentAck_AddIsAsyncAndClearWaitsBeforeRemove(t *testing.T) {
 	}
 
 	rec.releaseAddCall()
+	finishLLM()
 	h.Wait()
 
 	if got, want := rec.snapshotEvents(), []string{"add", "remove"}; !slices.Equal(got, want) {
