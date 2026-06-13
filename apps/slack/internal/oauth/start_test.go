@@ -218,6 +218,7 @@ func TestStartRejectsMissingState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is incomplete")
 }
 
 func TestStartRejectsRawTeamQuery(t *testing.T) {
@@ -232,6 +233,7 @@ func TestStartRejectsRawTeamQuery(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is incomplete")
 }
 
 func TestStartRejectsTamperedState(t *testing.T) {
@@ -249,6 +251,7 @@ func TestStartRejectsTamperedState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link expired")
 }
 
 func TestStartRejectsExpiredState(t *testing.T) {
@@ -263,6 +266,7 @@ func TestStartRejectsExpiredState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link expired")
 }
 
 func TestStartRejectsWrongMethod(t *testing.T) {
@@ -273,6 +277,10 @@ func TestStartRejectsWrongMethod(t *testing.T) {
 	h(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("got %d want 405", rec.Code)
+	}
+	assertOAuthErrorPage(t, rec, "Use the Slack setup link")
+	if got := rec.Header().Get("Allow"); got != "GET" {
+		t.Errorf("Allow header: got %q want GET", got)
 	}
 }
 
@@ -286,6 +294,7 @@ func TestStartRefusesWithoutSecret(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("got %d want 503", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "qURL setup is unavailable")
 }
 
 func TestStartRefusesWithShortSecret(t *testing.T) {
@@ -298,4 +307,5 @@ func TestStartRefusesWithShortSecret(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("got %d want 503", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "qURL setup is unavailable")
 }
