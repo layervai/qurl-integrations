@@ -28,6 +28,7 @@ const (
 	testAgentStreamToolUse       = "tool_use"
 	testAgentStreamProposeRevoke = "propose_revoke"
 	testAgentStreamInstalledTeam = "T_installed"
+	testAgentStreamRemoteTeam    = "T_remote"
 )
 
 type recordingStreamPort struct {
@@ -256,7 +257,7 @@ func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 	e := env(slackEventTypeAppMention, "channel", "U_remote", "", "", "<@U12345678> hi")
 	e.TeamID = testAgentStreamInstalledTeam
 	e.EnterpriseID = "E_grid"
-	e.Event.UserTeam = "T_remote"
+	e.Event.UserTeam = testAgentStreamRemoteTeam
 	e.Event.Channel = "C_shared"
 	e.Event.TS = testChannelMentionStreamTS
 
@@ -274,7 +275,7 @@ func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 		EnterpriseID:    "E_grid",
 		ChannelID:       "C_shared",
 		ThreadTS:        testChannelMentionStreamTS,
-		RecipientTeamID: "T_remote",
+		RecipientTeamID: testAgentStreamRemoteTeam,
 		RecipientUserID: "U_remote",
 	}
 	if got != want {
@@ -304,14 +305,19 @@ func TestNewAgentReplyStreamer_ChannelMentionRecipientTeamFallbacks(t *testing.T
 }
 
 func TestNewAgentReplyStreamer_KeepsPanePathAndSkipsChannelFollowups(t *testing.T) {
-	h := NewHandler(Config{AgentStream: &recordingStreamPort{}})
+	port := &recordingStreamPort{}
+	h := NewHandler(Config{AgentStream: port})
 	dm := env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi")
-	dm.TeamID = "T1"
-	if s := h.newAgentReplyStreamer(context.Background(), slog.Default(), dm, agentEventRootTS(&dm.Event)); s == nil {
+	dm.Event.UserTeam = testAgentStreamRemoteTeam
+	s := h.newAgentReplyStreamer(context.Background(), slog.Default(), dm, agentEventRootTS(&dm.Event))
+	if s == nil {
 		t.Fatal("message.im pane turns must still stream")
 	}
+	s.onDelta("pane reply")
+	if got := port.starts[0].RecipientTeamID; got != "T1" {
+		t.Fatalf("pane turns should keep using the event team as recipient team, got %q", got)
+	}
 	followup := env(slackEventTypeMessage, "channel", "U2", "", "", "follow-up")
-	followup.TeamID = "T1"
 	followup.Event.ThreadTS = "100.0"
 	if s := h.newAgentReplyStreamer(context.Background(), slog.Default(), followup, agentEventRootTS(&followup.Event)); s != nil {
 		t.Fatal("non-mention channel follow-ups are outside #706 and should keep the post path")
@@ -371,7 +377,6 @@ func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
 	h, posts, mu := newStreamingAgentHandler(llm, port, nil)
 
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> what can I reach?")
-	e.TeamID = "T1"
 	e.Event.UserTeam = "T_user"
 	h.processAgentEvent(context.Background(), slog.Default(), e)
 
@@ -397,7 +402,6 @@ func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *test
 	h.cfg.AgentConfirmEnabled = true
 
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> revoke staging")
-	e.TeamID = "T1"
 	h.processAgentEvent(context.Background(), slog.Default(), e)
 
 	if port.startCalls != 1 || port.stops != 1 {
@@ -419,7 +423,6 @@ func TestProcessAgentEvent_ChannelMentionStreamingPartialErrorNoDoublePost(t *te
 	h, posts, mu := newStreamingAgentHandler(llm, port, nil)
 
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> what can I reach?")
-	e.TeamID = "T1"
 	h.processAgentEvent(context.Background(), slog.Default(), e)
 
 	if port.startCalls != 1 || port.stops != 1 || port.appended() != "partial answer" {

@@ -24,14 +24,11 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 	if h.cfg.AgentStream == nil {
 		return nil
 	}
-	switch {
-	case env.Event.ChannelType == slackChannelTypeIM:
-	case env.Event.Type == slackEventTypeAppMention:
-	default:
+	if env.Event.ChannelType != slackChannelTypeIM && env.Event.Type != slackEventTypeAppMention {
 		return nil
 	}
 	recipientTeamID := agentStreamRecipientTeamID(env)
-	if recipientTeamID == "" || env.Event.User == "" {
+	if recipientTeamID == "" {
 		return nil
 	}
 	return &agentReplyStreamer{
@@ -49,6 +46,9 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 }
 
 func agentStreamRecipientTeamID(env *slackEventEnvelope) string {
+	if env.Event.ChannelType == slackChannelTypeIM {
+		return env.TeamID
+	}
 	if env.Event.UserTeam != "" {
 		return env.Event.UserTeam
 	}
