@@ -696,7 +696,7 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	if minter.revoked {
 		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
 	}
-	assertSetupBindingPersistFailureLogged(t, logs(), cfg.setupBindingReplayWindowHours())
+	assertSetupBindingPersistFailureLogged(t, logs(), setupBindingReplayWindowHours(cfg.SetupBindingReplayWindowHours))
 }
 
 func TestCallbackLogsConfiguredBindingReplayWindowOnPersistFailure(t *testing.T) {

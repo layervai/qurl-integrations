@@ -687,7 +687,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	defer persistCancel()
 	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
 		if minted.BindingBacked {
-			replayWindowHours := cfg.setupBindingReplayWindowHours()
+			replayWindowHours := setupBindingReplayWindowHours(cfg.SetupBindingReplayWindowHours)
 			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 				"event", setupBindingPersistFailureEvent,
 				"error", perr,

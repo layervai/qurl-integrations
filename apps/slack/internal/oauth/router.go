@@ -326,11 +326,11 @@ func (c Config) now() func() time.Time {
 }
 
 // setupBindingReplayWindowHours returns the operator-facing replay window for
-// binding-backed setup persist failures. A zero Config value preserves the
+// binding-backed setup persist failures. A zero value preserves the
 // qurl-service default so focused tests and direct constructors stay stable.
-func (c *Config) setupBindingReplayWindowHours() int {
-	if c.SetupBindingReplayWindowHours > 0 {
-		return c.SetupBindingReplayWindowHours
+func setupBindingReplayWindowHours(configuredHours int) int {
+	if configuredHours > 0 {
+		return configuredHours
 	}
 	return DefaultSetupBindingReplayWindowHours
 }
