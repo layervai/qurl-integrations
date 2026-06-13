@@ -91,6 +91,8 @@ type slackEventEnvelope struct {
 type slackInnerEvent struct {
 	Type        string `json:"type"`
 	User        string `json:"user"`
+	UserTeam    string `json:"user_team,omitempty"`
+	SourceTeam  string `json:"source_team,omitempty"`
 	BotID       string `json:"bot_id"`
 	Subtype     string `json:"subtype"`
 	Text        string `json:"text"`
@@ -631,9 +633,10 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 	}
 
 	replyTS := agentEventRootTS(&env.Event)
-	// Native reply streaming for a pane (DM) turn: when the AgentStream seam is wired and
-	// this is an im turn, the reply renders token-by-token instead of as one posted message.
-	// nil otherwise — the agent keeps the normal post path. Per-turn (a fresh streamer/Run).
+	// Native reply streaming: when the AgentStream seam is wired and the event is a
+	// pane DM or channel @mention, the reply renders token-by-token instead of as one
+	// posted message. nil otherwise — the agent keeps the normal post path. Per-turn
+	// (a fresh streamer/Run).
 	streamer := h.newAgentReplyStreamer(ctx, log, env, replyTS)
 	var streamOpts []agent.Option
 	if streamer != nil {

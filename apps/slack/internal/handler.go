@@ -502,15 +502,27 @@ type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, chann
 // sanitization is needed here.
 type AppHomePublishFunc func(ctx context.Context, teamID, enterpriseID, userID string, blocks []any) error
 
+// AgentStreamStart describes one chat.startStream call. TeamID/EnterpriseID select the
+// bot token; RecipientTeamID/RecipientUserID identify the human Slack should deliver
+// the streamed channel reply to. They are separate so Enterprise Grid/shared-channel
+// turns can't accidentally send the installed workspace's team as the recipient team.
+type AgentStreamStart struct {
+	TeamID          string
+	EnterpriseID    string
+	ChannelID       string
+	ThreadTS        string
+	RecipientTeamID string
+	RecipientUserID string
+}
+
 // AgentStreamPort drives Slack's native AI-app streaming over the per-workspace bot
 // token (enterpriseID for Grid token resolution). StartStream opens a stream on a
 // thread and returns the stream message's ts — the handle AppendStream/StopStream
-// address; recipientUserID is the pane user (Slack requires it on a streamed reply).
-// AppendStream appends a markdown chunk; StopStream finalizes the message. A nil port
-// keeps the agent on the non-streaming post path; all three require the assistant:write
-// scope.
+// address. AppendStream appends a markdown chunk; StopStream finalizes the message.
+// A nil port keeps the agent on the non-streaming post path; all three require the
+// assistant:write scope.
 type AgentStreamPort interface {
-	StartStream(ctx context.Context, teamID, enterpriseID, channelID, threadTS, recipientUserID string) (streamTS string, err error)
+	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
 	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
 }

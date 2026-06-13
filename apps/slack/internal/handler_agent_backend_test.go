@@ -461,7 +461,7 @@ func TestFormatResourceLine(t *testing.T) {
 		t.Fatalf("format leaked the internal resource id: %q", got)
 	}
 	// Slug fallback when no alias; still no id.
-	got = formatResourceLine(&client.Resource{ResourceID: "r_2", Slug: "staging", Type: "tunnel"}, "")
+	got = formatResourceLine(&client.Resource{ResourceID: "r_2", Slug: "staging", Type: client.ResourceTypeTunnel}, "")
 	if !strings.Contains(got, "$staging") || strings.Contains(got, "r_2") {
 		t.Fatalf("slug fallback = %q, want $staging without the id", got)
 	}
