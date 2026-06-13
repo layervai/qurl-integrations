@@ -79,6 +79,12 @@ All of these must pass before merge:
   The validator enforces format only; reviewers own tag/SHA correctness. Before
   changing a tag comment, confirm it matches the pinned SHA with `git ls-remote
   https://github.com/OWNER/REPO.git refs/tags/v1.2.3`.
+  - **Dependabot:** The `github-actions` updater updates pinned SHAs and exact
+    trailing tag comments together. This behavior was first observed on PR
+    #639, where Dependabot bumped `anthropics/claude-code-action` from
+    `# v1.0.133` to `# v1.0.148` in both workflow comments. Future Dependabot
+    PRs should not need manual comment edits; if one leaves them out of sync,
+    update the SHA and first trailing comment together before merge.
 
 ### Merge-result checks
 
