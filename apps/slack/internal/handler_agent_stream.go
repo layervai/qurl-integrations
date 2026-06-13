@@ -207,9 +207,18 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 	// pending+flush so it shares the one append+record+break path.
 	if !s.broken {
 		reply := hardenAgentMarkdown(result.Reply)
-		if r := strings.TrimSpace(reply); r != "" && !strings.Contains(s.streamed.String(), r) {
-			s.pending.WriteString(reply)
-			s.flush(ctx)
+		if r := strings.TrimSpace(reply); r != "" {
+			streamed := s.streamed.String()
+			if !strings.Contains(streamed, r) {
+				// Per-delta streaming treats chunk starts as possible Markdown parse
+				// boundaries. If that stricter form is already present, do not append a
+				// one-shot variant that may be less escaped around reference definitions.
+				streamReply := hardenAgentMarkdownForStreamReconcile(result.Reply)
+				if sr := strings.TrimSpace(streamReply); sr != "" && !strings.Contains(streamed, sr) {
+					s.pending.WriteString(streamReply)
+					s.flush(ctx)
+				}
+			}
 		}
 	}
 	s.stop(ctx)

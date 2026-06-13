@@ -6,9 +6,17 @@ const maxAgentMarkdownLinkBytes = 4096
 
 // hardenAgentMarkdown keeps the agent's standard-Markdown answer renderable while
 // removing masked-link ambiguity: [label](url) becomes label (url), so Slack can
-// still autolink the destination but the visible text no longer hides it.
+// still autolink the destination but the visible text no longer hides it. This
+// is an anti-phishing visible-destination pass, not a spec-complete Markdown
+// parser; keep new syntax support pinned by tests.
 func hardenAgentMarkdown(markdown string) string {
 	var h agentMarkdownLinkHarden
+	return h.write(markdown) + h.flush()
+}
+
+func hardenAgentMarkdownForStreamReconcile(markdown string) string {
+	var h agentMarkdownLinkHarden
+	h.references.anywhere = true
 	return h.write(markdown) + h.flush()
 }
 
@@ -299,6 +307,7 @@ func hardenAgentMarkdownWithCodeDisabled(markdown string) string {
 type markdownReferenceDefinitionEscaper struct {
 	lineColumn     int
 	lineHasContent bool
+	anywhere       bool
 	pending        markdownReferenceDefinitionPending
 }
 
@@ -336,7 +345,7 @@ func (e *markdownReferenceDefinitionEscaper) write(markdown string) string {
 			advanceMarkdownLineState(&chunkColumn, &chunkHasContent, c)
 			continue
 		}
-		if c == '[' && ((!e.lineHasContent && e.lineColumn <= 3) || (!chunkHasContent && chunkColumn <= 3)) {
+		if c == '[' && (e.anywhere || (!e.lineHasContent && e.lineColumn <= 3) || (!chunkHasContent && chunkColumn <= 3)) {
 			e.startReferenceDefinition()
 			advanceMarkdownLineState(&chunkColumn, &chunkHasContent, c)
 			continue

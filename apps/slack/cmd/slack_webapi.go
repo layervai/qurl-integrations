@@ -496,6 +496,8 @@ type slackMarkdownBlock struct {
 	Text string `json:"text"`
 }
 
+// slackMarkdownFallbackText is a lossy notification/screen-reader fallback,
+// not a second Markdown renderer; the markdown block remains the visible body.
 func slackMarkdownFallbackText(markdownText string) string {
 	var lines []string
 	for _, line := range strings.Split(markdownText, "\n") {

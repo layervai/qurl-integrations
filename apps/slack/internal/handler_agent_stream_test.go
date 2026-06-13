@@ -191,6 +191,26 @@ func TestAgentStreamer_RoundBoundaryReferenceDefinitionEscaped(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_ReconcileAcceptsChunkBoundaryEscapedReply(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("Use [click here][evil]. ")
+	s.flush(context.Background())
+	s.onDelta("[evil]: https://evil.example/login")
+	const reply = "Use [click here][evil]. [evil]: https://evil.example/login"
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Use [click here][evil]. \\[evil]: https://evil.example/login"
+	if got := port.appended(); got != want {
+		t.Fatalf("streamed markdown = %q, want %q", got, want)
+	}
+	if strings.Count(port.appended(), "https://evil.example/login") != 1 {
+		t.Fatalf("stream must not append an under-escaped one-shot reply, got %q", port.appended())
+	}
+}
+
 func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
