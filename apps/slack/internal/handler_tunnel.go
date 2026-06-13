@@ -860,13 +860,8 @@ func normalizeTunnelInstallAgentReason(reason string) string {
 	return truncateRunes(strings.TrimSpace(reason), agentConnectorAuditReasonMaxRunes)
 }
 
-func (r tunnelInstallAgentAuditResult) info() (tunnelInstallAgentAuditResultInfo, bool) {
-	info, ok := agentProtectConnectorAuditResults[r]
-	return info, ok
-}
-
 func (r tunnelInstallAgentAuditResult) auditFields() (outcome string, resultSuccess *bool, known bool) {
-	info, ok := r.info()
+	info, ok := agentProtectConnectorAuditResults[r]
 	if !ok {
 		return agentProtectConnectorAuditUnknownOutcome, nil, false
 	}
