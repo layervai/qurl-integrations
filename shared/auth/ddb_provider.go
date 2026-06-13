@@ -349,6 +349,11 @@ func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error) boo
 	if err == nil || ctx.Err() != nil {
 		return false
 	}
+	// We cannot distinguish the owner's caller being canceled from a lower
+	// layer surfacing the same context error during a DDB brownout. Retrying
+	// keeps healthy waiters from inheriting a dead owner's context, and each
+	// retry re-enters singleflight as a new owner so extra DDB pressure is
+	// sequential rather than a fan-out spike.
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
