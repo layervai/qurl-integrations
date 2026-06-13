@@ -120,14 +120,13 @@ func serviceUnreachableMessageWith(apiErr *client.APIError) string {
 // surface), so fail-closed.
 const channelRequiredMessage = "This command must be invoked from a channel."
 
-// noResourceForAliasMessage formats the "no binding" copy surfaced
-// when a channel's alias_bindings map has no entry for the requested
-// alias. Phrased for an end user who doesn't know what an "alias" is:
-// name the literal token the user typed, say plainly what state it's
-// in, and give them BOTH a self-serve action (`/qurl aliases` lists
-// what is configured here, so a typo is one tab away) AND the
-// escalation path (ask the admin to wire it up) since only the
-// admin can run setalias.
+// noResourceForAliasMessage formats the channel-scoped "not visible here"
+// copy surfaced when a token has no binding in this channel or resolves to a
+// resource that is not allowed here. Phrased for an end user who doesn't know
+// what an "alias" is: name the literal token the user typed, say plainly what
+// state it's in, and give them BOTH a self-serve action (`/qurl aliases` lists
+// what is configured here, so a typo is one tab away) AND the escalation path
+// (ask the admin to wire it up) since only the admin can run setalias.
 //
 // The `/qurl aliases` breadcrumb is channel-scoped (it shows aliases
 // bound here), and so is `/qurl list` now — both surface only what
