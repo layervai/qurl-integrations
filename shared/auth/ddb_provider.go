@@ -31,6 +31,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -93,9 +95,14 @@ const (
 )
 
 const (
-	apiKeyCacheTTL                         = 5 * time.Minute
-	apiKeyCacheSweepEvery                  = time.Minute
-	apiKeySharedContextErrorRetryLimit int = 1
+	apiKeyCacheTTL                     = 5 * time.Minute
+	apiKeyCacheSweepEvery              = time.Minute
+	apiKeySharedContextErrorRetryLimit = 1
+	apiKeyValidationRecheckLimit       = 3
+
+	apiKeyValidationProjectionKey        = "#api_key"
+	apiKeyValidationProjectionDataKey    = "#data_key"
+	apiKeyValidationProjectionExpression = apiKeyValidationProjectionKey + ", " + apiKeyValidationProjectionDataKey
 )
 
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
@@ -144,21 +151,26 @@ type DDBProvider struct {
 	Encryptor FieldEncryptor
 
 	// Cache successful APIKey lookups at the DDB/decrypt boundary with the
-	// shared TTL singleflight helper. The helper intentionally uses one mutex
-	// for cache maps, in-flight fills, generation invalidation, and the
-	// strong-read sidecar below: fills run outside the lock, so unrelated
-	// workspaces only serialize the short map operations instead of DDB/KMS.
-	//
-	// The cache is process-local, so sibling instances can keep a decrypted key,
-	// including a revoked key, until the five-minute TTL from #263 expires;
-	// stricter cross-instance invalidation is tracked in #766. The decrypted key
-	// remains in heap memory for that TTL as the accepted KMS/latency trade-off.
+	// shared TTL singleflight helper. Cache hits still perform a strongly
+	// consistent DDB projection read of the encrypted key material before
+	// returning plaintext; that trades steady-state DDB-read avoidance for
+	// bounded cross-instance rotation/revocation staleness without putting KMS
+	// Decrypt back on the steady-state slash-command path. Definitive
+	// changed/deleted validation results evict the cache; validation transport
+	// errors fall back to the cached key so a DDB blip does not become a full
+	// Slack outage. The decrypted key remains in heap memory for the TTL as the
+	// accepted KMS/latency trade-off. Validation reads are strongly consistent
+	// so sibling rotations/deletes take effect immediately when DDB is reachable
+	// rather than after eventual-read replication lag.
+	// The validation token is intentionally tied to encrypted key material, so a
+	// future same-plaintext rewrap would invalidate warm entries and re-run KMS
+	// decrypts even though the API key value did not change.
 	// SetAPIKey seeds this process after a successful write. DeleteAPIKey evicts
 	// this process and forces strongly-consistent refills for one TTL so a
 	// same-process eventually-consistent post-delete read cannot re-cache the
 	// revoked key.
 	apiKeyCacheOnce   sync.Once
-	apiKeyLookupCache *ttlcache.Cache[string]
+	apiKeyLookupCache *ttlcache.Cache[cachedAPIKey]
 
 	// Protected by apiKeyLookupCache's mutex through ttlcache hooks. Generation
 	// entries are retained by the helper after invalidation even after an
@@ -168,6 +180,7 @@ type DDBProvider struct {
 	// seeded or invalidated in this process and is retained for the process
 	// lifetime.
 	apiKeyStrongReadUntil map[string]time.Time
+	apiKeyValidationCalls map[string]*apiKeyValidationCall
 
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
@@ -175,17 +188,30 @@ type DDBProvider struct {
 	Now func() time.Time
 }
 
+type cachedAPIKey struct {
+	apiKey     string
+	cacheToken apiKeyCacheToken
+}
+
 type apiKeyLookupStart struct {
-	apiKey string
+	apiKey     string
+	cacheToken apiKeyCacheToken
 	// Cached API-key hits only store successful lookups, so err is expected
 	// to be nil. Keeping the Result shape here mirrors ttlcache and makes
 	// that contract explicit at the call site.
 	err            error
 	hit            bool
-	call           *ttlcache.Call[string]
+	call           *ttlcache.Call[cachedAPIKey]
 	owner          bool
 	generation     uint64
 	consistentRead bool
+}
+
+type apiKeyValidationCall struct {
+	done       chan struct{}
+	cacheToken apiKeyCacheToken
+	current    bool
+	err        error
 }
 
 // SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
@@ -212,9 +238,9 @@ func (p *DDBProvider) nowOrDefault() time.Time {
 	return time.Now()
 }
 
-func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[string] {
+func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[cachedAPIKey] {
 	p.apiKeyCacheOnce.Do(func() {
-		p.apiKeyLookupCache = ttlcache.New[string](ttlcache.Options[string]{
+		p.apiKeyLookupCache = ttlcache.New[cachedAPIKey](ttlcache.Options[cachedAPIKey]{
 			SweepEvery: apiKeyCacheSweepEvery,
 			OnSweep: func(at time.Time) {
 				// OnSweep runs under the ttlcache lock; keep this hook
@@ -223,6 +249,11 @@ func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[string] {
 					if !at.Before(until) {
 						delete(p.apiKeyStrongReadUntil, workspaceID)
 					}
+				}
+			},
+			OnEvict: func(workspaceID string, _ ttlcache.Result[cachedAPIKey]) {
+				if p.apiKeyValidationCalls != nil {
+					delete(p.apiKeyValidationCalls, workspaceID)
 				}
 			},
 		})
@@ -326,11 +357,17 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	}
 
 	sharedContextErrorRetries := 0
+	validationContextErrorRetries := 0
+	validationRechecks := 0
 	for {
 		now := p.nowOrDefault()
 		start := p.getOrStartAPIKeyLookup(workspaceID, now)
 		if start.hit {
-			return start.apiKey, start.err
+			apiKey, done, err := p.apiKeyFromValidatedCache(ctx, workspaceID, &start, &validationContextErrorRetries, &validationRechecks)
+			if !done {
+				continue
+			}
+			return apiKey, err
 		}
 		if !start.owner {
 			select {
@@ -340,7 +377,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 					sharedContextErrorRetries++
 					continue
 				}
-				return result.Value, result.Err
+				return result.Value.apiKey, result.Err
 			case <-ctx.Done():
 				return "", fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
 			}
@@ -348,6 +385,70 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 
 		return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, start.generation, start.consistentRead)
 	}
+}
+
+// apiKeyFromValidatedCache returns done=false when validation observed a
+// retryable state and the caller should re-enter APIKey's lookup loop. When
+// done=true, apiKey/retErr are final for this APIKey call.
+func (p *DDBProvider) apiKeyFromValidatedCache(ctx context.Context, workspaceID string, start *apiKeyLookupStart, validationContextErrorRetries, validationRechecks *int) (apiKey string, done bool, retErr error) {
+	ok, err := p.validateCachedAPIKey(ctx, workspaceID, start.cacheToken)
+	if err != nil {
+		fallbackAPIKey, fallbackDone, fallbackErr := apiKeyAfterCacheValidationError(ctx, start.apiKey, err, validationContextErrorRetries)
+		if !fallbackDone {
+			return "", false, nil
+		}
+		if fallbackErr == nil && !p.cachedAPIKeyStillLocal(workspaceID, start.cacheToken) {
+			if err := retryAPIKeyCacheValidationLoop(ctx, workspaceID, validationRechecks); err != nil {
+				return "", true, err
+			}
+			return "", false, nil
+		}
+		return fallbackAPIKey, true, fallbackErr
+	}
+	if !ok {
+		// Token mismatch/delete sets a strong-read refill marker, so the next
+		// loop either observes current DDB state or a newer writer's token.
+		p.evictAPIKeyCacheIfToken(workspaceID, start.cacheToken, p.nowOrDefault().Add(apiKeyCacheTTL))
+		if err := retryAPIKeyCacheValidationLoop(ctx, workspaceID, validationRechecks); err != nil {
+			return "", true, err
+		}
+		return "", false, nil
+	}
+	if !p.cachedAPIKeyStillLocal(workspaceID, start.cacheToken) {
+		// A local writer replaced this token after validation; re-loop to
+		// validate the live cache entry instead of returning stale plaintext.
+		if err := retryAPIKeyCacheValidationLoop(ctx, workspaceID, validationRechecks); err != nil {
+			return "", true, err
+		}
+		return "", false, nil
+	}
+	return start.apiKey, true, nil
+}
+
+func retryAPIKeyCacheValidationLoop(ctx context.Context, workspaceID string, rechecks *int) error {
+	// One budget covers all validation re-loop reasons because each means this
+	// caller has not yet validated the currently local cache token.
+	if *rechecks >= apiKeyValidationRecheckLimit {
+		slog.WarnContext(ctx, "DDBProvider.APIKey cache validation did not converge",
+			slog.String("workspace_id", workspaceID),
+			slog.Int("rechecks", *rechecks),
+			slog.Int("limit", apiKeyValidationRecheckLimit),
+		)
+		return errors.New("DDBProvider.APIKey: cache validation did not converge")
+	}
+	*rechecks++
+	return nil
+}
+
+func apiKeyAfterCacheValidationError(ctx context.Context, cachedKey string, err error, contextErrorRetries *int) (apiKey string, done bool, retErr error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", true, fmt.Errorf("DDBProvider.APIKey: %w", ctxErr)
+	}
+	if shouldRetryAPIKeyLookupAfterSharedError(ctx, err, *contextErrorRetries) {
+		*contextErrorRetries++
+		return "", false, nil
+	}
+	return cachedKey, true, nil
 }
 
 func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, retries int) bool {
@@ -364,7 +465,7 @@ func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, ret
 }
 
 func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
-	start, consistentRead := ttlcache.GetOrStartWith[string, bool](p.apiKeyCache(), workspaceID, now, func() bool {
+	start, consistentRead := ttlcache.GetOrStartWith[cachedAPIKey, bool](p.apiKeyCache(), workspaceID, now, func() bool {
 		// GetOrStartWith runs this hook under the ttlcache lock; keep it
 		// non-reentrant and limited to the strong-read sidecar.
 		// The hook also runs for waiters so all callers observe and clean up
@@ -384,7 +485,7 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 		return false
 	})
 	if start.Hit {
-		return apiKeyLookupStart{apiKey: start.Result.Value, err: start.Result.Err, hit: true}
+		return apiKeyLookupStart{apiKey: start.Result.Value.apiKey, cacheToken: start.Result.Value.cacheToken, err: start.Result.Err, hit: true}
 	}
 	if !start.Owner {
 		return apiKeyLookupStart{call: start.Call}
@@ -392,21 +493,21 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 	return apiKeyLookupStart{call: start.Call, owner: true, generation: start.Generation, consistentRead: consistentRead}
 }
 
-func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *ttlcache.Call[string], generation uint64, consistentRead bool) (string, error) {
-	result := ttlcache.Result[string]{}
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *ttlcache.Call[cachedAPIKey], generation uint64, consistentRead bool) (string, error) {
+	result := ttlcache.Result[cachedAPIKey]{}
 	finished := false
 	defer func() {
 		if rec := recover(); rec != nil {
 			if !finished {
-				result = ttlcache.Result[string]{Err: errors.New("DDBProvider.APIKey: lookup panicked")}
+				result = ttlcache.Result[cachedAPIKey]{Err: errors.New("DDBProvider.APIKey: lookup panicked")}
 				p.apiKeyCache().Finish(workspaceID, call, result, 0, p.nowOrDefault(), generation)
 			}
 			panic(rec)
 		}
 	}()
 
-	apiKey, err := p.fetchAPIKey(ctx, workspaceID, consistentRead)
-	result = ttlcache.Result[string]{Value: apiKey, Err: err}
+	apiKey, cacheToken, err := p.fetchAPIKey(ctx, workspaceID, consistentRead)
+	result = ttlcache.Result[cachedAPIKey]{Value: cachedAPIKey{apiKey: apiKey, cacheToken: cacheToken}, Err: err}
 	finished = true
 	cacheTTL := time.Duration(0)
 	if err == nil {
@@ -416,12 +517,14 @@ func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceI
 	return apiKey, err
 }
 
-func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consistentRead bool) (string, error) {
+func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consistentRead bool) (string, apiKeyCacheToken, error) {
 	// Eventually-consistent read is correct here: the per-workspace key
 	// only changes on (re-)install, and the few-ms propagation delay is
-	// inside the same "click the setup link" window. DeleteAPIKey temporarily
-	// asks for a strong read so this process cannot re-cache a just-deleted key
-	// from an eventually-consistent replica.
+	// inside the same "click the setup link" window. Cache-hit validation is
+	// stricter because #766 is specifically about prompt cross-instance
+	// revocation/rotation visibility. DeleteAPIKey temporarily asks for a strong
+	// read so this process cannot re-cache a just-deleted key from an
+	// eventually-consistent replica.
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -433,33 +536,137 @@ func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consi
 	}
 	out, err := p.Client.GetItem(ctx, input)
 	if err != nil {
-		return "", fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
+		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
 	}
 	if out == nil || len(out.Item) == 0 {
-		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
 
 	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
-		return "", fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
 	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(wrappedKey.Value) == 0 {
-		return "", errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key_dk")
+		return "", apiKeyCacheToken{}, errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key_dk")
 	}
 
 	pt, err := p.Encryptor.Open(ctx, ctBlob.Value, wrappedKey.Value, []byte(workspaceID))
 	if err != nil {
-		return "", fmt.Errorf("DDBProvider.APIKey: decrypt: %w", err)
+		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: decrypt: %w", err)
 	}
 	// Empty plaintext means the ciphertext decrypted but to zero bytes —
 	// corruption / truncate / unsigned-store-bypass. Fail loud here rather
 	// than handing the caller "" and watching qurl-service surface an
 	// opaque 401.
 	if len(pt) == 0 {
-		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
+		return "", apiKeyCacheToken{}, errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
 	}
-	return string(pt), nil
+	return string(pt), newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value), nil
+}
+
+type apiKeyCacheToken [sha256.Size]byte
+
+func newAPIKeyCacheToken(ciphertext, wrappedKey []byte) apiKeyCacheToken {
+	h := sha256.New()
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(ciphertext)))
+	_, _ = h.Write(length[:])
+	_, _ = h.Write(ciphertext)
+	binary.BigEndian.PutUint64(length[:], uint64(len(wrappedKey)))
+	_, _ = h.Write(length[:])
+	_, _ = h.Write(wrappedKey)
+	var token apiKeyCacheToken
+	copy(token[:], h.Sum(nil))
+	return token
+}
+
+func (p *DDBProvider) cachedAPIKeyStillCurrent(ctx context.Context, workspaceID string, cacheToken apiKeyCacheToken) (bool, error) {
+	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+		ProjectionExpression: aws.String(apiKeyValidationProjectionExpression),
+		ExpressionAttributeNames: map[string]string{
+			apiKeyValidationProjectionKey:     attrQURLAPIKey,
+			apiKeyValidationProjectionDataKey: attrDataKeyCT,
+		},
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return false, fmt.Errorf("DDBProvider.APIKey: cache validation GetItem: %w", err)
+	}
+	if out == nil || len(out.Item) == 0 {
+		return false, nil
+	}
+	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(ctBlob.Value) == 0 {
+		return false, nil
+	}
+	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
+	if !ok || len(wrappedKey.Value) == 0 {
+		return false, nil
+	}
+	return newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value) == cacheToken, nil
+}
+
+func (p *DDBProvider) validateCachedAPIKey(ctx context.Context, workspaceID string, cacheToken apiKeyCacheToken) (bool, error) {
+	call, owner := p.getOrStartAPIKeyValidation(workspaceID, cacheToken)
+	if !owner {
+		select {
+		case <-call.done:
+			return call.current, call.err
+		case <-ctx.Done():
+			return false, fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
+		}
+	}
+
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				p.finishAPIKeyValidation(workspaceID, call, false, errors.New("DDBProvider.APIKey: cache validation panicked"))
+			}
+			panic(rec)
+		}
+	}()
+	current, err := p.cachedAPIKeyStillCurrent(ctx, workspaceID, cacheToken)
+	finished = true
+	p.finishAPIKeyValidation(workspaceID, call, current, err)
+	return current, err
+}
+
+func (p *DDBProvider) getOrStartAPIKeyValidation(workspaceID string, cacheToken apiKeyCacheToken) (*apiKeyValidationCall, bool) {
+	var call *apiKeyValidationCall
+	owner := false
+	p.apiKeyCache().WithLock(func() {
+		if p.apiKeyValidationCalls == nil {
+			p.apiKeyValidationCalls = map[string]*apiKeyValidationCall{}
+		}
+		if existing, ok := p.apiKeyValidationCalls[workspaceID]; ok && existing.cacheToken == cacheToken {
+			call = existing
+			return
+		}
+		call = &apiKeyValidationCall{
+			done:       make(chan struct{}),
+			cacheToken: cacheToken,
+		}
+		p.apiKeyValidationCalls[workspaceID] = call
+		owner = true
+	})
+	return call, owner
+}
+
+func (p *DDBProvider) finishAPIKeyValidation(workspaceID string, call *apiKeyValidationCall, current bool, err error) {
+	p.apiKeyCache().WithLock(func() {
+		call.current = current
+		call.err = err
+		if p.apiKeyValidationCalls[workspaceID] == call {
+			delete(p.apiKeyValidationCalls, workspaceID)
+		}
+		close(call.done)
+	})
 }
 
 func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil time.Time) {
@@ -478,11 +685,33 @@ func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil 
 	})
 }
 
-func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time) {
+func (p *DDBProvider) evictAPIKeyCacheIfToken(workspaceID string, cacheToken apiKeyCacheToken, strongReadUntil time.Time) {
 	if strings.TrimSpace(workspaceID) == "" {
 		return
 	}
-	p.apiKeyCache().SeedWith(workspaceID, ttlcache.Result[string]{Value: apiKey}, apiKeyCacheTTL, now, func() {
+	p.apiKeyCache().InvalidateIfWith(workspaceID, func(result ttlcache.Result[cachedAPIKey]) bool {
+		return result.Value.cacheToken == cacheToken
+	}, func() {
+		if !strongReadUntil.IsZero() {
+			if p.apiKeyStrongReadUntil == nil {
+				p.apiKeyStrongReadUntil = map[string]time.Time{}
+			}
+			p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
+		}
+	})
+}
+
+func (p *DDBProvider) cachedAPIKeyStillLocal(workspaceID string, cacheToken apiKeyCacheToken) bool {
+	return p.apiKeyCache().CachedResultMatches(workspaceID, func(result ttlcache.Result[cachedAPIKey]) bool {
+		return result.Value.cacheToken == cacheToken
+	})
+}
+
+func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, cacheToken apiKeyCacheToken, now time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	p.apiKeyCache().SeedWith(workspaceID, ttlcache.Result[cachedAPIKey]{Value: cachedAPIKey{apiKey: apiKey, cacheToken: cacheToken}}, apiKeyCacheTTL, now, func() {
 		// SeedWith runs this hook under the ttlcache lock; keep it
 		// non-reentrant and limited to the strong-read sidecar.
 		if p.apiKeyStrongReadUntil != nil {
@@ -585,7 +814,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
-	p.seedAPIKeyCache(workspaceID, apiKey, now)
+	p.seedAPIKeyCache(workspaceID, apiKey, newAPIKeyCacheToken(ct, wrapped), now)
 	return nil
 }
 
