@@ -91,6 +91,7 @@ const (
 	agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome  = "qURL Connector setup generated, but Slack could not deliver the bootstrap-key DM and the bootstrap key was revoked."
 	agentProtectConnectorAuditInstructionsDeliveryFailedOutcome = "qURL Connector setup generated, but Slack could not confirm install-instructions delivery and the bootstrap key was revoked."
 	agentProtectConnectorAuditBuildFailedOutcome                = "qURL Connector setup failed before install instructions were delivered."
+	agentProtectConnectorAuditAdminRejectedOutcome              = "qURL Connector setup was not started because the modal submitter was not verified as a qURL admin."
 )
 
 type tunnelInstallArgs struct {

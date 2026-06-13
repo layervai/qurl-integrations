@@ -217,10 +217,6 @@ func blockActionIDs(actions []interactionAction) []string {
 }
 
 func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
-	// Rejections before startAsyncWorker are pre-execution validation or
-	// authorization failures, including the modal admin re-check below. Like
-	// confirm-card pre-execution rejections, they do not write agent audit rows;
-	// accepted submissions that reach the setup worker are recorded below.
 	args, fieldErrors := parseTunnelInstallModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)
@@ -274,6 +270,29 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		return
 	}
 
+	log := slog.With(
+		"command", "tunnel_install_modal",
+		"team_id", meta.TeamID,
+		"channel_id", meta.ChannelID,
+		"user_id", meta.UserID,
+		"view_id", payload.View.ID,
+	)
+	agentAudit := tunnelInstallAgentAuditFromMetadata(&meta, args)
+	req := &tunnelInstallRequest{
+		teamID:       meta.TeamID,
+		enterpriseID: meta.EnterpriseID,
+		channelID:    meta.ChannelID,
+		userID:       meta.UserID,
+		responseURL:  meta.ResponseURL,
+		args:         args,
+		agentAudit:   agentAudit,
+	}
+	// Validation, configuration, and request-identity rejections above are
+	// pre-execution and unaudited. This submitted-modal admin re-check is the
+	// first denied path with a concrete connector identity; accepted submits
+	// that reach the worker are recorded there. Slash-origin submits carry no
+	// agentAudit and no-op.
+
 	// Slack expects modal submissions to be acknowledged quickly; keep this
 	// synchronous admin re-check bounded so a slow store fails closed. Use the
 	// handler base context, matching slash-command admin gates, so a client
@@ -282,41 +301,22 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	defer cancel()
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
-		slog.Error("tunnel install modal admin check failed", "error", err, "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		log.Error("tunnel install modal admin check failed", "error", err)
+		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
 		respondTunnelInstallModalError(w, "Could not verify admin status. Retry in a moment.")
 		return
 	}
 	if !isAdmin {
-		slog.Warn("tunnel install modal denied: non-admin", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID)
+		log.Warn("tunnel install modal denied: non-admin")
+		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditAdminRejectedOutcome, false)
 		respondTunnelInstallModalError(w, "This command is admin-only.")
 		return
 	}
 
-	log := slog.With(
-		"command", "tunnel_install_modal",
-		"team_id", meta.TeamID,
-		"channel_id", meta.ChannelID,
-		"user_id", meta.UserID,
-		"view_id", payload.View.ID,
-	)
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
-	attemptID := tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
-	// Agent audit rows start at the async setup boundary: the validation and
-	// admin gates above reject before any setup attempt, while in-worker
-	// failures such as an upstream key-fetch error are recorded as attempted
-	// connector setups.
-	agentAudit := tunnelInstallAgentAuditFromMetadata(&meta, args)
+	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, &tunnelInstallRequest{
-			teamID:       meta.TeamID,
-			enterpriseID: meta.EnterpriseID,
-			channelID:    meta.ChannelID,
-			userID:       meta.UserID,
-			responseURL:  meta.ResponseURL,
-			args:         args,
-			attemptID:    attemptID,
-			agentAudit:   agentAudit,
-		})
+		h.processTunnelInstall(ctx, log, req)
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
 		return

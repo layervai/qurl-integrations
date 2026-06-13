@@ -1783,29 +1783,83 @@ func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
 }
 
 func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-
 	const nonAdminUserID = "U_non_admin"
-	h := newAdminTestHandler(t, ts)
-	h.SetAliasStore(h.cfg.AdminStore)
-	meta := TunnelInstallModalMetadata{
-		TeamID:        testAdminTeamID,
-		ChannelID:     testTunnelChannelID,
-		UserID:        nonAdminUserID,
-		ResponseURL:   testSlackResponseURL,
-		CreatedAtUnix: fixedNow.Unix(),
-	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	cases := []struct {
+		name      string
+		agentMeta *TunnelInstallAgentMetadata
+		wantAudit bool
+	}{
+		{
+			name:      "slash initiated",
+			wantAudit: false,
+		},
+		{
+			name: "agent initiated",
+			agentMeta: &TunnelInstallAgentMetadata{
+				Action: string(agent.ActionProtectConnector),
+				Reason: testTunnelAgentReason,
+			},
+			wantAudit: true,
+		},
 	}
-	if !strings.Contains(w.Body.String(), "admin-only") {
-		t.Fatalf("modal response = %s, want non-admin rejection", w.Body.String())
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+
+			agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return fixedNow }}
+			h := newAdminTestHandler(t, ts)
+			h.cfg.AgentStore = agentStore
+			h.SetAliasStore(h.cfg.AdminStore)
+			meta := TunnelInstallModalMetadata{
+				TeamID:        testAdminTeamID,
+				ChannelID:     testTunnelChannelID,
+				UserID:        nonAdminUserID,
+				ResponseURL:   testSlackResponseURL,
+				CreatedAtUnix: fixedNow.Unix(),
+				Agent:         tc.agentMeta,
+			}
+			body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "admin-only") {
+				t.Fatalf("modal response = %s, want non-admin rejection", w.Body.String())
+			}
+
+			got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, nonAdminUserID, 10)
+			if err != nil {
+				t.Fatalf("list audit entries: %v", err)
+			}
+			if !tc.wantAudit {
+				if len(got) != 0 {
+					t.Fatalf("slash-initiated modal must not record agent audit, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("agent-initiated modal should record one audit entry, got %d: %+v", len(got), got)
+			}
+			entry := got[0]
+			if entry.Actor != nonAdminUserID || entry.Action != string(agent.ActionProtectConnector) || entry.Target != testTunnelSlug || entry.Channel != testTunnelChannelID {
+				t.Fatalf("audit entry identity mismatch: %+v", entry)
+			}
+			if entry.Reason != testTunnelAgentReason {
+				t.Fatalf("audit reason = %q, want modal provenance reason", entry.Reason)
+			}
+			if entry.Outcome != agentProtectConnectorAuditAdminRejectedOutcome || entry.Result != agentProtectConnectorAuditAdminRejectedOutcome {
+				t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditAdminRejectedOutcome)
+			}
+			if entry.ResultSuccess == nil || *entry.ResultSuccess {
+				t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)
+			}
+		})
 	}
 }
 
