@@ -105,6 +105,7 @@ const (
 	agentProtectConnectorAuditAdminVerificationFailedResult
 	agentProtectConnectorAuditAdminDeniedResult
 	agentProtectConnectorAuditWorkerUnavailableResult
+	agentProtectConnectorAuditResultCount
 )
 
 type tunnelInstallArgs struct {
@@ -728,6 +729,8 @@ func (r tunnelInstallAgentAuditResult) outcome() (string, bool) {
 		return agentProtectConnectorAuditAdminDeniedOutcome, true
 	case agentProtectConnectorAuditWorkerUnavailableResult:
 		return agentProtectConnectorAuditWorkerUnavailableOutcome, true
+	case agentProtectConnectorAuditResultCount:
+		return agentProtectConnectorAuditBuildFailedOutcome, false
 	default:
 		return agentProtectConnectorAuditBuildFailedOutcome, false
 	}

@@ -2983,6 +2983,66 @@ func TestTunnelInstallAgentAuditUsesBackgroundWhenBaseContextNil(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
+	cases := map[tunnelInstallAgentAuditResult]struct {
+		outcome string
+		success bool
+	}{
+		agentProtectConnectorAuditSuccessResult: {
+			outcome: agentProtectConnectorAuditOutcome,
+			success: true,
+		},
+		agentProtectConnectorAuditBootstrapDMDeliveryFailedResult: {
+			outcome: agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome,
+		},
+		agentProtectConnectorAuditInstructionsDeliveryFailedResult: {
+			outcome: agentProtectConnectorAuditInstructionsDeliveryFailedOutcome,
+		},
+		agentProtectConnectorAuditBuildFailedResult: {
+			outcome: agentProtectConnectorAuditBuildFailedOutcome,
+		},
+		agentProtectConnectorAuditAdminVerificationFailedResult: {
+			outcome: agentProtectConnectorAuditAdminVerificationFailedOutcome,
+		},
+		agentProtectConnectorAuditAdminDeniedResult: {
+			outcome: agentProtectConnectorAuditAdminDeniedOutcome,
+		},
+		agentProtectConnectorAuditWorkerUnavailableResult: {
+			outcome: agentProtectConnectorAuditWorkerUnavailableOutcome,
+		},
+	}
+	if len(cases) != int(agentProtectConnectorAuditResultCount) {
+		t.Fatalf("audit result cases = %d, want %d", len(cases), agentProtectConnectorAuditResultCount)
+	}
+	for result := tunnelInstallAgentAuditResult(0); result < agentProtectConnectorAuditResultCount; result++ {
+		tc, ok := cases[result]
+		if !ok {
+			t.Fatalf("missing test case for audit result %d", result)
+		}
+		outcome, known := result.outcome()
+		if !known {
+			t.Fatalf("audit result %d known = false", result)
+		}
+		if outcome != tc.outcome {
+			t.Fatalf("audit result %d outcome = %q, want %q", result, outcome, tc.outcome)
+		}
+		if result.success() != tc.success {
+			t.Fatalf("audit result %d success = %t, want %t", result, result.success(), tc.success)
+		}
+	}
+
+	outcome, known := agentProtectConnectorAuditResultCount.outcome()
+	if known {
+		t.Fatalf("unknown audit result known = true")
+	}
+	if outcome != agentProtectConnectorAuditBuildFailedOutcome {
+		t.Fatalf("unknown audit result outcome = %q, want %q", outcome, agentProtectConnectorAuditBuildFailedOutcome)
+	}
+	if agentProtectConnectorAuditResultCount.success() {
+		t.Fatal("unknown audit result success = true")
+	}
+}
+
 func TestTunnelInstallAgentAuditRecordsOnlyAgentBuildFailure(t *testing.T) {
 	cases := []struct {
 		name       string
