@@ -723,7 +723,7 @@ func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]a
 			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], setupBindingCleanupAfterWindowHours)
 		}
 		if rec["operator_action"] != setupBindingPersistFailureOperatorAction {
-			t.Errorf("operator_action = %v", rec["operator_action"])
+			t.Errorf("operator_action = %v, want %q", rec["operator_action"], setupBindingPersistFailureOperatorAction)
 		}
 	}
 	if matches == 0 {

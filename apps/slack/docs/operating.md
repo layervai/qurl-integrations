@@ -148,10 +148,11 @@ fields @timestamp, team_id, key_id, retry_window_hours, error
 ```
 
 Threshold: any result opens an on-call ticket to help the workspace admin rerun
-setup before the replay window expires. For CloudWatch alarms, use `count >= 1`
-over the query matches in a 5-minute evaluation period; the query lists rows for
-triage instead of returning `stats count()`. If the admin reruns setup and the
-Slack storage write succeeds, close the ticket.
+setup before the replay window expires. For automated alerting, use a metric
+filter (or scheduled Logs Insights query that publishes a metric) matching this
+event and alarm on `count >= 1` in a 5-minute evaluation period; the query lists
+rows for triage instead of returning `stats count()`. If the admin reruns setup
+and the Slack storage write succeeds, close the ticket.
 
 For post-window cleanup, run the same event query over the older incident window
 (for example, a multi-day range whose end time is older than the emitted cleanup
