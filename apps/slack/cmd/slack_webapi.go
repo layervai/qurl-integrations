@@ -236,6 +236,7 @@ const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 
 const slackChatPostEphemeralURL = "https://slack.com/api/chat.postEphemeral"
 const maxSlackMarkdownFallbackLogKeys = 1024
+const slackMarkdownBlockType = "markdown"
 
 const (
 	slackReactionsAddURL    = "https://slack.com/api/reactions.add"
@@ -502,6 +503,7 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 }
 
 func slackMarkdownBlockMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
+	markdownText = internal.HardenAgentMarkdown(markdownText)
 	return json.Marshal(struct {
 		Channel  string               `json:"channel"`
 		ThreadTS string               `json:"thread_ts,omitempty"`
@@ -509,7 +511,7 @@ func slackMarkdownBlockMessageBody(channelID, threadTS, markdownText string) ([]
 		Blocks   []slackMarkdownBlock `json:"blocks"`
 		// Keep Slack from reparsing the notification/screen-reader fallback as mrkdwn.
 		Mrkdwn bool `json:"mrkdwn"`
-	}{Channel: channelID, ThreadTS: threadTS, Text: slackMarkdownFallbackText(markdownText), Blocks: []slackMarkdownBlock{{Type: "markdown", Text: markdownText}}, Mrkdwn: false})
+	}{Channel: channelID, ThreadTS: threadTS, Text: slackMarkdownFallbackText(markdownText), Blocks: []slackMarkdownBlock{{Type: slackMarkdownBlockType, Text: markdownText}}, Mrkdwn: false})
 }
 
 type slackMarkdownBlock struct {
@@ -593,6 +595,7 @@ func trimMarkdownFallbackOrderedListMarker(line string) string {
 // Slack rejects markdown_text paired with text/blocks, so this compatibility
 // retry intentionally omits the literal notification/screen-reader fallback.
 func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
+	markdownText = internal.HardenAgentMarkdown(markdownText)
 	return json.Marshal(struct {
 		Channel      string `json:"channel"`
 		ThreadTS     string `json:"thread_ts,omitempty"`

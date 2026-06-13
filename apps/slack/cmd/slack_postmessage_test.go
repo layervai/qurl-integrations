@@ -522,7 +522,7 @@ func TestSlackPostMarkdownMessageFuncPostsMarkdownBlockAndFallback(t *testing.T)
 	if gotBody.Text != "Use bold and code" {
 		t.Fatalf("fallback text = %q, want plain notification text", gotBody.Text)
 	}
-	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0].Type != "markdown" || gotBody.Blocks[0].Text != "Use **bold** and `code`" {
+	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0].Type != slackMarkdownBlockType || gotBody.Blocks[0].Text != "Use **bold** and `code`" {
 		t.Fatalf("blocks = %+v, want one standard-Markdown block", gotBody.Blocks)
 	}
 	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
@@ -530,6 +530,38 @@ func TestSlackPostMarkdownMessageFuncPostsMarkdownBlockAndFallback(t *testing.T)
 	}
 	if gotBody.MarkdownText != "" || strings.Contains(rawBody, `"markdown_text"`) {
 		t.Fatalf("body %q must not use markdown_text on the fallback-capable path", rawBody)
+	}
+}
+
+func TestSlackPostMarkdownMessageFuncHardensMarkdownBlockDefenseInDepth(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Text   string `json:"text"`
+		Blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"blocks"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	in := "Use [billing](https://phish.example/login) or <https://phish.example/admin|admin portal>."
+	want := "Use billing (https://phish.example/login) or admin portal (https://phish.example/admin)."
+	if err := post(context.Background(), "T_test", "", mdTestChannel, "", in); err != nil {
+		t.Fatalf("chat.postMessage markdown block: %v", err)
+	}
+	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0].Type != slackMarkdownBlockType || gotBody.Blocks[0].Text != want {
+		t.Fatalf("blocks = %+v, want hardened standard-Markdown block", gotBody.Blocks)
+	}
+	if gotBody.Text != want {
+		t.Fatalf("fallback text = %q, want hardened fallback", gotBody.Text)
 	}
 }
 
@@ -619,7 +651,7 @@ func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t
 	}
 }
 
-func TestSlackPostMarkdownMessageFuncMarkdownTextRetryPreservesSlackMrkdwnLinkText(t *testing.T) {
+func TestSlackPostMarkdownMessageFuncMarkdownTextRetryHardensSlackMrkdwnLinkText(t *testing.T) {
 	t.Parallel()
 	var retryBody struct {
 		MarkdownText string `json:"markdown_text"`
@@ -646,8 +678,9 @@ func TestSlackPostMarkdownMessageFuncMarkdownTextRetryPreservesSlackMrkdwnLinkTe
 	if err := post(context.Background(), "T_test", "", mdTestChannel, "", answer); err != nil {
 		t.Fatalf("chat.postMessage markdown fallback: %v", err)
 	}
-	if retryBody.MarkdownText != answer || retryBody.Text != "" || len(retryBody.Blocks) != 0 {
-		t.Fatalf("retry body = %+v, want markdown_text-only literal answer", retryBody)
+	const want = "Literal safe label (https://evil.example)"
+	if retryBody.MarkdownText != want || retryBody.Text != "" || len(retryBody.Blocks) != 0 {
+		t.Fatalf("retry body = %+v, want hardened markdown_text-only answer", retryBody)
 	}
 }
 
