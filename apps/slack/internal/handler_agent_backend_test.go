@@ -212,6 +212,87 @@ func TestAgentBackend_ListResources_PaginatesPastFirstPage(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_ListResources_ShowsChannelAliasForUnaliasedResource(t *testing.T) {
+	// The real agent-protected-URL shape: the resource carries NO intrinsic alias and no
+	// slug (urls have none) — its handle is the channel-alias binding (Slack-side). The
+	// list must surface that channel alias via the join, not a handle-less `- (url)`.
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"deploydash": &ddbtypes.AttributeValueMemberS{Value: "r_url2"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_url2"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	b := &agentBackend{store: store, log: slog.Default()}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// r_url2: a url resource with no alias, no slug — named only by the channel binding.
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_url2","type":"url","description":"Deploy dashboard","target_url":"https://deploy.example.com"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	out, err := b.ListResources(context.Background(), backendTC())
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	// Without the join this line would be a handle-less `- Deploy dashboard (url)`.
+	if !strings.Contains(out, "$deploydash") {
+		t.Fatalf("list must surface the channel alias for an unaliased resource, got %q", out)
+	}
+	if strings.Contains(out, "r_url2") {
+		t.Fatalf("list leaked the resource id: %q", out)
+	}
+}
+
+func TestAgentBackend_ListResources_PicksSmallestAliasOnMultipleBindings(t *testing.T) {
+	// alias_bindings is map[alias]rid, so several aliases can bind one resource.
+	// GetChannelPolicy builds its slice by ranging that Go map (randomized order), so the
+	// label must be chosen deterministically — the lexicographically smallest — or it would
+	// flip turn-to-turn for a multi-bound resource.
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"zzz": &ddbtypes.AttributeValueMemberS{Value: "r_url2"},
+			"aaa": &ddbtypes.AttributeValueMemberS{Value: "r_url2"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_url2"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	b := &agentBackend{store: store, log: slog.Default()}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_url2","type":"url","description":"Deploy dashboard","target_url":"https://deploy.example.com"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	out, err := b.ListResources(context.Background(), backendTC())
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if !strings.Contains(out, "$aaa") || strings.Contains(out, "$zzz") {
+		t.Fatalf("multi-bound resource must take the smallest alias ($aaa), got %q", out)
+	}
+}
+
 func TestAgentBackend_ResolveToken(t *testing.T) {
 	b, _ := newBackendUnderTest(t, true)
 	ctx := context.Background()
@@ -370,7 +451,8 @@ func TestAgentBackend_LogsReadError(t *testing.T) {
 }
 
 func TestFormatResourceLine(t *testing.T) {
-	got := formatResourceLine(&client.Resource{ResourceID: "r_1", Alias: "oncall", Type: "url", Description: "Dash"})
+	// No channel alias → falls back to the resource's intrinsic alias.
+	got := formatResourceLine(&client.Resource{ResourceID: "r_1", Alias: "oncall", Type: "url", Description: "Dash"}, "")
 	if !strings.Contains(got, "$oncall") || !strings.Contains(got, "Dash") || !strings.Contains(got, "url") {
 		t.Fatalf("format = %q, want $oncall/Dash/url", got)
 	}
@@ -379,8 +461,14 @@ func TestFormatResourceLine(t *testing.T) {
 		t.Fatalf("format leaked the internal resource id: %q", got)
 	}
 	// Slug fallback when no alias; still no id.
-	got = formatResourceLine(&client.Resource{ResourceID: "r_2", Slug: "staging", Type: "tunnel"})
+	got = formatResourceLine(&client.Resource{ResourceID: "r_2", Slug: "staging", Type: "tunnel"}, "")
 	if !strings.Contains(got, "$staging") || strings.Contains(got, "r_2") {
 		t.Fatalf("slug fallback = %q, want $staging without the id", got)
+	}
+	// The channel alias wins, and names a resource that has NEITHER intrinsic alias NOR
+	// slug (the agent-protected-URL shape) — which would otherwise render handle-less.
+	got = formatResourceLine(&client.Resource{ResourceID: "r_url2", Type: "url", Description: "Deploy"}, "deploydash")
+	if !strings.Contains(got, "$deploydash") || strings.Contains(got, "r_url2") {
+		t.Fatalf("channel-alias precedence = %q, want $deploydash without the id", got)
 	}
 }
