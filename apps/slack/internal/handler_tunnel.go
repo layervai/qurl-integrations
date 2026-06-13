@@ -733,6 +733,21 @@ func (r tunnelInstallAgentAuditResult) outcome() string {
 	}
 }
 
+func (r tunnelInstallAgentAuditResult) known() bool {
+	switch r {
+	case agentProtectConnectorAuditSuccessResult,
+		agentProtectConnectorAuditBootstrapDMDeliveryFailedResult,
+		agentProtectConnectorAuditInstructionsDeliveryFailedResult,
+		agentProtectConnectorAuditBuildFailedResult,
+		agentProtectConnectorAuditAdminVerificationFailedResult,
+		agentProtectConnectorAuditAdminDeniedResult,
+		agentProtectConnectorAuditWorkerUnavailableResult:
+		return true
+	default:
+		return false
+	}
+}
+
 func (r tunnelInstallAgentAuditResult) success() bool {
 	return r == agentProtectConnectorAuditSuccessResult
 }
@@ -752,6 +767,9 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	// handler-scoped budget instead.
 	auditCtx, cancel := context.WithTimeout(baseCtx, agentConnectorAuditWriteTimeout)
 	defer cancel()
+	if !result.known() {
+		log.Warn("tunnel install agent audit result unknown; using build-failed outcome", "result", uint8(result))
+	}
 	resultOutcome := result.outcome()
 	resultSuccess := result.success()
 	// Modal-submit audits have no public confirm card, so the legacy Outcome

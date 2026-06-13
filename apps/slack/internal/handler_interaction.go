@@ -309,6 +309,8 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	}
 	if !isAdmin {
 		log.Warn("tunnel install modal denied: non-admin")
+		// The same-user gate above means this row belongs to the admin who
+		// opened the modal; in practice this is the admin-revoked-mid-flow case.
 		respondTunnelInstallModalError(w, "This command is admin-only.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminDeniedResult)
 		return
