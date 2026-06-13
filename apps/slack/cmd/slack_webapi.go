@@ -500,8 +500,10 @@ func slackMarkdownFallbackText(markdownText string) string {
 	var lines []string
 	for _, line := range strings.Split(markdownText, "\n") {
 		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(strings.TrimPrefix(line, ">"))
 		line = strings.TrimLeft(line, "#")
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* "))
+		line = strings.TrimSpace(trimMarkdownFallbackOrderedListMarker(line))
 		if line != "" {
 			lines = append(lines, line)
 		}
@@ -512,6 +514,17 @@ func slackMarkdownFallbackText(markdownText string) string {
 }
 
 var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "`", "", "*", "")
+
+func trimMarkdownFallbackOrderedListMarker(line string) string {
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 0 || i+1 >= len(line) || line[i] != '.' || line[i+1] != ' ' {
+		return line
+	}
+	return line[i+2:]
+}
 
 func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
 	return json.Marshal(struct {

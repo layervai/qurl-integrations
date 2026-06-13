@@ -50,6 +50,15 @@ func TestHardenAgentMarkdown_PreservesCodeSpans(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
+	t.Parallel()
+	in := "` then [click me](https://evil.example/phish)"
+	want := "` then click me (https://evil.example/phish)"
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestHardenAgentMarkdown_PreservesEscapedBrackets(t *testing.T) {
 	t.Parallel()
 	in := `Literal \[safe label](https://example.invalid) but real [link](https://evil.example).`

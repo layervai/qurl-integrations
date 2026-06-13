@@ -154,6 +154,23 @@ func TestAgentStreamer_BufferedLinkPrefixDoesNotOpenStream(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	const reply = "Intro: ` then [click me](https://evil.example/phish)"
+	s.onDelta("Intro: ")
+	s.onDelta("` then ")
+	s.onDelta("[click me](https://evil.example/phish)")
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Intro: ` then click me (https://evil.example/phish)"
+	if port.appended() != want {
+		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
+	}
+}
+
 func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)

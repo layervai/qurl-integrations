@@ -19,6 +19,8 @@ type agentMarkdownLinkHarden struct {
 	codeTicks    int
 	pendingTicks int
 	escaped      bool
+	codeDisabled bool
+	codeBuffer   strings.Builder
 
 	pendingBang bool
 	link        markdownLinkPending
@@ -61,8 +63,16 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 			}
 			continue
 		}
-		if c != '`' && h.pendingTicks > 0 {
+		if !h.codeDisabled && c == '`' {
+			h.pendingTicks++
+			continue
+		}
+		if h.pendingTicks > 0 {
 			h.emitBacktickRun(&out)
+		}
+		if h.inCode {
+			h.codeBuffer.WriteByte(c)
+			continue
 		}
 		if h.escaped {
 			out.WriteByte(c)
@@ -76,10 +86,6 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 				continue
 			}
 			out.WriteByte('!')
-		}
-		if c == '`' {
-			h.pendingTicks++
-			continue
 		}
 		if !h.inCode && c == '\\' {
 			out.WriteByte(c)
@@ -108,6 +114,9 @@ func (h *agentMarkdownLinkHarden) flush() string {
 	}
 	if h.pendingTicks > 0 {
 		h.emitBacktickRun(&out)
+	}
+	if h.inCode {
+		out.WriteString(h.flushUnclosedCode())
 	}
 	h.escaped = false
 	h.inCode = false
@@ -254,16 +263,37 @@ func (h *agentMarkdownLinkHarden) emitBacktickRun(out *strings.Builder) {
 	if n == 0 {
 		return
 	}
+	ticks := strings.Repeat("`", n)
 	if h.inCode {
 		if n == h.codeTicks {
+			h.codeBuffer.WriteString(ticks)
+			out.WriteString(h.codeBuffer.String())
 			h.inCode = false
 			h.codeTicks = 0
+			h.codeBuffer.Reset()
+			return
 		}
-	} else {
-		h.inCode = true
-		h.codeTicks = n
+		h.codeBuffer.WriteString(ticks)
+		return
 	}
-	out.WriteString(strings.Repeat("`", n))
+	h.inCode = true
+	h.codeTicks = n
+	h.codeBuffer.Reset()
+	h.codeBuffer.WriteString(ticks)
+}
+
+func (h *agentMarkdownLinkHarden) flushUnclosedCode() string {
+	code := h.codeBuffer.String()
+	h.inCode = false
+	h.codeTicks = 0
+	h.codeBuffer.Reset()
+	return hardenAgentMarkdownWithCodeDisabled(code)
+}
+
+func hardenAgentMarkdownWithCodeDisabled(markdown string) string {
+	var h agentMarkdownLinkHarden
+	h.codeDisabled = true
+	return h.write(markdown) + h.flush()
 }
 
 type markdownReferenceDefinitionEscaper struct {
