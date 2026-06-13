@@ -1321,20 +1321,10 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// explain that operator-managed installs are not self-service. Argument
 		// variants land here: advertise usage when uninstall is live, otherwise
 		// keep the same unsupported-deployment message as the bare verb.
-		if h.canAdvertiseUninstall() {
-			teamID := strings.TrimSpace(values.Get(fieldTeamID))
-			if teamID == "" {
-				respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
-				return
-			}
-			userID := strings.TrimSpace(values.Get(fieldUserID))
-			if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
-				return
-			}
-			respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
-		} else {
-			h.respondUninstallUnavailable(w)
+		if _, _, ok := h.requireUninstallAvailableAndAuthorized(w, values); !ok {
+			return
 		}
+		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel
@@ -1637,33 +1627,43 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 }
 
 func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
-	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	teamID, userID, ok := h.requireUninstallAvailableAndAuthorized(w, values)
+	if !ok {
+		return
+	}
+	h.deleteWorkspaceAPIKey(w, teamID, userID)
+}
+
+// requireUninstallAvailableAndAuthorized is the single precondition path for
+// both bare uninstall and uninstall argument variants.
+func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, values url.Values) (teamID, userID string, ok bool) {
+	teamID = strings.TrimSpace(values.Get(fieldTeamID))
 	if teamID == "" {
 		respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
-		return
+		return "", "", false
 	}
 	if h.cfg.AuthProvider == nil {
 		h.respondUninstallUnavailable(w)
-		return
+		return "", "", false
 	}
-	userID := strings.TrimSpace(values.Get(fieldUserID))
+	userID = strings.TrimSpace(values.Get(fieldUserID))
 	// Providers that cannot delete are structurally non-mutating. Return the
 	// unsupported reply before any owner/user checks or delete context setup.
 	if !h.cfg.AuthProvider.SupportsDeleteAPIKey() {
 		respondUninstallUnsupported(w)
-		return
+		return "", "", false
 	}
 	// Any provider that can delete must have AdminStore wired so this
 	// destructive command is owner/admin-gated.
 	if h.cfg.AdminStore == nil {
 		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
 		h.respondUninstallUnavailable(w)
-		return
+		return "", "", false
 	}
 	if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
-		return
+		return "", "", false
 	}
-	h.deleteWorkspaceAPIKey(w, teamID, userID)
+	return teamID, userID, true
 }
 
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
