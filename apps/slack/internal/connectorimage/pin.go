@@ -32,8 +32,8 @@ const (
 // library images. Preserving the operator's input lets startup reject those
 // ambiguous forms instead of silently normalizing them. The local guards below
 // intentionally depend on the current reference.Parse success/failure boundary;
-// re-check the ClassifyPin table and latest-tag fuzz invariant when upgrading
-// github.com/distribution/reference.
+// re-check the ClassifyPin table and FuzzClassifyPinRejectsLatest when
+// upgrading github.com/distribution/reference.
 func ClassifyPin(image string) PinStatus {
 	name, digest, hasDigest := strings.Cut(image, "@")
 	parsed, parseErr := dockerref.Parse(image)

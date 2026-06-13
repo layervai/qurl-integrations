@@ -62,6 +62,7 @@ func TestClassifyPin(t *testing.T) {
 		{name: "multi-colon non-latest tag with digest", image: testConnectorImageRepo + ":v1:v2@" + validDigest, want: MalformedReference},
 		{name: "empty tag with digest", image: testConnectorImageRepo + ":@" + validDigest, want: MalformedReference},
 		{name: "malformed digest", image: testConnectorImageRepo + "@notadigest", want: MalformedDigest},
+		{name: "multiple digest separators", image: testConnectorImageRepo + "@" + validDigest + "@extra", want: MalformedDigest},
 		{name: "tagged malformed digest", image: testConnectorVersionImage + "@sha256:abc123", want: MalformedDigest},
 		{name: "short sha256 digest", image: testConnectorImageRepo + "@sha256:abc123", want: MalformedDigest},
 		{name: "uppercase sha256 digest", image: testConnectorImageRepo + "@sha256:" + strings.Repeat("A", 64), want: UppercaseDigest},
