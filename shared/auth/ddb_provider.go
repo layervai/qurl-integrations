@@ -133,7 +133,8 @@ type FieldEncryptor interface {
 
 // DDBProvider implements Provider by reading per-workspace API keys from
 // a DynamoDB table, with field-level envelope encryption on the key
-// column.
+// column. It owns mutex-protected cache state and must not be copied after
+// first use; construct and share it as *DDBProvider.
 type DDBProvider struct {
 	Client    DynamoDBClient
 	TableName string
@@ -155,6 +156,7 @@ type DDBProvider struct {
 	// KMS/latency trade-off. SetAPIKey seeds this process with the new key after
 	// a successful write, but sibling processes and post-delete refills still
 	// rely on the TTL if an eventually-consistent DDB read returns an older row.
+	// Cross-instance invalidation is tracked separately in #766.
 	apiKeyCache map[string]*cachedAPIKey
 
 	// The mutex coordinates the cache with in-flight fills and invalidation
@@ -531,7 +533,9 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 // SetAPIKey upserts the per-workspace qURL API key. The configuredBy field
 // is informational (the Slack user_id of the admin who completed
 // /oauth/qurl/callback) and is persisted plaintext. UpdateItem is used instead
-// of PutItem so Slack app install metadata in the same row is preserved.
+// of PutItem so Slack app install metadata in the same row is preserved. The
+// apiKey value is stored exactly as minted by qurl-service; APIKey returns the
+// same plaintext without trimming.
 func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetAPIKey: workspaceID is empty")
