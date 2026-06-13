@@ -64,7 +64,8 @@ const (
 	// TODO(upstream-contract): mirrors qurl-service's
 	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT, which is the source of truth for
 	// binding replay lifetime. This is best-effort lockstep only; this repo has
-	// no shared or generated source for the upstream value.
+	// no shared or generated source for the upstream value. Source:
+	// layervai/qurl-service#904.
 	setupBindingRetryWindowHours = 24
 	// Cleanup starts when the same replay window closes; keep this aliased to
 	// the retry window unless qurl-service introduces a separate cleanup TTL.
